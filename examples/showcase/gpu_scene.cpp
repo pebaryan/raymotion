@@ -1,5 +1,6 @@
 // gpu_scene.cpp -- "gpu-3d": a lit, shadowed GPU scene on the timeline, with an orbiting
-// camera, a sweeping spot light, fog, a second camera in an inset viewport, and 2D titles.
+// camera, a studio environment the metal reflects, a sweeping spot light, a shadow-casting
+// point light, depth of field, fog, a second camera in an inset viewport, and 2D titles.
 #include "rmtn/raymotion.hpp"
 
 namespace rmtn {
@@ -12,9 +13,9 @@ void registerGpuScene(Registry& out) {
     const int fps = c.fps;
 
     auto scene = std::make_shared<g3d::Scene>();
-    scene->ambient = 0.25f;
-    scene->skyColor = mkColor(0x9fb4ff);
-    scene->groundColor = mkColor(0x2a2230);
+    // Image-based lighting: a dim studio with soft light boxes for the metal to reflect.
+    scene->environmentGenerator = g3d::studioEnvironment(mkColor(0x3a4670), mkColor(0x1a2036), mkColor(0x0c0e18), 4);
+    scene->environmentIntensity = 0.9f;
     scene->fogColor = sky;
     scene->fogNear = 14; scene->fogFar = 34;
 
@@ -77,7 +78,10 @@ void registerGpuScene(Registry& out) {
         l.target = { 3.5f * std::cos(a), 0, 3.5f * std::sin(a) };
     };
     scene->lights.push_back(sweep);
-    scene->lights.push_back(g3d::Light::point({ 0, 0.8f, 0 }, mkColor(0xff4fa3), 1.4f, 6));
+    // A pink point light under the knot throws the spheres' shadows outward.
+    g3d::Light glow = g3d::Light::point({ 0, 0.8f, 0 }, mkColor(0xff4fa3), 1.6f, 9);
+    glow.castShadow = true;
+    scene->lights.push_back(glow);
 
     // Main camera: dollies in with a spring and orbits.
     scene->camera.fov = 40;
@@ -86,6 +90,11 @@ void registerGpuScene(Registry& out) {
         float a = (float)interpolate(t, { 0, 240 }, { 0.3, 1.9 });
         cam.position = { dist * std::cos(a), 6.0f + 1.0f * std::sin(t * 0.02f), dist * std::sin(a) };
         cam.target = { 0, 1.6f, 0 };
+        // Focus on the knot, so the pillars behind it soften.
+        Vector3 d{ cam.position.x, cam.position.y - 2.0f, cam.position.z };
+        cam.dof.focusDistance = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+        cam.dof.aperture = 1.2f;
+        cam.dof.maxBlur = 10;
     };
 
     // Backdrop gradient behind the scene (the scene's background is transparent).
@@ -122,7 +131,7 @@ void registerGpuScene(Registry& out) {
         dr::textBox(cx, "GPU 3D", rows[0], big);
         TextStyle small = big;
         small.font = fonts::ui(false); small.size = 40; small.color = teal;
-        dr::textBox(cx, "lights, shadows, fog and two cameras, on the timeline", rows[1], small);
+        dr::textBox(cx, "reflections, shadows, depth of field and two cameras", rows[1], small);
     };
 
     out.push_back(std::move(c));

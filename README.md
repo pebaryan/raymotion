@@ -141,6 +141,8 @@ knot->up = [](int t, g3d::Object3D& o) { o.position.y = 1.5f; o.rotation.y = t *
 scene->lights.push_back(g3d::Light::directional({-6, 12, 5}, WHITE, 1.1f, /*shadow*/ true));
 scene->lights.push_back(g3d::Light::spot({6, 7, 6}, {0, 0, 0}, ORANGE, 2, 24));
 scene->fogNear = 14; scene->fogFar = 34;
+scene->environmentGenerator = g3d::studioEnvironment(mkColor(0x3a4670), mkColor(0x1a2036), BLACK);
+scene->camera.dof = {/*focusDistance*/ 12, /*aperture*/ 1.2f, /*maxBlur*/ 10};
 
 addRoot(c.roots, 0, 240)->fn = g3d::draw(scene);                          // full frame
 addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamera);  // inset view
@@ -151,13 +153,21 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   animations play on the GPU (`object->animation`, `animationFrame`).
 * Materials: colour/texture, roughness, metalness, emissive, opacity (sorted
   transparency), unlit, double-sided. Lighting is in linear space with sRGB output.
-* Lights: hemisphere ambient, up to 8 directional/point/spot lights with range falloff,
-  a PCF shadow map from the first shadow-casting directional or spot light, linear fog.
+* Lights: up to 8 directional/point/spot lights with range falloff. Any of them can cast
+  PCF shadows; they share one shadow atlas (`shadowMapSize` per tile, a tile per
+  directional/spot light and six per point light, 16 tiles), with `shadowBias` in world
+  units on top of an automatic slope bias. Linear fog.
+* Ambient light is a sky/ground hemisphere, or image-based: `scene->environment` (an
+  equirectangular PNG/JPG/HDR) or `environmentGenerator` (e.g. `g3d::studioEnvironment`,
+  a gradient with soft light boxes) lights diffuse surfaces from its blurred mips and
+  gives reflections that blur with roughness; `showEnvironment` draws it as a skybox.
+* Depth of field per camera (`camera.dof`): a golden-angle gather blur from the depth
+  buffer, sized in composition pixels so it looks the same at every supersampling level.
 * Object hierarchy with Euler transforms; every object, light and camera has an `up`
   callback driven by the node's local frame.
 * A scene renders offscreen at canvas resolution (so it is supersampled), then
   composites over the 2D content under it with the node's opacity, in any viewport.
-  `gpu-3d` renders 240 frames of 1080p with shadows in about 3.5 s.
+  `gpu-3d` renders 240 frames of 1080p with IBL, two shadow casters and DOF in about 4 s.
 
 ### Engine pieces
 
@@ -175,7 +185,8 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
 * `rmtn/anim.hpp` — `interpolate`, `interpolateColors`, `spring`/`measureSpring`, `ease::`.
 * `rmtn/transitions.hpp` — `TransitionSeries` with fade, slide and wipe.
 * `rmtn/layout.hpp` — `layout::` rects, rows, columns, grids; `wrapText`, `dr::textBox`.
-* `rmtn/scene3d.hpp` — `g3d::` GPU scenes: geometry, models, materials, lights, cameras.
+* `rmtn/scene3d.hpp` — `g3d::` GPU scenes: geometry, models, materials, lights, shadows,
+  environments, cameras with depth of field.
 * `rmtn/json.hpp` — `Json` values for props (parse, typed lookups with fallbacks, merge).
 * `rmtn/synth.hpp` — sine-sum note events + envelopes -> WAV soundtrack.
 * `rmtn/cli.hpp` — `runCli`: list / preview / render / still / props.
@@ -192,7 +203,7 @@ fx-1-overlays          1920x1032 @30fps   10.0s  music=1   (overlay shader)
 fx-2-bloom             1920x1032 @30fps   10.0s  music=1   (+ CPU quarter-res bloom)
 fx-3-gpulit            1920x1032 @30fps   10.0s  music=1   (+ CPU painter-lit meshes; historical name)
 fx-4-max               1920x1032 @30fps   10.0s  music=1   (full composite)
-gpu-3d                 1920x1080 @30fps    8.0s  music=0   (GPU scene: shadows, spot, fog, inset camera)
+gpu-3d                 1920x1080 @30fps    8.0s  music=0   (GPU scene: IBL, shadows, DOF, fog, inset camera)
 here-there-explainer   1280x720  @30fps  108.0s  music=1   (logic explainer)
 here-there-plain       1280x720  @30fps  108.0s  music=0   (plain-language cut, Segoe UI)
 here-there-feed        1080x1350 @30fps   88.0s  music=0   (portrait feed cut, Segoe UI)
@@ -208,7 +219,8 @@ out for Segoe UI and refuse to substitute another font (their tests skip without
 `ctest` runs: HT semantics and the authoring API (interpolation, springs, timing,
 transitions, layout, JSON; pure logic); layer compositing (group opacity, blend modes,
 masks, offsets at every supersampling level, wipes, text boxes); GPU 3D (placement and
-depth, lighting, shadows, viewports, transparency, hierarchy, OBJ and a generated skinned
+depth, lighting, directional/spot/point and multi-light shadows, environment lighting and
+skybox, depth of field, viewports, transparency, hierarchy, OBJ and a generated skinned
 glTF, determinism); renderer regressions (supersampling edge levels
 and coordinates, concave fills, fonts, FX shader uniforms, determinism, shutdown);
 Here-There layout checks; and a Python CLI suite (exact sizes, draft scaling, stale-frame

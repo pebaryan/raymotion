@@ -1,4 +1,4 @@
-// scene3d.cpp -- GPU 3D: lazy GPU resources, the lit/shadow shaders and scene rendering.
+// scene3d.cpp -- GPU 3D: lazy GPU resources, the lit/shadow/DOF shaders and scene rendering.
 #include "rmtn/scene3d.hpp"
 #include "rmtn/render.hpp"
 #include <raymath.h>
@@ -18,7 +18,9 @@ namespace {
 
 constexpr int MAX_LIGHTS = 8;
 constexpr int MAX_BONES = 128;
-constexpr int SHADOW_SLOT = 14;          // texture unit for the shadow map (material maps use 0..11)
+constexpr int MAX_TILES = 16;            // shadow-atlas tiles per scene
+constexpr int MAX_ATLAS = 8192;
+constexpr int ENV_SLOT = 13, SHADOW_SLOT = 14, DEPTH_SLOT = 15;   // material maps use units 0..11
 
 // ---- shaders ---------------------------------------------------------------------------
 // Attribute and uniform names are raylib's defaults, so DrawMesh binds them.
@@ -38,8 +40,7 @@ mat4 skinMatrix() {
 )";
 
 const char* LIT_VS_BODY = R"(
-uniform mat4 lightVP;
-out vec3 fragPos; out vec2 fragTexCoord; out vec3 fragNormal; out vec4 fragColor; out vec4 fragLightPos;
+out vec3 fragPos; out vec2 fragTexCoord; out vec3 fragNormal; out vec4 fragColor;
 void main() {
     mat4 skin = skinMatrix();
     vec4 pos = skin * vec4(vertexPosition, 1.0);
@@ -48,7 +49,6 @@ void main() {
     fragNormal = mat3(matNormal) * (mat3(skin) * vertexNormal);
     fragTexCoord = vertexTexCoord;
     fragColor = vertexColor;
-    fragLightPos = lightVP * world;
     gl_Position = mvp * pos;
 }
 )";
@@ -65,41 +65,95 @@ void main() { finalColor = vec4(1.0); }
 // Colours arrive as sRGB (texture, colDiffuse, vertex colour) or already linear (scene
 // uniforms, converted on the CPU); lighting is linear and the result is re-encoded.
 const char* LIT_FS = R"(#version 330
-in vec3 fragPos; in vec2 fragTexCoord; in vec3 fragNormal; in vec4 fragColor; in vec4 fragLightPos;
+in vec3 fragPos; in vec2 fragTexCoord; in vec3 fragNormal; in vec4 fragColor;
 uniform sampler2D texture0; uniform vec4 colDiffuse;
 uniform vec3 viewPos;
 uniform vec3 skyColor; uniform vec3 groundColor;
 uniform int lightCount;
 uniform int lightType[8]; uniform vec3 lightPos[8]; uniform vec3 lightDir[8]; uniform vec3 lightColor[8];
 uniform float lightRange[8]; uniform float lightCosInner[8]; uniform float lightCosOuter[8];
+uniform int lightShadow[8]; uniform float lightBias[8];
 uniform float roughness; uniform float metalness; uniform vec3 emissive; uniform int unlit; uniform float opacity;
-uniform int receiveShadow; uniform int shadowLight; uniform sampler2D shadowMap;
-uniform float shadowBias; uniform float shadowTexel;
+uniform int receiveShadow;
+uniform sampler2D shadowAtlas; uniform float atlasTexel;
+uniform mat4 shadowVP[16]; uniform vec4 shadowRect[16]; uniform vec4 shadowParams[16];
+uniform sampler2D envMap; uniform int hasEnv; uniform int envLinear; uniform float envMaxLod;
+uniform float envIntensity; uniform float envRotation; uniform int skybox;
 uniform vec3 fogColor; uniform float fogNear; uniform float fogFar;
 out vec4 finalColor;
 
-float shadowFactor() {
-    vec3 p = fragLightPos.xyz / fragLightPos.w * 0.5 + 0.5;
-    if (p.z >= 1.0 || p.x <= 0.0 || p.x >= 1.0 || p.y <= 0.0 || p.y >= 1.0) return 1.0;
+const float PI = 3.14159265;
+
+// ---- shadows: atlas tiles; params = (near, far, perspective, texel size per unit depth)
+float linearDepth(float d, vec4 prm) {
+    if (prm.z > 0.5) { float z = d * 2.0 - 1.0; return 2.0 * prm.x * prm.y / (prm.y + prm.x - z * (prm.y - prm.x)); }
+    return prm.x + d * (prm.y - prm.x);
+}
+float shadowAt(int tile, float bias, float ndl) {
+    vec4 clip = shadowVP[tile] * vec4(fragPos, 1.0);
+    vec3 p = clip.xyz / clip.w * 0.5 + 0.5;
+    if (p.z >= 1.0 || p.z <= 0.0 || p.x <= 0.0 || p.x >= 1.0 || p.y <= 0.0 || p.y >= 1.0) return 1.0;
+    vec4 prm = shadowParams[tile], r = shadowRect[tile];
+    float zf = prm.z > 0.5 ? clip.w : linearDepth(p.z, prm);
+    float texelWorld = prm.w * (prm.z > 0.5 ? zf : 1.0);
+    float slope = sqrt(max(1.0 - ndl * ndl, 0.0)) / max(ndl, 0.1);
+    float b = bias + texelWorld * (1.5 + min(slope, 4.0));
+    vec2 lo = r.xy + vec2(1.5 * atlasTexel), hi = r.xy + r.zw - vec2(1.5 * atlasTexel);
     float lit = 0.0;
     for (int x = -1; x <= 1; x++)
-        for (int y = -1; y <= 1; y++)
-            lit += (p.z - shadowBias > texture(shadowMap, p.xy + vec2(x, y) * shadowTexel).r) ? 0.0 : 1.0;
+        for (int y = -1; y <= 1; y++) {
+            vec2 uv = clamp(r.xy + p.xy * r.zw + vec2(x, y) * atlasTexel, lo, hi);
+            lit += zf - b > linearDepth(texture(shadowAtlas, uv).r, prm) ? 0.0 : 1.0;
+        }
     return lit / 9.0;
 }
+int cubeFace(vec3 d) {
+    vec3 a = abs(d);
+    if (a.x >= a.y && a.x >= a.z) return d.x > 0.0 ? 0 : 1;
+    if (a.y >= a.z) return d.y > 0.0 ? 2 : 3;
+    return d.z > 0.0 ? 4 : 5;
+}
+
+// ---- environment: equirectangular, mip level by blur
+vec3 env(vec3 d, float lod) {
+    float u = atan(d.z, d.x) / (2.0 * PI) + 0.5 + envRotation;
+    float v = acos(clamp(d.y, -1.0, 1.0)) / PI;
+    vec3 c = textureLod(envMap, vec2(u, v), lod).rgb;
+    return (envLinear == 1 ? c : pow(c, vec3(2.2))) * envIntensity;
+}
+// Karis' analytic approximation of the split-sum environment BRDF.
+vec3 envBRDF(vec3 spec, float rough, float ndv) {
+    vec4 r = rough * vec4(-1.0, -0.0275, -0.572, 0.022) + vec4(1.0, 0.0425, 1.04, -0.04);
+    float a004 = min(r.x * r.x, exp2(-9.28 * ndv)) * r.x + r.y;
+    vec2 ab = vec2(-1.04, 1.04) * a004 + r.zw;
+    return spec * ab.x + ab.y;
+}
+
+vec4 encode(vec3 c, float a) { return vec4(pow(clamp(c, 0.0, 1.0), vec3(1.0 / 2.2)), a); }
 
 void main() {
+    if (skybox == 1) { finalColor = encode(env(normalize(fragPos - viewPos), 0.0), 1.0); return; }
     vec4 base = texture(texture0, fragTexCoord) * colDiffuse * fragColor;
     if (unlit == 1) { finalColor = vec4(base.rgb, base.a * opacity); return; }
     vec3 albedo = pow(base.rgb, vec3(2.2));
     vec3 n = normalize(fragNormal);
     if (!gl_FrontFacing) n = -n;
     vec3 v = normalize(viewPos - fragPos);
-
-    vec3 color = mix(groundColor, skyColor, n.y * 0.5 + 0.5) * albedo;
-    float shininess = exp2(10.0 * (1.0 - clamp(roughness, 0.0, 1.0)) + 1.0);
+    float rough = clamp(roughness, 0.0, 1.0);
     vec3 specColor = mix(vec3(0.04), albedo, metalness);
     vec3 diffColor = albedo * (1.0 - metalness);
+
+    vec3 color;
+    if (hasEnv == 1) {
+        float ndv = max(dot(n, v), 1e-4);
+        vec3 r = reflect(-v, n);
+        // Blur by mip level, stopping where the image is still about 16 x 8: smaller mips
+        // average the whole sky and ground together.
+        float blurLod = max(envMaxLod - 4.0, 0.0);
+        color = diffColor * env(n, blurLod) + env(r, rough * blurLod) * envBRDF(specColor, rough, ndv);
+    } else color = mix(groundColor, skyColor, n.y * 0.5 + 0.5) * albedo;
+
+    float shininess = exp2(10.0 * (1.0 - rough) + 1.0);
     for (int i = 0; i < 8; i++) {
         if (i >= lightCount) break;
         vec3 l;
@@ -117,7 +171,10 @@ void main() {
         }
         float ndl = dot(n, l);
         if (ndl <= 0.0 || atten <= 0.0) continue;
-        if (i == shadowLight && receiveShadow == 1) atten *= shadowFactor();
+        if (lightShadow[i] >= 0 && receiveShadow == 1) {
+            int tile = lightShadow[i] + (lightType[i] == 1 ? cubeFace(fragPos - lightPos[i]) : 0);
+            atten *= shadowAt(tile, lightBias[i], ndl);
+        }
         vec3 h = normalize(l + v);
         float spec = pow(max(dot(n, h), 0.0), shininess) * (shininess + 8.0) / 25.1327;
         color += (diffColor + specColor * spec) * lightColor[i] * atten * ndl;
@@ -127,40 +184,92 @@ void main() {
         float f = clamp((length(viewPos - fragPos) - fogNear) / (fogFar - fogNear), 0.0, 1.0);
         color = mix(color, fogColor, f);
     }
-    finalColor = vec4(pow(clamp(color, 0.0, 1.0), vec3(1.0 / 2.2)), base.a * opacity);
+    finalColor = encode(color, base.a * opacity);
+}
+)";
+
+// Depth of field: a gather blur over a golden-angle spiral (after Dennis Gustafsson's
+// "Bokeh depth of field in a single pass"). Colour is premultiplied, so alpha blurs too.
+const char* DOF_FS = R"(#version 330
+in vec2 fragTexCoord; in vec4 fragColor;
+uniform sampler2D texture0; uniform sampler2D depthTex;
+uniform vec2 texel; uniform float zNear; uniform float zFar; uniform int ortho;
+uniform float focus; uniform float aperture; uniform float maxBlur; uniform float radStep;
+out vec4 finalColor;
+float depthAt(vec2 uv) {
+    float d = texture(depthTex, uv).r;
+    if (ortho == 1) return zNear + d * (zFar - zNear);
+    float z = d * 2.0 - 1.0;
+    return 2.0 * zNear * zFar / (zFar + zNear - z * (zFar - zNear));
+}
+float blurSize(float z) { return clamp(aperture * abs(z - focus) / max(z, 1e-4), 0.0, 1.0) * maxBlur; }
+void main() {
+    float cz = depthAt(fragTexCoord), cs = blurSize(cz);
+    vec4 sum = texture(texture0, fragTexCoord);
+    float tot = 1.0, radius = radStep, ang = 0.0;
+    for (int i = 0; i < 512; i++) {
+        if (radius >= maxBlur) break;
+        vec2 tc = fragTexCoord + vec2(cos(ang), sin(ang)) * texel * radius;
+        vec4 sc = texture(texture0, tc);
+        float sz = depthAt(tc), ss = blurSize(sz);
+        if (sz > cz) ss = clamp(ss, 0.0, cs * 2.0);       // sharp things in front stay sharp
+        float m = smoothstep(radius - 0.5, radius + 0.5, ss);
+        sum += mix(sum / tot, sc, m);
+        tot += 1.0;
+        radius += radStep / radius;
+        ang += 2.39996323;
+    }
+    finalColor = sum / tot * fragColor;
 }
 )";
 
 struct LitLocs {
     int viewPos, sky, ground, lightCount, lightType, lightPos, lightDir, lightColor, lightRange,
-        cosInner, cosOuter, roughness, metalness, emissive, unlit, opacity, receiveShadow,
-        shadowLight, shadowMap, shadowBias, shadowTexel, fogColor, fogNear, fogFar, lightVP,
-        skinned, bones;
+        cosInner, cosOuter, lightShadow, lightBias, roughness, metalness, emissive, unlit, opacity,
+        receiveShadow, shadowAtlas, atlasTexel, shadowVP, shadowRect, shadowParams, envMap, hasEnv,
+        envLinear, envMaxLod, envIntensity, envRotation, skybox, fogColor, fogNear, fogFar, skinned, bones;
 };
+struct DofLocs { int depthTex, texel, zNear, zFar, ortho, focus, aperture, maxBlur, radStep; };
+
+// An offscreen target with a sampleable depth texture (for depth of field).
+struct DepthTarget { unsigned int fbo = 0, color = 0, depth = 0; int w = 0, h = 0; };
 
 struct Gpu {
     bool ready = false;
-    Shader lit{}, depth{};
+    Shader lit{}, depth{}, dof{};
     LitLocs L{};
+    DofLocs D{};
     int depthSkinned = -1, depthBones = -1;
     ::Material material{};               // raylib material: owns a MAX_MATERIAL_MAPS maps array
-    unsigned int shadowFbo = 0, shadowTex = 0;
-    int shadowSize = 0;
+    unsigned int atlasFbo = 0, atlasTex = 0;
+    int atlasSize = 0;
+    DepthTarget sceneTarget;
+    Mesh skyCube{};
     std::map<std::string, Texture2D> textures;
+    std::map<const Scene*, Texture2D> generated;    // environmentGenerator results
 };
 Gpu gpu;
 
 Texture2D whiteTexture() { return { rlGetTextureIdDefault(), 1, 1, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 }; }
 
+void unloadDepthTarget(DepthTarget& t) {
+    if (t.fbo) rlUnloadFramebuffer(t.fbo);      // frees the attached textures too
+    t = DepthTarget{};
+}
+
 void releaseGpu() {
     if (gpu.lit.id) UnloadShader(gpu.lit);
     if (gpu.depth.id) UnloadShader(gpu.depth);
+    if (gpu.dof.id) UnloadShader(gpu.dof);
     if (gpu.material.maps) {
         gpu.material.maps[MATERIAL_MAP_DIFFUSE].texture = whiteTexture();   // cached textures are freed below
         UnloadMaterial(gpu.material);
     }
-    if (gpu.shadowFbo) rlUnloadFramebuffer(gpu.shadowFbo);   // also frees the attached depth texture
+    if (gpu.atlasFbo) rlUnloadFramebuffer(gpu.atlasFbo);
+    unloadDepthTarget(gpu.sceneTarget);
+    if (gpu.skyCube.vertexCount) UnloadMesh(gpu.skyCube);
     for (auto& [path, tex] : gpu.textures) UnloadTexture(tex);
+    for (auto& [scene, tex] : gpu.generated) UnloadTexture(tex);
     gpu = Gpu{};
 }
 
@@ -169,49 +278,102 @@ void ensureGpu() {
     const std::string head = SKIN_VS_HEAD;
     gpu.lit = LoadShaderFromMemory((head + LIT_VS_BODY).c_str(), LIT_FS);
     gpu.depth = LoadShaderFromMemory((head + DEPTH_VS_BODY).c_str(), DEPTH_FS);
-    if (!IsShaderValid(gpu.lit) || !IsShaderValid(gpu.depth)) throw std::runtime_error("g3d: shader compilation failed");
+    gpu.dof = LoadShaderFromMemory(nullptr, DOF_FS);
+    if (!IsShaderValid(gpu.lit) || !IsShaderValid(gpu.depth) || !IsShaderValid(gpu.dof))
+        throw std::runtime_error("g3d: shader compilation failed");
     auto loc = [](const char* name) { return GetShaderLocation(gpu.lit, name); };
     gpu.L = { loc("viewPos"), loc("skyColor"), loc("groundColor"), loc("lightCount"), loc("lightType"),
               loc("lightPos"), loc("lightDir"), loc("lightColor"), loc("lightRange"), loc("lightCosInner"),
-              loc("lightCosOuter"), loc("roughness"), loc("metalness"), loc("emissive"), loc("unlit"),
-              loc("opacity"), loc("receiveShadow"), loc("shadowLight"), loc("shadowMap"), loc("shadowBias"),
-              loc("shadowTexel"), loc("fogColor"), loc("fogNear"), loc("fogFar"), loc("lightVP"),
-              loc("skinned"), loc("boneMatrices") };
+              loc("lightCosOuter"), loc("lightShadow"), loc("lightBias"), loc("roughness"), loc("metalness"),
+              loc("emissive"), loc("unlit"), loc("opacity"), loc("receiveShadow"), loc("shadowAtlas"),
+              loc("atlasTexel"), loc("shadowVP"), loc("shadowRect"), loc("shadowParams"), loc("envMap"),
+              loc("hasEnv"), loc("envLinear"), loc("envMaxLod"), loc("envIntensity"), loc("envRotation"),
+              loc("skybox"), loc("fogColor"), loc("fogNear"), loc("fogFar"), loc("skinned"), loc("boneMatrices") };
+    auto dloc = [](const char* name) { return GetShaderLocation(gpu.dof, name); };
+    gpu.D = { dloc("depthTex"), dloc("texel"), dloc("zNear"), dloc("zFar"), dloc("ortho"), dloc("focus"),
+              dloc("aperture"), dloc("maxBlur"), dloc("radStep") };
     gpu.depthSkinned = GetShaderLocation(gpu.depth, "skinned");
     gpu.depthBones = GetShaderLocation(gpu.depth, "boneMatrices");
+    // Samplers live on fixed units for the whole run.
+    int envUnit = ENV_SLOT, shadowUnit = SHADOW_SLOT, depthUnit = DEPTH_SLOT;
+    SetShaderValue(gpu.lit, gpu.L.envMap, &envUnit, SHADER_UNIFORM_INT);
+    SetShaderValue(gpu.lit, gpu.L.shadowAtlas, &shadowUnit, SHADER_UNIFORM_INT);
+    SetShaderValue(gpu.dof, gpu.D.depthTex, &depthUnit, SHADER_UNIFORM_INT);
     gpu.material = LoadMaterialDefault();
     gpu.ready = true;
     onGraphicsShutdown(releaseGpu);
 }
 
-bool ensureShadowMap(int size) {
-    size = std::clamp(size, 256, 8192);
-    if (gpu.shadowFbo && gpu.shadowSize == size) return true;
-    if (gpu.shadowFbo) { rlUnloadFramebuffer(gpu.shadowFbo); gpu.shadowFbo = gpu.shadowTex = 0; }
-    gpu.shadowFbo = rlLoadFramebuffer();
-    gpu.shadowTex = rlLoadTextureDepth(size, size, false);
-    rlFramebufferAttach(gpu.shadowFbo, gpu.shadowTex, RL_ATTACHMENT_DEPTH, RL_ATTACHMENT_TEXTURE2D, 0);
+bool ensureAtlas(int size) {
+    if (gpu.atlasFbo && gpu.atlasSize == size) return true;
+    if (gpu.atlasFbo) { rlUnloadFramebuffer(gpu.atlasFbo); gpu.atlasFbo = gpu.atlasTex = 0; gpu.atlasSize = 0; }
+    gpu.atlasFbo = rlLoadFramebuffer();
+    gpu.atlasTex = rlLoadTextureDepth(size, size, false);
+    rlFramebufferAttach(gpu.atlasFbo, gpu.atlasTex, RL_ATTACHMENT_DEPTH, RL_ATTACHMENT_TEXTURE2D, 0);
+    const bool ok = rlFramebufferComplete(gpu.atlasFbo);
     rlDisableFramebuffer();
-    if (!rlFramebufferComplete(gpu.shadowFbo)) {
+    if (!ok) {
         TraceLog(LOG_WARNING, "g3d: shadow framebuffer incomplete; shadows disabled");
-        rlUnloadFramebuffer(gpu.shadowFbo);
-        gpu.shadowFbo = gpu.shadowTex = 0;
+        rlUnloadFramebuffer(gpu.atlasFbo);
+        gpu.atlasFbo = gpu.atlasTex = 0;
         return false;
     }
-    gpu.shadowSize = size;
+    gpu.atlasSize = size;
     return true;
+}
+
+DepthTarget& sceneTarget(int w, int h) {
+    DepthTarget& t = gpu.sceneTarget;
+    if (t.fbo && t.w == w && t.h == h) return t;
+    unloadDepthTarget(t);
+    t.fbo = rlLoadFramebuffer();
+    t.color = rlLoadTexture(nullptr, w, h, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, 1);
+    t.depth = rlLoadTextureDepth(w, h, false);
+    rlFramebufferAttach(t.fbo, t.color, RL_ATTACHMENT_COLOR_CHANNEL0, RL_ATTACHMENT_TEXTURE2D, 0);
+    rlFramebufferAttach(t.fbo, t.depth, RL_ATTACHMENT_DEPTH, RL_ATTACHMENT_TEXTURE2D, 0);
+    const bool ok = rlFramebufferComplete(t.fbo);
+    rlDisableFramebuffer();
+    if (!ok) { unloadDepthTarget(t); throw std::runtime_error("g3d: depth-of-field target incomplete"); }
+    t.w = w; t.h = h;
+    return t;
+}
+
+// Mipmapped, trilinear and repeating: right for material maps and environments alike.
+void prepareTexture(Texture2D& tex) {
+    GenTextureMipmaps(&tex);
+    SetTextureFilter(tex, TEXTURE_FILTER_TRILINEAR);
+    SetTextureWrap(tex, TEXTURE_WRAP_REPEAT);
 }
 
 Texture2D texture(const std::string& path) {
     auto it = gpu.textures.find(path);
     if (it != gpu.textures.end()) return it->second;
+    if (!FileExists(path.c_str())) throw std::runtime_error("g3d: texture not found: " + path);
     Texture2D tex = LoadTexture(path.c_str());
     if (!IsTextureValid(tex)) throw std::runtime_error("g3d: cannot load texture: " + path);
-    GenTextureMipmaps(&tex);
-    SetTextureFilter(tex, TEXTURE_FILTER_TRILINEAR);
-    SetTextureWrap(tex, TEXTURE_WRAP_REPEAT);
+    prepareTexture(tex);
     gpu.textures[path] = tex;
     return tex;
+}
+
+Texture2D environmentTexture(const Scene& s) {
+    if (!s.environment.empty()) return texture(s.environment);
+    if (!s.environmentGenerator) return Texture2D{};
+    auto it = gpu.generated.find(&s);
+    if (it != gpu.generated.end()) return it->second;
+    Image img = s.environmentGenerator();
+    Texture2D tex = LoadTextureFromImage(img);
+    UnloadImage(img);
+    if (!IsTextureValid(tex)) throw std::runtime_error("g3d: environment generator produced no image");
+    prepareTexture(tex);
+    gpu.generated[&s] = tex;
+    return tex;
+}
+
+bool isFloatFormat(int format) {
+    return format == PIXELFORMAT_UNCOMPRESSED_R32 || format == PIXELFORMAT_UNCOMPRESSED_R32G32B32 ||
+           format == PIXELFORMAT_UNCOMPRESSED_R32G32B32A32 || format == PIXELFORMAT_UNCOMPRESSED_R16 ||
+           format == PIXELFORMAT_UNCOMPRESSED_R16G16B16 || format == PIXELFORMAT_UNCOMPRESSED_R16G16B16A16;
 }
 
 // sRGB 0..255 -> linear 0..1, times k.
@@ -308,36 +470,105 @@ Vector3 safeUp(Vector3 dir, Vector3 up) {
     return std::fabs(Vector3DotProduct(Vector3Normalize(dir), Vector3Normalize(up))) > 0.999f ? Vector3{ 0, 0, 1 } : up;
 }
 
-// Light view/projection for the shadow pass, loaded into rlgl's matrices.
-Matrix loadLightMatrices(const Light& l) {
-    Vector3 dir = Vector3Subtract(l.target, l.position);
-    float dist = std::max(0.01f, Vector3Length(dir));
+// ---- shadows --------------------------------------------------------------------------
+struct Tile { Matrix vp; Vector4 rect, params; };
+struct Shadows {
+    std::vector<Tile> tiles;
+    int lightTile[MAX_LIGHTS];           // first tile of each light, -1 = unshadowed
+};
+
+// Loads a light-view camera into rlgl and returns its view-projection; `params` gets
+// (near, far, perspective, world size of one texel at unit depth).
+Matrix loadTileCamera(Vector3 eye, Vector3 target, Vector3 up, bool perspective, float halfAngleOrExtent,
+                      float zNear, float zFar, int tileSize, Vector4& params) {
     rlMatrixMode(RL_PROJECTION);
     rlLoadIdentity();
-    if (l.type == Light::Type::Directional) {
-        float e = l.shadowExtent;
-        rlOrtho(-e, e, -e, e, 0.01, dist + 4.0 * e);
+    if (perspective) {
+        float top = zNear * std::tan(halfAngleOrExtent);
+        rlFrustum(-top, top, -top, top, zNear, zFar);
+        params = { zNear, zFar, 1, 2 * std::tan(halfAngleOrExtent) / tileSize };
     } else {
-        float top = 0.05f * std::tan(std::min(89.f, l.outerAngle) * DEG2RAD);
-        rlFrustum(-top, top, -top, top, 0.05, l.range > 0 ? l.range : 200.0);
+        float e = halfAngleOrExtent;
+        rlOrtho(-e, e, -e, e, zNear, zFar);
+        params = { zNear, zFar, 0, 2 * e / tileSize };
     }
     rlMatrixMode(RL_MODELVIEW);
     rlLoadIdentity();
-    // Directional lights are pulled back so the whole shadowed area is in front of them.
-    Vector3 eye = l.type == Light::Type::Directional
-        ? Vector3Subtract(l.target, Vector3Scale(Vector3Normalize(dir), dist + 2.0f * l.shadowExtent))
-        : l.position;
-    rlMultMatrixf(MatrixToFloat(MatrixLookAt(eye, l.target, safeUp(dir, { 0, 1, 0 }))));
+    rlMultMatrixf(MatrixToFloat(MatrixLookAt(eye, target, up)));
     return MatrixMultiply(rlGetMatrixModelview(), rlGetMatrixProjection());
 }
 
-void setSceneUniforms(const Scene& s, const Camera& cam, int shadowLight, const Matrix& lightVP) {
-    const Shader& sh = gpu.lit;
+Shadows renderShadows(const Scene& s, const std::vector<Item>& items) {
+    Shadows out;
+    std::fill(std::begin(out.lightTile), std::end(out.lightTile), -1);
+    const int count = std::min((int)s.lights.size(), MAX_LIGHTS);
+    int tilesNeeded = 0;
+    for (int i = 0; i < count; i++) {
+        const Light& l = s.lights[(size_t)i];
+        if (!l.castShadow) continue;
+        int n = l.type == Light::Type::Point ? 6 : 1;
+        if (tilesNeeded + n > MAX_TILES) break;
+        out.lightTile[i] = tilesNeeded;
+        tilesNeeded += n;
+    }
+    if (!tilesNeeded) return out;
+    const int grid = (int)std::ceil(std::sqrt((double)tilesNeeded));
+    const int tile = std::clamp(s.shadowMapSize, 64, MAX_ATLAS / grid);
+    if (!ensureAtlas(grid * tile)) {
+        std::fill(std::begin(out.lightTile), std::end(out.lightTile), -1);
+        return out;
+    }
+    rlDrawRenderBatchActive();
+    rlEnableFramebuffer(gpu.atlasFbo);
+    rlViewport(0, 0, gpu.atlasSize, gpu.atlasSize);
+    rlClearScreenBuffers();
+    rlEnableDepthTest();
+    rlEnableDepthMask();
+
+    auto renderTile = [&](Vector3 eye, Vector3 target, Vector3 up, bool persp, float a, float zn, float zf) {
+        const int index = (int)out.tiles.size(), col = index % grid, row = index / grid;
+        Tile t;
+        t.vp = loadTileCamera(eye, target, up, persp, a, zn, zf, tile, t.params);
+        t.rect = { (float)col / grid, (float)row / grid, 1.f / grid, 1.f / grid };
+        rlViewport(col * tile, row * tile, tile, tile);
+        for (const Item& it : items)
+            if (it.obj->material.castShadow && it.obj->material.opacity >= 1.f && !it.obj->material.unlit) drawItem(it, true);
+        out.tiles.push_back(t);
+    };
+    for (int i = 0; i < count; i++) {
+        if (out.lightTile[i] < 0) continue;
+        const Light& l = s.lights[(size_t)i];
+        Vector3 dir = Vector3Subtract(l.target, l.position);
+        const float dist = std::max(0.01f, Vector3Length(dir));
+        dir = Vector3Scale(dir, 1 / dist);
+        if (l.type == Light::Type::Directional) {
+            // Pulled back so everything within shadowExtent of the target is in front of it.
+            const float back = dist + 2.0f * l.shadowExtent;
+            renderTile(Vector3Subtract(l.target, Vector3Scale(dir, back)), l.target, safeUp(dir, { 0, 1, 0 }),
+                       false, l.shadowExtent, 0.01f, back + 2.0f * l.shadowExtent);
+        } else if (l.type == Light::Type::Spot) {
+            const float half = std::min(85.f, std::max(l.outerAngle, 1.f) + 2.f) * DEG2RAD;
+            renderTile(l.position, l.target, safeUp(dir, { 0, 1, 0 }), true, half, 0.05f, l.range > 0 ? l.range : 200.f);
+        } else {
+            // Cube faces in the shader's cubeFace() order; slightly wider than 90 degrees for PCF.
+            static const Vector3 dirs[6] = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
+            static const Vector3 ups[6] = { { 0, -1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 }, { 0, -1, 0 }, { 0, -1, 0 } };
+            for (int f = 0; f < 6; f++)
+                renderTile(l.position, Vector3Add(l.position, dirs[f]), ups[f], true, 47.f * DEG2RAD, 0.05f,
+                           l.range > 0 ? l.range : 50.f);
+        }
+    }
+    rlDrawRenderBatchActive();
+    return out;
+}
+
+void setSceneUniforms(const Scene& s, const Camera& cam, const Shadows& sh, Texture2D envTex) {
+    const Shader& lit = gpu.lit;
     const LitLocs& L = gpu.L;
     int count = std::min((int)s.lights.size(), MAX_LIGHTS);
     int type[MAX_LIGHTS] = {};
     Vector3 pos[MAX_LIGHTS] = {}, dir[MAX_LIGHTS] = {}, col[MAX_LIGHTS] = {};
-    float range[MAX_LIGHTS] = {}, cin[MAX_LIGHTS] = {}, cosOut[MAX_LIGHTS] = {};
+    float range[MAX_LIGHTS] = {}, cin[MAX_LIGHTS] = {}, cosOut[MAX_LIGHTS] = {}, bias[MAX_LIGHTS] = {};
     for (int i = 0; i < count; i++) {
         const Light& l = s.lights[(size_t)i];
         type[i] = (int)l.type;
@@ -349,38 +580,104 @@ void setSceneUniforms(const Scene& s, const Camera& cam, int shadowLight, const 
         float outer = std::clamp(l.outerAngle, 0.1f, 89.9f), inner = std::clamp(l.innerAngle, 0.f, outer - 0.05f);
         cin[i] = std::cos(inner * DEG2RAD);
         cosOut[i] = std::cos(outer * DEG2RAD);
+        bias[i] = l.shadowBias;
     }
     Vector3 sky = linear(s.skyColor, s.ambient), ground = linear(s.groundColor, s.ambient), fog = linear(s.fogColor);
-    SetShaderValue(sh, L.viewPos, &cam.position, SHADER_UNIFORM_VEC3);
-    SetShaderValue(sh, L.sky, &sky, SHADER_UNIFORM_VEC3);
-    SetShaderValue(sh, L.ground, &ground, SHADER_UNIFORM_VEC3);
-    SetShaderValue(sh, L.lightCount, &count, SHADER_UNIFORM_INT);
-    SetShaderValueV(sh, L.lightType, type, SHADER_UNIFORM_INT, MAX_LIGHTS);
-    SetShaderValueV(sh, L.lightPos, pos, SHADER_UNIFORM_VEC3, MAX_LIGHTS);
-    SetShaderValueV(sh, L.lightDir, dir, SHADER_UNIFORM_VEC3, MAX_LIGHTS);
-    SetShaderValueV(sh, L.lightColor, col, SHADER_UNIFORM_VEC3, MAX_LIGHTS);
-    SetShaderValueV(sh, L.lightRange, range, SHADER_UNIFORM_FLOAT, MAX_LIGHTS);
-    SetShaderValueV(sh, L.cosInner, cin, SHADER_UNIFORM_FLOAT, MAX_LIGHTS);
-    SetShaderValueV(sh, L.cosOuter, cosOut, SHADER_UNIFORM_FLOAT, MAX_LIGHTS);
-    SetShaderValue(sh, L.fogColor, &fog, SHADER_UNIFORM_VEC3);
-    SetShaderValue(sh, L.fogNear, &s.fogNear, SHADER_UNIFORM_FLOAT);
-    SetShaderValue(sh, L.fogFar, &s.fogFar, SHADER_UNIFORM_FLOAT);
-    SetShaderValue(sh, L.shadowLight, &shadowLight, SHADER_UNIFORM_INT);
-    SetShaderValueMatrix(sh, L.lightVP, lightVP);
-    if (shadowLight >= 0) {
-        const Light& l = s.lights[(size_t)shadowLight];
-        float texel = 1.f / (float)gpu.shadowSize;
-        int slot = SHADOW_SLOT;
-        SetShaderValue(sh, L.shadowBias, &l.shadowBias, SHADER_UNIFORM_FLOAT);
-        SetShaderValue(sh, L.shadowTexel, &texel, SHADER_UNIFORM_FLOAT);
-        SetShaderValue(sh, L.shadowMap, &slot, SHADER_UNIFORM_INT);
+    SetShaderValue(lit, L.viewPos, &cam.position, SHADER_UNIFORM_VEC3);
+    SetShaderValue(lit, L.sky, &sky, SHADER_UNIFORM_VEC3);
+    SetShaderValue(lit, L.ground, &ground, SHADER_UNIFORM_VEC3);
+    SetShaderValue(lit, L.lightCount, &count, SHADER_UNIFORM_INT);
+    SetShaderValueV(lit, L.lightType, type, SHADER_UNIFORM_INT, MAX_LIGHTS);
+    SetShaderValueV(lit, L.lightPos, pos, SHADER_UNIFORM_VEC3, MAX_LIGHTS);
+    SetShaderValueV(lit, L.lightDir, dir, SHADER_UNIFORM_VEC3, MAX_LIGHTS);
+    SetShaderValueV(lit, L.lightColor, col, SHADER_UNIFORM_VEC3, MAX_LIGHTS);
+    SetShaderValueV(lit, L.lightRange, range, SHADER_UNIFORM_FLOAT, MAX_LIGHTS);
+    SetShaderValueV(lit, L.cosInner, cin, SHADER_UNIFORM_FLOAT, MAX_LIGHTS);
+    SetShaderValueV(lit, L.cosOuter, cosOut, SHADER_UNIFORM_FLOAT, MAX_LIGHTS);
+    SetShaderValueV(lit, L.lightShadow, sh.lightTile, SHADER_UNIFORM_INT, MAX_LIGHTS);
+    SetShaderValueV(lit, L.lightBias, bias, SHADER_UNIFORM_FLOAT, MAX_LIGHTS);
+    SetShaderValue(lit, L.fogColor, &fog, SHADER_UNIFORM_VEC3);
+    SetShaderValue(lit, L.fogNear, &s.fogNear, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, L.fogFar, &s.fogFar, SHADER_UNIFORM_FLOAT);
+    if (!sh.tiles.empty()) {
+        Matrix vps[MAX_TILES];
+        Vector4 rects[MAX_TILES], params[MAX_TILES];
+        for (size_t i = 0; i < sh.tiles.size(); i++) { vps[i] = sh.tiles[i].vp; rects[i] = sh.tiles[i].rect; params[i] = sh.tiles[i].params; }
+        rlEnableShader(lit.id);
+        rlSetUniformMatrices(L.shadowVP, vps, (int)sh.tiles.size());
+        SetShaderValueV(lit, L.shadowRect, rects, SHADER_UNIFORM_VEC4, (int)sh.tiles.size());
+        SetShaderValueV(lit, L.shadowParams, params, SHADER_UNIFORM_VEC4, (int)sh.tiles.size());
+        float texel = 1.f / (float)gpu.atlasSize;
+        SetShaderValue(lit, L.atlasTexel, &texel, SHADER_UNIFORM_FLOAT);
     }
+    int hasEnv = envTex.id ? 1 : 0, envLin = hasEnv && isFloatFormat(envTex.format) ? 1 : 0, sky0 = 0;
+    float maxLod = hasEnv ? std::floor(std::log2((float)std::max(envTex.width, envTex.height))) : 0;
+    float rot = s.environmentRotation / 360.f;
+    SetShaderValue(lit, L.hasEnv, &hasEnv, SHADER_UNIFORM_INT);
+    SetShaderValue(lit, L.envLinear, &envLin, SHADER_UNIFORM_INT);
+    SetShaderValue(lit, L.envMaxLod, &maxLod, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, L.envIntensity, &s.environmentIntensity, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, L.envRotation, &rot, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, L.skybox, &sky0, SHADER_UNIFORM_INT);
+}
+
+void bindUnit(int slot, unsigned int id) {
+    rlActiveTextureSlot(slot);
+    if (id) rlEnableTexture(id); else rlDisableTexture();
+    rlActiveTextureSlot(0);
+}
+
+void drawSkybox(const Camera& cam) {
+    if (!gpu.skyCube.vertexCount) gpu.skyCube = GenMeshCube(1, 1, 1);
+    int one = 1, zero = 0;
+    SetShaderValue(gpu.lit, gpu.L.skybox, &one, SHADER_UNIFORM_INT);
+    ::Material mat = gpu.material;
+    mat.shader = gpu.lit;
+    mat.maps[MATERIAL_MAP_DIFFUSE].texture = whiteTexture();
+    mat.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
+    setBones(gpu.L.bones, gpu.L.skinned, gpu.lit, nullptr, false);
+    const float size = cam.farPlane;                    // corners stay inside the far plane
+    rlDisableBackfaceCulling();
+    rlDisableDepthMask();
+    DrawMesh(gpu.skyCube, mat, MatrixMultiply(MatrixScale(size, size, size),
+                                              MatrixTranslate(cam.position.x, cam.position.y, cam.position.z)));
+    rlEnableDepthMask();
+    SetShaderValue(gpu.lit, gpu.L.skybox, &zero, SHADER_UNIFORM_INT);
+}
+
+// Blurs `src` by depth into the currently bound target (2D state, composition units).
+void compositeDof(const DepthTarget& src, const Camera& cam, float scale) {
+    const auto& D = gpu.D;
+    const Camera::DepthOfField& d = cam.dof;
+    const float maxBlur = std::max(1.f, d.maxBlur * scale);
+    const float radStep = std::max(0.5f, maxBlur * maxBlur / 128.f);        // about 64 taps
+    const Vector2 texel{ 1.f / src.w, 1.f / src.h };
+    const int ortho = cam.orthographic ? 1 : 0;
+    SetShaderValue(gpu.dof, D.texel, &texel, SHADER_UNIFORM_VEC2);
+    SetShaderValue(gpu.dof, D.zNear, &cam.nearPlane, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(gpu.dof, D.zFar, &cam.farPlane, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(gpu.dof, D.ortho, &ortho, SHADER_UNIFORM_INT);
+    SetShaderValue(gpu.dof, D.focus, &d.focusDistance, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(gpu.dof, D.aperture, &d.aperture, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(gpu.dof, D.maxBlur, &maxBlur, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(gpu.dof, D.radStep, &radStep, SHADER_UNIFORM_FLOAT);
+    bindUnit(DEPTH_SLOT, src.depth);
+    // Premultiplied "over" the target (which may already hold the scene background).
+    rlSetBlendFactorsSeparate(RL_ONE, RL_ONE_MINUS_SRC_ALPHA, RL_ONE, RL_ONE_MINUS_SRC_ALPHA, RL_FUNC_ADD, RL_FUNC_ADD);
+    BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+    BeginShaderMode(gpu.dof);
+    const Texture2D color{ src.color, src.w, src.h, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
+    DrawTexturePro(color, { 0, 0, (float)src.w, -(float)src.h }, { 0, 0, src.w / scale, src.h / scale }, { 0, 0 }, 0, WHITE);
+    EndShaderMode();
+    rlDrawRenderBatchActive();
+    bindUnit(DEPTH_SLOT, 0);
 }
 
 void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target, float scale) {
     ensureGpu();
     std::vector<Item> items;
     collect(s.objects, MatrixIdentity(), items);
+    const Texture2D envTex = environmentTexture(s);
 
     // Background, in 2D before the viewport changes.
     if (s.background.a > 0) {
@@ -388,30 +685,23 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
         rlDrawRenderBatchActive();
     }
 
-    // Shadow pass: the first casting directional or spot light.
-    int shadowLight = -1;
-    Matrix lightVP = MatrixIdentity();
-    for (int i = 0; i < std::min((int)s.lights.size(), MAX_LIGHTS); i++) {
-        const Light& l = s.lights[(size_t)i];
-        if (l.castShadow && l.type != Light::Type::Point) { shadowLight = i; break; }
-    }
     rlMatrixMode(RL_PROJECTION);
     rlPushMatrix();
-    if (shadowLight >= 0 && ensureShadowMap(s.shadowMapSize)) {
-        rlDrawRenderBatchActive();
-        rlEnableFramebuffer(gpu.shadowFbo);
-        rlViewport(0, 0, gpu.shadowSize, gpu.shadowSize);
-        rlClearScreenBuffers();
-        rlEnableDepthTest();
-        rlEnableDepthMask();
-        lightVP = loadLightMatrices(s.lights[(size_t)shadowLight]);
-        for (const Item& it : items)
-            if (it.obj->material.castShadow && it.obj->material.opacity >= 1.f && !it.obj->material.unlit) drawItem(it, true);
-        rlEnableFramebuffer(target.id);
-    } else shadowLight = -1;
+    const Shadows shadows = renderShadows(s, items);
 
-    // Main pass, inside the viewport (GL's origin is bottom-left).
-    const int fbH = target.texture.height;
+    // Main pass, into the target or (for depth of field) a target with a depth texture.
+    const int fbW = target.texture.width, fbH = target.texture.height;
+    const bool dof = cam.dof.aperture > 0 && cam.dof.maxBlur > 0;
+    const DepthTarget* dofTarget = nullptr;
+    if (dof) {
+        dofTarget = &sceneTarget(fbW, fbH);
+        rlEnableFramebuffer(dofTarget->fbo);
+        rlViewport(0, 0, fbW, fbH);
+        rlClearColor(0, 0, 0, 0);
+        rlClearScreenBuffers();
+    } else rlEnableFramebuffer(target.id);
+
+    // Inside the viewport (GL's origin is bottom-left).
     const int vx = (int)std::lround(vp.x * scale), vy = (int)std::lround(vp.y * scale);
     const int vw = std::max(1, (int)std::lround(vp.width * scale)), vh = std::max(1, (int)std::lround(vp.height * scale));
     rlViewport(vx, fbH - vy - vh, vw, vh);
@@ -433,12 +723,10 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     rlEnableDepthTest();
     rlEnableDepthMask();
 
-    setSceneUniforms(s, cam, shadowLight, lightVP);
-    if (shadowLight >= 0) {
-        rlActiveTextureSlot(SHADOW_SLOT);
-        rlEnableTexture(gpu.shadowTex);
-        rlActiveTextureSlot(0);
-    }
+    setSceneUniforms(s, cam, shadows, envTex);
+    bindUnit(SHADOW_SLOT, shadows.tiles.empty() ? 0 : gpu.atlasTex);
+    bindUnit(ENV_SLOT, envTex.id);
+    if (envTex.id && s.showEnvironment) drawSkybox(cam);
     std::vector<Item> clear;
     for (Item& it : items) {
         if (it.obj->material.opacity < 1.f) {
@@ -452,18 +740,20 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     for (const Item& it : clear) drawItem(it, false);
     rlEnableDepthMask();
 
-    if (shadowLight >= 0) {
-        rlActiveTextureSlot(SHADOW_SLOT);
-        rlDisableTexture();
-        rlActiveTextureSlot(0);
-    }
+    bindUnit(SHADOW_SLOT, 0);
+    bindUnit(ENV_SLOT, 0);
     rlDisableDepthTest();
     rlDisableBackfaceCulling();
     rlMatrixMode(RL_PROJECTION);
     rlPopMatrix();
     rlMatrixMode(RL_MODELVIEW);
     rlLoadIdentity();
-    rlViewport(0, 0, target.texture.width, fbH);
+    rlViewport(0, 0, fbW, fbH);
+    if (dofTarget) {
+        rlEnableFramebuffer(target.id);
+        rlScalef(scale, scale, 1.f);                    // the 2D state drawOffscreen bound
+        compositeDof(*dofTarget, cam, scale);
+    }
 }
 
 } // namespace
@@ -669,6 +959,35 @@ Object3D* findIn(std::vector<std::unique_ptr<Object3D>>& list, const std::string
 }
 }
 Object3D* Scene::find(const std::string& name) { return findIn(objects, name); }
+
+std::function<Image()> studioEnvironment(Color top, Color horizon, Color bottom, int panels) {
+    return [=]() {
+        const int w = 512, h = 256;
+        Image img = GenImageColor(w, h, BLACK);
+        Color* px = (Color*)img.data;
+        auto lerp = [](Color a, Color b, float k) {
+            return Color{ (unsigned char)(a.r + (b.r - a.r) * k), (unsigned char)(a.g + (b.g - a.g) * k),
+                          (unsigned char)(a.b + (b.b - a.b) * k), 255 };
+        };
+        for (int y = 0; y < h; y++) {
+            const float elev = std::cos((y + 0.5f) / h * PI);             // +1 straight up, -1 down
+            for (int x = 0; x < w; x++) {
+                Color c = elev >= 0 ? lerp(horizon, top, std::sqrt(elev)) : lerp(horizon, bottom, std::sqrt(-elev));
+                // Soft panels between 20 and 55 degrees up, evenly spaced around.
+                const float az = (x + 0.5f) / w * 2 * PI, alt = std::asin(std::clamp(elev, -1.f, 1.f)) * RAD2DEG;
+                float glow = 0;
+                for (int p = 0; p < panels; p++) {
+                    float d = std::fabs(std::remainder(az - (p + 0.25f) * 2 * PI / panels, 2 * PI));
+                    float across = std::clamp(1 - (d - 0.18f) / 0.06f, 0.f, 1.f);
+                    float upDown = std::clamp(1 - (std::fabs(alt - 37.5f) - 15) / 4, 0.f, 1.f);
+                    glow = std::max(glow, across * upDown);
+                }
+                px[y * w + x] = lerp(c, WHITE, glow);
+            }
+        }
+        return img;
+    };
+}
 
 void render(Scene& s, int t, const Ctx& c, Rectangle viewport, Camera* camera) {
     Camera& cam = camera ? *camera : s.camera;

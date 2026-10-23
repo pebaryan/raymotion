@@ -120,9 +120,11 @@ struct Light {
     Vector3 target{ 0, 0, 0 };      // directional and spot
     float range = 0;                // point/spot: light fades to 0 at this distance (0 = no falloff)
     float innerAngle = 20, outerAngle = 30;           // spot cone, degrees from its axis
-    bool castShadow = false;        // the first casting directional or spot light gets a shadow map
-    float shadowExtent = 8;         // directional: half-size of the shadowed area (world units)
-    float shadowBias = 0.002f;
+    // Shadows: any light type. A directional or spot light uses one shadow-atlas tile, a
+    // point light six (one per cube face); up to 16 tiles per scene, in light order.
+    bool castShadow = false;
+    float shadowExtent = 8;         // directional: half-size of the shadowed area around target
+    float shadowBias = 0.02f;       // world units, on top of an automatic slope/texel bias
     std::function<void(int t, Light& self)> up;
 
     static Light directional(Vector3 from, Color c = WHITE, float intensity = 1, bool shadow = false);
@@ -137,6 +139,9 @@ struct Camera {
     bool orthographic = false;
     float orthoHeight = 10;         // visible world height (orthographic)
     float nearPlane = 0.05f, farPlane = 500;
+    // Depth of field: things at focusDistance are sharp; blur grows with
+    // aperture * |depth - focus| / depth, up to maxBlur composition pixels. aperture 0 = off.
+    struct DepthOfField { float focusDistance = 5, aperture = 0, maxBlur = 12; } dof;
     std::function<void(int t, Camera& self)> up;
 };
 
@@ -147,10 +152,18 @@ struct Scene {
     std::vector<Light> lights;      // up to 8
     Color skyColor{ 200, 214, 255, 255 }, groundColor{ 60, 52, 48, 255 };
     float ambient = 0.35f;          // hemisphere light from sky (above) and ground (below)
+    // Image-based lighting from an equirectangular image (PNG/JPG, or HDR for linear
+    // radiance). It replaces the hemisphere: diffuse from its blurred mips, reflections
+    // sharp to blurry with roughness.
+    std::string environment;
+    std::function<Image()> environmentGenerator;    // used when `environment` is empty; called once
+    float environmentIntensity = 1;
+    float environmentRotation = 0;  // degrees about +y
+    bool showEnvironment = false;   // also draw it as the backdrop
     Color background = BLANK;       // BLANK: the 2D content beneath shows through
     Color fogColor = BLACK;
     float fogNear = 0, fogFar = 0;  // linear fog by view distance; fogFar <= fogNear disables
-    int shadowMapSize = 2048;
+    int shadowMapSize = 1024;       // per atlas tile (shrunk if the atlas would pass 8192)
     std::function<void(int t, Scene& self)> up;
 
     Object3D* add(GeometryPtr g, Material m = {});
@@ -159,6 +172,11 @@ struct Scene {
     Object3D* find(const std::string& name);         // depth-first, nullptr when absent
 };
 using ScenePtr = std::shared_ptr<Scene>;
+
+// A procedural studio environment for Scene::environmentGenerator: a vertical gradient
+// (top, horizon, bottom) with `panels` soft light boxes above the horizon that shiny
+// objects reflect.
+std::function<Image()> studioEnvironment(Color top, Color horizon, Color bottom, int panels = 3);
 
 // Renders `scene` at frame t into the current canvas target, inside `viewport` (local to
 // ctx; empty = the whole composition), composited with ctx opacity. `camera` overrides

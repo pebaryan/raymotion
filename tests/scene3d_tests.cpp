@@ -208,6 +208,151 @@ static void transparencyAndHierarchy() {
     UnloadImage(img);
 }
 
+// Shadowed vs unshadowed luma at each probe point, for a scene built with and without shadows.
+static std::vector<std::pair<int, int>> shadowProbe(const std::function<void(g3d::Scene&, bool)>& build,
+                                                    const std::vector<Vector3>& points) {
+    std::vector<std::pair<int, int>> out(points.size());
+    for (int k = 0; k < 2; k++) {
+        auto s = std::make_shared<g3d::Scene>();
+        s->camera.position = { 0, 9, 9 };
+        g3d::Material m;
+        m.roughness = 1;
+        s->add(g3d::Geometry::plane(30, 30), m);
+        build(*s, k == 1);
+        Comp c = sceneComp(s);
+        Image img = render(c, 0);
+        for (size_t i = 0; i < points.size(); i++) {
+            int l = luma(px(img, project(s->camera, points[i])));
+            (k ? out[i].first : out[i].second) = l;
+        }
+        UnloadImage(img);
+    }
+    return out;
+}
+
+static void moreShadows() {
+    g3d::Material m;
+    m.roughness = 1;
+    // Two directional lights from opposite sides: both shadows at once.
+    auto two = shadowProbe([&](g3d::Scene& s, bool on) {
+        s.add(g3d::Geometry::box(1, 1, 1), m)->position = { 0, 1.5f, 0 };
+        s.lights.push_back(g3d::Light::directional({ 4, 8, 0 }, WHITE, 0.4f, on));
+        s.lights.push_back(g3d::Light::directional({ -4, 8, 0 }, WHITE, 0.4f, on));
+    }, { { -0.75f, 0, 0 }, { 0.75f, 0, 0 }, { 3, 0, 3 } });
+    CHECK(two[0].first < two[0].second - 30 && two[1].first < two[1].second - 30);
+    CHECK(std::abs(two[2].first - two[2].second) <= 2);
+
+    // A point light above four boxes: shadows on four different cube faces.
+    auto point = shadowProbe([&](g3d::Scene& s, bool on) {
+        for (Vector3 p : { Vector3{ 2, 2, 0 }, Vector3{ -2, 2, 0 }, Vector3{ 0, 2, -2 }, Vector3{ 0, 2, 2 } })
+            s.add(g3d::Geometry::box(0.8f, 0.8f, 0.8f), m)->position = p;
+        g3d::Light l = g3d::Light::point({ 0, 4, 0 }, WHITE, 1.5f, 20);
+        l.castShadow = on;
+        s.lights.push_back(l);
+    }, { { 4, 0, 0 }, { -4, 0, 0 }, { 0, 0, 4 }, { 2.8f, 0, 2.8f } });          // +x, -x and +z faces
+    for (int i = 0; i < 3; i++) CHECK(point[(size_t)i].first < point[(size_t)i].second - 30);
+    CHECK(std::abs(point[3].first - point[3].second) <= 2);
+
+    // A spot light's shadow.
+    auto spot = shadowProbe([&](g3d::Scene& s, bool on) {
+        s.add(g3d::Geometry::box(1, 1, 1), m)->position = { 0, 2.5f, 0 };
+        s.lights.push_back(g3d::Light::spot({ 0, 5, 0.01f }, { 0, 0, 0 }, WHITE, 2, 40, on));
+    }, { { 0.3f, 0, 0.3f }, { 2.5f, 0, 0 } });
+    CHECK(spot[0].first < spot[0].second - 30);
+    CHECK(std::abs(spot[1].first - spot[1].second) <= 2);
+}
+
+static void environment(const fs::path& dir) {
+    // Equirectangular: red sky above the horizon, blue ground below.
+    Image eq = GenImageColor(256, 128, RED);
+    ImageDrawRectangle(&eq, 0, 64, 256, 64, BLUE);
+    const fs::path path = dir / "env.png";
+    ExportImage(eq, path.string().c_str());
+    UnloadImage(eq);
+
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = { 0, 0, 5 };
+    s->environment = path.string();
+    g3d::Material chrome;
+    chrome.metalness = 1;
+    chrome.roughness = 0;
+    s->add(g3d::Geometry::sphere(1, 48, 64), chrome);
+    Comp c = sceneComp(s);
+    Image img = render(c, 0);
+    Color up = px(img, project(s->camera, { 0, 0.8f, 0.6f })), down = px(img, project(s->camera, { 0, -0.8f, 0.6f }));
+    CHECK(close(up, RED, 3) && close(down, BLUE, 3));             // the mirror reflects sky and ground
+    CHECK(close(GetImageColor(img, 3, 3), BLACK));                // no backdrop unless asked
+    UnloadImage(img);
+
+    // The environment as backdrop, turned 180 degrees about y: unchanged, as it is symmetric.
+    auto sky = std::make_shared<g3d::Scene>();
+    sky->camera.position = { 0, 0, 5 };
+    sky->environment = path.string();
+    sky->showEnvironment = true;
+    sky->environmentRotation = 180;
+    Comp sc = sceneComp(sky);
+    img = render(sc, 0);
+    CHECK(close(GetImageColor(img, W / 2, 3), RED, 3) && close(GetImageColor(img, W / 2, H - 3), BLUE, 3));
+    UnloadImage(img);
+
+    // A generated environment: used as given, generated once for any number of frames.
+    auto gen = std::make_shared<g3d::Scene>();
+    gen->camera.position = { 0, 0, 5 };
+    gen->showEnvironment = true;
+    int calls = 0;
+    auto studio = g3d::studioEnvironment(RED, GRAY, BLUE, 0);
+    gen->environmentGenerator = [&calls, studio] { calls++; return studio(); };
+    Comp gc = sceneComp(gen);
+    for (int f = 0; f < 2; f++) {
+        img = render(gc, f);
+        // The frame edges are ~22 degrees off the horizon: mostly top/bottom, part gray horizon.
+        Color top = GetImageColor(img, W / 2, 0), bottom = GetImageColor(img, W / 2, H - 1);
+        CHECK(top.r > top.b + 60 && bottom.b > bottom.r + 60);
+        UnloadImage(img);
+    }
+    CHECK(calls == 1);
+
+    // Rough surfaces see the blurred environment: a matte sphere's top is lit red, not blue.
+    auto r = std::make_shared<g3d::Scene>();
+    r->camera.position = { 0, 0, 5 };
+    r->environment = path.string();
+    g3d::Material matte;
+    matte.roughness = 1;
+    r->add(g3d::Geometry::sphere(1, 48, 64), matte);
+    Comp rc = sceneComp(r);
+    img = render(rc, 0);
+    Color mt = px(img, project(r->camera, { 0, 0.9f, 0.4f }));
+    CHECK(mt.r > mt.b + 40);
+    UnloadImage(img);
+}
+
+static void depthOfField() {
+    // Counts partially covered (blurred) pixels across a box's edges along one row.
+    auto softness = [](const Image& img, int y, int x0, int x1) {
+        int n = 0;
+        for (int x = x0; x < x1; x++) { int v = GetImageColor(img, x, y).r; n += v > 25 && v < 230; }
+        return n;
+    };
+    int nearSoft[2], farSoft[2];
+    for (int k = 0; k < 2; k++) {
+        auto s = std::make_shared<g3d::Scene>();
+        s->camera.position = { 0, 0, 5 };
+        s->camera.target = { 0, 0, 0 };
+        if (k) s->camera.dof = { 3, 1, 8 };                                     // focus on the near box
+        s->add(g3d::Geometry::box(0.6f, 0.6f, 0.6f), unlit(WHITE))->position = { -0.9f, 0, 2 };
+        s->add(g3d::Geometry::box(3, 3, 1), unlit(WHITE))->position = { 7, 0, -10 };
+        Comp c = sceneComp(s);
+        Image img = render(c, 0);
+        const int nearY = (int)project(s->camera, { -0.9f, 0, 2 }).y, farY = (int)project(s->camera, { 7, 0, -10 }).y;
+        nearSoft[k] = softness(img, nearY, 0, W / 2);
+        farSoft[k] = softness(img, farY, W / 2, W);
+        CHECK(allOpaque(img));
+        UnloadImage(img);
+    }
+    CHECK(farSoft[0] <= 2 && farSoft[1] >= 6);                                  // far edges blur
+    CHECK(nearSoft[1] <= nearSoft[0] + 2);                                      // the focused box stays sharp
+}
+
 static void determinism() {
     auto s = std::make_shared<g3d::Scene>();
     s->camera.position = { 0, 3, 6 };
@@ -385,6 +530,9 @@ int main() {
     shadows();
     viewportsAndOpacity();
     transparencyAndHierarchy();
+    moreShadows();
+    environment(dir);
+    depthOfField();
     determinism();
     models(dir);
     shutdownGraphics();
