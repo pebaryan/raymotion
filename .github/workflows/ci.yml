@@ -7,7 +7,9 @@ on:
 jobs:
   linux:
     # Full suite: raylib 6.2 from source, GL tests on Mesa llvmpipe under Xvfb.
+    # Non-blocking for now: Windows is the supported platform.
     runs-on: ubuntu-24.04
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
@@ -44,7 +46,9 @@ jobs:
 
   macos:
     # Portability build; GL tests need a display session, so only non-GL tests run.
+    # Non-blocking for now: Windows is the supported platform.
     runs-on: macos-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Configure
