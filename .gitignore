@@ -1,0 +1,12 @@
+build/
+out/
+*.mp4
+cache/
+# Scratch output of the import-lib experiments (tools/*.sh recreate it on demand)
+tools/tmp_defs/
+tmp_defs/
+third_party/raylib_extracted/
+# Microsoft SDK / Visual Studio library mirrors: machine-local, not redistributable
+third_party/msvc-crt/
+third_party/msvc-sdk-libs/
+third_party/vs-libs/
