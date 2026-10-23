@@ -1,4 +1,5 @@
 """CLI integration tests. Artifacts are isolated from the project's out directory."""
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -94,6 +95,30 @@ class CliTests(unittest.TestCase):
         path = self.cwd / "hello.png"
         self.run_cli("still", "hello", "--at", "45", "--png", str(path), exe=STARTER)
         self.assertEqual(self.png_size(path), (1280, 720))
+
+    def test_props(self):
+        defaults = json.loads(self.run_cli("props", "promo", exe=STARTER).stdout)
+        self.assertEqual(defaults["secondsPerScene"], 3)
+        self.assertIn("promo", self.run_cli("list", exe=STARTER).stdout)
+
+        # Length follows the props: 3 x 1s scenes minus two transition overlaps (18 + 20).
+        short = '{"secondsPerScene": 1, "features": ["One"]}'
+        self.run_cli("still", "promo", "--at", "51", "--props", short, "--png", "short.png", exe=STARTER)
+        late = subprocess.run([str(STARTER), "still", "promo", "--at", "52", "--props", short],
+                              cwd=self.cwd, capture_output=True, text=True, timeout=60)
+        self.assertNotEqual(late.returncode, 0, "frame past the props-derived duration was accepted")
+
+        # @file and colour props reach the frame: the outro background is the accent.
+        (self.cwd / "props.json").write_text('{"accent": "#ff0000"}', encoding="utf-8")
+        self.run_cli("still", "promo", "--at", "200", "--props", "@props.json", "--png", "red.png", exe=STARTER)
+        raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(self.cwd / "red.png"), "-vf", "crop=1:1:5:5",
+                              "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True, check=True).stdout
+        self.assertEqual(tuple(raw), (255, 0, 0))
+
+        bad = subprocess.run([str(STARTER), "still", "promo", "--at", "0", "--props", '{"title": tru}'],
+                             cwd=self.cwd, capture_output=True, text=True, timeout=60)
+        self.assertEqual(bad.returncode, 2)
+        self.assertIn("line 1, column", bad.stderr)
 
 if __name__ == "__main__":
     unittest.main()

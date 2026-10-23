@@ -57,7 +57,10 @@ endif()
 add_library(rmtn_engine STATIC
   src/engine/cli.cpp
   src/engine/fonts.cpp
-  src/engine/render.cpp)
+  src/engine/render.cpp
+  src/engine/anim.cpp
+  src/engine/layout.cpp
+  src/engine/json.cpp)
 add_library(raymotion::engine ALIAS rmtn_engine)
 target_include_directories(rmtn_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(rmtn_engine PUBLIC raylib)
@@ -87,11 +90,18 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   # Pure logic: runs anywhere.
   add_executable(raymotion_ht_tests tests/ht_logic_tests.cpp)
   add_test(NAME ht_semantics COMMAND raymotion_ht_tests)
+  add_executable(raymotion_anim_tests tests/anim_tests.cpp)
+  target_link_libraries(raymotion_anim_tests PRIVATE rmtn_engine)
+  add_test(NAME anim_semantics COMMAND raymotion_anim_tests)
 
   # The rest need an OpenGL 3.3 context (label "gl"; on headless Linux run under xvfb).
   add_executable(raymotion_render_tests tests/render_tests.cpp)
   target_link_libraries(raymotion_render_tests PRIVATE rmtn_engine)
   add_test(NAME renderer_regressions COMMAND raymotion_render_tests)
+
+  add_executable(raymotion_layer_tests tests/layer_tests.cpp)
+  target_link_libraries(raymotion_layer_tests PRIVATE rmtn_engine)
+  add_test(NAME layer_compositing COMMAND raymotion_layer_tests)
 
   # Here-There layouts are designed for Segoe UI: exit 77 (skipped) where it is absent.
   add_executable(raymotion_plain_tests tests/ht_plain_tests.cpp)
@@ -103,7 +113,7 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   target_compile_definitions(raymotion_feed_tests PRIVATE RAYMOTION_FEED_STATE=1 RAYMOTION_FEED_RENDER=1)
   add_test(NAME ht_feed COMMAND raymotion_feed_tests)
 
-  set_tests_properties(renderer_regressions ht_plain_layout ht_feed PROPERTIES LABELS gl SKIP_RETURN_CODE 77)
+  set_tests_properties(renderer_regressions layer_compositing ht_plain_layout ht_feed PROPERTIES LABELS gl SKIP_RETURN_CODE 77)
 
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND)

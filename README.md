@@ -39,6 +39,8 @@ build/raymotion list
 build/raymotion preview <name>                 # live window; esc or close quits
 build/raymotion render  <name> [--crf N] [--draft] [--no-music] [--png-frames] [--ss N]
 build/raymotion still   <name> --at FRAME [--png PATH] [--ss N]
+build/raymotion props   <name>                 # print the default props as JSON
+# any command:  --props '{"title": "Hi"}'  or  --props @props.json
 ```
 
 * `render` draws every frame into a composition-sized canvas and pipes raw RGBA into
@@ -49,6 +51,8 @@ build/raymotion still   <name> --at FRAME [--png PATH] [--ss N]
 * Output is exactly the composition size regardless of the desktop. `--draft` renders
   half size (even dimensions) without supersampling.
 * Frames carry no state: `still --at N` is identical to frame N of a full render.
+* `--props` is merged (objects key by key) over the composition's `defaultProps`; the
+  composition rebuilds from the result, so props can change its length or size too.
 
 ## Writing a project
 
@@ -82,6 +86,48 @@ add_executable(myvideo main.cpp)
 target_link_libraries(myvideo PRIVATE raymotion::engine)
 ```
 
+### Authoring API
+
+Remotion's building blocks, as C++ (the starter's `promo` composition uses all of them):
+
+```cpp
+// Timing: sequences, loops, freezes, back-to-back series.
+Series s(c.roots);
+s.add(60)->fn = intro;
+s.add(90, -10)->fn = body;                          // overlaps the intro by 10 frames
+loop(c.roots, 0, 30, 4)->fn = pulse;                // local t = 0..29, four times
+freeze(c.roots, 200, 40, 15)->fn = body;            // holds the body's frame 15
+
+// Values: interpolate (Extend / Clamp / Identity / Wrap), colours, springs, easings.
+p.opacity = interpolate(t, {0, 20}, {0, 1}, clamped(ease::out(ease::cubic)));
+p.scale = spring(t, {30.0});                        // fps; also config {mass, stiffness, damping}, from/to, delay
+Color c = interpolateColors(t, {0, 30}, {RED, BLUE});
+Easing css = ease::bezier(0.25, 0.1, 0.25, 1);
+
+// Layers: the subtree renders offscreen, then composites as one group.
+Layer& l = node->isolate();
+l.opacity = 0.5f;                                   // no seams where children overlap
+l.blend = Blend::Screen;                            // Normal, Add, Multiply, Screen
+l.mask = [](const Ctx& cx, int t) { dr::circle(cx, {640, 360}, 10.f * t, WHITE); };
+
+// Transitions between scenes (fade / slide / wipe, with a direction and easing).
+TransitionSeries ts(c.roots, c.w, c.h);
+ts.add(90)->fn = sceneA;
+ts.transition(Transition::slide(20, Direction::FromRight));
+ts.add(90)->fn = sceneB;
+c.duration = ts.end();
+
+// Layout: flex rows/columns, grids, wrapped and aligned text boxes.
+auto cols = layout::row(layout::inset(layout::fill(c.w, c.h), 64), {layout::px(320), layout::flex()}, 24);
+dr::textBox(cx, "Wraps to the box, aligned", cols[1], {fonts::ui(true), 48});
+
+// Props: defaults + a build step that runs with the merged input props.
+c.defaultProps = Json::parse(R"({"title": "Hello", "accent": "#47dad8"})");
+c.build = [](Comp& c, const Json& props) {
+    /* read props.str("title", ""), props.color("accent", WHITE), ...; fill c.roots */
+};
+```
+
 ### Engine pieces
 
 * `rmtn/timeline.hpp` — `Comp`, the node tree (start/duration, `up` animates props,
@@ -95,8 +141,12 @@ target_link_libraries(myvideo PRIVATE raymotion::engine)
 * `rmtn/fonts.hpp` — `fonts::ui()` is the bundled Inter (SIL OFL); `fonts::load({...})`
   finds files in project assets, `RAYMOTION_ASSETS`, then system font dirs, caches them
   with mipmapped filtering, and throws instead of silently substituting.
+* `rmtn/anim.hpp` — `interpolate`, `interpolateColors`, `spring`/`measureSpring`, `ease::`.
+* `rmtn/transitions.hpp` — `TransitionSeries` with fade, slide and wipe.
+* `rmtn/layout.hpp` — `layout::` rects, rows, columns, grids; `wrapText`, `dr::textBox`.
+* `rmtn/json.hpp` — `Json` values for props (parse, typed lookups with fallbacks, merge).
 * `rmtn/synth.hpp` — sine-sum note events + envelopes -> WAV soundtrack.
-* `rmtn/cli.hpp` — `runCli`: list / preview / render / still.
+* `rmtn/cli.hpp` — `runCli`: list / preview / render / still / props.
 
 ## Showcase
 
@@ -122,10 +172,12 @@ out for Segoe UI and refuse to substitute another font (their tests skip without
 
 ## Tests
 
-`ctest` runs: HT semantics (pure logic); renderer regressions (supersampling edge levels
+`ctest` runs: HT semantics and the authoring API (interpolation, springs, timing,
+transitions, layout, JSON; pure logic); layer compositing (group opacity, blend modes,
+masks, offsets at every supersampling level, wipes, text boxes); renderer regressions (supersampling edge levels
 and coordinates, concave fills, fonts, FX shader uniforms, determinism, shutdown);
 Here-There layout checks; and a Python CLI suite (exact sizes, draft scaling, stale-frame
-cleanup, a real MP4 render, the starter project). Tests needing OpenGL carry the `gl`
+cleanup, a real MP4 render, the starter project, props). Tests needing OpenGL carry the `gl`
 label (`ctest -LE gl` skips them on headless machines).
 
 Inter is © The Inter Project Authors, SIL Open Font License 1.1

@@ -9,6 +9,7 @@
 #include <memory>
 #include <functional>
 #include <string>
+#include "json.hpp"
 #include "synth.hpp"
 
 namespace rmtn {
@@ -180,13 +181,38 @@ struct NodeProps {
     float opacity = 1.0f;
 };
 
+// ------------------------------------------------------------------ layers
+enum class Blend { Normal, Add, Multiply, Screen };
+enum class MaskMode { Alpha, Luma };
+
+// A layer renders its node's subtree offscreen and composites the flattened result, so
+// opacity applies to the group as a whole (no seams where children overlap) and blend
+// modes and masks act on the group. Each layer costs one offscreen pass (two with a mask).
+struct Layer {
+    bool enabled = true;                             // false: draw inline, as if there were no layer
+    float opacity = 1.0f;                            // times the node's accumulated opacity
+    Vector2 offset{ 0, 0 };                          // shifts the flattened group (composition px)
+    Blend blend = Blend::Normal;
+    std::function<void(const Ctx& c, int t)> mask;   // drawn in the node's space; content shows where it covers
+    MaskMode maskMode = MaskMode::Alpha;
+    bool invertMask = false;
+};
+
 // ------------------------------------------------------------------ timeline tree
+struct TNode;
+using Nodes = std::vector<std::unique_ptr<TNode>>;
+
 struct TNode {
     int start = 0, dur = 60;                 // relative to parent's start, in frames
+    int loopEvery = 0;                       // > 0: content sees t % loopEvery (see loop())
+    int freezeAt = -1;                       // >= 0: content sees this frame (see freeze())
     NodeProps props;
     std::function<void(int t, NodeProps& p)> up;                    // animate props at local frame t
     std::function<void(const Ctx& c, int t)> fn;                    // draw leaves at local frame t
-    std::vector<std::unique_ptr<TNode>> kids;
+    Nodes kids;
+    std::unique_ptr<Layer> layer;            // set via isolate()
+    // Animates the layer from the node's unremapped local frame (used by transitions).
+    std::function<void(int t, NodeProps& p, Layer& l)> layerUp;
 
     TNode* add(int off, int duration) {
         kids.push_back(std::make_unique<TNode>());
@@ -194,21 +220,47 @@ struct TNode {
         n->start = off; n->dur = duration;
         return n;
     }
+    // Turns this node into a layer (idempotent) and returns its settings.
+    Layer& isolate() {
+        if (!layer) layer = std::make_unique<Layer>();
+        return *layer;
+    }
 };
 
-static void stepNode(TNode& n, int parentLocal, const Ctx& parentCtx) {
+// Engine hooks (render.cpp). drawLayer renders a layered node offscreen and composites it;
+// it returns false when no canvas is active (the node is then drawn inline, with its
+// layer opacity applied per primitive and no mask). restoreBlend re-applies the engine's
+// 2D blend state after user drawing code, which may have changed it.
+bool drawLayer(TNode& n, int t, const Ctx& c);
+void restoreBlend();
+
+void stepNode(TNode& n, int parentLocal, const Ctx& parentCtx);
+
+// Draws a node's own leaves and children at (remapped) local frame t.
+inline void drawNodeContent(TNode& n, int t, const Ctx& c) {
+    if (n.fn) { n.fn(c, t); restoreBlend(); }
+    for (auto& k : n.kids) stepNode(*k, t, c);
+}
+
+inline void stepNode(TNode& n, int parentLocal, const Ctx& parentCtx) {
     int t = parentLocal - n.start;
     if (t < 0 || t >= n.dur) return;
-    if (n.up) n.up(t, n.props);
+    int lt = n.freezeAt >= 0 ? n.freezeAt : n.loopEvery > 0 ? t % n.loopEvery : t;
+    if (n.up) n.up(lt, n.props);
+    if (n.layer && n.layerUp) n.layerUp(t, n.props, *n.layer);
     Ctx c;
     c.o = mapP(parentCtx, n.props.pos);
     c.s = parentCtx.s * n.props.scale;
     c.rot = parentCtx.rot + n.props.rot;
     c.a = parentCtx.a * n.props.opacity;
-    if (n.fn) n.fn(c, t);
-    for (auto& k : n.kids) stepNode(*k, t, c);
+    if (n.layer && n.layer->enabled) {
+        if (drawLayer(n, lt, c)) return;
+        c.a *= n.layer->opacity;
+        c.o.x += n.layer->offset.x; c.o.y += n.layer->offset.y;
+    }
+    drawNodeContent(n, lt, c);
 }
-static void drawTree(const std::vector<std::unique_ptr<TNode>>& roots, int frame) {
+inline void drawTree(const Nodes& roots, int frame) {
     Ctx root{ { 0, 0 }, 1.f, 0.f, 1.f };
     for (auto& r : roots) stepNode(*r, frame, root);
 }
@@ -222,20 +274,58 @@ struct Comp {
     int supersample = 2;                     // antialiasing: draw at w*N x h*N, box-filter down (1, 2 or 4)
     Color background{ 4, 4, 10, 255 };       // cleared before the timeline tree draws
     Song song;                               // procedural soundtrack (used when music=true)
-    std::vector<std::unique_ptr<TNode>> roots;
+    Nodes roots;
     // Optional custom renderer replacing the timeline tree (multi-pass effects etc.).
     // Called with `target` (w x h) already bound; it may bind its own targets but must
     // leave `target` bound on return. Supersampling does not apply to it.
     std::function<void(Comp& c, int frame, RenderTexture target)> render;
+
+    // Input props (Remotion's defaultProps / inputProps / calculateMetadata). When `build`
+    // is set, the CLI calls it once before use with defaultProps merged with --props; it
+    // fills `roots` (or `render`) and may change duration, size, fps or background.
+    Json defaultProps;
+    std::function<void(Comp& c, const Json& props)> build;
 };
 
-// sugar: append a root node [off, off+dur) to a composition and return it
-static inline TNode* addRoot(std::vector<std::unique_ptr<TNode>>& roots, int off, int dur) {
-    roots.push_back(std::make_unique<TNode>());
-    TNode* n = roots.back().get();
-    n->start = off; n->dur = dur;
+// ------------------------------------------------------------------ sequencing
+// Remotion's <Sequence>: a node active for [from, from + duration) of its parent.
+inline TNode* addRoot(Nodes& list, int from, int duration) {
+    list.push_back(std::make_unique<TNode>());
+    TNode* n = list.back().get();
+    n->start = from; n->dur = duration;
     return n;
 }
+inline TNode* sequence(Nodes& list, int from, int duration) { return addRoot(list, from, duration); }
+
+// <Loop>: content repeats every `every` frames, `times` times.
+inline TNode* loop(Nodes& list, int from, int every, int times) {
+    TNode* n = addRoot(list, from, every * times);
+    n->loopEvery = every;
+    return n;
+}
+// <Freeze>: content held at its local `frame` for `duration` frames.
+inline TNode* freeze(Nodes& list, int from, int duration, int frame) {
+    TNode* n = addRoot(list, from, duration);
+    n->freezeAt = frame;
+    return n;
+}
+
+// <Series>: sequences placed back to back. A negative offset overlaps the previous one,
+// a positive offset leaves a gap.
+class Series {
+public:
+    explicit Series(Nodes& list, int from = 0) : list_(list), end_(from) {}
+    explicit Series(TNode* parent, int from = 0) : Series(parent->kids, from) {}
+    TNode* add(int duration, int offset = 0) {
+        TNode* n = addRoot(list_, end_ + offset, duration);
+        end_ = n->start + duration;
+        return n;
+    }
+    int end() const { return end_; }      // frame after the last sequence
+private:
+    Nodes& list_;
+    int end_;
+};
 
 // A project's composition list; handed to rmtn::runCli (cli.hpp).
 using Registry = std::vector<Comp>;

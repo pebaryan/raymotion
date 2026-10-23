@@ -85,9 +85,10 @@ static inline void circle(const Ctx& c, V2 ctr, float r, Color col) {
 static inline void ring(const Ctx& c, V2 ctr, float r, float w, Color col) {
     DrawCircleLinesEx(mapP(c, ctr), r * c.s, std::max(1.0f, w * c.s), TA(c, col));
 }
+// arc stroke of width w centred on radius r, from a0 to a1 degrees (follows ctx rotation)
 static inline void arc(const Ctx& c, V2 ctr, float r, float w, float a0deg, float a1deg, Color col) {
-    DrawCircleSectorLinesEx(mapP(c, ctr), r * c.s, a0deg, a1deg, 64,
-                            std::max(1.0f, w * c.s), TA(c, col));
+    float half = std::max(0.5f, w * c.s / 2);
+    DrawRing(mapP(c, ctr), std::max(0.f, r * c.s - half), r * c.s + half, a0deg + c.rot, a1deg + c.rot, 64, TA(c, col));
 }
 static inline void sector(const Ctx& c, V2 ctr, float r, float a0deg, float a1deg, Color col) {
     DrawCircleSector(mapP(c, ctr), r * c.s, a0deg, a1deg, 64, TA(c, col));

@@ -6,3 +6,7 @@
 #include "fonts.hpp"
 #include "render.hpp"
 #include "cli.hpp"
+#include "anim.hpp"
+#include "transitions.hpp"
+#include "layout.hpp"
+#include "json.hpp"

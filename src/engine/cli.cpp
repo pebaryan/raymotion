@@ -8,6 +8,9 @@
 #include <vector>
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <stdexcept>
 #include "rmtn/timeline.hpp"
 #include "rmtn/draw.hpp"
 #include "rmtn/synth.hpp"
@@ -108,6 +111,24 @@ std::string ffmpegPath(const char* forced) {
     return "";
 }
 
+// --props value: inline JSON, or @path to a JSON file.
+Json loadProps(const char* arg) {
+    if (arg[0] != '@') return Json::parse(arg);
+    std::ifstream in(std::filesystem::u8path(arg + 1), std::ios::binary);
+    if (!in) throw std::runtime_error(std::string("cannot read props file: ") + (arg + 1));
+    std::stringstream text;
+    text << in.rdbuf();
+    return Json::parse(text.str());
+}
+
+// Builds a composition from its default props merged with `overrides`, then checks it.
+void prepare(Comp& c, const Json& overrides) {
+    if (c.build) c.build(c, c.defaultProps.merged(overrides.isNull() ? Json(Json::Object{}) : overrides));
+    else if (overrides.size()) fprintf(stderr, "note: '%s' takes no props; --props ignored\n", c.name.c_str());
+    if (c.w <= 0 || c.h <= 0 || c.fps <= 0 || c.duration <= 0)
+        throw std::runtime_error("composition '" + c.name + "' needs positive size, fps and duration");
+}
+
 void usage() {
     puts("usage:");
     puts("  raymotion list                                  list compositions");
@@ -116,17 +137,21 @@ void usage() {
     puts("                        render every frame via raylib, pipe to ffmpeg -> mp4");
     puts("                        --png-frames writes a PNG sequence instead (no ffmpeg)");
     puts("  raymotion still   <name> --at FRAME [--png PATH] write one PNG frame");
+    puts("  raymotion props   <name>                        print the default props (JSON)");
     puts("options: --ffmpeg PATH overrides auto-detected ffmpeg binary");
     puts("         --ss N        supersampling 1, 2 or 4 (default: the composition's)");
+    puts("         --props JSON  input props merged over the defaults; @file.json reads a file");
 }
 
 int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
     const char* mode = argc > 1 ? argv[1] : "";
     if (!strcmp(mode, "list")) {
         Registry comps; registerAll(comps);
-        for (auto& c : comps)
+        for (auto& c : comps) {
+            prepare(c, Json());
             printf("%-22s %dx%d @%dfps  %.1fs  music=%d\n", c.name.c_str(), c.w, c.h, c.fps,
                    (double)c.duration / c.fps, (int)c.music);
+        }
         return 0;
     }
     if (!strcmp(mode, "help") || !mode[0]) { usage(); return 1; }
@@ -134,7 +159,7 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
     if (argc < 3) { usage(); return 1; }
     const std::string want = argv[2];
 
-    const char* crfArg = nullptr, *ffArg = nullptr, *atArg = nullptr, *pngArg = nullptr, *ssArg = nullptr;
+    const char* crfArg = nullptr, *ffArg = nullptr, *atArg = nullptr, *pngArg = nullptr, *ssArg = nullptr, *propsArg = nullptr;
     bool draft = false, noMusic = false, pngFrames = false;
     for (int i = 3; i < argc; i++) {
         if (!strcmp(argv[i], "--crf") && i+1 < argc) crfArg = argv[++i];
@@ -142,6 +167,7 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
         else if (!strcmp(argv[i], "--at") && i+1 < argc) atArg = argv[++i];
         else if (!strcmp(argv[i], "--png") && i+1 < argc) pngArg = argv[++i];
         else if (!strcmp(argv[i], "--ss") && i+1 < argc) ssArg = argv[++i];
+        else if (!strcmp(argv[i], "--props") && i+1 < argc) propsArg = argv[++i];
         else if (!strcmp(argv[i], "--draft")) draft = true;
         else if (!strcmp(argv[i], "--no-music")) noMusic = true;
         else if (!strcmp(argv[i], "--png-frames")) pngFrames = true;
@@ -151,6 +177,8 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
     Comp* comp = nullptr;
     for (auto& c : comps) if (c.name == want) comp = &c;
     if (!comp) { printf("unknown composition '%s'\n", want.c_str()); usage(); return 1; }
+    if (!strcmp(mode, "props")) { puts(comp->defaultProps.dump().c_str()); return 0; }
+    prepare(*comp, propsArg ? loadProps(propsArg) : Json());
 
     int W = comp->w, H = comp->h;
     if (draft) { W = (W / 2) & ~1; H = (H / 2) & ~1; }   // yuv420p needs even dimensions
@@ -294,6 +322,8 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
 } // namespace
 
 int runCli(int argc, const char** argv, const RegisterFn& registerAll){
+    // raylib's INFO lines drown the CLI's own output; RAYMOTION_VERBOSE=1 restores them.
+    if (!getenv("RAYMOTION_VERBOSE")) SetTraceLogLevel(LOG_WARNING);
     try { return runMain(argc,argv,registerAll); }
     catch (const std::exception& error){
         fprintf(stderr,"raymotion: %s\n",error.what());
