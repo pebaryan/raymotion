@@ -3,7 +3,8 @@
 #include <string>
 #include <vector>
 #include <cstdio>
-#include "../src/rmtn/ht_feed_layout.hpp"
+#include "rmtn/render.hpp"
+#include "../examples/showcase/ht_feed_layout.hpp"
 namespace staging {
 using namespace rmtn::feedLayout;
 struct Triangle { Vector2 a,b,c; Color color; };
@@ -27,13 +28,17 @@ void reset(){triangles.clear();lines.clear();texts.clear();badges.clear();tokenL
 #define DrawLineEx staging::line
 #define DrawTextEx staging::text
 #define DrawRectangleRounded staging::rounded
-#include "../src/ht_feed.cpp"
+#include "../examples/showcase/ht_feed.cpp"
 #undef DrawEllipse
 #undef DrawTriangle
 #undef DrawLineEx
 #undef DrawTextEx
 #undef DrawRectangleRounded
 int main(){
+    // These layouts are designed for Segoe UI; skip (ctest SKIP_RETURN_CODE) where it is absent.
+    if(rmtn::fonts::find("segoeui.ttf").empty() || rmtn::fonts::find("segoeuib.ttf").empty()){
+        std::puts("SKIP: Segoe UI not installed"); return 77;
+    }
     std::vector<rmtn::Comp> comps; rmtn::register_ht_feed(comps);
     bool ok=comps.size()==1 && comps[0].name=="here-there-feed" && comps[0].w==1080 && comps[0].h==1350 && comps[0].duration==2640 && comps[0].fps==30 && !comps[0].music;
     std::printf("feed registration=%d\n",ok);
@@ -118,7 +123,7 @@ int main(){
     for(int i=0;i<bytes;++i){same &= p[i]==q[i]; changes |= p[i]!=r[i];}
     rendered=badgeClear && badgeFrames==540 && backedUpAttached && backedUpFrames==120 && rejectedOutside && rejectedFrames==90 && same && changes && rmtn::feedLayoutErrors==0 && rmtn::feedTextCalls>10000 && rmtn::feedFont().texture.id!=GetFontDefault().texture.id;
     std::printf("all-frame feed layout overflows=%d textCalls=%d deterministic=%d changing=%d\n",rmtn::feedLayoutErrors,rmtn::feedTextCalls,same,changes);
-    UnloadImage(a); UnloadImage(b); UnloadImage(c); UnloadRenderTexture(canvas); CloseWindow();
+    UnloadImage(a); UnloadImage(b); UnloadImage(c); UnloadRenderTexture(canvas); rmtn::shutdownGraphics(); CloseWindow();
 #endif
     std::printf("feed real-GL render=%d\n",rendered);
     return ok && semantic && rendered?0:1;

@@ -15,6 +15,9 @@
 #include "rmtn/timeline.hpp"
 #include "rmtn/draw.hpp"
 #include "rmtn/render3d.hpp"
+#include "rmtn/render.hpp"
+
+namespace rmtn { static void releaseFrameResources(); }
 
 namespace rmtn {
 
@@ -63,6 +66,7 @@ static void fxEnsure(int W,int H){
         gRes =GetShaderLocation(SHX.grain,"gres"); gVig =GetShaderLocation(SHX.grain,"vig");
         gMode=GetShaderLocation(SHX.grain,"gmode");
         fxReady=true;
+        onGraphicsShutdown(releaseFrameResources);
     }
     if (fw!=W || fh!=H){
         if (RTscene.id) UnloadRenderTexture(RTscene);
@@ -283,11 +287,9 @@ static void paint3D(int frame,int W,int H){
 }
 
 // ---------------------------- per-frame presentation ----------------------------
-static void presentScene(Comp& c,int frame,RenderTexture output){
-    const int W=c.w, H=c.h, tier=c.fx;
+static void presentScene(Comp& c,int frame,RenderTexture output,int tier){
+    const int W=c.w, H=c.h;
     ClearBackground(mkC(0x04040a));
-    if (tier==0){ drawTree(c.roots,frame); return; }
-    fxEnsure(W,H);
     rlDisableDepthTest(); rlDisableDepthMask();       // 2D/painter path: no depth attachment interaction
     const int fps=c.fps>0?c.fps:30;
     double timeT=(double)frame/fps;
@@ -304,7 +306,7 @@ static void presentScene(Comp& c,int frame,RenderTexture output){
         if (tier>=3) paint3D(frame,W,H);
     EndTextureMode();
     // EndTextureMode restores the window, not an enclosing render target.
-    if (output.id) BeginTextureMode(output);
+    BeginTextureMode(output);
     cpuBloom(W,H,tier);
     // composite to window: opaque base, then additive bloom (stacked passes, tint-alpha dose)
     ClearBackground(mkC(0x020204));                            // fresh window target before additive layering
@@ -324,18 +326,8 @@ static void presentScene(Comp& c,int frame,RenderTexture output){
     hudPass(frame,W,H,tier,c.duration,fps);
 }
 
-// Output is always a composition-sized canvas; presentation may scale it.
-void presentFrame(Comp& c,int frame,RenderTexture output = {}){
-    // Allocating render textures changes the framebuffer binding: do it before
-    // binding the output, including on the first frame or after a size change.
-    if (c.fx>0) fxEnsure(c.w,c.h);
-    if (output.id) BeginTextureMode(output);
-    presentScene(c,frame,output);
-    if (output.id) EndTextureMode();
-}
-
-// GL objects die with the window; call before CloseWindow so a later window starts fresh.
-void releaseFrameResources(){
+// GL objects die with the window; released through rmtn::shutdownGraphics().
+static void releaseFrameResources(){
     if (fxReady){
         UnloadShader(SHX.grain);
         SHX=Shx{};
@@ -346,6 +338,34 @@ void releaseFrameResources(){
         *rt=RenderTexture{};
     }
     fw=fh=0;
+}
+
+// Comp::render hook: `target` arrives bound and is left bound.
+void renderFxTier(Comp& c,int frame,RenderTexture target,int tier){
+    // Allocating render textures changes the framebuffer binding, so rebind afterwards.
+    fxEnsure(c.w,c.h);
+    BeginTextureMode(target);
+    presentScene(c,frame,target,tier);
+}
+
+void registerFxSeries(Registry& out){
+    static const char* fxl[] = {"fx-1-overlays","fx-2-bloom","fx-3-gpulit","fx-4-max"};
+    for (int tier = 1; tier <= 4; tier++) {
+        Comp c; c.name = fxl[tier-1]; c.w = 1920; c.h = 1032; c.fps = 30; c.duration = 300; c.music = true;
+        c.render = [tier](Comp& comp,int frame,RenderTexture target){ renderFxTier(comp,frame,target,tier); };
+        for (auto e : { SongEvent{0.4,3.0,96.0+tier*8,0.34,false}, SongEvent{3.4,3.2,147.0,0.28,false}, SongEvent{6.6,2.4,184.0,0.26,false} }) c.song.push_back(e);
+        for (int i = 0; i < 30; i++) {
+            SongEvent p{}; p.t0 = 1.0 + i*0.27; p.dur = 0.4; p.amp = 0.30; p.pluck = true;
+            static const double pent[] = { 392.0, 448.4, 523.25, 587.3, 698.4 };
+            p.freq = pent[i % 5] * (tier > 2 ? 1.18 : 1.0);
+            c.song.push_back(p);
+        }
+        for (int i = 0; i < 8 + tier*2; i++) {
+            SongEvent k{}; k.t0 = 0.9 + i*(1.0 - 0.05*tier); k.dur = 0.16; k.amp = 0.5; k.pluck = true; k.freq = 72.0;
+            c.song.push_back(k);
+        }
+        out.push_back(std::move(c));
+    }
 }
 
 } // namespace rmtn

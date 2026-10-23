@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 EXE = Path(sys.argv.pop(1)).resolve()
+STARTER = Path(sys.argv.pop(1)).resolve()
 
 class CliTests(unittest.TestCase):
     def setUp(self):
@@ -14,8 +15,8 @@ class CliTests(unittest.TestCase):
         self.cwd = Path(self.tmp.name)
         self.addCleanup(self.tmp.cleanup)
 
-    def run_cli(self, *args):
-        result = subprocess.run([str(EXE), *args], cwd=self.cwd, capture_output=True, text=True, timeout=180)
+    def run_cli(self, *args, exe=EXE):
+        result = subprocess.run([str(exe), *args], cwd=self.cwd, capture_output=True, text=True, timeout=180)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result
 
@@ -73,6 +74,26 @@ class CliTests(unittest.TestCase):
     def test_bare_png_filename(self):
         self.run_cli("still", "probe", "--at", "0", "--png", "frame.png")
         self.assertTrue((self.cwd / "frame.png").is_file())
+
+    def distinct_colors(self, path):
+        raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                             capture_output=True, check=True).stdout
+        return len({raw[i:i+3] for i in range(0, len(raw), 3)})
+
+    def test_supersampling_antialiases_and_keeps_size(self):
+        hard, smooth = self.cwd / "ss1.png", self.cwd / "ss4.png"
+        self.run_cli("still", "probe", "--at", "20", "--ss", "1", "--png", str(hard))
+        self.run_cli("still", "probe", "--at", "20", "--ss", "4", "--png", str(smooth))
+        self.assertEqual(self.png_size(smooth), (1280, 720))
+        self.assertGreater(self.distinct_colors(smooth), self.distinct_colors(hard),
+                           "supersampled frame has no extra edge shades")
+
+    def test_starter_project(self):
+        listing = self.run_cli("list", exe=STARTER).stdout
+        self.assertIn("hello", listing)
+        path = self.cwd / "hello.png"
+        self.run_cli("still", "hello", "--at", "45", "--png", str(path), exe=STARTER)
+        self.assertEqual(self.png_size(path), (1280, 720))
 
 if __name__ == "__main__":
     unittest.main()

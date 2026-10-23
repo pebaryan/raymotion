@@ -171,7 +171,7 @@ static inline void drawMesh(const Mesh& mesh, const Mat4&mtr, const Cam&cam, int
         for(int i3=0;i3<3;i3++){ s[i3]=project(cam,W,H,w[i3]); if(!s[i3].ok){ok=false;break;} }
         if(!ok) continue;
         float ndl=-dot(n,L); if(ndl<0)ndl=0;
-        float rim = 1.f+fabs(dot(n,nrm(viewDir)));
+        float rim = 1.f+std::fabs(dot(n,nrm(viewDir)));
         Color base = fc.col;
         if(o.rainbow){
             float hue = std::atan2(n.x, n.z)*57.2957795f + 180.f;

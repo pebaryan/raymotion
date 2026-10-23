@@ -1,11 +1,15 @@
 // rmtn/synth.hpp -- procedural chiptune-style WAV generation. No audio assets: notes are sine sums.
 #pragma once
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <string>
 #include <vector>
 #include <fstream>
 
 namespace rmtn {
+
+constexpr double TAU = 6.283185307179586;
 
 struct SongEvent { double t0, dur, freq, amp; bool pluck; };
 using Song = std::vector<SongEvent>;
@@ -28,9 +32,9 @@ static std::vector<float> renderSong(const Song& song, double totalSec, int rate
             if (v <= 0.002) continue;
             double tau = g - e.t0;
             double f = e.freq;
-            double s = 0.62 * std::sin(2*M_PI*f*tau)
-                     + 0.26 * std::sin(2*M_PI*(3*f)*tau + 0.7)
-                     + 0.12 * std::sin(2*M_PI*(5*f)*tau + 1.9);
+            double s = 0.62 * std::sin(TAU*f*tau)
+                     + 0.26 * std::sin(TAU*(3*f)*tau + 0.7)
+                     + 0.12 * std::sin(TAU*(5*f)*tau + 1.9);
             out[i] += (float)(v * s);
         }
     }

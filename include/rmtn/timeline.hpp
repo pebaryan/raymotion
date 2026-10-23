@@ -2,6 +2,7 @@
 // composable transforms, deterministic frame-driven randomness. No state carries between frames.
 #pragma once
 #include <raylib.h>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -217,10 +218,15 @@ struct Comp {
     std::string name;
     int w = 1920, h = 1080, fps = 30;
     bool music = false;
-    int fx = 0;   // FX tier used by fx_present.cpp (0 = legacy path)
     int duration = 0;                        // total frames
+    int supersample = 2;                     // antialiasing: draw at w*N x h*N, box-filter down (1, 2 or 4)
+    Color background{ 4, 4, 10, 255 };       // cleared before the timeline tree draws
     Song song;                               // procedural soundtrack (used when music=true)
     std::vector<std::unique_ptr<TNode>> roots;
+    // Optional custom renderer replacing the timeline tree (multi-pass effects etc.).
+    // Called with `target` (w x h) already bound; it may bind its own targets but must
+    // leave `target` bound on return. Supersampling does not apply to it.
+    std::function<void(Comp& c, int frame, RenderTexture target)> render;
 };
 
 // sugar: append a root node [off, off+dur) to a composition and return it
@@ -231,7 +237,7 @@ static inline TNode* addRoot(std::vector<std::unique_ptr<TNode>>& roots, int off
     return n;
 }
 
-// registry implemented in scenes.cpp
-void register_scenes(std::vector<Comp>& out);
+// A project's composition list; handed to rmtn::runCli (cli.hpp).
+using Registry = std::vector<Comp>;
 
 } // namespace rmtn

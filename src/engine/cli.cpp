@@ -1,4 +1,5 @@
-// main.cpp -- raymotion CLI: list | preview | render | still
+// cli.cpp -- raymotion command line: list | preview | render | still
+#include "rmtn/cli.hpp"
 #include <raylib.h>
 #include <cstdio>
 #include <cstring>
@@ -11,43 +12,45 @@
 #include "rmtn/draw.hpp"
 #include "rmtn/synth.hpp"
 #include "rmtn/preview.hpp"
+#include "rmtn/render.hpp"
 
 #ifdef _WIN32
 #define popen _popen
 #define pclose _pclose
 #endif
 
-using namespace rmtn;
-
-// FX-tier renderer implemented in fx_present.cpp
 namespace rmtn {
-void presentFrame(Comp& c, int frame, RenderTexture output);
-void releaseFrameResources();
-}
+namespace {
 
-static void drawFrame(Comp& c,int frame,RenderTexture canvas){
+void drawFrame(Comp& c,int frame,Canvas& canvas){
     presentFrame(c,frame,canvas);
     ClearBackground(BLACK);
-    DrawTexturePro(canvas.texture,{0,0,(float)c.w,-(float)c.h},
+    DrawTexturePro(canvas.output().texture,{0,0,(float)c.w,-(float)c.h},
                    fitCanvas(c.w,c.h,GetScreenWidth(),GetScreenHeight()), {0,0},0,WHITE);
 }
 
-static void closeCanvas(RenderTexture canvas){
-    UnloadRenderTexture(canvas);
-    releaseFrameResources();
+// Supersampling factor: --ss overrides the composition; drafts and custom renderers use 1.
+int canvasScale(const Comp& c,const char* ssArg,bool draft){
+    if (c.render || draft) return 1;
+    return ssArg ? atoi(ssArg) : c.supersample;
+}
+
+void closeCanvas(Canvas& canvas){
+    canvas.unload();
+    shutdownGraphics();
     CloseWindow();
 }
 
 // Canvas pixels top-down, resized to the output size. Caller unloads.
-static Image grabFrame(RenderTexture canvas,int W,int H){
-    Image image=LoadImageFromTexture(canvas.texture);
+Image grabFrame(const Canvas& canvas,int W,int H){
+    Image image=LoadImageFromTexture(canvas.output().texture);
     if (!image.data) return image;
     ImageFlipVertical(&image);
     if (image.width!=W || image.height!=H) ImageResize(&image,W,H);
     return image;
 }
 
-static bool saveFrame(RenderTexture canvas,int W,int H,const std::string& path){
+bool saveFrame(const Canvas& canvas,int W,int H,const std::string& path){
     Image image=grabFrame(canvas,W,H);
     if (!image.data) return false;
     bool ok=ExportImage(image,path.c_str());
@@ -56,11 +59,11 @@ static bool saveFrame(RenderTexture canvas,int W,int H,const std::string& path){
     return ok;
 }
 
-static std::string quote(const std::string& s) { return "\"" + s + "\""; }
+std::string quote(const std::string& s) { return "\"" + s + "\""; }
 
 // cmd.exe strips the first and last quote of a command line that holds several quoted
 // tokens, so on Windows the whole line gets one more enclosing pair.
-static std::string shellLine(const std::string& cmd) {
+std::string shellLine(const std::string& cmd) {
 #ifdef _WIN32
     return "\"" + cmd + "\"";
 #else
@@ -68,7 +71,7 @@ static std::string shellLine(const std::string& cmd) {
 #endif
 }
 
-static bool ffmpegWorks(const std::string& exe) {
+bool ffmpegWorks(const std::string& exe) {
 #ifdef _WIN32
     const char* devnull = "NUL";
 #else
@@ -78,7 +81,7 @@ static bool ffmpegWorks(const std::string& exe) {
     return std::system(shellLine(probe).c_str()) == 0;
 }
 
-static std::string ffmpegPath(const char* forced) {
+std::string ffmpegPath(const char* forced) {
     if (forced && *forced) return forced;
     namespace fs = std::filesystem;
     std::vector<std::string> candidates;
@@ -105,7 +108,7 @@ static std::string ffmpegPath(const char* forced) {
     return "";
 }
 
-static void usage() {
+void usage() {
     puts("usage:");
     puts("  raymotion list                                  list compositions");
     puts("  raymotion preview <name>                        play in a live window (esc quits)");
@@ -114,12 +117,13 @@ static void usage() {
     puts("                        --png-frames writes a PNG sequence instead (no ffmpeg)");
     puts("  raymotion still   <name> --at FRAME [--png PATH] write one PNG frame");
     puts("options: --ffmpeg PATH overrides auto-detected ffmpeg binary");
+    puts("         --ss N        supersampling 1, 2 or 4 (default: the composition's)");
 }
 
-static int runMain(int argc, const char** argv) {
+int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
     const char* mode = argc > 1 ? argv[1] : "";
     if (!strcmp(mode, "list")) {
-        std::vector<Comp> comps; register_scenes(comps);
+        Registry comps; registerAll(comps);
         for (auto& c : comps)
             printf("%-22s %dx%d @%dfps  %.1fs  music=%d\n", c.name.c_str(), c.w, c.h, c.fps,
                    (double)c.duration / c.fps, (int)c.music);
@@ -130,19 +134,20 @@ static int runMain(int argc, const char** argv) {
     if (argc < 3) { usage(); return 1; }
     const std::string want = argv[2];
 
-    const char* crfArg = nullptr, *ffArg = nullptr, *atArg = nullptr, *pngArg = nullptr;
+    const char* crfArg = nullptr, *ffArg = nullptr, *atArg = nullptr, *pngArg = nullptr, *ssArg = nullptr;
     bool draft = false, noMusic = false, pngFrames = false;
     for (int i = 3; i < argc; i++) {
         if (!strcmp(argv[i], "--crf") && i+1 < argc) crfArg = argv[++i];
         else if (!strcmp(argv[i], "--ffmpeg") && i+1 < argc) ffArg = argv[++i];
         else if (!strcmp(argv[i], "--at") && i+1 < argc) atArg = argv[++i];
         else if (!strcmp(argv[i], "--png") && i+1 < argc) pngArg = argv[++i];
+        else if (!strcmp(argv[i], "--ss") && i+1 < argc) ssArg = argv[++i];
         else if (!strcmp(argv[i], "--draft")) draft = true;
         else if (!strcmp(argv[i], "--no-music")) noMusic = true;
         else if (!strcmp(argv[i], "--png-frames")) pngFrames = true;
     }
 
-    std::vector<Comp> comps; register_scenes(comps);
+    Registry comps; registerAll(comps);
     Comp* comp = nullptr;
     for (auto& c : comps) if (c.name == want) comp = &c;
     if (!comp) { printf("unknown composition '%s'\n", want.c_str()); usage(); return 1; }
@@ -162,8 +167,8 @@ static int runMain(int argc, const char** argv) {
         if (!parent.empty()) std::filesystem::create_directories(parent,ec);
         if (ec){ fprintf(stderr,"cannot create PNG directory: %s\n",ec.message().c_str()); return 2; }
         InitWindow(W, H, "raymotion-still");
-        RenderTexture canvas=LoadRenderTexture(comp->w,comp->h);
-        if (!IsRenderTextureValid(canvas)){ CloseWindow(); return 2; }
+        Canvas canvas;
+        if (!canvas.load(comp->w,comp->h,canvasScale(*comp,ssArg,draft))){ CloseWindow(); return 2; }
         // Frames carry no state between them, so only the requested one is drawn.
         BeginDrawing();
         drawFrame(*comp, at, canvas);
@@ -183,8 +188,8 @@ static int runMain(int argc, const char** argv) {
         Rectangle initialFit=fitCanvas(comp->w,comp->h,GetScreenWidth(),GetScreenHeight());
         SetWindowSize((int)initialFit.width,(int)initialFit.height);
         SetWindowMinSize(240,240);
-        RenderTexture canvas=LoadRenderTexture(comp->w,comp->h);
-        if (!IsRenderTextureValid(canvas)){ CloseWindow(); return 2; }
+        Canvas canvas;
+        if (!canvas.load(comp->w,comp->h,canvasScale(*comp,ssArg,draft))){ CloseWindow(); return 2; }
         SetTargetFPS(60);
         double playhead = 0, speed = 1.0;
         bool paused = false;
@@ -240,13 +245,17 @@ static int runMain(int argc, const char** argv) {
             if (!wav.empty()) cmd += " -c:a aac -b:a 160k -shortest";
             cmd += " " + quote(mp4);
             if (getenv("RAYMOTION_DEBUG_CMD")) printf("[CMD] %s\n", cmd.c_str());
-            pipe = popen(shellLine(cmd).c_str(), "wb");
+#ifdef _WIN32
+            pipe = popen(shellLine(cmd).c_str(), "wb");   // binary: no CRLF translation of pixels
+#else
+            pipe = popen(shellLine(cmd).c_str(), "w");    // POSIX pipes are always binary
+#endif
             if (!pipe) { fprintf(stderr, "cannot start ffmpeg: %s\n", ff.c_str()); return 3; }
         }
 
         InitWindow(W, H, ("raymotion render - " + comp->name).c_str());
-        RenderTexture canvas=LoadRenderTexture(comp->w,comp->h);
-        if (!IsRenderTextureValid(canvas)){ if (pipe) pclose(pipe); CloseWindow(); return 2; }
+        Canvas canvas;
+        if (!canvas.load(comp->w,comp->h,canvasScale(*comp,ssArg,draft))){ if (pipe) pclose(pipe); CloseWindow(); return 2; }
         double t0 = GetTime();
         bool ok = true;
         for (int f = 0; f < comp->duration && ok; f++) {
@@ -282,11 +291,14 @@ static int runMain(int argc, const char** argv) {
     return 1;
 }
 
+} // namespace
 
-int main(int argc,const char** argv){
-    try { return runMain(argc,argv); }
+int runCli(int argc, const char** argv, const RegisterFn& registerAll){
+    try { return runMain(argc,argv,registerAll); }
     catch (const std::exception& error){
         fprintf(stderr,"raymotion: %s\n",error.what());
         return 2;
     }
 }
+
+} // namespace rmtn

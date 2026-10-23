@@ -1,6 +1,11 @@
-#include "../src/ht_plain.cpp"
+#include "../examples/showcase/ht_plain.cpp"
 #include <cstdio>
+#include "rmtn/render.hpp"
 int main(){
+    // These layouts are designed for Segoe UI; skip (ctest SKIP_RETURN_CODE) where it is absent.
+    if(rmtn::fonts::find("segoeui.ttf").empty() || rmtn::fonts::find("segoeuib.ttf").empty()){
+        std::puts("SKIP: Segoe UI not installed"); return 77;
+    }
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
     InitWindow(640,360,"plain explainer test");
     auto lines=rmtn::wrapPlain("A guess is not the same thing as a conclusion.",32,260);
@@ -21,6 +26,7 @@ int main(){
         std::printf("all-frame layout overflow count=%d\n",rmtn::plainLayoutErrors);
         UnloadRenderTexture(canvas);
     }
+    rmtn::shutdownGraphics();
     CloseWindow();
     std::printf("wrap=%d loadedTrueType=%d fits=%d sceneRegistered=%d\n",wrap,font,fits,scene);
     return wrap && font && fits && scene ? 0:1;

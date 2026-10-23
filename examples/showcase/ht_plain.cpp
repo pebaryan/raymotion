@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 #include "rmtn/timeline.hpp"
-#include "rmtn/here_there.hpp"
+#include "here_there.hpp"
 #include "rmtn/fonts.hpp"
 
 namespace rmtn { namespace {
@@ -16,16 +16,9 @@ const Color PM{184,199,214,255}, PA{255,202,117,255}, PH{100,224,209,255};
 const Color POK{146,231,170,255}, PNO{255,155,160,255};
 int plainLayoutErrors=0;
 
+// Designed and layout-tested for Segoe UI; fonts::load throws rather than substituting.
 Font plainFont(bool bold=false){
-    static Font regular{}, heading{};
-    Font& font=bold?heading:regular;
-    if(!font.texture.id){
-        font=LoadFontEx(systemFontPath(bold?"segoeuib.ttf":"segoeui.ttf").c_str(),64,nullptr,0);
-        if(!IsFontValid(font) || font.texture.id==GetFontDefault().texture.id)
-            throw std::runtime_error("Segoe UI was not loaded; refusing unreadable default font fallback");
-        SetTextureFilter(font.texture,TEXTURE_FILTER_BILINEAR);
-    }
-    return font;
+    return fonts::load({bold?"segoeuib.ttf":"segoeui.ttf"},64);
 }
 std::vector<std::string> wrapPlain(const std::string& message,float size,float width,bool bold=false){
     std::vector<std::string> lines;

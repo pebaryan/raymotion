@@ -6,8 +6,8 @@
 #include <string>
 #include <vector>
 #include "rmtn/timeline.hpp"
-#include "rmtn/here_there.hpp"
-#include "rmtn/ht_feed_layout.hpp"
+#include "here_there.hpp"
+#include "ht_feed_layout.hpp"
 #include "rmtn/fonts.hpp"
 namespace rmtn {
 struct FeedState { unsigned h=2,t=2; bool fact=false,probe=false; };
@@ -25,13 +25,8 @@ FeedState feedState(int frame){
 namespace {
 const Color paper{249,240,218,255}, ink{39,54,64,255}, amber{225,155,57,255}, teal{35,153,148,255}, coral{210,76,58,255}, muted{99,108,108,255};
 int feedLayoutErrors=0, feedTextCalls=0;
-Font feedFont(bool bold=false){
- static Font regular{},heavy{}; Font& f=bold?heavy:regular;
- if(!f.texture.id){ f=LoadFontEx(systemFontPath(bold?"segoeuib.ttf":"segoeui.ttf").c_str(),64,nullptr,0);
-  if(!IsFontValid(f)||f.texture.id==GetFontDefault().texture.id) throw std::runtime_error("HT feed requires installed Segoe UI; default font fallback refused");
-  SetTextureFilter(f.texture,TEXTURE_FILTER_BILINEAR);
- } return f;
-}
+// Designed and layout-tested for Segoe UI; fonts::load throws rather than substituting.
+Font feedFont(bool bold=false){ return fonts::load({bold?"segoeuib.ttf":"segoeui.ttf"},64); }
 void feedText(const std::string& text,float x,float y,float width,float size,Color color=ink,bool bold=false,float bottom=1320){
  std::vector<std::string> lines; std::string line,word;
  auto flush=[&](){if(word.empty())return; auto next=line.empty()?word:line+" "+word;

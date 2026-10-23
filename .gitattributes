@@ -1,0 +1,7 @@
+* text=auto
+*.sh text eol=lf
+*.ttf binary
+*.png binary
+*.lib binary
+*.dll binary
+*.exe binary

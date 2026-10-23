@@ -1,6 +1,7 @@
 // rmtn/draw.hpp -- procedural drawing primitives. Everything here is generated from code;
 // points go through the node transform ctx (origin, scale, rotation, accumulated alpha).
 #pragma once
+#include <algorithm>
 #include <cmath>
 #include <vector>
 #include "timeline.hpp"
@@ -29,11 +30,41 @@ static inline void rectGrad4(const Ctx& c, float x, float y, float w, float h,
     DrawTriangleGradient(a, b, d, A, B, D);
     DrawTriangleGradient(a, d, e, A, D, E);
 }
+// Any simple polygon, convex or not (stars, blobs), via ear clipping. Triangles do not
+// overlap, so translucent fills stay uniform. Self-intersecting input degrades to a fan.
 static inline void fillPoly(const Ctx& c, const V2* pts, int n, Color col) {
+    if (n < 3) return;
     Color k = TA(c, col);
-    std::vector<Vector2> m(n);
-    for (int i = 0; i < n; i++) m[i] = Vector2{ mapP(c, pts[i]) };
-    DrawTriangleFan(m.data(), n, k);
+    static thread_local std::vector<Vector2> m;
+    static thread_local std::vector<int> idx;
+    m.resize(n); idx.resize(n);
+    double area = 0;
+    for (int i = 0; i < n; i++) { m[i] = mapP(c, pts[i]); idx[i] = i; }
+    for (int i = 0; i < n; i++) area += (double)m[i].x * m[(i+1)%n].y - (double)m[(i+1)%n].x * m[i].y;
+    const double sgn = area >= 0 ? 1.0 : -1.0;
+    auto cross = [](Vector2 a, Vector2 b, Vector2 p) {
+        return ((double)b.x - a.x) * ((double)p.y - a.y) - ((double)b.y - a.y) * ((double)p.x - a.x);
+    };
+    size_t i = 0, misses = 0;
+    while (idx.size() > 3 && misses <= idx.size()) {
+        size_t sz = idx.size();
+        int ia = idx[(i + sz - 1) % sz], ib = idx[i % sz], ic = idx[(i + 1) % sz];
+        double turn = cross(m[ia], m[ib], m[ic]) * sgn;
+        bool ear = turn > 0;
+        for (size_t j = 0; ear && j < sz; j++) {
+            int q = idx[j];
+            if (q == ia || q == ib || q == ic) continue;
+            ear = !(cross(m[ia], m[ib], m[q]) * sgn >= 0 && cross(m[ib], m[ic], m[q]) * sgn >= 0 &&
+                    cross(m[ic], m[ia], m[q]) * sgn >= 0);
+        }
+        if (ear || std::fabs(turn) < 1e-9) {          // collinear vertices are simply dropped
+            if (ear) DrawTriangle(m[ia], m[ib], m[ic], k);
+            idx.erase(idx.begin() + (long)(i % sz));
+            misses = 0;
+        } else { i++; misses++; }
+        i %= idx.size();
+    }
+    for (size_t j = 1; j + 1 < idx.size(); j++) DrawTriangle(m[idx[0]], m[idx[j]], m[idx[j+1]], k);
 }
 static inline void strokeSeg(const Ctx& c, V2 p0, V2 p1, float w, Color col) {
     V2 a = mapP(c, p0), b = mapP(c, p1);
