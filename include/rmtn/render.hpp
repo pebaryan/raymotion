@@ -31,6 +31,13 @@ private:
 // supersampled when the canvas scale is > 1).
 void presentFrame(Comp& c, int frame, Canvas& canvas);
 
+// Renders `body` into a transparent offscreen target the size of the current canvas
+// target (colour and depth cleared, 2D state bound with the supersample scale), then
+// composites it over the current target with `alpha` (premultiplied "over"). `body` may
+// bind other framebuffers but must rebind `target` before drawing into it again. Returns
+// false without calling `body` when no canvas target is active (outside presentFrame).
+bool drawOffscreen(float alpha, const std::function<void(const RenderTexture& target, float scale)>& body);
+
 // GL-owning code registers a release callback; shutdownGraphics() runs them all (then
 // unloads cached fonts) and must be called before CloseWindow.
 void onGraphicsShutdown(std::function<void()> release);

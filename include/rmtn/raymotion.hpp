@@ -10,3 +10,4 @@
 #include "transitions.hpp"
 #include "layout.hpp"
 #include "json.hpp"
+#include "scene3d.hpp"

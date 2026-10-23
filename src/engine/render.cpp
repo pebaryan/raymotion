@@ -179,6 +179,24 @@ bool drawLayer(TNode& n, int t, const Ctx& c) {
     return true;
 }
 
+bool drawOffscreen(float alpha, const std::function<void(const RenderTexture&, float)>& body) {
+    if (targets.empty()) return false;
+    const Target parent = targets.back();
+    if (alpha <= 0.f) return true;
+    rlDrawRenderBatchActive();                         // see drawLayer
+    RenderTexture content = acquire(parent.rt.texture.width, parent.rt.texture.height);
+    targets.push_back({ content, parent.scale });
+    bindTarget(targets.back());
+    ClearBackground(BLANK);
+    body(content, parent.scale);
+    rlDrawRenderBatchActive();
+    targets.pop_back();
+    bindTarget(parent);
+    composite(Layer{}, content, RenderTexture{}, alpha, parent.scale);
+    release(content);
+    return true;
+}
+
 void restoreBlend() {
     if (!targets.empty()) standardBlend();
 }
