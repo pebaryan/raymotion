@@ -11,3 +11,5 @@ third_party/raylib_extracted/
 third_party/msvc-crt/
 third_party/msvc-sdk-libs/
 third_party/vs-libs/
+# Editor/agent session state
+.zcode/
