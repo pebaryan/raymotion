@@ -82,7 +82,8 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/ht_plain.cpp
     examples/showcase/ht_feed.cpp
     examples/showcase/gpu_scene.cpp
-    examples/showcase/prefabs.cpp)
+    examples/showcase/prefabs.cpp
+    examples/showcase/asp.cpp)
   target_link_libraries(raymotion PRIVATE rmtn_engine)
 
   add_executable(raymotion_starter examples/starter/main.cpp)
