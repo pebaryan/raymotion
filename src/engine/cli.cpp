@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <atomic>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -16,6 +18,7 @@
 #include "rmtn/synth.hpp"
 #include "rmtn/preview.hpp"
 #include "rmtn/render.hpp"
+#include "rmtn/media.hpp"
 
 #ifdef _WIN32
 #define popen _popen
@@ -24,6 +27,55 @@
 
 namespace rmtn {
 namespace {
+
+const int AUDIO_RATE = 48000;
+
+// Preview sound: the mixed soundtrack streamed from a cursor. While it plays the playhead
+// follows the audio clock, so picture and sound stay together.
+class PreviewAudio {
+public:
+    bool start(std::vector<float> mix) {
+        mix_ = std::move(mix);
+        InitAudioDevice();
+        if (!IsAudioDeviceReady()) return false;
+        stream_ = LoadAudioStream(AUDIO_RATE, 32, 2);
+        SetAudioStreamCallback(stream_, feed);
+        PlayAudioStream(stream_);
+        on_ = true;
+        return true;
+    }
+    bool active() const { return on_; }
+    bool playing() const { return playing_; }
+    void play(bool p) { playing_ = p; }
+    void seek(double seconds) { cursor_ = (long long)std::llround(seconds * AUDIO_RATE); }
+    double seconds() const { return (double)cursor_ / AUDIO_RATE; }
+    void stop() {
+        if (!on_) return;
+        playing_ = false;
+        UnloadAudioStream(stream_);
+        CloseAudioDevice();
+        on_ = false;
+    }
+private:
+    static void feed(void* out, unsigned int frames) {     // audio thread
+        float* o = (float*)out;
+        const long long n = (long long)(mix_.size() / 2);
+        long long from = cursor_.load(), c = from;
+        for (unsigned int i = 0; i < frames; i++) {
+            if (!playing_ || n == 0) { o[2 * i] = o[2 * i + 1] = 0; continue; }
+            if (c >= n || c < 0) c = 0;                       // the preview loops
+            o[2 * i] = mix_[(size_t)c * 2];
+            o[2 * i + 1] = mix_[(size_t)c * 2 + 1];
+            c++;
+        }
+        cursor_.compare_exchange_strong(from, c);            // a seek meanwhile wins
+    }
+    static inline std::vector<float> mix_;
+    static inline std::atomic<long long> cursor_{ 0 };
+    static inline std::atomic<bool> playing_{ false };
+    AudioStream stream_{};
+    bool on_ = false;
+};
 
 void drawFrame(Comp& c,int frame,Canvas& canvas){
     presentFrame(c,frame,canvas);
@@ -74,43 +126,6 @@ std::string shellLine(const std::string& cmd) {
 #endif
 }
 
-bool ffmpegWorks(const std::string& exe) {
-#ifdef _WIN32
-    const char* devnull = "NUL";
-#else
-    const char* devnull = "/dev/null";
-#endif
-    std::string probe = quote(exe) + " -version >" + devnull + " 2>&1";
-    return std::system(shellLine(probe).c_str()) == 0;
-}
-
-std::string ffmpegPath(const char* forced) {
-    if (forced && *forced) return forced;
-    namespace fs = std::filesystem;
-    std::vector<std::string> candidates;
-    if (const char* env = getenv("RAYMOTION_FFMPEG")) candidates.push_back(env);
-    // winget installs Gyan.FFmpeg under a versioned directory in the user's profile.
-    if (const char* local = getenv("LOCALAPPDATA")) {
-        std::error_code ec;
-        fs::path packages = fs::u8path(local) / "Microsoft" / "WinGet" / "Packages";
-        for (fs::directory_iterator it(packages, ec), end; !ec && it != end; it.increment(ec)) {
-            if (it->path().filename().string().rfind("Gyan.FFmpeg", 0) != 0) continue;
-            std::error_code ec2;
-            for (fs::directory_iterator sub(it->path(), ec2), e2; !ec2 && sub != e2; sub.increment(ec2))
-                candidates.push_back((sub->path() / "bin" / "ffmpeg.exe").u8string());
-        }
-    }
-    candidates.push_back("C:/Program Files/ffmpeg/bin/ffmpeg.exe");
-    candidates.push_back("C:/ffmpeg/bin/ffmpeg.exe");
-    for (const auto& p : candidates) {
-        std::error_code ec;
-        if (p.empty() || !fs::exists(fs::u8path(p), ec)) continue;
-        if (ffmpegWorks(p)) return p;
-    }
-    if (ffmpegWorks("ffmpeg")) return "ffmpeg";   // last resort: PATH
-    return "";
-}
-
 // --props value: inline JSON, or @path to a JSON file.
 Json loadProps(const char* arg) {
     if (arg[0] != '@') return Json::parse(arg);
@@ -132,8 +147,8 @@ void prepare(Comp& c, const Json& overrides) {
 void usage() {
     puts("usage:");
     puts("  raymotion list                                  list compositions");
-    puts("  raymotion preview <name>                        play in a live window (esc quits)");
-    puts("  raymotion render  <name> [--crf N] [--draft] [--no-music] [--png-frames]");
+    puts("  raymotion preview <name> [--mute]               play with sound in a live window (esc quits)");
+    puts("  raymotion render  <name> [--crf N] [--draft] [--mute] [--png-frames]");
     puts("                        render every frame via raylib, pipe to ffmpeg -> mp4");
     puts("                        --png-frames writes a PNG sequence instead (no ffmpeg)");
     puts("  raymotion still   <name> --at FRAME [--png PATH] write one PNG frame");
@@ -149,8 +164,8 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
         Registry comps; registerAll(comps);
         for (auto& c : comps) {
             prepare(c, Json());
-            printf("%-22s %dx%d @%dfps  %.1fs  music=%d\n", c.name.c_str(), c.w, c.h, c.fps,
-                   (double)c.duration / c.fps, (int)c.music);
+            printf("%-22s %dx%d @%dfps  %.1fs  audio=%d\n", c.name.c_str(), c.w, c.h, c.fps,
+                   (double)c.duration / c.fps, (int)media::hasAudio(c));
         }
         return 0;
     }
@@ -169,7 +184,7 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
         else if (!strcmp(argv[i], "--ss") && i+1 < argc) ssArg = argv[++i];
         else if (!strcmp(argv[i], "--props") && i+1 < argc) propsArg = argv[++i];
         else if (!strcmp(argv[i], "--draft")) draft = true;
-        else if (!strcmp(argv[i], "--no-music")) noMusic = true;
+        else if (!strcmp(argv[i], "--mute") || !strcmp(argv[i], "--no-music")) noMusic = true;
         else if (!strcmp(argv[i], "--png-frames")) pngFrames = true;
     }
 
@@ -179,6 +194,7 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
     if (!comp) { printf("unknown composition '%s'\n", want.c_str()); usage(); return 1; }
     if (!strcmp(mode, "props")) { puts(comp->defaultProps.dump().c_str()); return 0; }
     prepare(*comp, propsArg ? loadProps(propsArg) : Json());
+    if (ffArg) media::setFfmpeg(ffArg);
 
     int W = comp->w, H = comp->h;
     if (draft) { W = (W / 2) & ~1; H = (H / 2) & ~1; }   // yuv420p needs even dimensions
@@ -219,6 +235,9 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
         Canvas canvas;
         if (!canvas.load(comp->w,comp->h,canvasScale(*comp,ssArg,draft))){ CloseWindow(); return 2; }
         SetTargetFPS(60);
+        PreviewAudio audio;
+        if (!noMusic && media::hasAudio(*comp) && !audio.start(media::mixAudio(*comp, AUDIO_RATE)))
+            fprintf(stderr, "no audio device: previewing without sound\n");
         double playhead = 0, speed = 1.0;
         bool paused = false;
         while (!WindowShouldClose()) {   // esc (raylib's exit key) or the window's close button
@@ -228,11 +247,21 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
                 (int)playhead % comp->duration, comp->duration, speed, paused ? "PAUSED" : "PLAY");
             DrawText(hud, 12, 12, 18, Color{ (unsigned char)240, (unsigned char)240, (unsigned char)255, (unsigned char)180 });
             EndDrawing();
-            if (!paused) playhead += comp->fps * GetFrameTime() * speed;
             if (IsKeyDown(KEY_RIGHT)) speed = 2.0; else if (IsKeyDown(KEY_LEFT)) speed = 0.25; else speed = 1.0;
             int kp = GetKeyPressed();
             if (kp == KEY_SPACE) paused = !paused;   // rare spurious repeats; acceptable for a preview
+            // Sound plays at normal speed only; then the audio clock drives the playhead.
+            bool audible = audio.active() && !paused && speed == 1.0;
+            if (audible) {
+                if (!audio.playing()) audio.seek(std::fmod(playhead, (double)comp->duration) / comp->fps);
+                audio.play(true);
+                playhead = audio.seconds() * comp->fps;
+            } else {
+                audio.play(false);
+                if (!paused) playhead += comp->fps * GetFrameTime() * speed;
+            }
         }
+        audio.stop();
         closeCanvas(canvas);
         return 0;
     }
@@ -250,15 +279,13 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
         }
         std::string ff;
         if (!pngFrames) {
-            ff = ffmpegPath(ffArg);
+            ff = media::ffmpeg();
             if (ff.empty()) { puts("ffmpeg not found (use --ffmpeg PATH, or --png-frames to skip encoding)"); return 2; }
         }
         std::string wav = "", mp4 = "out/" + comp->name + (draft ? "_draft.mp4" : ".mp4");
-        if (comp->music && !noMusic && !draft && !pngFrames) {
+        if (!noMusic && !pngFrames && media::hasAudio(*comp)) {
             wav = dir + "/track.wav";
-            double total = (double)comp->duration / comp->fps;
-            auto samples = renderSong(comp->song, total + 0.3, 22050);
-            if (!writeWavMono(wav, 22050, samples)) { puts("wav write failed"); wav.clear(); }
+            if (!media::writeWav(wav, media::mixAudio(*comp, AUDIO_RATE), AUDIO_RATE)) { puts("wav write failed"); wav.clear(); }
         }
 
         FILE* pipe = nullptr;
@@ -270,7 +297,7 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
             if (!wav.empty()) cmd += " -i " + quote(wav);
             cmd += " -frames:v " + std::to_string(comp->duration);
             cmd += " -c:v h264 -pix_fmt yuv420p -crf " + std::to_string(crf) + " -movflags +faststart";
-            if (!wav.empty()) cmd += " -c:a aac -b:a 160k -shortest";
+            if (!wav.empty()) cmd += " -c:a aac -b:a 192k -shortest";
             cmd += " " + quote(mp4);
             if (getenv("RAYMOTION_DEBUG_CMD")) printf("[CMD] %s\n", cmd.c_str());
 #ifdef _WIN32

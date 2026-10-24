@@ -198,6 +198,17 @@ struct Layer {
     bool invertMask = false;
 };
 
+// ------------------------------------------------------------------ audio
+// A sound played from its node's local frame 0 while the node is active (see media.hpp).
+struct AudioClip {
+    std::string file;
+    double startFrom = 0, endAt = 0;     // seconds into the file (endAt 0: its end)
+    double playbackRate = 1;
+    bool loop = false;
+    float volume = 1;
+    std::function<float(int t)> volumeAt;    // times `volume`, by node-local frame
+};
+
 // ------------------------------------------------------------------ timeline tree
 struct TNode;
 using Nodes = std::vector<std::unique_ptr<TNode>>;
@@ -210,6 +221,7 @@ struct TNode {
     std::function<void(int t, NodeProps& p)> up;                    // animate props at local frame t
     std::function<void(const Ctx& c, int t)> fn;                    // draw leaves at local frame t
     Nodes kids;
+    std::vector<AudioClip> audio;            // sounds (media::audio, media::video)
     std::unique_ptr<Layer> layer;            // set via isolate()
     // Animates the layer from the node's unremapped local frame (used by transitions).
     std::function<void(int t, NodeProps& p, Layer& l)> layerUp;

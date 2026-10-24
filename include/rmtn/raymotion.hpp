@@ -11,3 +11,4 @@
 #include "layout.hpp"
 #include "json.hpp"
 #include "scene3d.hpp"
+#include "media.hpp"

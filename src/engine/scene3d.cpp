@@ -1,6 +1,7 @@
 // scene3d.cpp -- GPU 3D: lazy GPU resources, the lit/shadow/DOF shaders and scene rendering.
 #include "rmtn/scene3d.hpp"
 #include "rmtn/render.hpp"
+#include "rmtn/media.hpp"
 #include <raymath.h>
 #include <rlgl.h>
 #include <algorithm>
@@ -348,8 +349,9 @@ void prepareTexture(Texture2D& tex) {
 Texture2D texture(const std::string& path) {
     auto it = gpu.textures.find(path);
     if (it != gpu.textures.end()) return it->second;
-    if (!FileExists(path.c_str())) throw std::runtime_error("g3d: texture not found: " + path);
-    Texture2D tex = LoadTexture(path.c_str());
+    Image img = media::loadImage(path);      // resolved like other media; JPG and HDR included
+    Texture2D tex = LoadTextureFromImage(img);
+    UnloadImage(img);
     if (!IsTextureValid(tex)) throw std::runtime_error("g3d: cannot load texture: " + path);
     prepareTexture(tex);
     gpu.textures[path] = tex;

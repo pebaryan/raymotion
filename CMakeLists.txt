@@ -61,9 +61,12 @@ add_library(rmtn_engine STATIC
   src/engine/anim.cpp
   src/engine/layout.cpp
   src/engine/json.cpp
-  src/engine/scene3d.cpp)
+  src/engine/scene3d.cpp
+  src/engine/media.cpp)
 add_library(raymotion::engine ALIAS rmtn_engine)
 target_include_directories(rmtn_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+# Single-header decoders (stb_image, nanosvg), compiled privately into media.cpp.
+target_include_directories(rmtn_engine PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
 target_link_libraries(rmtn_engine PUBLIC raylib)
 # Development fallback for bundled fonts; installed apps ship assets/ beside the executable.
 target_compile_definitions(rmtn_engine PRIVATE RMTN_BUNDLED_ASSETS="${CMAKE_CURRENT_SOURCE_DIR}/assets")
@@ -109,6 +112,10 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   target_link_libraries(raymotion_scene3d_tests PRIVATE rmtn_engine)
   add_test(NAME scene3d COMMAND raymotion_scene3d_tests)
 
+  add_executable(raymotion_media_tests tests/media_tests.cpp)
+  target_link_libraries(raymotion_media_tests PRIVATE rmtn_engine)
+  add_test(NAME media COMMAND raymotion_media_tests)
+
   # Here-There layouts are designed for Segoe UI: exit 77 (skipped) where it is absent.
   add_executable(raymotion_plain_tests tests/ht_plain_tests.cpp)
   target_link_libraries(raymotion_plain_tests PRIVATE rmtn_engine)
@@ -119,7 +126,7 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   target_compile_definitions(raymotion_feed_tests PRIVATE RAYMOTION_FEED_STATE=1 RAYMOTION_FEED_RENDER=1)
   add_test(NAME ht_feed COMMAND raymotion_feed_tests)
 
-  set_tests_properties(renderer_regressions layer_compositing scene3d ht_plain_layout ht_feed PROPERTIES LABELS gl SKIP_RETURN_CODE 77)
+  set_tests_properties(renderer_regressions layer_compositing scene3d media ht_plain_layout ht_feed PROPERTIES LABELS gl SKIP_RETURN_CODE 77)
 
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND)

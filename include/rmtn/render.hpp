@@ -38,6 +38,12 @@ void presentFrame(Comp& c, int frame, Canvas& canvas);
 // false without calling `body` when no canvas target is active (outside presentFrame).
 bool drawOffscreen(float alpha, const std::function<void(const RenderTexture& target, float scale)>& body);
 
+// While presentFrame runs: the frame rate of the composition being drawn and the scale
+// from composition units to pixels of the current target (the supersample factor).
+// Outside it: 30 and 1.
+int frameRate();
+float canvasScale();
+
 // GL-owning code registers a release callback; shutdownGraphics() runs them all (then
 // unloads cached fonts) and must be called before CloseWindow.
 void onGraphicsShutdown(std::function<void()> release);

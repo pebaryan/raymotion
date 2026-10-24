@@ -51,6 +51,7 @@ struct Target { RenderTexture rt; float scale; };
 std::vector<Target> targets;            // innermost last; empty outside presentFrame's tree pass
 std::vector<RenderTexture> pool;        // free offscreen layer targets
 bool poolRegistered = false;
+int currentFps = 30;
 
 // "Over" for straight-alpha sources that keeps destination alpha correct: colour blends
 // as usual, alpha accumulates as a + d(1-a). Opaque canvases stay opaque, and layer
@@ -201,7 +202,11 @@ void restoreBlend() {
     if (!targets.empty()) standardBlend();
 }
 
+int frameRate() { return currentFps; }
+float canvasScale() { return targets.empty() ? 1.f : targets.back().scale; }
+
 void presentFrame(Comp& c, int frame, Canvas& canvas) {
+    currentFps = c.fps;
     if (c.render) {
         BeginTextureMode(canvas.output());
         rlDisableBackfaceCulling();   // hooks start in 2D state; 3D code enables what it needs
