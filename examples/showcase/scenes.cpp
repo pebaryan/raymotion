@@ -16,6 +16,7 @@ void register_ht_plain(Registry& out);
 void register_ht_feed(Registry& out);
 void registerFxSeries(Registry& out);
 void registerGpuScene(Registry& out);
+void registerPrefabs(Registry& out);
 
 void register_scenes(Registry& out) {
 using namespace dr;
@@ -362,5 +363,6 @@ registerGpuScene(out);
 register_ht_explainer(out);
 register_ht_plain(out);
 register_ht_feed(out);
+registerPrefabs(out);
 } // register_scenes
 } // namespace rmtn
