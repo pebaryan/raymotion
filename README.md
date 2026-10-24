@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/pebaryan/raymotion/actions/workflows/ci.yml/badge.svg)](https://github.com/pebaryan/raymotion/actions/workflows/ci.yml)
 
-![demo-neon: the RAYMOTION title card](docs/images/demo-neon.png)
+[![raymotion: the introduction video on YouTube](docs/images/raymotion-promo.jpg)](https://youtu.be/tcALbxoO9x0)
 
 Remotion-style motion graphics / video engine — pure C++17 on **raylib + ffmpeg**, no
 web stack. Compositions are code: a timeline tree of nodes with keyframe/easing tracks
