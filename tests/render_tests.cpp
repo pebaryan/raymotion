@@ -1,6 +1,7 @@
 #include "../examples/showcase/fx_present.cpp"
 #include "rmtn/preview.hpp"
 #include "rmtn/fonts.hpp"
+#include "rmtn/frame_stream.hpp"
 #include <cstdio>
 
 // Distinct grey levels across rows [y0,y1): 2 for hard (aliased) edges; N x N supersampling
@@ -128,6 +129,36 @@ int main() {
         expect(down>20*255 && up<5*255,"rotated text follows ctx rotation");
         expect(lit(160,120)>20*255,"rotated text pivots on its anchor");
         UnloadImage(img); canvas.unload();
+    }
+
+    // FrameStream delivers every frame, in order, with the same bytes as a blocking read
+    // (rows bottom-up), and reports a sink that stops accepting frames.
+    {
+        RenderTexture rt=LoadRenderTexture(320,240);
+        auto paint=[&](int k){
+            BeginTextureMode(rt); ClearBackground(BLACK);
+            DrawRectangle(10*k,20,30,40,Color{(unsigned char)(40+k),200,90,255});
+            EndTextureMode();
+        };
+        std::vector<std::vector<unsigned char>> want, got;
+        rmtn::FrameStream stream;
+        expect(stream.open(320,240,[&](const unsigned char* p,size_t n){ got.emplace_back(p,p+n); return true; }),"frame stream opens");
+        for(int k=0;k<7;++k){
+            paint(k);
+            Image ref=LoadImageFromTexture(rt.texture);   // GL order, like the stream
+            want.emplace_back((unsigned char*)ref.data,(unsigned char*)ref.data+320*240*4);
+            UnloadImage(ref);
+            expect(stream.push(rt),"frame stream accepts frames");
+        }
+        expect(stream.close(),"frame stream drains");
+        expect(got==want,"streamed frames match blocking readback, in order");
+
+        int delivered=0; bool refused=false;
+        rmtn::FrameStream failing;
+        failing.open(320,240,[&](const unsigned char*,size_t){ return ++delivered<2; },2);
+        for(int k=0;k<20 && !refused;++k){ paint(k); refused=!failing.push(rt); }
+        expect(!failing.close() && delivered==2,"frame stream reports a failed sink");
+        UnloadRenderTexture(rt);
     }
 
     // Read the actual GL uniform state, not merely whether the shader compiled.

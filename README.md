@@ -46,7 +46,11 @@ build/raymotion prefabs                        # list prefabs and their default 
 
 * `render` draws every frame into a composition-sized canvas and pipes raw RGBA into
   ffmpeg -> `out/<name>.mp4` (+ AAC soundtrack from the procedural synth for `music=1`
-  comps). `--png-frames` writes `out/<name>_frames/fNNNNN.png` instead and needs no ffmpeg.
+  comps). Frames are read back asynchronously and written to ffmpeg from a separate
+  thread, so drawing, readback and encoding overlap. `--encoder NAME` picks any ffmpeg
+  encoder (default `h264`, i.e. libx264; `h264_nvenc`/`hevc_nvenc` on NVIDIA GPUs) and
+  `--preset NAME` its speed; `--crf N` maps to each encoder's own quality setting.
+  `--png-frames` writes `out/<name>_frames/fNNNNN.png` instead and needs no ffmpeg.
 * ffmpeg lookup: `--ffmpeg PATH`, `RAYMOTION_FFMPEG`, a winget Gyan.FFmpeg install,
   `C:/Program Files/ffmpeg`, `C:/ffmpeg`, then `PATH`.
 * Output is exactly the composition size regardless of the desktop. `--draft` renders

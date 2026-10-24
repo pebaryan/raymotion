@@ -18,6 +18,7 @@
 #include "rmtn/synth.hpp"
 #include "rmtn/preview.hpp"
 #include "rmtn/render.hpp"
+#include "rmtn/frame_stream.hpp"
 #include "rmtn/media.hpp"
 #include "rmtn/prefab.hpp"
 
@@ -117,6 +118,28 @@ bool saveFrame(const Canvas& canvas,int W,int H,const std::string& path){
 
 std::string quote(const std::string& s) { return "\"" + s + "\""; }
 
+bool endsWith(const std::string& s, const char* tail) {
+    const size_t n = strlen(tail);
+    return s.size() >= n && s.compare(s.size() - n, n, tail) == 0;
+}
+
+// ffmpeg video codec arguments. Each hardware family spells constant quality and speed its
+// own way, so --crf and --preset are translated: the scales are close, not identical.
+std::string videoCodecArgs(const std::string& encoder, const char* preset, int crf) {
+    const std::string q = std::to_string(crf);
+    std::string a = " -c:v " + encoder;
+    if (endsWith(encoder, "_nvenc"))
+        a += " -rc vbr -cq " + q + " -b:v 0 -pix_fmt yuv420p";
+    else if (endsWith(encoder, "_qsv"))
+        a += " -global_quality " + q + " -pix_fmt nv12";
+    else if (endsWith(encoder, "_amf"))
+        a += " -rc cqp -qp_i " + q + " -qp_p " + q + " -qp_b " + q + " -pix_fmt yuv420p";
+    else
+        a += " -crf " + q + " -pix_fmt yuv420p";
+    if (preset) a += (endsWith(encoder, "_amf") ? " -quality " : " -preset ") + std::string(preset);
+    return a;
+}
+
 // cmd.exe strips the first and last quote of a command line that holds several quoted
 // tokens, so on Windows the whole line gets one more enclosing pair.
 std::string shellLine(const std::string& cmd) {
@@ -149,9 +172,15 @@ void usage() {
     puts("usage:");
     puts("  raymotion list                                  list compositions");
     puts("  raymotion preview <name> [--mute]               play with sound in a live window (esc quits)");
-    puts("  raymotion render  <name> [--crf N] [--draft] [--mute] [--png-frames]");
+    puts("  raymotion render  <name> [--crf N] [--encoder NAME] [--preset NAME]");
+    puts("                        [--draft] [--mute] [--png-frames]");
     puts("                        render every frame via raylib, pipe to ffmpeg -> mp4");
     puts("                        --png-frames writes a PNG sequence instead (no ffmpeg)");
+    puts("                        --encoder NAME any ffmpeg encoder (default h264 = libx264;");
+    puts("                          h264_nvenc, hevc_nvenc, h264_qsv, h264_amf are hardware)");
+    puts("                        --preset NAME encoder speed: ultrafast..veryslow for x264,");
+    puts("                          p1..p7 for nvenc, speed|balanced|quality for amf");
+    puts("                        --crf N  quality, lower is better (default 19)");
     puts("  raymotion still   <name> --at FRAME [--png PATH] write one PNG frame");
     puts("  raymotion props   <name>                        print the default props (JSON)");
     puts("  raymotion prefabs                               list prefabs and their default props");
@@ -182,11 +211,14 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
     if (argc < 3) { usage(); return 1; }
     const std::string want = argv[2];
 
-    const char* crfArg = nullptr, *ffArg = nullptr, *atArg = nullptr, *pngArg = nullptr, *ssArg = nullptr, *propsArg = nullptr;
+    const char* crfArg = nullptr, *ffArg = nullptr, *atArg = nullptr, *pngArg = nullptr, *ssArg = nullptr, *propsArg = nullptr,
+               *encoderArg = nullptr, *presetArg = nullptr;
     bool draft = false, noMusic = false, pngFrames = false;
     for (int i = 3; i < argc; i++) {
         if (!strcmp(argv[i], "--crf") && i+1 < argc) crfArg = argv[++i];
         else if (!strcmp(argv[i], "--ffmpeg") && i+1 < argc) ffArg = argv[++i];
+        else if (!strcmp(argv[i], "--encoder") && i+1 < argc) encoderArg = argv[++i];
+        else if (!strcmp(argv[i], "--preset") && i+1 < argc) presetArg = argv[++i];
         else if (!strcmp(argv[i], "--at") && i+1 < argc) atArg = argv[++i];
         else if (!strcmp(argv[i], "--png") && i+1 < argc) pngArg = argv[++i];
         else if (!strcmp(argv[i], "--ss") && i+1 < argc) ssArg = argv[++i];
@@ -274,7 +306,7 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
         return 0;
     }
 
-    // ---- render: frame-by-frame capture piped into ffmpeg ----------------------
+    // ---- render: frames streamed into ffmpeg while the next ones draw ---------
     if (!strcmp(mode, "render")) {
         std::string dir = "out/" + comp->name + (draft ? "_draft_frames" : "_frames");
         std::filesystem::create_directories(dir);
@@ -304,7 +336,8 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
                 " -framerate " + std::to_string(comp->fps) + " -i -";
             if (!wav.empty()) cmd += " -i " + quote(wav);
             cmd += " -frames:v " + std::to_string(comp->duration);
-            cmd += " -c:v h264 -pix_fmt yuv420p -crf " + std::to_string(crf) + " -movflags +faststart";
+            cmd += " -vf vflip";            // frames arrive bottom-up, straight from GL
+            cmd += videoCodecArgs(encoderArg ? encoderArg : "h264", presetArg, crf) + " -movflags +faststart";
             if (!wav.empty()) cmd += " -c:a aac -b:a 192k -shortest";
             cmd += " " + quote(mp4);
             if (getenv("RAYMOTION_DEBUG_CMD")) printf("[CMD] %s\n", cmd.c_str());
@@ -319,6 +352,19 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
         InitWindow(W, H, ("raymotion render - " + comp->name).c_str());
         Canvas canvas;
         if (!canvas.load(comp->w,comp->h,canvasScale(*comp,ssArg,draft))){ if (pipe) pclose(pipe); CloseWindow(); return 2; }
+        // Drafts are downscaled on the GPU: an exact 2:1 bilinear draw is a 2x2 box filter.
+        RenderTexture scaled{};
+        const bool resize = W != comp->w || H != comp->h;
+        FrameStream stream;
+        if (pipe) {
+            if (resize) {
+                scaled = LoadRenderTexture(W, H);
+                SetTextureFilter(canvas.output().texture, TEXTURE_FILTER_BILINEAR);
+            }
+            if (!stream.open(W, H, [pipe](const unsigned char* rgba, size_t bytes) {
+                    return fwrite(rgba, 1, bytes, pipe) == bytes;
+                })) { fprintf(stderr, "cannot start frame readback\n"); pclose(pipe); closeCanvas(canvas); return 3; }
+        }
         double t0 = GetTime();
         bool ok = true;
         for (int f = 0; f < comp->duration && ok; f++) {
@@ -329,16 +375,21 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
                 char fname[160]; snprintf(fname, sizeof fname, "%s/f%05d.png", dir.c_str(), f);
                 ok = saveFrame(canvas,W,H,fname);
             } else {
-                Image image = grabFrame(canvas,W,H);
-                size_t bytes = (size_t)W*H*4;
-                ok = image.data && fwrite(image.data, 1, bytes, pipe) == bytes;
-                UnloadImage(image);
+                if (resize) {
+                    BeginTextureMode(scaled);
+                    DrawTexturePro(canvas.output().texture, { 0, 0, (float)comp->w, -(float)comp->h },
+                                   { 0, 0, (float)W, (float)H }, { 0, 0 }, 0, WHITE);
+                    EndTextureMode();
+                }
+                ok = stream.push(resize ? scaled : canvas.output());
                 if (!ok) fprintf(stderr, "ffmpeg stopped accepting frames at %d\n", f);
             }
             if (f % 15 == 0 || f+1 == comp->duration)
                 printf("[%4d/%4d]\n", f, comp->duration);
         }
+        if (pipe && !stream.close() && ok) { fprintf(stderr, "ffmpeg stopped accepting frames\n"); ok = false; }
         double dt = GetTime() - t0;
+        if (scaled.id) UnloadRenderTexture(scaled);
         closeCanvas(canvas);
         if (pngFrames) {
             if (!ok) return 2;
@@ -346,8 +397,9 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
             return 0;
         }
         int rc = pclose(pipe);
-        printf("rendered %d frames in %.1fs -> %s (rc=%d)\n", comp->duration, dt, mp4.c_str(), rc);
-        return ok && rc == 0 ? 0 : 3;
+        if (!ok || rc != 0) { fprintf(stderr, "render failed: ffmpeg exited with %d (see its messages above)\n", rc); return 3; }
+        printf("rendered %d frames in %.1fs -> %s\n", comp->duration, dt, mp4.c_str());
+        return 0;
     }
 
     usage();

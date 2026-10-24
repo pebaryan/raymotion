@@ -56,6 +56,7 @@ endif()
 # ---------------------------------------------------------------- engine library
 add_library(rmtn_engine STATIC
   src/engine/cli.cpp
+  src/engine/frame_stream.cpp
   src/engine/fonts.cpp
   src/engine/render.cpp
   src/engine/anim.cpp

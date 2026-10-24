@@ -62,6 +62,17 @@ class CliTests(unittest.TestCase):
         self.assertEqual(int(stream["nb_read_frames"]), 60)
         self.assertEqual((stream["width"], stream["height"]), (640, 360))
 
+    def test_encoder_and_preset(self):
+        self.run_cli("render", "probe", "--draft", "--no-music", "--encoder", "libx264", "--preset", "ultrafast")
+        result = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name,nb_frames", "-of", "json", str(self.cwd / "out" / "probe_draft.mp4")], capture_output=True, text=True, check=True)
+        stream = json.loads(result.stdout)["streams"][0]
+        self.assertEqual((stream["codec_name"], int(stream["nb_frames"])), ("h264", 60))
+        bad = subprocess.run([str(EXE), "render", "probe", "--draft", "--no-music", "--encoder", "no_such_encoder"],
+                             cwd=self.cwd, capture_output=True, text=True, timeout=60)
+        self.assertEqual(bad.returncode, 3)
+        self.assertIn("render failed", bad.stderr)
+        self.assertNotIn("rendered", bad.stdout)
+
     def test_nested_png_filename(self):
         self.run_cli("still", "probe", "--at", "0", "--png", "nested/images/frame.png")
         self.assertTrue((self.cwd / "nested/images/frame.png").is_file())
