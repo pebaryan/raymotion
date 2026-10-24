@@ -311,6 +311,8 @@ void genScore(const std::string& path) {
 }
 
 // Generates every asset once per ASSETS version.
+bool assetsReady = false;   // set by the assets hook; `list` builds without it
+
 void ensureAssets() {
     std::filesystem::create_directories(ASSETS);
     auto make = [](const std::string& file, void (*gen)(const std::string&)) {
@@ -1078,9 +1080,11 @@ void registerOwnCompute(Registry& out) {
     Comp c;
     c.name = "own-your-compute"; c.w = 1920; c.h = 1080; c.fps = FPS; c.duration = DURATION;
     c.background = NIGHT;
+    c.assets = [](const Comp&, const Json&) { ensureAssets(); assetsReady = true; };
     c.build = [](Comp& c, const Json&) {
-        ensureAssets();
         c.roots.clear();
+        media::audio(addRoot(c.roots, 0, DURATION), ASSETS + "/score.wav");
+        if (!assetsReady) return;   // metadata only: no generated files to read yet
         TNode* film = addRoot(c.roots, 0, DURATION);
         actCloud(film->add(A1, A2 - A1));
         actStrings(film->add(A2, A3 - A2));
@@ -1093,7 +1097,6 @@ void registerOwnCompute(Registry& out) {
         captions(c.roots);
         strapline(c.roots);
         finish(c.roots);
-        media::audio(addRoot(c.roots, 0, DURATION), ASSETS + "/score.wav");
     };
     out.push_back(std::move(c));
 }

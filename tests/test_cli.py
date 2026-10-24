@@ -73,6 +73,12 @@ class CliTests(unittest.TestCase):
         self.assertIn("render failed", bad.stderr)
         self.assertNotIn("rendered", bad.stdout)
 
+    def test_list_generates_no_assets(self):
+        listing = self.run_cli("list").stdout
+        self.assertIn("raymotion-promo        1920x1080 @60fps  210.0s  audio=1", listing)
+        self.assertIn("own-your-compute       1920x1080 @30fps  66.0s  audio=1", listing)
+        self.assertEqual(list(self.cwd.iterdir()), [], "list wrote files")
+
     def test_nested_png_filename(self):
         self.run_cli("still", "probe", "--at", "0", "--png", "nested/images/frame.png")
         self.assertTrue((self.cwd / "nested/images/frame.png").is_file())

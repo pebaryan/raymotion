@@ -297,6 +297,12 @@ struct Comp {
     // fills `roots` (or `render`) and may change duration, size, fps or background.
     Json defaultProps;
     std::function<void(Comp& c, const Json& props)> build;
+
+    // Optional: creates the files `build` reads (generated textures, models, audio). The
+    // CLI runs it just before `build`, and only when frames will be drawn (still, preview,
+    // render). `list` builds without it, so `build` must still set size, duration and
+    // audio when it has not run.
+    std::function<void(const Comp& c, const Json& props)> assets;
 };
 
 // ------------------------------------------------------------------ sequencing

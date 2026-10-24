@@ -161,8 +161,11 @@ Json loadProps(const char* arg) {
 }
 
 // Builds a composition from its default props merged with `overrides`, then checks it.
-void prepare(Comp& c, const Json& overrides) {
-    if (c.build) c.build(c, c.defaultProps.merged(overrides.isNull() ? Json(Json::Object{}) : overrides));
+// `drawing` runs the composition's asset hook first; listing metadata skips it.
+void prepare(Comp& c, const Json& overrides, bool drawing) {
+    const Json props = c.defaultProps.merged(overrides.isNull() ? Json(Json::Object{}) : overrides);
+    if (drawing && c.assets) c.assets(c, props);
+    if (c.build) c.build(c, props);
     else if (overrides.size()) fprintf(stderr, "note: '%s' takes no props; --props ignored\n", c.name.c_str());
     if (c.w <= 0 || c.h <= 0 || c.fps <= 0 || c.duration <= 0)
         throw std::runtime_error("composition '" + c.name + "' needs positive size, fps and duration");
@@ -194,7 +197,7 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
     if (!strcmp(mode, "list")) {
         Registry comps; registerAll(comps);
         for (auto& c : comps) {
-            prepare(c, Json());
+            prepare(c, Json(), false);
             printf("%-22s %dx%d @%dfps  %.1fs  audio=%d\n", c.name.c_str(), c.w, c.h, c.fps,
                    (double)c.duration / c.fps, (int)media::hasAudio(c));
         }
@@ -233,8 +236,8 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
     for (auto& c : comps) if (c.name == want) comp = &c;
     if (!comp) { printf("unknown composition '%s'\n", want.c_str()); usage(); return 1; }
     if (!strcmp(mode, "props")) { puts(comp->defaultProps.dump().c_str()); return 0; }
-    prepare(*comp, propsArg ? loadProps(propsArg) : Json());
-    if (ffArg) media::setFfmpeg(ffArg);
+    if (ffArg) media::setFfmpeg(ffArg);   // before the asset hook, which may encode with it
+    prepare(*comp, propsArg ? loadProps(propsArg) : Json(), true);
 
     int W = comp->w, H = comp->h;
     if (draft) { W = (W / 2) & ~1; H = (H / 2) & ~1; }   // yuv420p needs even dimensions

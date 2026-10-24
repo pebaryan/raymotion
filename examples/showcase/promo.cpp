@@ -6,7 +6,7 @@
 //
 // Like own-your-compute, nothing is read from disk that this file did not make: the score
 // is synthesised, and the texture, photo, SVG logo, GIF, video clip and OBJ model used by
-// the media and 3D chapters are generated into out/promo-assets-v1/ on first build (the
+// the media and 3D chapters are generated into out/promo-assets-v1/ before the first frame is drawn (the
 // GIF and the clip need ffmpeg).
 //   raymotion render raymotion-promo
 #include "rmtn/raymotion.hpp"
@@ -2008,9 +2008,15 @@ Transition transitionInto(int ch) {
     return Transition::slide(XF, Direction::FromRight);
 }
 
+bool assetsReady = false;   // set by the assets hook; `list` builds without it
+
 void buildPromo(Comp& c) {
-    ensureAssets();
     c.roots.clear();
+    c.duration = totalFrames();
+    if (!assetsReady) {   // metadata only: no generated files to read yet
+        media::audio(addRoot(c.roots, 0, c.duration), asset("score.wav"));
+        return;
+    }
     TransitionSeries ts(c.roots, (float)c.w, (float)c.h);
     const auto feats = features();
     for (int ch = 0; ch < NCH; ch++) {
@@ -2039,6 +2045,7 @@ void registerPromo(Registry& out) {
     c.w = 1920; c.h = 1080; c.fps = FPS;
     c.background = BG;
     c.duration = totalFrames();
+    c.assets = [](const Comp&, const Json&) { ensureAssets(); assetsReady = true; };
     c.build = [](Comp& comp, const Json&) { buildPromo(comp); };
     out.push_back(std::move(c));
 }
