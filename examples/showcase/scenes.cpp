@@ -19,6 +19,7 @@ void registerGpuScene(Registry& out);
 void registerPrefabs(Registry& out);
 void registerAspFeed(Registry& out);
 void registerOwnCompute(Registry& out);
+void registerPromo(Registry& out);
 
 void register_scenes(Registry& out) {
 using namespace dr;
@@ -368,5 +369,6 @@ register_ht_feed(out);
 registerPrefabs(out);
 registerAspFeed(out);
 registerOwnCompute(out);
+registerPromo(out);
 } // register_scenes
 } // namespace rmtn

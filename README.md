@@ -226,7 +226,15 @@ here-there-explainer   1280x720  @30fps  108.0s  music=1   (logic explainer)
 here-there-plain       1280x720  @30fps  108.0s  music=0   (plain-language cut, Segoe UI)
 here-there-feed        1080x1350 @30fps   88.0s  music=0   (portrait feed cut, Segoe UI)
 own-your-compute       1920x1080 @30fps   66.0s  audio=1   (story film: GPU 3D, particles, glitch; all assets from code)
+raymotion-promo        1920x1080 @60fps  210.0s  audio=1   (YouTube introduction: how it works, 16 features, credits)
 ```
+
+`raymotion-promo` is a 3.5-minute introduction to the engine for YouTube, at 60 fps: the
+idea (a video is a function of its frame number), the pipeline from C++ to MP4, the
+timeline tree, then sixteen features demonstrated one by one beside the code that drives
+them, the GitHub repository and the credits. Its score, and the texture, photo, SVG, GIF,
+video clip and OBJ model its media and 3D chapters show, are generated into
+`out/promo-assets-v1/` on first use (the GIF and the clip need ffmpeg).
 
 The Here-and-There pieces introduce Pedro Cabalar's treatment of HT and equilibrium
 logic; sources, script and scope notes are in `docs/here-there-explainer.md`, and the
