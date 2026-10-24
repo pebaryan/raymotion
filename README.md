@@ -9,6 +9,9 @@ web stack. Compositions are code: a timeline tree of nodes with keyframe/easing 
 and transforms, drawn deterministically per frame, supersampled for clean edges, and
 piped straight into ffmpeg.
 
+▶ **[Watch the 3.5-minute introduction on YouTube](https://youtu.be/tcALbxoO9x0)**: how it works,
+the technology underneath, and every feature demonstrated, all rendered by raymotion itself.
+
 ## Build
 
 Needs CMake 3.21+, a C++17 compiler, and ffmpeg on `PATH` for MP4 output.
@@ -229,7 +232,8 @@ own-your-compute       1920x1080 @30fps   66.0s  audio=1   (story film: GPU 3D, 
 raymotion-promo        1920x1080 @60fps  210.0s  audio=1   (YouTube introduction: how it works, 16 features, credits)
 ```
 
-`raymotion-promo` is a 3.5-minute introduction to the engine for YouTube, at 60 fps: the
+`raymotion-promo` is the 3.5-minute introduction to the engine
+([watch it on YouTube](https://youtu.be/tcALbxoO9x0)), at 60 fps: the
 idea (a video is a function of its frame number), the pipeline from C++ to MP4, the
 timeline tree, then sixteen features demonstrated one by one beside the code that drives
 them, the GitHub repository and the credits. Its score, and the texture, photo, SVG, GIF,
