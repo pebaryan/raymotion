@@ -7,15 +7,21 @@
 #include <climits>
 #include <cstdint>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <exception>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <map>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 
 // stb_image for JPG/PNG/GIF/BMP/TGA/PSD/HDR/PIC/PNM, private to this file (raylib links
 // its own reduced copy).
@@ -95,6 +101,7 @@ std::string lowerExt(const std::string& path) {
 }
 
 // ------------------------------------------------------------------ ffmpeg
+std::mutex ffmpegMtx;                 // the search may run from a decode worker
 std::string forcedFfmpeg;
 std::string foundFfmpeg;
 bool searchedFfmpeg = false;
@@ -165,6 +172,11 @@ std::set<GpuOwner*>& owners() {
     // Never destroyed: media held by static caches unregisters during exit.
     static auto* list = new std::set<GpuOwner*>;
     return *list;
+}
+// Guards owners() insert/erase; the shutdown hook iterates on the main thread only.
+std::mutex& ownersMtx() {
+    static std::mutex m;
+    return m;
 }
 bool hookRegistered = false;
 void ensureHook() {
@@ -270,11 +282,15 @@ std::string resolve(const std::string& file) {
 }
 
 std::string ffmpeg() {
+    std::lock_guard<std::mutex> lock(ffmpegMtx);
     if (!forcedFfmpeg.empty()) return forcedFfmpeg;
     if (!searchedFfmpeg) { foundFfmpeg = searchFfmpeg(); searchedFfmpeg = true; }
     return foundFfmpeg;
 }
-void setFfmpeg(const std::string& path) { forcedFfmpeg = path; }
+void setFfmpeg(const std::string& path) {
+    std::lock_guard<std::mutex> lock(ffmpegMtx);
+    forcedFfmpeg = path;
+}
 
 Image loadImage(const std::string& file, int svgWidth) {
     const std::string path = resolve(file);
@@ -316,15 +332,31 @@ struct ImageAsset::State : GpuOwner {
     std::vector<Image> pending;                  // decoded frames awaiting upload
     std::vector<Texture2D> frames;
     std::vector<double> ends;                    // GIF: cumulative frame end times, seconds
+    // Decode runs on a background task started at construction; accessors block on it.
+    std::future<void> work;
+    std::exception_ptr err;
     struct Raster { int width; Texture2D tex; unsigned long long used; };
     std::vector<Raster> rasters;                 // SVG textures by width, least recent evicted
     unsigned long long clock = 0;
 
     ~State() override {
-        owners().erase(this);
+        if (work.valid()) work.wait();           // the task uses `this`
+        { std::lock_guard<std::mutex> lock(ownersMtx()); owners().erase(this); }
         for (auto& img : pending) UnloadImage(img);
         if (svg) nsvgDelete(svg);
         // Textures are released by shutdownGraphics, before the GL context goes away.
+    }
+    void startDecode() {
+        if (work.valid()) return;
+        work = std::async(std::launch::async, [this] {
+            try { decode(); } catch (...) { err = std::current_exception(); }
+        });
+    }
+    // Blocks until the background decode is done; its error surfaces here (at the first
+    // accessor, exactly as when decoding was synchronous).
+    void waitDecode() {
+        if (work.valid()) { work.get(); work = {}; }
+        if (err) std::rethrow_exception(err);
     }
     void releaseGpu() override {
         for (auto& t : frames) UnloadTexture(t);
@@ -372,18 +404,19 @@ struct ImageAsset::State : GpuOwner {
 
 ImageAsset::ImageAsset(std::string file) : file_(std::move(file)), s_(std::make_unique<State>()) {
     s_->fileName = file_;
-    owners().insert(s_.get());
+    { std::lock_guard<std::mutex> lock(ownersMtx()); owners().insert(s_.get()); }
+    s_->startDecode();
 }
 ImageAsset::~ImageAsset() = default;
 
-int ImageAsset::width() { s_->decode(); return s_->w; }
-int ImageAsset::height() { s_->decode(); return s_->h; }
-bool ImageAsset::isVector() { s_->decode(); return s_->vector; }
-int ImageAsset::frameCount() { s_->decode(); return s_->ends.empty() ? 1 : (int)s_->ends.size(); }
-double ImageAsset::duration() { s_->decode(); return s_->ends.empty() ? 0 : s_->ends.back(); }
+int ImageAsset::width() { s_->waitDecode(); return s_->w; }
+int ImageAsset::height() { s_->waitDecode(); return s_->h; }
+bool ImageAsset::isVector() { s_->waitDecode(); return s_->vector; }
+int ImageAsset::frameCount() { s_->waitDecode(); return s_->ends.empty() ? 1 : (int)s_->ends.size(); }
+double ImageAsset::duration() { s_->waitDecode(); return s_->ends.empty() ? 0 : s_->ends.back(); }
 
 int ImageAsset::frameAt(double seconds) {
-    s_->decode();
+    s_->waitDecode();
     const auto& ends = s_->ends;
     if (ends.size() < 2) return 0;
     double t = std::fmod(seconds, ends.back());
@@ -393,7 +426,7 @@ int ImageAsset::frameAt(double seconds) {
 
 Texture2D ImageAsset::texture(int frame, float pixelWidth) {
     State& s = *s_;
-    s.decode();
+    s.waitDecode();
     ensureHook();
     if (s.vector) {
         // Rasterise in 1/8-octave steps (at most ~9% above the drawn size), up to 8192 px.
@@ -427,6 +460,8 @@ Texture2D ImageAsset::texture(int frame, float pixelWidth) {
 
 ImagePtr image(const std::string& file) {
     static std::map<std::string, ImagePtr> cache;
+    static std::mutex mtx;
+    std::lock_guard<std::mutex> lock(mtx);
     auto& slot = cache[file];
     if (!slot) slot = std::make_shared<ImageAsset>(file);
     return slot;
@@ -480,9 +515,13 @@ struct ProbeResult { VideoInfo info; std::string rate; };   // rate: exact, e.g.
 
 const ProbeResult& probeFull(const std::string& file) {
     static std::map<std::string, ProbeResult> cache;
+    static std::mutex mtx;
     const std::string path = resolve(file);
-    auto it = cache.find(path);
-    if (it != cache.end()) return it->second;
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        auto it = cache.find(path);
+        if (it != cache.end()) return it->second;
+    }
     std::string ff = requireFfmpeg("read " + path);
     std::string out = readProcess(quote(ffprobeFor(ff)) + " -v error -show_entries"
         " stream=codec_type,width,height,r_frame_rate,avg_frame_rate:format=duration -of default=nw=1 " + quote(path));
@@ -508,6 +547,7 @@ const ProbeResult& probeFull(const std::string& file) {
         }
     }
     if (out.empty()) throw std::runtime_error("media: cannot probe " + path + " (is ffprobe beside ffmpeg?)");
+    std::lock_guard<std::mutex> lock(mtx);
     return cache[path] = r;
 }
 
@@ -516,23 +556,51 @@ const ProbeResult& probeFull(const std::string& file) {
 VideoInfo probe(const std::string& file) { return probeFull(file).info; }
 
 struct VideoDecoder::State : GpuOwner {
+    // Decoding runs on a worker thread that reads the ffmpeg pipe a few frames ahead;
+    // frame() (the render thread) takes decoded frames from `ready`, blocking when the
+    // wanted one is not there yet — so what a frame shows never depends on scheduling.
+    static constexpr int kAhead = 3;
+    struct Slot { int index; std::vector<unsigned char> px; };
+
     std::string file, path, rate;
     VideoInfo info;
     bool probed = false;
-    FILE* pipe = nullptr;
+    FILE* pipe = nullptr;         // owned by the worker only
     int next = 0;                 // index of the frame the pipe yields next
-    int shown = -1;               // index in `tex`
+    int shown = -1;               // index in `tex` (render thread only)
     int count = INT_MAX;          // frames known to exist (set at end of stream)
-    std::vector<unsigned char> buf;
-    Texture2D tex{};
+    std::vector<unsigned char> buf;   // worker's read buffer
 
-    ~State() override { owners().erase(this); closePipe(); }
-    void closePipe() { if (pipe) { pclose(pipe); pipe = nullptr; } }
+    std::thread worker;
+    std::mutex mtx;
+    std::condition_variable cv;
+    bool stopping = false;
+    int want = 0;                 // index the consumer is waiting for
+    int restart = -1;             // restart request from the consumer (-1: none)
+    bool ended = false;           // the pipe ran out; `count` is final
+    std::exception_ptr err;
+    std::deque<Slot> ready;       // decoded frames [next - size, next)
+
+    ~State() override {
+        stopWorker();
+        { std::lock_guard<std::mutex> lock(ownersMtx()); owners().erase(this); }
+    }
     void releaseGpu() override {
-        closePipe();
+        stopWorker();             // the pipe must not outlive the GL context it feeds
         if (tex.id) UnloadTexture(tex);
         tex = Texture2D{};
         shown = -1;
+    }
+    void stopWorker() {
+        if (!worker.joinable()) return;
+        { std::lock_guard<std::mutex> lock(mtx); stopping = true; restart = -1; }
+        cv.notify_all();
+        worker.join();            // waits out one in-flight frame read at most
+        stopping = false;
+        std::lock_guard<std::mutex> lock(mtx);
+        closePipe();
+        ready.clear();
+        ended = false;
     }
     void ensureProbe() {
         if (probed) return;
@@ -545,6 +613,7 @@ struct VideoDecoder::State : GpuOwner {
         buf.resize((size_t)info.width * info.height * 4);
         probed = true;
     }
+    void closePipe() { if (pipe) { pclose(pipe); pipe = nullptr; } }
     void start(int index) {
         closePipe();
         // Seek a quarter frame early so rounding cannot skip the wanted frame; the fps
@@ -559,30 +628,93 @@ struct VideoDecoder::State : GpuOwner {
         next = index;
     }
     bool readFrame() { return fread(buf.data(), 1, buf.size(), pipe) == buf.size(); }
+    void run() {                  // worker: decodes ahead of the consumer
+        std::unique_lock<std::mutex> lk(mtx);
+        for (;;) {
+            cv.wait(lk, [&] {
+                return stopping || restart >= 0 || (!ended && pipe && next <= want + kAhead);
+            });
+            if (stopping) return;
+            if (restart >= 0) {
+                int target = restart;
+                restart = -1;
+                ended = false;
+                ready.clear();                // also drops a stale in-flight read below
+                lk.unlock();
+                try {
+                    start(target);
+                } catch (...) {
+                    lk.lock();
+                    err = std::current_exception();
+                    cv.notify_all();
+                    return;
+                }
+                lk.lock();
+                continue;
+            }
+            int idx = next;
+            lk.unlock();
+            bool ok = readFrame();
+            lk.lock();
+            if (ok) {
+                ready.push_back({ idx, buf });
+                next = idx + 1;
+            } else {
+                closePipe();
+                ended = true;
+                count = next;
+                if (next == 0) err = std::make_exception_ptr(std::runtime_error("media: cannot decode video " + path));
+            }
+            cv.notify_all();
+        }
+    }
+    // Render thread: returns the decoded pixels of `index` (worker keeps the mutex).
+    std::vector<unsigned char> take(int index) {
+        std::unique_lock<std::mutex> lk(mtx);
+        for (;;) {
+            if (err) std::rethrow_exception(err);
+            if (ended) index = std::max(0, std::min(index, count - 1));
+            bool have = index < next && index >= next - (int)ready.size();
+            if (have) {
+                while (ready.front().index < index) ready.pop_front();
+                std::vector<unsigned char> px = std::move(ready.front().px);
+                ready.pop_front();
+                cv.notify_all();              // room for the worker to read ahead again
+                return px;
+            }
+            want = index;                     // the worker reads up to want + kAhead
+            if (!worker.joinable()) {
+                restart = index;
+                worker = std::thread([this] { run(); });
+            } else if (index < next - (int)ready.size() ||
+                       index > next + (int)(2 * info.fps) + 1) {
+                // Behind what is queued or too far ahead: restart the pipe there. The
+                // worker clears `ready` itself, so an in-flight read cannot sneak back in.
+                restart = index;
+            }
+            cv.notify_all();
+            cv.wait(lk, [&] {
+                return err || ended ||
+                       (index < next && index >= next - (int)ready.size());
+            });
+        }
+    }
+    Texture2D tex{};
+
     Texture2D frame(int index) {
         ensureProbe();
         ensureHook();
         index = std::max(0, std::min(index, count - 1));
         if (index == shown && tex.id) return tex;
-        // Forward within two seconds: keep reading; otherwise restart at the frame.
-        if (!pipe || index < next || index > next + (int)(2 * info.fps) + 1) start(index);
-        while (next <= index) {
-            if (!readFrame()) {
-                closePipe();
-                if (next == 0) throw std::runtime_error("media: cannot decode video " + path);
-                count = next;                    // the stream ended early: hold its last frame
-                return frame(count - 1);
-            }
-            next++;
-        }
+        std::vector<unsigned char> px = take(index);
         rlDrawRenderBatchActive();               // pending draws may still use the old frame
         if (!tex.id) {
-            Image img = imageFromRGBA(buf.data(), info.width, info.height);
+            Image img = imageFromRGBA(px.data(), info.width, info.height);
             tex = LoadTextureFromImage(img);
             if (!tex.id) throw std::runtime_error("media: cannot create a video texture");
             SetTextureWrap(tex, TEXTURE_WRAP_CLAMP);
         } else {
-            UpdateTexture(tex, buf.data());
+            UpdateTexture(tex, px.data());
         }
         GenTextureMipmaps(&tex);
         SetTextureFilter(tex, TEXTURE_FILTER_TRILINEAR);
@@ -593,7 +725,7 @@ struct VideoDecoder::State : GpuOwner {
 
 VideoDecoder::VideoDecoder(std::string file) : file_(std::move(file)), s_(std::make_unique<State>()) {
     s_->file = file_;
-    owners().insert(s_.get());
+    { std::lock_guard<std::mutex> lock(ownersMtx()); owners().insert(s_.get()); }
 }
 VideoDecoder::~VideoDecoder() = default;
 
@@ -637,12 +769,11 @@ AudioClip& audio(TNode* node, const std::string& file, AudioOptions o) {
     return node->audio.back();
 }
 
-const std::vector<float>& decodeAudio(const std::string& file, int rate) {
-    static std::map<std::pair<std::string, int>, std::vector<float>> cache;
-    const std::string path = resolve(file);
-    auto key = std::make_pair(path, rate);
-    auto it = cache.find(key);
-    if (it != cache.end()) return it->second;
+namespace {
+
+// Decodes `file` to interleaved stereo float at `rate`, without touching the cache
+// (so it is safe to run from several threads at once).
+std::vector<float> decodeAudioRaw(const std::string& path, int rate) {
     std::vector<float> pcm;
     const std::string ext = lowerExt(path);
     bool native = false;
@@ -665,6 +796,23 @@ const std::vector<float>& decodeAudio(const std::string& file, int rate) {
         // Silence is fine for a video without sound; anything else that yields none is an error.
         if (pcm.empty() && probe(path).hasAudio) throw std::runtime_error("media: cannot decode audio from " + path);
     }
+    return pcm;
+}
+
+} // namespace
+
+const std::vector<float>& decodeAudio(const std::string& file, int rate) {
+    static std::map<std::pair<std::string, int>, std::vector<float>> cache;
+    static std::mutex mtx;
+    const std::string path = resolve(file);
+    auto key = std::make_pair(path, rate);
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        auto it = cache.find(key);
+        if (it != cache.end()) return it->second;
+    }
+    std::vector<float> pcm = decodeAudioRaw(path, rate);
+    std::lock_guard<std::mutex> lock(mtx);
     return cache[key] = std::move(pcm);
 }
 
@@ -712,6 +860,16 @@ std::vector<float> mixAudio(const Comp& c, int rate) {
     std::vector<float> out(frames * 2, 0.f);
     std::vector<Occurrence> occ;
     for (const auto& r : c.roots) collect(*r, 0, 0, c.duration, occ);
+    {   // Warm the audio cache for every distinct clip in parallel before mixing.
+        ffmpeg();                                 // finish the search before spawning tasks
+        std::map<std::pair<std::string, int>, bool> seen;
+        std::vector<std::future<void>> jobs;
+        for (const Occurrence& o : occ)
+            if (seen.emplace(std::make_pair(o.clip->file, rate), true).second)
+                jobs.push_back(std::async(std::launch::async,
+                                          [f = o.clip->file, rate] { decodeAudio(f, rate); }));
+        for (auto& j : jobs) j.get();             // a decode error surfaces here
+    }
     for (const Occurrence& o : occ) {
         const AudioClip& clip = *o.clip;
         const std::vector<float>& pcm = decodeAudio(clip.file, rate);

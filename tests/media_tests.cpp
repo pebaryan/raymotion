@@ -218,6 +218,21 @@ static void video(const fs::path& dir) {
     CHECK(close(texel(dec.frameAt(9.0)), frameColor(29), 1));          // past the end: the last frame
     CHECK(close(texel(dec.frameAt(-1.0)), frameColor(0), 1));
 
+    {   // Determinism: a scrambled visit order shows exactly the sequential frames.
+        media::VideoDecoder dec2(clip.u8string());
+        bool scrambled = true;
+        for (int i : { 29, 4, 17, 0, 25, 8, 12, 1, 21, 3, 29, 0 })
+            scrambled = scrambled && close(texel(dec2.frameAt(i / 10.0)), frameColor(i), 1);
+        CHECK(scrambled);
+        // Two decoders on the same file, interleaved, do not disturb each other.
+        media::VideoDecoder a(clip.u8string()), b(clip.u8string());
+        bool inter = true;
+        for (int i = 0; i < 30; i++)
+            inter = inter && close(texel(a.frameAt(i / 10.0)), frameColor(i), 1) &&
+                    close(texel(b.frameAt((29 - i) / 10.0)), frameColor(29 - i), 1);
+        CHECK(inter);
+    }
+
     // On the timeline: startFrom and playbackRate, looping, a held last frame.
     auto at = [&](media::VideoOptions o, int frame) {
         Comp c = comp(30, 300);

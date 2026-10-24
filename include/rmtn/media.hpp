@@ -9,10 +9,12 @@
 //     media::video(addRoot(c.roots, 30, 150), "clip.mp4", { 0, 0, 1920, 1080 }, v);
 //     media::audio(addRoot(c.roots, 0, c.duration), "music.ogg").volume = 0.6f;
 //
-// Media is decoded where it is first drawn (or mixed), so compositions can be built before
-// a window exists; a missing or unreadable file throws std::runtime_error from there.
-// Video frames and non-native formats are decoded by ffmpeg (found as for rendering);
-// PNG/JPG/GIF/BMP/TGA/PSD/HDR/QOI/DDS images, SVG and WAV/OGG/MP3/QOA audio need no ffmpeg.
+// Media decodes in the background (images/GIFs on a per-asset task, video frames a few
+// ahead on the decoder's worker), so compositions can be built before a window exists;
+// the first use of an asset waits for it and a missing or unreadable file throws
+// std::runtime_error from there. Video frames and non-native formats are decoded by
+// ffmpeg (found as for rendering); PNG/JPG/GIF/BMP/TGA/PSD/HDR/QOI/DDS images, SVG and
+// WAV/OGG/MP3/QOA audio need no ffmpeg.
 #pragma once
 #include <raylib.h>
 #include <functional>
@@ -95,8 +97,9 @@ struct VideoInfo {
 };
 VideoInfo probe(const std::string& file);         // via ffprobe (beside ffmpeg); cached
 
-// Frame-accurate decoding: a dedicated ffmpeg process streams frames, so playing forward
-// costs one read per frame and seeking restarts it. Each decoder serves one playback.
+// Frame-accurate decoding: a dedicated ffmpeg process streams frames on a worker thread
+// that keeps a few decoded ahead, so playing forward rarely waits on a read and seeking
+// restarts the process. Each decoder serves one playback.
 class VideoDecoder {
 public:
     explicit VideoDecoder(std::string file);
