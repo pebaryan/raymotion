@@ -14,7 +14,25 @@ static Comp makeAspFeed() {
     c.name = "asp-feed"; c.w = 1080; c.h = 1920; c.fps = 30;
     c.background = mkColor(0x0c1220);
     c.music = true;
-    c.song = { { 0, 52, 220, 0.35, true } };
+    // A gentle arpeggiated backing instead of a drone: Am - F - C - G, 2 s per chord,
+    // eighth-note plucks over a soft sustained bass.
+    {
+        struct Chord { double bass, arp[4]; };
+        static const Chord chords[] = {
+            { 110.00, { 220.00, 261.63, 329.63, 440.00 } },   // A minor
+            { 87.31, { 174.61, 220.00, 261.63, 349.23 } },    // F major
+            { 130.81, { 196.00, 261.63, 329.63, 392.00 } },   // C major
+            { 98.00, { 196.00, 246.94, 293.66, 392.00 } },    // G major
+        };
+        const double beat = 0.25;                             // an eighth at 120 bpm
+        for (double t = 0; t < 30; t += 2) {
+            const Chord& ch = chords[(int)(t / 2) % 4];
+            c.song.push_back({ t, 2.1, ch.bass, 0.10, false });
+            const int order[8] = { 0, 1, 2, 3, 2, 1, 0, 1 };
+            for (int i = 0; i < 8; i++)
+                c.song.push_back({ t + i * beat, 0.9, ch.arp[order[i]], 0.16, true });
+        }
+    }
     const float W = (float)c.w, H = (float)c.h;
     const Color BG = c.background, INK = mkColor(0xf2f4ff), ACCENT = mkColor(0x47dad8),
                 PANEL = mkColor(0x1b2638), GOLDEN = mkColor(0xffc365), NOPE = mkColor(0xff5d5d),
