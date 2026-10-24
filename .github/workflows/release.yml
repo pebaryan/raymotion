@@ -1,0 +1,35 @@
+name: Release
+
+# Pushing a v* tag builds the Windows package and attaches it to that tag's release,
+# creating the release (with generated notes) if it does not exist yet.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DRAYMOTION_RAYLIB=vendored
+      - name: Build
+        run: cmake --build build --config Release
+      - name: Test
+        # Hosted Windows runners have no OpenGL 3.3 driver: run the non-GL tests.
+        run: ctest --test-dir build -C Release -LE gl --output-on-failure
+      - name: Package
+        shell: pwsh
+        run: ./tools/package-windows.ps1 -Build build/Release -Version $env:GITHUB_REF_NAME -Out dist
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) { gh release create $tag --verify-tag --title $tag --generate-notes }
+          gh release upload $tag (Get-ChildItem dist/*.zip).FullName --clobber

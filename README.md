@@ -14,6 +14,11 @@ the technology underneath, and every feature demonstrated, all rendered by raymo
 
 ## Build
 
+**Windows binary:** each [release](https://github.com/pebaryan/raymotion/releases) has a
+`raymotion-<version>-windows-x64.zip` with the showcase executable and its assets; it needs
+ffmpeg on `PATH`, an OpenGL 3.3 driver and the Visual C++ runtime. To write your own
+compositions, build from source:
+
 Needs CMake 3.21+, a C++17 compiler, and ffmpeg on `PATH` for MP4 output.
 
 ```sh
@@ -31,6 +36,8 @@ raylib 6.2 comes from one of (`-DRAYMOTION_RAYLIB=...`):
 | `fetch` | downloads and builds raylib 6.2 from source (Linux needs the X11/GL dev packages listed in `.github/workflows/ci.yml`) |
 | `system` | `find_package(raylib 6.2)` |
 
+Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds, tests and attaches
+the Windows zip (`tools/package-windows.ps1`) to that tag's release.
 CI builds Linux (full suite under Xvfb + Mesa), Windows (both raylib modes) and macOS.
 Building on the original stripped-VS development machine is described in
 [docs/local-toolchain.md](docs/local-toolchain.md).
