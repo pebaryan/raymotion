@@ -19,6 +19,7 @@
 #include "rmtn/preview.hpp"
 #include "rmtn/render.hpp"
 #include "rmtn/media.hpp"
+#include "rmtn/prefab.hpp"
 
 #ifdef _WIN32
 #define popen _popen
@@ -153,6 +154,7 @@ void usage() {
     puts("                        --png-frames writes a PNG sequence instead (no ffmpeg)");
     puts("  raymotion still   <name> --at FRAME [--png PATH] write one PNG frame");
     puts("  raymotion props   <name>                        print the default props (JSON)");
+    puts("  raymotion prefabs                               list prefabs and their default props");
     puts("options: --ffmpeg PATH overrides auto-detected ffmpeg binary");
     puts("         --ss N        supersampling 1, 2 or 4 (default: the composition's)");
     puts("         --props JSON  input props merged over the defaults; @file.json reads a file");
@@ -167,6 +169,12 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
             printf("%-22s %dx%d @%dfps  %.1fs  audio=%d\n", c.name.c_str(), c.w, c.h, c.fps,
                    (double)c.duration / c.fps, (int)media::hasAudio(c));
         }
+        return 0;
+    }
+    if (!strcmp(mode, "prefabs")) {
+        Registry comps; registerAll(comps);   // registration also fills the prefab registry
+        for (const auto& n : prefab::names())
+            printf("%-22s %s\n", n.c_str(), prefab::get(n).defaultProps.dump().c_str());
         return 0;
     }
     if (!strcmp(mode, "help") || !mode[0]) { usage(); return 1; }

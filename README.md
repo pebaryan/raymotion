@@ -40,6 +40,7 @@ build/raymotion preview <name>                 # live window; esc or close quits
 build/raymotion render  <name> [--crf N] [--draft] [--no-music] [--png-frames] [--ss N]
 build/raymotion still   <name> --at FRAME [--png PATH] [--ss N]
 build/raymotion props   <name>                 # print the default props as JSON
+build/raymotion prefabs                        # list prefabs and their default props
 # any command:  --props '{"title": "Hi"}'  or  --props @props.json
 ```
 
@@ -126,6 +127,18 @@ c.defaultProps = Json::parse(R"({"title": "Hello", "accent": "#47dad8"})");
 c.build = [](Comp& c, const Json& props) {
     /* read props.str("title", ""), props.color("accent", WHITE), ...; fill c.roots */
 };
+
+// Prefabs: named, parameterized subtree builders, registered once and instantiated
+// anywhere (Remotion-style components). The caller owns timing; props merge over the
+// prefab's defaults exactly like a composition's.
+prefab::add({ "card", Json::parse(R"({"accent": "#47dad8", "delay": 0})"),
+              [](TNode& n, const Json& p) {
+                  n.up = [d = p.integer("delay", 0)](int t, NodeProps& pr) {
+                      pr.opacity = (float)interpolate(t - d, { 0, 15 }, { 0, 1 }, clamped());
+                  };
+                  /* fill n.kids, add audio, isolate() a layer, ... */
+              } });
+prefab::use(root, 30, 60, "card", Json{{"title", "Fast"}});   // root->add(30, 60) + apply
 ```
 
 ### GPU 3D
@@ -188,8 +201,9 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
 * `rmtn/scene3d.hpp` — `g3d::` GPU scenes: geometry, models, materials, lights, shadows,
   environments, cameras with depth of field.
 * `rmtn/json.hpp` — `Json` values for props (parse, typed lookups with fallbacks, merge).
+* `rmtn/prefab.hpp` — `prefab::add/use`: registered, parameterized subtree builders.
 * `rmtn/synth.hpp` — sine-sum note events + envelopes -> WAV soundtrack.
-* `rmtn/cli.hpp` — `runCli`: list / preview / render / still / props.
+* `rmtn/cli.hpp` — `runCli`: list / preview / render / still / props / prefabs.
 
 ## Showcase
 

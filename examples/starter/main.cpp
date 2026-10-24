@@ -1,5 +1,5 @@
 // Minimal raymotion project: one composition, rendered through the engine CLI.
-//   starter list | preview hello | render hello | still hello --at 45 | props promo
+//   starter list | preview hello | render hello | still hello --at 45 | props promo | prefabs
 #include "rmtn/raymotion.hpp"
 
 using namespace rmtn;
@@ -11,7 +11,7 @@ using namespace rmtn;
 //   starter render promo --props @promo.json
 static void buildPromo(Comp& c, const Json& props) {
     const Color accent = props.color("accent", mkColor(0x47dad8));
-    const Color ink = mkColor(0xf2f4ff), panel = mkColor(0x1b2638), bg = c.background;
+    const Color ink = mkColor(0xf2f4ff), bg = c.background;
     const std::string title = props.str("title", "raymotion");
     const std::string tagline = props.str("tagline", "");
     std::vector<std::string> features;
@@ -52,7 +52,8 @@ static void buildPromo(Comp& c, const Json& props) {
         dr::textBox(cx, tagline, rows[1], small);
     };
 
-    // 2. Features: one card per entry in a grid, springing in one after another.
+    // 2. Features: one card per entry in a grid, springing in one after another. Each
+    //    card is an instance of the "feature-card" prefab registered below.
     ts.transition(Transition::slide(18, Direction::FromRight));
     TNode* list = ts.add(scene);
     list->fn = backdrop(mkColor(0x0c1220));
@@ -61,24 +62,13 @@ static void buildPromo(Comp& c, const Json& props) {
     auto cells = layout::grid(frame, cols, gridRows, 32);
     for (int i = 0; i < (int)features.size(); i++) {
         const Rectangle cell = cells[(size_t)i];
-        TNode* card = list->add(0, scene);
-        card->props.pos = layout::center(cell);
-        card->up = [fps, i](int t, NodeProps& p) {
-            SpringOptions o;
-            o.fps = fps; o.delay = 10 + i * 5; o.config.damping = 12;
-            double k = spring(t, o);
-            p.scale = (float)k;
-            p.opacity = (float)std::min(1.0, k);
-        };
-        card->fn = [=, text = features[(size_t)i]](const Ctx& cx, int) {
-            const float w = cell.width, h = cell.height;
-            dr::roundRect(cx, -w / 2, -h / 2, w, h, 24, panel);
-            dr::rect(cx, -w / 2, -h / 2, 10, h, accent);
-            TextStyle st;
-            st.font = fonts::ui(true); st.size = 44; st.color = ink;
-            st.align = Align::Center; st.valign = Align::Center;
-            dr::textBox(cx, text, layout::inset({ -w / 2, -h / 2, w, h }, 24), st);
-        };
+        Json card;
+        card.set("text", features[(size_t)i]);
+        card.set("delay", 10 + i * 5);
+        card.set("w", (double)cell.width);
+        card.set("h", (double)cell.height);
+        card.set("fps", fps);
+        prefab::use(list, 0, scene, "feature-card", std::move(card))->props.pos = layout::center(cell);
     }
 
     // 3. Outro: the tagline under a ring, wiped in, fading out at the end.
@@ -102,6 +92,39 @@ static void buildPromo(Comp& c, const Json& props) {
 }
 
 static void registerComps(Registry& out) {
+    // A reusable building block: one feature card with a spring entrance, parameterized
+    // by props (text, delay, size, colours). Registered once, instantiated by "promo"
+    // once per feature, and listed by `starter prefabs`.
+    prefab::add({
+        "feature-card",
+        Json::parse(R"({
+            "text": "", "delay": 0, "fps": 30, "w": 400, "h": 200,
+            "panel": "#1b2638", "ink": "#f2f4ff", "accent": "#47dad8"
+        })"),
+        [](TNode& card, const Json& p) {
+            const float w = (float)p.num("w", 400), h = (float)p.num("h", 200);
+            const int delay = p.integer("delay", 0), fps = p.integer("fps", 30);
+            const Color panel = p.color("panel", mkColor(0x1b2638));
+            const Color ink = p.color("ink", mkColor(0xf2f4ff));
+            const Color accent = p.color("accent", mkColor(0x47dad8));
+            card.up = [fps, delay](int t, NodeProps& pr) {
+                SpringOptions o;
+                o.fps = fps; o.delay = delay; o.config.damping = 12;
+                double k = spring(t, o);
+                pr.scale = (float)k;
+                pr.opacity = (float)std::min(1.0, k);
+            };
+            card.fn = [w, h, panel, ink, accent, text = p.str("text", "")](const Ctx& cx, int) {
+                dr::roundRect(cx, -w / 2, -h / 2, w, h, 24, panel);
+                dr::rect(cx, -w / 2, -h / 2, 10, h, accent);
+                TextStyle st;
+                st.font = fonts::ui(true); st.size = 44; st.color = ink;
+                st.align = Align::Center; st.valign = Align::Center;
+                dr::textBox(cx, text, layout::inset({ -w / 2, -h / 2, w, h }, 24), st);
+            };
+        },
+    });
+
     Comp c;
     c.name = "hello"; c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90;
     c.background = mkColor(0x101826);

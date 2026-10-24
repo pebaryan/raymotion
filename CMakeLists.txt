@@ -62,7 +62,8 @@ add_library(rmtn_engine STATIC
   src/engine/layout.cpp
   src/engine/json.cpp
   src/engine/scene3d.cpp
-  src/engine/media.cpp)
+  src/engine/media.cpp
+  src/engine/prefab.cpp)
 add_library(raymotion::engine ALIAS rmtn_engine)
 target_include_directories(rmtn_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 # Single-header decoders (stb_image, nanosvg), compiled privately into media.cpp.
@@ -115,6 +116,10 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   add_executable(raymotion_media_tests tests/media_tests.cpp)
   target_link_libraries(raymotion_media_tests PRIVATE rmtn_engine)
   add_test(NAME media COMMAND raymotion_media_tests)
+
+  add_executable(raymotion_prefab_tests tests/prefab_tests.cpp)
+  target_link_libraries(raymotion_prefab_tests PRIVATE rmtn_engine)
+  add_test(NAME prefab COMMAND raymotion_prefab_tests)
 
   # Here-There layouts are designed for Segoe UI: exit 77 (skipped) where it is absent.
   add_executable(raymotion_plain_tests tests/ht_plain_tests.cpp)
