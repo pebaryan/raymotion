@@ -18,6 +18,7 @@ void registerFxSeries(Registry& out);
 void registerGpuScene(Registry& out);
 void registerPrefabs(Registry& out);
 void registerAspFeed(Registry& out);
+void registerTokenStory(Registry& out);
 void registerOwnCompute(Registry& out);
 void registerPromo(Registry& out);
 
@@ -368,6 +369,7 @@ register_ht_plain(out);
 register_ht_feed(out);
 registerPrefabs(out);
 registerAspFeed(out);
+registerTokenStory(out);
 registerOwnCompute(out);
 registerPromo(out);
 } // register_scenes
