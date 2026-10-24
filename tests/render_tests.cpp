@@ -110,6 +110,26 @@ int main() {
     try { rmtn::fonts::load({"no-such-font-file.ttf"}); } catch(const std::exception&){ threw=true; }
     expect(threw,"missing font is an error, not a silent fallback");
 
+    // Rotated text turns the same way as the shapes beside it (mapP: clockwise on screen
+    // for positive degrees) and pivots on its anchor.
+    {
+        rmtn::Comp tilt; tilt.w=320; tilt.h=240; tilt.duration=1; tilt.background=BLACK;
+        auto* tn=rmtn::addRoot(tilt.roots,0,1);
+        tn->props.pos={160,120}; tn->props.rot=30;
+        tn->fn=[](const rmtn::Ctx& cx,int){
+            rmtn::dr::text(rmtn::fonts::ui(true),cx,"MMMMMMMMMM",{0,0},40,0,WHITE,0.5,0.5);
+        };
+        rmtn::Canvas canvas; canvas.load(320,240,1);
+        rmtn::presentFrame(tilt,0,canvas);
+        Image img=readOutput(canvas);
+        auto lit=[&](int cx,int cy){ int s=0; for(int y=cy-6;y<=cy+6;++y) for(int x=cx-6;x<=cx+6;++x) s+=GetImageColor(img,x,y).r; return s; };
+        const int down=lit(160+87,120+50), up=lit(160+87,120-50);   // 100 px along +-30 degrees
+        std::printf("rotated text: along rotation=%d mirrored=%d\n",down,up);
+        expect(down>20*255 && up<5*255,"rotated text follows ctx rotation");
+        expect(lit(160,120)>20*255,"rotated text pivots on its anchor");
+        UnloadImage(img); canvas.unload();
+    }
+
     // Read the actual GL uniform state, not merely whether the shader compiled.
     rmtn::fxEnsure(320,240);
     rmtn::grainOverlay(0.25f,320,240,0.35f,3);

@@ -130,16 +130,15 @@ static inline void star(const Ctx& c, V2 ctr, float rOut, float rIn, int points,
     }
     fillPoly(c, pts.data(), (int)pts.size(), col);
 }
-// text: rotation follows accumulated ctx rotation; fontSize/spacing scale with ctx.
+// text: rotation follows accumulated ctx rotation (same sense as mapP, about the anchor);
+// fontSize/spacing scale with ctx.
 // `anchor`: 0 = top-left as raylib, 0.5 = center-ish on X (uses MeasureTextEx).
 static void text(Font font, const Ctx& c, const char* str, V2 pos, float fontSize, float spacing,
                  Color col, double anchorX = 0.0, double anchorY = 0.0) {
     Vector2 m = MeasureTextEx(font, str, fontSize * c.s, spacing * c.s);
-    Vector2 at = mapP(c, pos);
-    // measure is in already-scaled px; unscale the anchor offset back into screen space
-    at.x -= (float)anchorX * m.x;
-    at.y -= (float)anchorY * m.y;
-    DrawTextPro(font, str, at, { 0, 0 }, -c.rot, fontSize * c.s, spacing * c.s, TA(c, col));
+    // measure is in already-scaled px, so the anchor is a screen-space pivot
+    Vector2 origin{ (float)anchorX * m.x, (float)anchorY * m.y };
+    DrawTextPro(font, str, mapP(c, pos), origin, c.rot, fontSize * c.s, spacing * c.s, TA(c, col));
 }
 static Vector2 measure(Font font, const char* str, float fontSize, float spacing) {
     return MeasureTextEx(font, str, fontSize, spacing);
