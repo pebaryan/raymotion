@@ -13,3 +13,5 @@
 #include "scene3d.hpp"
 #include "media.hpp"
 #include "prefab.hpp"
+#include "diagram.hpp"
+#include "chem.hpp"

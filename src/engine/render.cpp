@@ -213,6 +213,11 @@ void restoreBlend() {
 
 int frameRate() { return currentFps; }
 float canvasScale() { return targets.empty() ? 1.f : targets.back().scale; }
+Vector2 canvasSize() {
+    if (targets.empty()) return { 0, 0 };
+    const Target& t = targets.back();
+    return { t.rt.texture.width / t.scale, t.rt.texture.height / t.scale };
+}
 
 void presentFrame(Comp& c, int frame, Canvas& canvas) {
     currentFps = c.fps;

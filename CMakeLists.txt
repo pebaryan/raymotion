@@ -65,7 +65,13 @@ add_library(rmtn_engine STATIC
   src/engine/json.cpp
   src/engine/scene3d.cpp
   src/engine/media.cpp
-  src/engine/prefab.cpp)
+  src/engine/prefab.cpp
+  src/engine/diagram_layout.cpp
+  src/engine/diagram_parse.cpp
+  src/engine/diagram_draw.cpp
+  src/engine/bpmn.cpp
+  src/engine/chem.cpp
+  src/engine/chem3d.cpp)
 add_library(raymotion::engine ALIAS rmtn_engine)
 target_include_directories(rmtn_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 # Single-header decoders (stb_image, nanosvg), compiled privately into media.cpp.
@@ -89,7 +95,8 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/tokens.cpp
     examples/showcase/own_compute.cpp
     examples/showcase/promo.cpp
-    examples/showcase/npr.cpp)
+    examples/showcase/npr.cpp
+    examples/showcase/diagrams.cpp)
   target_link_libraries(raymotion PRIVATE rmtn_engine)
 
   add_executable(raymotion_starter examples/starter/main.cpp)
@@ -107,6 +114,9 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   add_executable(raymotion_anim_tests tests/anim_tests.cpp)
   target_link_libraries(raymotion_anim_tests PRIVATE rmtn_engine)
   add_test(NAME anim_semantics COMMAND raymotion_anim_tests)
+  add_executable(raymotion_diagram_tests tests/diagram_tests.cpp)
+  target_link_libraries(raymotion_diagram_tests PRIVATE rmtn_engine)
+  add_test(NAME diagram_parsing COMMAND raymotion_diagram_tests)
 
   # The rest need an OpenGL 3.3 context (label "gl"; on headless Linux run under xvfb).
   add_executable(raymotion_render_tests tests/render_tests.cpp)
@@ -129,6 +139,10 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   target_link_libraries(raymotion_prefab_tests PRIVATE rmtn_engine)
   add_test(NAME prefab COMMAND raymotion_prefab_tests)
 
+  add_executable(raymotion_diagram_render_tests tests/diagram_render_tests.cpp)
+  target_link_libraries(raymotion_diagram_render_tests PRIVATE rmtn_engine)
+  add_test(NAME diagram_rendering COMMAND raymotion_diagram_render_tests)
+
   # Here-There layouts are designed for Segoe UI: exit 77 (skipped) where it is absent.
   add_executable(raymotion_plain_tests tests/ht_plain_tests.cpp)
   target_link_libraries(raymotion_plain_tests PRIVATE rmtn_engine)
@@ -139,7 +153,7 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   target_compile_definitions(raymotion_feed_tests PRIVATE RAYMOTION_FEED_STATE=1 RAYMOTION_FEED_RENDER=1)
   add_test(NAME ht_feed COMMAND raymotion_feed_tests)
 
-  set_tests_properties(renderer_regressions layer_compositing scene3d media ht_plain_layout ht_feed PROPERTIES LABELS gl SKIP_RETURN_CODE 77)
+  set_tests_properties(renderer_regressions layer_compositing scene3d media diagram_rendering ht_plain_layout ht_feed PROPERTIES LABELS gl SKIP_RETURN_CODE 77)
 
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND)

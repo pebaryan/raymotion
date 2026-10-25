@@ -1,0 +1,19 @@
+// The build pipeline with linting, integration tests and a staged release.
+digraph pipeline {
+  rankdir=LR;
+  node [shape=box style="rounded"];
+  checkout [label="Checkout"];
+  lint [label="Lint"];
+  build [label="Build"];
+  test [label="Unit tests"];
+  itest [label="Integration\ntests"];
+  subgraph cluster_release {
+    label="Release";
+    stage [label="Staging"];
+    prod [label="Production" shape=doubleoctagon];
+  }
+  checkout -> lint -> build;
+  checkout -> build -> test -> stage;
+  build -> itest -> stage;
+  stage -> prod [label="approve" style=dashed];
+}

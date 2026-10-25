@@ -22,6 +22,7 @@ void registerTokenStory(Registry& out);
 void registerOwnCompute(Registry& out);
 void registerPromo(Registry& out);
 void registerNpr(Registry& out);
+void registerDiagrams(Registry& out);
 
 void register_scenes(Registry& out) {
 using namespace dr;
@@ -374,5 +375,6 @@ registerTokenStory(out);
 registerOwnCompute(out);
 registerPromo(out);
 registerNpr(out);
+registerDiagrams(out);
 } // register_scenes
 } // namespace rmtn

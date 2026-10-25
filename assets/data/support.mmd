@@ -1,0 +1,13 @@
+%% A support ticket's path, from report to resolution.
+flowchart LR
+  report([Customer reports a bug]) --> triage{Reproducible?}
+  triage -- no --> ask[Ask for details] -.-> report
+  triage -- yes --> sev{Severity}
+  subgraph eng [Engineering]
+    fix[Write a fix] --> review[[Code review]] --> deploy[(Deploy)]
+  end
+  sev -->|high| fix
+  sev -->|low| backlog[Backlog] --> fix
+  deploy --> close((Closed))
+  classDef start fill:#dff3e4,stroke:#2f8f4e
+  class report,close start

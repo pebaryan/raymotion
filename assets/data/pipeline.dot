@@ -1,0 +1,9 @@
+// A build pipeline; pipeline-full.dot adds the release stages.
+digraph pipeline {
+  rankdir=LR;
+  node [shape=box style="rounded"];
+  checkout [label="Checkout"];
+  build [label="Build"];
+  test [label="Unit tests"];
+  checkout -> build -> test;
+}

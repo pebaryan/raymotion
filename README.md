@@ -245,6 +245,53 @@ art->add(0, 300)->fn = g3d::draw(scene);      // 2D drawn in `art` gets the wash
 `npr-styles` shows one still life in eight styles (Standard, Toon, Toon + ink, Gooch,
 Hatching, Watercolour, Comic halftone, Poster) and then six of them side by side.
 
+### Diagrams and structures
+
+Existing diagrams and structures load from their own file formats, lay themselves out
+(built in, no Graphviz needed) and animate on the timeline.
+
+```cpp
+auto d = dg::Diagram::make(dg::load("data/support.mmd"));   // .mmd .dot .bpmn .ttl .jsonld .json .nwk
+d->build(0, 6, 18);                           // nodes pop in flow order, edges draw on
+d->trace(90, 60, {"report", "triage", "fix", "close"});   // a pulse runs the path, lights it
+d->flow(160, 90, {"fix"}, 3);                 // packets along a node's out-edges
+d->dim(260, 20, {"triage", "fix"});          // fade everything else back
+d->focus(260, 40, {"triage"}, 2);             // the camera glides in; {} returns
+d->morph(320, 40, dg::load("data/v2.mmd"));   // matching ids move, new ones fade in
+addRoot(c.roots, 0, 400)->fn = dg::draw(d, {80, 40, 1760, 760});
+
+auto mol = chem::Depiction::make(chem::smiles("CN1C=NC2=C1C(=O)N(C(=O)N2C)C"));
+mol->build(0).highlight(60, 20, chem::find(mol->molecule, "C=O")[0]);
+g3d::Object3D* ball = chem::addMolecule(*scene, chem::loadMolecule("data/caffeine.sdf"));
+g3d::Object3D* prot = chem::addCartoon(*scene, chem::loadProtein("data/1crn.pdb"));
+chem::buildIn(prot, 0, 2, 10);                // grows residue by residue
+```
+
+* **Formats** (`dg::`): Mermaid flowcharts (every node shape, link styles and labels,
+  subgraphs, `classDef`/`class`/`style`/`linkStyle`) and state diagrams; Graphviz DOT
+  (attributes, default scopes, clusters, `rankdir`, `pos`); BPMN 2.0 XML (pools and lanes,
+  events with their definitions, gateways, typed tasks, sub-processes, data objects,
+  message flows), drawn where its diagram interchange puts it; RDF as Turtle, N-Triples
+  or JSON-LD (labels from `rdfs:label` and friends, colours by `rdf:type`, literals as
+  nodes or data); plain JSON and Cytoscape graphs; Newick trees.
+* **Layout** (`dg::layout`): layered (Sugiyama: cycle breaking, crossing reduction,
+  groups kept together, edge labels in their own slots, curved routes) for flowcharts;
+  stress-majorisation force layout for graphs; tidy and radial trees with branch lengths
+  for phylogenies. Positions from the file (BPMN, DOT `pos`) are kept.
+* **Themes**: `light`, `dark`, `blueprint` and `bpmn` (bpmn.io's look), or set fonts,
+  colours, stroke widths and a palette for node kinds yourself.
+* **Chemistry** (`chem::`): SMILES (aromatic rings kekulised, implicit hydrogens), MOL /
+  SDF V2000 and V3000, PDB; ring perception, formulas, masses and substructure search;
+  2D skeletal formulas (ring templates, coloured heteroatoms, wedges) that build and
+  highlight; 3D ball-and-stick, sticks and space-filling models (with a rough embedding
+  when the file has no 3D coordinates); protein cartoons with helix ribbons, strand
+  arrows and coil tubes, coloured as a rainbow, by chain or by structure.
+
+`diagrams` walks through a Mermaid flowchart, a DOT graph morphing into a bigger one, a
+BPMN process with a token run, a knowledge graph with focus and dimming, a phylogeny,
+caffeine in 2D and 3D and the crambin protein. The sample files are in `assets/data/`
+(crambin from the RCSB PDB and caffeine from PubChem, both public domain).
+
 ### Engine pieces
 
 * `rmtn/timeline.hpp` — `Comp`, the node tree (start/duration, `up` animates props,
@@ -263,6 +310,10 @@ Hatching, Watercolour, Comic halftone, Poster) and then six of them side by side
 * `rmtn/layout.hpp` — `layout::` rects, rows, columns, grids; `wrapText`, `dr::textBox`.
 * `rmtn/scene3d.hpp` — `g3d::` GPU scenes: geometry, models, materials (physically based
   or toon/Gooch/hatch), lights, shadows, environments, ink lines, cameras with depth of field.
+* `rmtn/diagram.hpp` — `dg::` graphs from Mermaid, DOT, BPMN, RDF, JSON and Newick;
+  layered, force and tree layouts; `Diagram` animations (build, trace, flow, morph, focus).
+* `rmtn/chem.hpp` — `chem::` molecules (SMILES, MOL/SDF, PDB), skeletal formulas, 3D
+  ball-and-stick and protein cartoons.
 * `rmtn/json.hpp` — `Json` values for props (parse, typed lookups with fallbacks, merge).
 * `rmtn/prefab.hpp` — `prefab::add/use`: registered, parameterized subtree builders.
 * `rmtn/synth.hpp` — sine-sum note events + envelopes -> WAV soundtrack.
@@ -287,6 +338,7 @@ here-there-feed        1080x1350 @30fps   88.0s  music=0   (portrait feed cut, S
 own-your-compute       1920x1080 @30fps   66.0s  audio=1   (story film: GPU 3D, particles, glitch; all assets from code)
 raymotion-promo        1920x1080 @60fps  210.0s  audio=1   (YouTube introduction: how it works, 16 features, credits)
 npr-styles             1920x1080 @30fps   53.8s  audio=0   (non-photorealistic rendering: eight illustration styles)
+diagrams               1920x1080 @30fps   56.0s  audio=0   (flowcharts, DOT, BPMN, knowledge graphs, trees, molecules, proteins)
 ```
 
 `raymotion-promo` is the 3.5-minute introduction to the engine
@@ -321,7 +373,10 @@ skybox, depth of field, viewports, transparency, hierarchy, OBJ and a generated 
 glTF, determinism, toon/Gooch/hatch shading, ink lines in layers, viewports and at 2x,
 boiling wobble); renderer regressions (supersampling edge levels
 and coordinates, concave fills, fonts, FX shader uniforms, determinism, shutdown);
-Here-There layout checks; and a Python CLI suite (exact sizes, draft scaling, stale-frame
+diagram parsing and layout (Mermaid, DOT, BPMN, Turtle, JSON-LD, JSON, Newick; layered,
+force and tree layouts; SMILES, SDF and PDB, rings, formulas, substructures, depictions;
+no window) and diagram rendering (build-up, highlights, traces, morphs, BPMN, skeletal
+formulas, 3D molecules and cartoons); Here-There layout checks; and a Python CLI suite (exact sizes, draft scaling, stale-frame
 cleanup, a real MP4 render, the starter project, props). Tests needing OpenGL carry the `gl`
 label (`ctest -LE gl` skips them on headless machines).
 

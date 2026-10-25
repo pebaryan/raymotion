@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- An online order: checked in sales, packed and booked in parallel by the warehouse. -->
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                  xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  id="order-definitions" targetNamespace="http://example.org/order">
+  <bpmn:collaboration id="collab">
+    <bpmn:participant id="shop" name="Online shop" processRef="order"/>
+    <bpmn:participant id="customer" name="Customer"/>
+    <bpmn:messageFlow id="m_order" sourceRef="customer" targetRef="received"/>
+    <bpmn:messageFlow id="m_declined" sourceRef="notify" targetRef="customer"/>
+    <bpmn:messageFlow id="m_shipped" sourceRef="shipped" targetRef="customer"/>
+  </bpmn:collaboration>
+  <bpmn:process id="order" isExecutable="false">
+    <bpmn:laneSet id="lanes">
+      <bpmn:lane id="sales" name="Sales">
+        <bpmn:flowNodeRef>received</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>check</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>stock</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>notify</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>declined</bpmn:flowNodeRef>
+      </bpmn:lane>
+      <bpmn:lane id="warehouse" name="Warehouse">
+        <bpmn:flowNodeRef>split</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>pack</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>courier</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>join</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>ship</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>shipped</bpmn:flowNodeRef>
+      </bpmn:lane>
+    </bpmn:laneSet>
+    <bpmn:startEvent id="received" name="Order received"><bpmn:messageEventDefinition/></bpmn:startEvent>
+    <bpmn:userTask id="check" name="Check order"/>
+    <bpmn:exclusiveGateway id="stock" name="In stock?"/>
+    <bpmn:sendTask id="notify" name="Notify customer"/>
+    <bpmn:endEvent id="declined" name="Order declined"/>
+    <bpmn:parallelGateway id="split"/>
+    <bpmn:manualTask id="pack" name="Pack items"/>
+    <bpmn:serviceTask id="courier" name="Book courier"/>
+    <bpmn:parallelGateway id="join"/>
+    <bpmn:task id="ship" name="Hand over parcel"/>
+    <bpmn:endEvent id="shipped" name="Order shipped"><bpmn:messageEventDefinition/></bpmn:endEvent>
+    <bpmn:sequenceFlow id="f1" sourceRef="received" targetRef="check"/>
+    <bpmn:sequenceFlow id="f2" sourceRef="check" targetRef="stock"/>
+    <bpmn:sequenceFlow id="f3" name="no" sourceRef="stock" targetRef="notify"/>
+    <bpmn:sequenceFlow id="f4" sourceRef="notify" targetRef="declined"/>
+    <bpmn:sequenceFlow id="f5" name="yes" sourceRef="stock" targetRef="split"/>
+    <bpmn:sequenceFlow id="f6" sourceRef="split" targetRef="pack"/>
+    <bpmn:sequenceFlow id="f7" sourceRef="split" targetRef="courier"/>
+    <bpmn:sequenceFlow id="f8" sourceRef="pack" targetRef="join"/>
+    <bpmn:sequenceFlow id="f9" sourceRef="courier" targetRef="join"/>
+    <bpmn:sequenceFlow id="f10" sourceRef="join" targetRef="ship"/>
+    <bpmn:sequenceFlow id="f11" sourceRef="ship" targetRef="shipped"/>
+  </bpmn:process>
+  <bpmndi:BPMNDiagram id="diagram">
+    <bpmndi:BPMNPlane id="plane" bpmnElement="collab">
+      <bpmndi:BPMNShape id="shop_di" bpmnElement="shop" isHorizontal="true"><dc:Bounds x="100" y="80" width="960" height="400"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="sales_di" bpmnElement="sales" isHorizontal="true"><dc:Bounds x="130" y="80" width="930" height="200"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="warehouse_di" bpmnElement="warehouse" isHorizontal="true"><dc:Bounds x="130" y="280" width="930" height="200"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="customer_di" bpmnElement="customer" isHorizontal="true"><dc:Bounds x="100" y="530" width="960" height="70"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="received_di" bpmnElement="received"><dc:Bounds x="180" y="162" width="36" height="36"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="160" y="118" width="76" height="27"/></bpmndi:BPMNLabel></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="check_di" bpmnElement="check"><dc:Bounds x="260" y="140" width="100" height="80"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="stock_di" bpmnElement="stock" isMarkerVisible="true"><dc:Bounds x="410" y="155" width="50" height="50"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="410" y="125" width="50" height="14"/></bpmndi:BPMNLabel></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="notify_di" bpmnElement="notify"><dc:Bounds x="520" y="140" width="100" height="80"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="declined_di" bpmnElement="declined"><dc:Bounds x="700" y="162" width="36" height="36"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="680" y="205" width="76" height="27"/></bpmndi:BPMNLabel></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="split_di" bpmnElement="split"><dc:Bounds x="410" y="355" width="50" height="50"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="pack_di" bpmnElement="pack"><dc:Bounds x="520" y="295" width="100" height="70"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="courier_di" bpmnElement="courier"><dc:Bounds x="520" y="395" width="100" height="70"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="join_di" bpmnElement="join"><dc:Bounds x="693" y="355" width="50" height="50"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="ship_di" bpmnElement="ship"><dc:Bounds x="800" y="340" width="100" height="80"/></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="shipped_di" bpmnElement="shipped"><dc:Bounds x="962" y="362" width="36" height="36"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="944" y="320" width="72" height="27"/></bpmndi:BPMNLabel></bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="f1_di" bpmnElement="f1"><di:waypoint x="216" y="180"/><di:waypoint x="260" y="180"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="f2_di" bpmnElement="f2"><di:waypoint x="360" y="180"/><di:waypoint x="410" y="180"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="f3_di" bpmnElement="f3"><di:waypoint x="460" y="180"/><di:waypoint x="520" y="180"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="475" y="160" width="20" height="14"/></bpmndi:BPMNLabel></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="f4_di" bpmnElement="f4"><di:waypoint x="620" y="180"/><di:waypoint x="700" y="180"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="f5_di" bpmnElement="f5"><di:waypoint x="435" y="205"/><di:waypoint x="435" y="355"/>
+        <bpmndi:BPMNLabel><dc:Bounds x="442" y="250" width="24" height="14"/></bpmndi:BPMNLabel></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="f6_di" bpmnElement="f6"><di:waypoint x="460" y="380"/><di:waypoint x="490" y="380"/><di:waypoint x="490" y="330"/><di:waypoint x="520" y="330"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="f7_di" bpmnElement="f7"><di:waypoint x="460" y="380"/><di:waypoint x="490" y="380"/><di:waypoint x="490" y="430"/><di:waypoint x="520" y="430"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="f8_di" bpmnElement="f8"><di:waypoint x="620" y="330"/><di:waypoint x="718" y="330"/><di:waypoint x="718" y="355"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="f9_di" bpmnElement="f9"><di:waypoint x="620" y="430"/><di:waypoint x="718" y="430"/><di:waypoint x="718" y="405"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="f10_di" bpmnElement="f10"><di:waypoint x="743" y="380"/><di:waypoint x="800" y="380"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="f11_di" bpmnElement="f11"><di:waypoint x="900" y="380"/><di:waypoint x="962" y="380"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="m_order_di" bpmnElement="m_order"><di:waypoint x="198" y="530"/><di:waypoint x="198" y="198"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="m_declined_di" bpmnElement="m_declined"><di:waypoint x="590" y="220"/><di:waypoint x="590" y="250"/><di:waypoint x="650" y="250"/><di:waypoint x="650" y="530"/></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="m_shipped_di" bpmnElement="m_shipped"><di:waypoint x="980" y="398"/><di:waypoint x="980" y="530"/></bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>

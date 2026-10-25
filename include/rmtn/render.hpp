@@ -47,6 +47,9 @@ void applyFilter(const Filter& f, const RenderTexture& src, const RenderTexture&
 // Outside it: 30 and 1.
 int frameRate();
 float canvasScale();
+// While presentFrame runs: the size of the current target in composition units (the
+// composition's size); outside it, {0, 0}.
+Vector2 canvasSize();
 
 // GL-owning code registers a release callback; shutdownGraphics() runs them all (then
 // unloads cached fonts) and must be called before CloseWindow.

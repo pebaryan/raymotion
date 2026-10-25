@@ -1,0 +1,20 @@
+# A small knowledge graph around Marie Curie (facts from Wikidata, simplified).
+@prefix : <http://example.org/curie/> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+:marie a :Person ; rdfs:label "Marie Curie" ;
+    :spouse :pierre ; :bornIn :warsaw ; :worksAt :sorbonne ;
+    :discovered :polonium , :radium ; :award :physics1903 , :chemistry1911 .
+:pierre a :Person ; rdfs:label "Pierre Curie" ;
+    :bornIn :paris ; :worksAt :sorbonne ; :award :physics1903 .
+:irene a :Person ; rdfs:label "Irène Joliot-Curie" ; :parent :marie , :pierre ; :award :chemistry1935 .
+:becquerel a :Person ; rdfs:label "Henri Becquerel" ; :award :physics1903 .
+:polonium a :Element ; rdfs:label "Polonium" ; :namedAfter :poland .
+:radium a :Element ; rdfs:label "Radium" .
+:warsaw a :City ; rdfs:label "Warsaw" ; :country :poland .
+:paris a :City ; rdfs:label "Paris" .
+:sorbonne a :Institution ; rdfs:label "Sorbonne" ; :locatedIn :paris .
+:poland a :Country ; rdfs:label "Poland" .
+:physics1903 a :Prize ; rdfs:label "Nobel Physics 1903" .
+:chemistry1911 a :Prize ; rdfs:label "Nobel Chemistry 1911" .
+:chemistry1935 a :Prize ; rdfs:label "Nobel Chemistry 1935" .
