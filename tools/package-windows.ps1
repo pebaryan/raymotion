@@ -18,6 +18,8 @@ if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force (Join-Path $stage "licenses") | Out-Null
 Copy-Item $exe $stage
 Copy-Item -Recurse (Join-Path $root "assets") $stage
+Copy-Item (Join-Path $root "LICENSE") (Join-Path $stage "LICENSE.txt")
+Copy-Item (Join-Path $root "NOTICE") (Join-Path $stage "NOTICE.txt")
 Copy-Item (Join-Path $root "third_party/raylib/LICENSE") (Join-Path $stage "licenses/raylib-zlib.txt")
 Copy-Item (Join-Path $root "assets/fonts/Inter-OFL.txt") (Join-Path $stage "licenses/Inter-OFL.txt")
 
@@ -41,6 +43,7 @@ Try it
 
 Keep the assets folder next to raymotion.exe.
 Source, docs and the intro video: https://github.com/pebaryan/raymotion
+Licensed under the Apache License 2.0 (LICENSE.txt); third-party notices in NOTICE.txt and licenses/.
 "@ | Set-Content -Encoding utf8 (Join-Path $stage "README.txt")
 
 $zip = Join-Path $Out "$name.zip"

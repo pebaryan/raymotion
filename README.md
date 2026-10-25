@@ -12,6 +12,12 @@ piped straight into ffmpeg.
 ▶ **[Watch the 3.5-minute introduction on YouTube](https://youtu.be/tcALbxoO9x0)**: how it works,
 the technology underneath, and every feature demonstrated, all rendered by raymotion itself.
 
+It is built for **technical and scientific explainers**: GPU 3D scenes with illustration
+styles, and diagrams, process models, knowledge graphs, molecules and proteins loaded
+from their own file formats and animated step by step. A single native binary often renders
+1080p faster than real time, and coding agents can write videos with the
+[raymotion agent skill](#agent-skill).
+
 ## Build
 
 **Windows binary:** each [release](https://github.com/pebaryan/raymotion/releases) has a
@@ -41,6 +47,20 @@ the Windows zip (`tools/package-windows.ps1`) to that tag's release.
 CI builds Linux (full suite under Xvfb + Mesa), Windows (both raylib modes) and macOS.
 Building on the original stripped-VS development machine is described in
 [docs/local-toolchain.md](docs/local-toolchain.md).
+
+## Agent skill
+
+`skills/raymotion/` teaches coding agents (Claude Code, Codex, Cursor and others that read
+[Agent Skills](https://agentskills.io)) to set up a project, write compositions, check
+them with stills and render them:
+
+```sh
+npx skills add pebaryan/raymotion
+```
+
+It covers the authoring API, 3D and illustration styles, diagrams, molecules and
+proteins, and the rules that keep frames deterministic, with a project template in
+`skills/raymotion/templates/`.
 
 ## Usage
 
@@ -380,5 +400,12 @@ formulas, 3D molecules and cartoons); Here-There layout checks; and a Python CLI
 cleanup, a real MP4 render, the starter project, props). Tests needing OpenGL carry the `gl`
 label (`ctest -LE gl` skips them on headless machines).
 
-Inter is © The Inter Project Authors, SIL Open Font License 1.1
-(`assets/fonts/Inter-OFL.txt`). raylib is zlib-licensed.
+## License
+
+raymotion is licensed under the [Apache License 2.0](LICENSE). Videos you render with it
+are yours: the license covers the engine, not its output.
+
+Third-party parts keep their own licenses (see [NOTICE](NOTICE)): raylib and nanosvg are
+zlib-licensed, stb_image is public domain or MIT, and Inter is © The Inter Project
+Authors under the SIL Open Font License 1.1 (`assets/fonts/Inter-OFL.txt`). The sample
+structures in `assets/data/` are public domain (RCSB PDB, PubChem).
