@@ -515,6 +515,51 @@ convert between the two spaces (for a mini-map, say).
 into an inscription and pulls back out, over a parallax starfield and under a fixed
 mini-map.
 
+### Code
+
+```cpp
+const code::Block before = code::Block::parse(R"(
+function load(url) {
+  return fetch(url).then(res => res.json());
+})", "ts");
+const code::Block after = code::Block::parse(R"(
+async function load(url) {
+  return (await fetch(url)).json();
+})", "ts");
+const code::Morph change(before, after);                           // diff once
+node->fn = [=](const Ctx& cx, int t) {
+    code::Style st;                                                 // theme, size, title bar, line numbers
+    st.title = "load.ts";
+    code::Look look;
+    look.reveal = t * 2.5;                                          // typed in
+    look.cursor = true;
+    if (t < 150) code::draw(cx, before, { 200, 160 }, st, look);
+    else code::draw(cx, change, { 200, 160 }, st, (t - 150) / 60.f);
+};
+```
+
+`code::` draws code blocks for programming explainers, set in the bundled JetBrains Mono:
+
+* **Highlighting:** C, C++, C#, Java, JavaScript, TypeScript, Python, Rust, Go, GLSL,
+  JSON, shell and SQL. Strings and comments that span lines, raw strings, decorators and
+  attributes, calls, members and constants all get their own colour. There are dark (One
+  Dark-like) and light (GitHub-like) themes, or you can write your own `Theme`.
+* **Cards:** a rounded panel with an optional title bar and line numbers. `bounds()` gives
+  its box and `cell(line, col)` the position of any character, for arrows and notes.
+* **Reveals:** `look.reveal` types characters in, with a caret; `look.lines` brings lines
+  in one by one.
+* **Focus:** `look.focus` keeps some lines lit and dims the rest behind a highlight band.
+  `focusFrom` and `focusMix` glide the focus from one range to the next. `Mark`s box or
+  underline a span (`Mark::text(block, line, "mid", colour)`), growing in with `u`.
+* **Changes:** `Morph(before, after)` diffs two versions. Unchanged lines glide to their
+  new places (re-indented lines slide sideways), edited lines keep their common tokens,
+  and the rest fades out and in, with a red or green flash in the gutter. At u = 0 and 1 it
+  draws exactly the two blocks.
+
+`code` types a function in, shows six languages and the light theme, walks through a
+binary search with line focus and notes, and refactors promises into async/await and
+then try/catch.
+
 ### Particles
 
 ```cpp
@@ -582,6 +627,8 @@ alone, out of order or twice with the same result, and costs only its live parti
   spherical geometry.
 * `rmtn/camera.hpp` — `cam::` shots, fits, smooth zooms, keyframed tracks, parallax,
   shake and camera-driven world nodes.
+* `rmtn/code.hpp` — `code::` highlighted code blocks in 13 languages, typewriter and
+  line-by-line reveals, line focus, marks, and morphs between versions.
 * `rmtn/json.hpp` — `Json` values for props (parse, typed lookups with fallbacks, merge).
 * `rmtn/prefab.hpp` — `prefab::add/use`: registered, parameterized subtree builders.
 * `rmtn/synth.hpp` — sine-sum note events + envelopes -> WAV soundtrack.
@@ -614,6 +661,7 @@ plots                  1920x1080 @30fps   40.7s  audio=1   (graphs, tangents, Ri
 charts                 1920x1080 @30fps   58.0s  audio=1   (box plots, violins, histograms, heatmaps, bubbles, radar, gauges, waterfalls, funnels, sunbursts, treemaps, Sankey, chord, streams, contours, parallel coordinates, candles)
 spaces                 1920x1080 @30fps   53.7s  audio=1   (1D to 2D to 3D, projections, surfaces, a torus glued, Möbius and Klein, spherical and hyperbolic geometry, a tesseract)
 camera                 1920x1080 @30fps   28.0s  audio=1   (a 2D camera: glide, fly, turn, shake and zoom over a big canvas, parallax, a HUD mini-map)
+code                   1920x1080 @30fps   35.3s  audio=1   (code blocks: typing, highlighting in many languages, line focus and marks, morphs between versions)
 ```
 
 `raymotion-promo` is the 3.5-minute introduction to the engine
@@ -668,6 +716,9 @@ spaces and the camera (flat and tilted views, depth, projections, meshes, gluing
 Möbius closure, the tesseract, `{p, q}` tilings, isometries, geodesics, spherical angles,
 stereographic projection, shots, fits, blends, smooth zooms, tracks, shake; no window) and
 their rendering (depth order, hidden labels, a camera world with a fixed HUD);
+code (highlighting in each language, tabs and columns, finding text, reveal counts, morph
+matching; no window) and its rendering (token colours, cards, focus, typewriter, morph
+end frames);
 Here-There layout checks; and a Python CLI suite (exact sizes, draft scaling, stale-frame
 cleanup, a real MP4 render, the starter project, props). Tests needing OpenGL carry the `gl`
 label (`ctest -LE gl` skips them on headless machines).

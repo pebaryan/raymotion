@@ -324,6 +324,44 @@ addRoot(c.roots, 0, 300)->fn = [tr](const Ctx& cx, int t) {
 and `Shot::fly(a, b, u, frame)` give the blends directly. Vector paths, formulas and plots
 stay sharp at any zoom; raylib text (`dr::text`) and images go soft past about 2x.
 
+## Code (`code::`, `rmtn/code.hpp`)
+
+Highlighted code cards for programming explainers. Lines are 1-based, columns 0-based.
+Parse blocks and build morphs while registering.
+
+```cpp
+const code::Block v1 = code::Block::parse(R"(
+def area(w, h):
+    return w * h
+)", "python");                                   // cpp c csharp java js ts python rust go glsl json bash sql text
+const code::Block v2 = code::Block::parse(R"(
+def area(w, h, d=1):
+    """Volume, or area when d = 1."""
+    return w * h * d
+)", "python");
+const code::Morph change(v1, v2);                // diff once: kept tokens glide, the rest fades
+node->fn = [=](const Ctx& cx, int t) {
+    code::Style st;                              // theme (Theme::dark()/light()), size, lineHeight, title,
+    st.title = "area.py";                        // lineNumbers, card, padding, radius, columns, diffGutter
+    code::Look look;
+    look.reveal = (t - 10) * 2.0;                // typewriter: characters shown (< 0: all)
+    look.cursor = true;
+    look.t = t;                                  // caret blink once typing stops
+    // look.lines = t / 8.f;                     // or line by line
+    // look.focus = { { 2, 2 } }; look.focusFrom = { { 1, 1 } }; look.focusMix = u; look.dim = 0.25f;
+    // look.marks.push_back(code::Mark::text(v1, 2, "w * h", GOLD));   // .u grows it, .underline
+    const Vector2 at{ 960 - code::bounds(v2, st).width / 2, 200 };    // bounds(): the card's box
+    if (t < 120) code::draw(cx, v1, at, st, look);
+    else code::draw(cx, change, at, st, (t - 120) / 50.f);            // 0 = v1, 1 = v2
+    const Vector2 p = code::cell(v1, st, at, 2, 11);   // top-left of a character, for notes and arrows
+    (void)p;
+};
+```
+
+`Block::chars()` is the reveal count for the whole block (a newline counts one), and
+`Block::find(line, "text")` gives a column range. For a morph, give the card a fixed
+width with `st.columns` so it does not resize, or let it grow from one size to the other.
+
 ## Particles (`fx::`, `rmtn/particles.hpp`)
 
 Emitters are computed per frame from a seed (no simulation state), so they follow the

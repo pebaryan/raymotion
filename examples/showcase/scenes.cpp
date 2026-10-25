@@ -30,6 +30,7 @@ void registerPlots(Registry& out);
 void registerCharts(Registry& out);
 void registerSpaces(Registry& out);
 void registerCamera(Registry& out);
+void registerCode(Registry& out);
 
 void register_scenes(Registry& out) {
 using namespace dr;
@@ -390,5 +391,6 @@ registerPlots(out);
 registerCharts(out);
 registerSpaces(out);
 registerCamera(out);
+registerCode(out);
 } // register_scenes
 } // namespace rmtn

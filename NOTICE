@@ -10,6 +10,8 @@ It includes or bundles third-party components under their own licenses:
 - nanosvg (third_party/nanosvg): zlib license, Copyright (c) Mikko Mononen.
 - Inter font (assets/fonts): SIL Open Font License 1.1, The Inter Project Authors
   (assets/fonts/Inter-OFL.txt).
+- JetBrains Mono font (assets/fonts): SIL Open Font License 1.1, The JetBrains Mono Project
+  Authors (assets/fonts/JetBrainsMono-OFL.txt).
 - Latin Modern Math font (assets/fonts/latinmodern-math.otf): GUST Font License (LPPL 1.3c),
   Copyright (c) 2012-2014 B. Jackowski, P. Strzelczyk and P. Pianowski (GUST e-foundry)
   (assets/fonts/LatinModernMath-GUST-FONT-LICENSE.txt).
