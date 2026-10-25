@@ -81,6 +81,11 @@ uniform mat4 shadowVP[16]; uniform vec4 shadowRect[16]; uniform vec4 shadowParam
 uniform sampler2D envMap; uniform int hasEnv; uniform int envLinear; uniform float envMaxLod;
 uniform float envIntensity; uniform float envRotation; uniform int skybox;
 uniform vec3 fogColor; uniform float fogNear; uniform float fogFar;
+uniform int shading; uniform float pxScale;
+uniform int toonBands; uniform float toonSoftness; uniform float toonHighlight; uniform float toonHighlightSize;
+uniform vec3 rimColor; uniform float rimWidth;
+uniform vec3 goochWarm; uniform vec3 goochCool;
+uniform vec3 hatchInk; uniform float hatchSpacing; uniform float hatchAngle; uniform float hatchWeight;
 out vec4 finalColor;
 
 const float PI = 3.14159265;
@@ -132,6 +137,96 @@ vec3 envBRDF(vec3 spec, float rough, float ndv) {
 
 vec4 encode(vec3 c, float a) { return vec4(pow(clamp(c, 0.0, 1.0), vec3(1.0 / 2.2)), a); }
 
+// Light i at this fragment: `l` points to it and `ndl` is n.l; returns the attenuation
+// times shadow (0 when the light does not reach a front-facing point).
+float lightAt(int i, vec3 n, out vec3 l, out float ndl) {
+    float atten = 1.0;
+    if (lightType[i] == 0) l = -lightDir[i];
+    else {
+        vec3 d = lightPos[i] - fragPos;
+        float dist = length(d);
+        l = d / max(dist, 1e-4);
+        if (lightRange[i] > 0.0) {
+            float k = clamp(1.0 - (dist * dist) / (lightRange[i] * lightRange[i]), 0.0, 1.0);
+            atten = k * k;
+        }
+        if (lightType[i] == 2) atten *= smoothstep(lightCosOuter[i], lightCosInner[i], dot(-l, lightDir[i]));
+    }
+    ndl = dot(n, l);
+    if (ndl <= 0.0 || atten <= 0.0) return 0.0;
+    if (lightShadow[i] >= 0 && receiveShadow == 1) {
+        int tile = lightShadow[i] + (lightType[i] == 1 ? cubeFace(fragPos - lightPos[i]) : 0);
+        atten *= shadowAt(tile, lightBias[i], ndl);
+    }
+    return atten;
+}
+
+// ---- stylised shading
+// x in 0..1 to `toonBands` flat steps; each step's edge ramps over toonSoftness.
+float band(float x) {
+    float b = float(max(toonBands, 1));
+    float f = clamp(x, 0.0, 1.0) * b;
+    float w = max(toonSoftness * b, 1e-3);
+    return min((floor(f) + smoothstep(0.0, w, fract(f))) / b, 1.0);
+}
+vec3 toon(vec3 albedo, vec3 n, vec3 v) {
+    vec3 color = albedo * mix(groundColor, skyColor, 0.5);         // flat ambient: the shadow tone
+    float edge = max(toonSoftness, 0.004);
+    for (int i = 0; i < 8; i++) {
+        if (i >= lightCount) break;
+        vec3 l; float ndl;
+        float a = lightAt(i, n, l, ndl);
+        if (a <= 0.0) continue;
+        color += albedo * lightColor[i] * band(ndl * a);
+        float spot = dot(n, normalize(l + v));
+        float cut = 1.0 - toonHighlightSize * toonHighlightSize;
+        color += lightColor[i] * toonHighlight * smoothstep(cut - edge * 0.25, cut + edge * 0.25, spot) * step(0.5, a);
+    }
+    float r = 1.0 - max(dot(n, v), 0.0);
+    color += rimColor * smoothstep(1.0 - rimWidth - edge, 1.0 - rimWidth + edge, r);
+    return color;
+}
+vec3 gooch(vec3 albedo, vec3 n, vec3 v) {
+    float t = 0.5;
+    float hl = 0.0;
+    if (lightCount > 0) {
+        vec3 l; float ndl;
+        float a = lightAt(0, n, l, ndl);
+        t = (1.0 + (ndl > 0.0 ? ndl * a : ndl)) * 0.5;               // shadowed light reads as the terminator
+        hl = smoothstep(0.93, 0.96, max(dot(reflect(-l, n), v), 0.0)) * step(0.5, a);
+    }
+    vec3 cool = goochCool * 0.55 + albedo * 0.2, warm = goochWarm * 0.45 + albedo * 0.55;
+    return mix(cool, warm, t) + vec3(hl * 0.8);
+}
+// One family of parallel strokes at `ang`, `strength` 0..1 sets their weight.
+float strokes(vec2 p, float ang, float spacing, float strength) {
+    if (strength <= 0.0) return 0.0;
+    vec2 d = vec2(cos(ang), sin(ang));
+    float u = dot(p, vec2(-d.y, d.x)) / spacing;
+    float line = floor(u);
+    u += 0.1 * sin(dot(p, d) * 0.045 + line * 2.3);                 // each stroke wavers a little
+    float dist = abs(fract(u) - 0.5) * spacing;                      // composition px to the stroke centre
+    float width = hatchWeight * (0.35 + 1.25 * strength);
+    float aa = 0.7 / pxScale;
+    return (1.0 - smoothstep(width * 0.5 - aa, width * 0.5 + aa, dist)) * min(strength * 3.0, 1.0);
+}
+vec3 hatch(vec3 albedo, vec3 n) {
+    vec3 lit = mix(groundColor, skyColor, n.y * 0.5 + 0.5);
+    for (int i = 0; i < 8; i++) {
+        if (i >= lightCount) break;
+        vec3 l; float ndl;
+        float a = lightAt(i, n, l, ndl);
+        lit += lightColor[i] * max(ndl, 0.0) * a;
+    }
+    float dark = 1.0 - pow(clamp(dot(lit, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0), 1.0 / 2.2);   // perceived tone
+    vec2 p = gl_FragCoord.xy / pxScale;
+    float ang = radians(hatchAngle);
+    float ink = strokes(p, ang, hatchSpacing, clamp((dark - 0.12) / 0.3, 0.0, 1.0));
+    ink = max(ink, strokes(p, ang + PI * 0.5, hatchSpacing, clamp((dark - 0.45) / 0.25, 0.0, 1.0)));
+    ink = max(ink, strokes(p, ang + PI * 0.25, hatchSpacing * 0.7, clamp((dark - 0.7) / 0.2, 0.0, 1.0)));
+    return mix(albedo, hatchInk, ink);
+}
+
 void main() {
     if (skybox == 1) { finalColor = encode(env(normalize(fragPos - viewPos), 0.0), 1.0); return; }
     vec4 base = texture(texture0, fragTexCoord) * colDiffuse * fragColor;
@@ -140,45 +235,34 @@ void main() {
     vec3 n = normalize(fragNormal);
     if (!gl_FrontFacing) n = -n;
     vec3 v = normalize(viewPos - fragPos);
-    float rough = clamp(roughness, 0.0, 1.0);
-    vec3 specColor = mix(vec3(0.04), albedo, metalness);
-    vec3 diffColor = albedo * (1.0 - metalness);
 
     vec3 color;
-    if (hasEnv == 1) {
-        float ndv = max(dot(n, v), 1e-4);
-        vec3 r = reflect(-v, n);
-        // Blur by mip level, stopping where the image is still about 16 x 8: smaller mips
-        // average the whole sky and ground together.
-        float blurLod = max(envMaxLod - 4.0, 0.0);
-        color = diffColor * env(n, blurLod) + env(r, rough * blurLod) * envBRDF(specColor, rough, ndv);
-    } else color = mix(groundColor, skyColor, n.y * 0.5 + 0.5) * albedo;
+    if (shading == 1) color = toon(albedo, n, v);
+    else if (shading == 2) color = gooch(albedo, n, v);
+    else if (shading == 3) color = hatch(albedo, n);
+    else {
+        float rough = clamp(roughness, 0.0, 1.0);
+        vec3 specColor = mix(vec3(0.04), albedo, metalness);
+        vec3 diffColor = albedo * (1.0 - metalness);
+        if (hasEnv == 1) {
+            float ndv = max(dot(n, v), 1e-4);
+            vec3 r = reflect(-v, n);
+            // Blur by mip level, stopping where the image is still about 16 x 8: smaller mips
+            // average the whole sky and ground together.
+            float blurLod = max(envMaxLod - 4.0, 0.0);
+            color = diffColor * env(n, blurLod) + env(r, rough * blurLod) * envBRDF(specColor, rough, ndv);
+        } else color = mix(groundColor, skyColor, n.y * 0.5 + 0.5) * albedo;
 
-    float shininess = exp2(10.0 * (1.0 - rough) + 1.0);
-    for (int i = 0; i < 8; i++) {
-        if (i >= lightCount) break;
-        vec3 l;
-        float atten = 1.0;
-        if (lightType[i] == 0) l = -lightDir[i];
-        else {
-            vec3 d = lightPos[i] - fragPos;
-            float dist = length(d);
-            l = d / max(dist, 1e-4);
-            if (lightRange[i] > 0.0) {
-                float k = clamp(1.0 - (dist * dist) / (lightRange[i] * lightRange[i]), 0.0, 1.0);
-                atten = k * k;
-            }
-            if (lightType[i] == 2) atten *= smoothstep(lightCosOuter[i], lightCosInner[i], dot(-l, lightDir[i]));
+        float shininess = exp2(10.0 * (1.0 - rough) + 1.0);
+        for (int i = 0; i < 8; i++) {
+            if (i >= lightCount) break;
+            vec3 l; float ndl;
+            float atten = lightAt(i, n, l, ndl);
+            if (atten <= 0.0) continue;
+            vec3 h = normalize(l + v);
+            float spec = pow(max(dot(n, h), 0.0), shininess) * (shininess + 8.0) / 25.1327;
+            color += (diffColor + specColor * spec) * lightColor[i] * atten * ndl;
         }
-        float ndl = dot(n, l);
-        if (ndl <= 0.0 || atten <= 0.0) continue;
-        if (lightShadow[i] >= 0 && receiveShadow == 1) {
-            int tile = lightShadow[i] + (lightType[i] == 1 ? cubeFace(fragPos - lightPos[i]) : 0);
-            atten *= shadowAt(tile, lightBias[i], ndl);
-        }
-        vec3 h = normalize(l + v);
-        float spec = pow(max(dot(n, h), 0.0), shininess) * (shininess + 8.0) / 25.1327;
-        color += (diffColor + specColor * spec) * lightColor[i] * atten * ndl;
     }
     color += emissive;
     if (fogFar > fogNear) {
@@ -224,27 +308,142 @@ void main() {
 }
 )";
 
+// Ink lines, pass 1: per pixel the view-space normal (octahedral, rg), the line style
+// (b, 0 = no lines) and the object id (a, 255 = outside the viewport).
+const char* GBUF_FS = R"(#version 330
+in vec3 fragPos; in vec2 fragTexCoord; in vec3 fragNormal; in vec4 fragColor;
+uniform mat4 matView; uniform float objectId; uniform float lineStyle;
+out vec4 finalColor;
+vec2 octEncode(vec3 n) {
+    n /= abs(n.x) + abs(n.y) + abs(n.z);
+    vec2 e = n.z >= 0.0 ? n.xy : (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    return e * 0.5 + 0.5;
+}
+void main() {
+    vec3 n = normalize(mat3(matView) * normalize(fragNormal));
+    if (!gl_FrontFacing) n = -n;
+    finalColor = vec4(octEncode(n), lineStyle / 255.0, objectId / 255.0);
+}
+)";
+
+// Ink lines, pass 2: a pixel is on a line when, within half the line's width, there is
+// an object boundary, a depth jump the surface's slope does not explain, or a crease.
+// The nearer side owns the edge (its style sets colour and width). Output is straight
+// alpha for the usual "over".
+const char* LINE_FS = R"(#version 330
+in vec2 fragTexCoord; in vec4 fragColor;
+uniform sampler2D texture0; uniform sampler2D depthTex;
+uniform vec2 texel; uniform float zNear; uniform float zFar; uniform int ortho;
+uniform float pixelWorld;              // world size of one target pixel at unit depth (ortho: absolute)
+uniform float pxScale;                 // target px per composition px
+uniform vec4 styles[64];               // rgb colour, a = width in target px
+uniform float maxRadius;               // target px
+uniform float creaseCos; uniform float depthThreshold;
+uniform float wobble; uniform float wobbleScale; uniform float seed;
+out vec4 finalColor;
+
+struct G { int id; int style; vec3 n; float z; };
+vec3 octDecode(vec2 e) {
+    e = e * 2.0 - 1.0;
+    vec3 n = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+    if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    return normalize(n);
+}
+float linearZ(float d) {
+    if (ortho == 1) return zNear + d * (zFar - zNear);
+    float z = d * 2.0 - 1.0;
+    return 2.0 * zNear * zFar / (zFar + zNear - z * (zFar - zNear));
+}
+G fetch(vec2 uv) {
+    vec4 g = texture(texture0, uv);
+    G r;
+    r.id = int(g.a * 255.0 + 0.5);
+    r.style = int(g.b * 255.0 + 0.5);
+    r.n = octDecode(g.rg);
+    r.z = r.id == 0 ? 1e30 : linearZ(texture(depthTex, uv).r);
+    return r;
+}
+float hash(vec3 p) { return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
+float vnoise(vec2 p, float s) {
+    vec2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash(vec3(i, s)), hash(vec3(i + vec2(1, 0), s)), f.x),
+               mix(hash(vec3(i + vec2(0, 1), s)), hash(vec3(i + vec2(1, 1), s)), f.x), f.y);
+}
+// The style owning an edge between c and q at distance r (target px), or 0 for none.
+int edgeStyle(G c, G q, float r) {
+    if (q.id == 255) return 0;
+    float z = min(c.z, q.z);
+    float pw = ortho == 1 ? pixelWorld : pixelWorld * z;
+    float nz = max(abs(c.n.z), 0.05);
+    float slope = min(sqrt(max(1.0 - nz * nz, 0.0)) / nz, 20.0);
+    float expected = r * pw * (1.0 + 1.5 * slope);                  // depth change the slope explains
+    if (c.id != q.id) {
+        int nearer = c.z <= q.z ? c.style : q.style, farther = c.z <= q.z ? q.style : c.style;
+        // Where two objects touch, neither is in front: the one with lines draws the contact.
+        bool touching = abs(c.z - q.z) <= expected + depthThreshold * z;
+        return nearer != 0 || !touching ? nearer : farther;
+    }
+    if (c.id == 0) return 0;
+    if (dot(c.n, q.n) < creaseCos) return c.style;
+    return abs(c.z - q.z) > expected + depthThreshold * z ? c.style : 0;
+}
+void main() {
+    vec2 uv = fragTexCoord;
+    if (wobble > 0.0) {
+        vec2 p = gl_FragCoord.xy / pxScale / wobbleScale;
+        vec2 d = vec2(vnoise(p, seed), vnoise(p + 17.3, seed + 5.1)) * 2.0 - 1.0;
+        uv += d * wobble * pxScale * texel;
+    }
+    G c = fetch(uv);
+    if (c.id == 255) { finalColor = vec4(0.0); return; }
+    float best = 0.0;
+    vec3 col = vec3(0.0);
+    int steps = int(ceil(maxRadius));
+    for (int r = 1; r <= 64; r++) {
+        if (r > steps || best >= 1.0) break;
+        for (int k = 0; k < 8; k++) {
+            float a = float(k) * 0.785398;
+            vec2 dir = vec2(cos(a), sin(a));
+            int s = edgeStyle(c, fetch(uv + dir * float(r) * texel), float(r));
+            if (s == 0) continue;
+            float cov = clamp(styles[s].a * 0.5 + 1.0 - float(r), 0.0, 1.0);
+            if (cov > best) { best = cov; col = styles[s].rgb; }
+        }
+    }
+    finalColor = vec4(col, best);
+}
+)";
+
 struct LitLocs {
     int viewPos, sky, ground, lightCount, lightType, lightPos, lightDir, lightColor, lightRange,
         cosInner, cosOuter, lightShadow, lightBias, roughness, metalness, emissive, unlit, opacity,
         receiveShadow, shadowAtlas, atlasTexel, shadowVP, shadowRect, shadowParams, envMap, hasEnv,
-        envLinear, envMaxLod, envIntensity, envRotation, skybox, fogColor, fogNear, fogFar, skinned, bones;
+        envLinear, envMaxLod, envIntensity, envRotation, skybox, fogColor, fogNear, fogFar, skinned, bones,
+        shading, pxScale, toonBands, toonSoftness, toonHighlight, toonHighlightSize, rimColor, rimWidth,
+        goochWarm, goochCool, hatchInk, hatchSpacing, hatchAngle, hatchWeight;
 };
 struct DofLocs { int depthTex, texel, zNear, zFar, ortho, focus, aperture, maxBlur, radStep; };
+struct GbufLocs { int objectId, lineStyle, skinned, bones; };
+struct LineLocs { int depthTex, texel, zNear, zFar, ortho, pixelWorld, pxScale, styles, maxRadius, creaseCos,
+                  depthThreshold, wobble, wobbleScale, seed; };
+constexpr int MAX_STYLES = 64;
 
 // An offscreen target with a sampleable depth texture (for depth of field).
 struct DepthTarget { unsigned int fbo = 0, color = 0, depth = 0; int w = 0, h = 0; };
 
 struct Gpu {
     bool ready = false;
-    Shader lit{}, depth{}, dof{};
+    Shader lit{}, depth{}, dof{}, gbuf{}, line{};
     LitLocs L{};
     DofLocs D{};
+    GbufLocs G{};
+    LineLocs N{};
     int depthSkinned = -1, depthBones = -1;
     ::Material material{};               // raylib material: owns a MAX_MATERIAL_MAPS maps array
     unsigned int atlasFbo = 0, atlasTex = 0;
     int atlasSize = 0;
-    DepthTarget sceneTarget;
+    DepthTarget sceneTarget, lineTarget;
     Mesh skyCube{};
     std::map<std::string, Texture2D> textures;
     std::map<const Scene*, Texture2D> generated;    // environmentGenerator results
@@ -262,12 +461,15 @@ void releaseGpu() {
     if (gpu.lit.id) UnloadShader(gpu.lit);
     if (gpu.depth.id) UnloadShader(gpu.depth);
     if (gpu.dof.id) UnloadShader(gpu.dof);
+    if (gpu.gbuf.id) UnloadShader(gpu.gbuf);
+    if (gpu.line.id) UnloadShader(gpu.line);
     if (gpu.material.maps) {
         gpu.material.maps[MATERIAL_MAP_DIFFUSE].texture = whiteTexture();   // cached textures are freed below
         UnloadMaterial(gpu.material);
     }
     if (gpu.atlasFbo) rlUnloadFramebuffer(gpu.atlasFbo);
     unloadDepthTarget(gpu.sceneTarget);
+    unloadDepthTarget(gpu.lineTarget);
     if (gpu.skyCube.vertexCount) UnloadMesh(gpu.skyCube);
     for (auto& [path, tex] : gpu.textures) UnloadTexture(tex);
     for (auto& [scene, tex] : gpu.generated) UnloadTexture(tex);
@@ -280,7 +482,10 @@ void ensureGpu() {
     gpu.lit = LoadShaderFromMemory((head + LIT_VS_BODY).c_str(), LIT_FS);
     gpu.depth = LoadShaderFromMemory((head + DEPTH_VS_BODY).c_str(), DEPTH_FS);
     gpu.dof = LoadShaderFromMemory(nullptr, DOF_FS);
-    if (!IsShaderValid(gpu.lit) || !IsShaderValid(gpu.depth) || !IsShaderValid(gpu.dof))
+    gpu.gbuf = LoadShaderFromMemory((head + LIT_VS_BODY).c_str(), GBUF_FS);
+    gpu.line = LoadShaderFromMemory(nullptr, LINE_FS);
+    if (!IsShaderValid(gpu.lit) || !IsShaderValid(gpu.depth) || !IsShaderValid(gpu.dof) ||
+        !IsShaderValid(gpu.gbuf) || !IsShaderValid(gpu.line))
         throw std::runtime_error("g3d: shader compilation failed");
     auto loc = [](const char* name) { return GetShaderLocation(gpu.lit, name); };
     gpu.L = { loc("viewPos"), loc("skyColor"), loc("groundColor"), loc("lightCount"), loc("lightType"),
@@ -289,7 +494,16 @@ void ensureGpu() {
               loc("emissive"), loc("unlit"), loc("opacity"), loc("receiveShadow"), loc("shadowAtlas"),
               loc("atlasTexel"), loc("shadowVP"), loc("shadowRect"), loc("shadowParams"), loc("envMap"),
               loc("hasEnv"), loc("envLinear"), loc("envMaxLod"), loc("envIntensity"), loc("envRotation"),
-              loc("skybox"), loc("fogColor"), loc("fogNear"), loc("fogFar"), loc("skinned"), loc("boneMatrices") };
+              loc("skybox"), loc("fogColor"), loc("fogNear"), loc("fogFar"), loc("skinned"), loc("boneMatrices"),
+              loc("shading"), loc("pxScale"), loc("toonBands"), loc("toonSoftness"), loc("toonHighlight"),
+              loc("toonHighlightSize"), loc("rimColor"), loc("rimWidth"), loc("goochWarm"), loc("goochCool"),
+              loc("hatchInk"), loc("hatchSpacing"), loc("hatchAngle"), loc("hatchWeight") };
+    auto gloc = [](const char* name) { return GetShaderLocation(gpu.gbuf, name); };
+    gpu.G = { gloc("objectId"), gloc("lineStyle"), gloc("skinned"), gloc("boneMatrices") };
+    auto nloc = [](const char* name) { return GetShaderLocation(gpu.line, name); };
+    gpu.N = { nloc("depthTex"), nloc("texel"), nloc("zNear"), nloc("zFar"), nloc("ortho"), nloc("pixelWorld"),
+              nloc("pxScale"), nloc("styles"), nloc("maxRadius"), nloc("creaseCos"), nloc("depthThreshold"),
+              nloc("wobble"), nloc("wobbleScale"), nloc("seed") };
     auto dloc = [](const char* name) { return GetShaderLocation(gpu.dof, name); };
     gpu.D = { dloc("depthTex"), dloc("texel"), dloc("zNear"), dloc("zFar"), dloc("ortho"), dloc("focus"),
               dloc("aperture"), dloc("maxBlur"), dloc("radStep") };
@@ -300,6 +514,7 @@ void ensureGpu() {
     SetShaderValue(gpu.lit, gpu.L.envMap, &envUnit, SHADER_UNIFORM_INT);
     SetShaderValue(gpu.lit, gpu.L.shadowAtlas, &shadowUnit, SHADER_UNIFORM_INT);
     SetShaderValue(gpu.dof, gpu.D.depthTex, &depthUnit, SHADER_UNIFORM_INT);
+    SetShaderValue(gpu.line, gpu.N.depthTex, &depthUnit, SHADER_UNIFORM_INT);
     gpu.material = LoadMaterialDefault();
     gpu.ready = true;
     onGraphicsShutdown(releaseGpu);
@@ -323,8 +538,7 @@ bool ensureAtlas(int size) {
     return true;
 }
 
-DepthTarget& sceneTarget(int w, int h) {
-    DepthTarget& t = gpu.sceneTarget;
+DepthTarget& depthTarget(DepthTarget& t, int w, int h) {
     if (t.fbo && t.w == w && t.h == h) return t;
     unloadDepthTarget(t);
     t.fbo = rlLoadFramebuffer();
@@ -334,8 +548,22 @@ DepthTarget& sceneTarget(int w, int h) {
     rlFramebufferAttach(t.fbo, t.depth, RL_ATTACHMENT_DEPTH, RL_ATTACHMENT_TEXTURE2D, 0);
     const bool ok = rlFramebufferComplete(t.fbo);
     rlDisableFramebuffer();
-    if (!ok) { unloadDepthTarget(t); throw std::runtime_error("g3d: depth-of-field target incomplete"); }
+    if (!ok) { unloadDepthTarget(t); throw std::runtime_error("g3d: offscreen depth target incomplete"); }
     t.w = w; t.h = h;
+    return t;
+}
+DepthTarget& sceneTarget(int w, int h) { return depthTarget(gpu.sceneTarget, w, h); }
+// The line pass reads ids and styles: no filtering between texels.
+DepthTarget& lineTarget(int w, int h) {
+    const bool fresh = !(gpu.lineTarget.fbo && gpu.lineTarget.w == w && gpu.lineTarget.h == h);
+    DepthTarget& t = depthTarget(gpu.lineTarget, w, h);
+    if (fresh)
+        for (unsigned int id : { t.color, t.depth }) {
+            rlTextureParameters(id, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_NEAREST);
+            rlTextureParameters(id, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_NEAREST);
+            rlTextureParameters(id, RL_TEXTURE_WRAP_S, RL_TEXTURE_WRAP_CLAMP);
+            rlTextureParameters(id, RL_TEXTURE_WRAP_T, RL_TEXTURE_WRAP_CLAMP);
+        }
     return t;
 }
 
@@ -426,17 +654,45 @@ void setMaterial(const g3d::Material& m) {
     SetShaderValue(sh, gpu.L.unlit, &unlit, SHADER_UNIFORM_INT);
     SetShaderValue(sh, gpu.L.opacity, &m.opacity, SHADER_UNIFORM_FLOAT);
     SetShaderValue(sh, gpu.L.receiveShadow, &receive, SHADER_UNIFORM_INT);
+
+    const int shading = (int)m.shading;
+    SetShaderValue(sh, gpu.L.shading, &shading, SHADER_UNIFORM_INT);
+    if (m.shading == Shading::Toon) {
+        const Material::Toon& t = m.toon;
+        const int bands = std::max(1, t.bands);
+        const Vector3 rim = linear(t.rim, t.rim.a / 255.f);
+        SetShaderValue(sh, gpu.L.toonBands, &bands, SHADER_UNIFORM_INT);
+        SetShaderValue(sh, gpu.L.toonSoftness, &t.softness, SHADER_UNIFORM_FLOAT);
+        SetShaderValue(sh, gpu.L.toonHighlight, &t.highlight, SHADER_UNIFORM_FLOAT);
+        SetShaderValue(sh, gpu.L.toonHighlightSize, &t.highlightSize, SHADER_UNIFORM_FLOAT);
+        SetShaderValue(sh, gpu.L.rimColor, &rim, SHADER_UNIFORM_VEC3);
+        SetShaderValue(sh, gpu.L.rimWidth, &t.rimWidth, SHADER_UNIFORM_FLOAT);
+    } else if (m.shading == Shading::Gooch) {
+        const Vector3 warm = linear(m.gooch.warm), cool = linear(m.gooch.cool);
+        SetShaderValue(sh, gpu.L.goochWarm, &warm, SHADER_UNIFORM_VEC3);
+        SetShaderValue(sh, gpu.L.goochCool, &cool, SHADER_UNIFORM_VEC3);
+    } else if (m.shading == Shading::Hatch) {
+        const Material::Hatch& h = m.hatch;
+        const Vector3 ink = linear(h.ink);
+        const float spacing = std::max(1.f, h.spacing);
+        SetShaderValue(sh, gpu.L.hatchInk, &ink, SHADER_UNIFORM_VEC3);
+        SetShaderValue(sh, gpu.L.hatchSpacing, &spacing, SHADER_UNIFORM_FLOAT);
+        SetShaderValue(sh, gpu.L.hatchAngle, &h.angle, SHADER_UNIFORM_FLOAT);
+        SetShaderValue(sh, gpu.L.hatchWeight, &h.weight, SHADER_UNIFORM_FLOAT);
+    }
 }
 
-// Draws one item with the lit shader (depthPass = false) or the depth shader.
-void drawItem(const Item& it, bool depthPass) {
+enum class Pass { Lit, Depth, Gbuf };
+
+// Draws one item with the lit, depth (shadow maps) or line g-buffer shader.
+void drawItem(const Item& it, Pass pass) {
     Object3D& o = *it.obj;
-    const Shader& sh = depthPass ? gpu.depth : gpu.lit;
-    const int bonesLoc = depthPass ? gpu.depthBones : gpu.L.bones;
-    const int skinnedLoc = depthPass ? gpu.depthSkinned : gpu.L.skinned;
+    const Shader& sh = pass == Pass::Lit ? gpu.lit : pass == Pass::Depth ? gpu.depth : gpu.gbuf;
+    const int bonesLoc = pass == Pass::Lit ? gpu.L.bones : pass == Pass::Depth ? gpu.depthBones : gpu.G.bones;
+    const int skinnedLoc = pass == Pass::Lit ? gpu.L.skinned : pass == Pass::Depth ? gpu.depthSkinned : gpu.G.skinned;
     ::Material mat = gpu.material;
     mat.shader = sh;
-    if (!depthPass) setMaterial(o.material);
+    if (pass == Pass::Lit) setMaterial(o.material);
     if (o.material.doubleSided) rlDisableBackfaceCulling(); else rlEnableBackfaceCulling();
 
     if (o.geometry) {
@@ -534,7 +790,7 @@ Shadows renderShadows(const Scene& s, const std::vector<Item>& items) {
         t.rect = { (float)col / grid, (float)row / grid, 1.f / grid, 1.f / grid };
         rlViewport(col * tile, row * tile, tile, tile);
         for (const Item& it : items)
-            if (it.obj->material.castShadow && it.obj->material.opacity >= 1.f && !it.obj->material.unlit) drawItem(it, true);
+            if (it.obj->material.castShadow && it.obj->material.opacity >= 1.f && !it.obj->material.unlit) drawItem(it, Pass::Depth);
         out.tiles.push_back(t);
     };
     for (int i = 0; i < count; i++) {
@@ -564,9 +820,10 @@ Shadows renderShadows(const Scene& s, const std::vector<Item>& items) {
     return out;
 }
 
-void setSceneUniforms(const Scene& s, const Camera& cam, const Shadows& sh, Texture2D envTex) {
+void setSceneUniforms(const Scene& s, const Camera& cam, const Shadows& sh, Texture2D envTex, float scale) {
     const Shader& lit = gpu.lit;
     const LitLocs& L = gpu.L;
+    SetShaderValue(lit, L.pxScale, &scale, SHADER_UNIFORM_FLOAT);
     int count = std::min((int)s.lights.size(), MAX_LIGHTS);
     int type[MAX_LIGHTS] = {};
     Vector3 pos[MAX_LIGHTS] = {}, dir[MAX_LIGHTS] = {}, col[MAX_LIGHTS] = {};
@@ -675,7 +932,91 @@ void compositeDof(const DepthTarget& src, const Camera& cam, float scale) {
     bindUnit(DEPTH_SLOT, 0);
 }
 
-void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target, float scale) {
+// ---- ink lines --------------------------------------------------------------------------
+// Line styles in use: index 0 is "no lines"; the rest are (colour, target-px width) pairs.
+struct LineStyles {
+    std::vector<Vector4> table{ Vector4{ 0, 0, 0, 0 } };
+    float maxWidth = 0;
+    int of(const Scene& s, const g3d::Material& m, float scale) {
+        if (m.lineWidth <= 0 || s.lines.width <= 0) return 0;
+        const Color c = m.lineColor.a ? m.lineColor : s.lines.color;
+        const Vector4 v{ c.r / 255.f, c.g / 255.f, c.b / 255.f, s.lines.width * m.lineWidth * scale };
+        for (size_t i = 1; i < table.size(); i++)
+            if (table[i].x == v.x && table[i].y == v.y && table[i].z == v.z && table[i].w == v.w) return (int)i;
+        if ((int)table.size() == MAX_STYLES) return 1;                 // out of styles: share the first
+        table.push_back(v);
+        maxWidth = std::max(maxWidth, v.w);
+        return (int)table.size() - 1;
+    }
+};
+
+// Pass 1, with the main pass's camera still loaded: ids, styles and normals of the opaque
+// items into the line target. Outside the viewport the id is 255, so its edge draws no line.
+void renderLineBuffer(const Scene& s, const std::vector<Item>& items, LineStyles& styles, const DepthTarget& lt,
+                      int vx, int vy, int vw, int vh, float scale) {
+    rlDrawRenderBatchActive();
+    rlEnableFramebuffer(lt.fbo);
+    rlViewport(0, 0, lt.w, lt.h);
+    rlClearColor(0, 0, 0, 255);
+    rlClearScreenBuffers();
+    rlEnableScissorTest();
+    rlScissor(vx, vy, vw, vh);
+    rlClearColor(0, 0, 0, 0);
+    rlClearScreenBuffers();
+    rlDisableScissorTest();
+    rlViewport(vx, vy, vw, vh);
+    rlEnableDepthTest();
+    rlEnableDepthMask();
+    rlDisableColorBlend();                       // ids and styles are data: write them unblended
+    for (size_t i = 0; i < items.size(); i++) {
+        const g3d::Material& m = items[i].obj->material;
+        if (m.opacity < 1.f) continue;
+        const float id = (float)(i % 254 + 1), style = (float)styles.of(s, m, scale);
+        SetShaderValue(gpu.gbuf, gpu.G.objectId, &id, SHADER_UNIFORM_FLOAT);
+        SetShaderValue(gpu.gbuf, gpu.G.lineStyle, &style, SHADER_UNIFORM_FLOAT);
+        drawItem(items[i], Pass::Gbuf);
+    }
+    rlDrawRenderBatchActive();
+    rlEnableColorBlend();
+}
+
+// Pass 2, in 2D pixel state over the bound colour target: finds the edges and draws them.
+void compositeLines(const Scene& s, const Camera& cam, const DepthTarget& lt, const LineStyles& styles,
+                    int vh, float scale, int t) {
+    const auto& N = gpu.N;
+    const Scene::Lines& L = s.lines;
+    const Vector2 texel{ 1.f / lt.w, 1.f / lt.h };
+    const int ortho = cam.orthographic ? 1 : 0;
+    const float pixelWorld = cam.orthographic ? cam.orthoHeight / vh : 2.f * std::tan(cam.fov * 0.5f * DEG2RAD) / vh;
+    const float maxRadius = styles.maxWidth * 0.5f + 1.f;
+    const float creaseCos = std::cos(std::clamp(L.creaseAngle, 0.f, 180.f) * DEG2RAD);
+    const float wobble = std::max(0.f, L.wobble), wobbleScale = std::max(1.f, L.wobbleScale);
+    const float seed = L.boilEvery > 0 ? (float)(t / L.boilEvery) : 0.f;
+    SetShaderValue(gpu.line, N.texel, &texel, SHADER_UNIFORM_VEC2);
+    SetShaderValue(gpu.line, N.zNear, &cam.nearPlane, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(gpu.line, N.zFar, &cam.farPlane, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(gpu.line, N.ortho, &ortho, SHADER_UNIFORM_INT);
+    SetShaderValue(gpu.line, N.pixelWorld, &pixelWorld, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(gpu.line, N.pxScale, &scale, SHADER_UNIFORM_FLOAT);
+    SetShaderValueV(gpu.line, N.styles, styles.table.data(), SHADER_UNIFORM_VEC4, (int)styles.table.size());
+    SetShaderValue(gpu.line, N.maxRadius, &maxRadius, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(gpu.line, N.creaseCos, &creaseCos, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(gpu.line, N.depthThreshold, &L.depthThreshold, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(gpu.line, N.wobble, &wobble, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(gpu.line, N.wobbleScale, &wobbleScale, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(gpu.line, N.seed, &seed, SHADER_UNIFORM_FLOAT);
+    bindUnit(DEPTH_SLOT, lt.depth);
+    rlSetBlendFactorsSeparate(RL_SRC_ALPHA, RL_ONE_MINUS_SRC_ALPHA, RL_ONE, RL_ONE_MINUS_SRC_ALPHA, RL_FUNC_ADD, RL_FUNC_ADD);
+    BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+    BeginShaderMode(gpu.line);
+    const Texture2D gb{ lt.color, lt.w, lt.h, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
+    DrawTexturePro(gb, { 0, 0, (float)lt.w, -(float)lt.h }, { 0, 0, (float)lt.w, (float)lt.h }, { 0, 0 }, 0, WHITE);
+    EndShaderMode();
+    rlDrawRenderBatchActive();
+    bindUnit(DEPTH_SLOT, 0);
+}
+
+void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target, float scale, int t) {
     ensureGpu();
     std::vector<Item> items;
     collect(s.objects, MatrixIdentity(), items);
@@ -725,7 +1066,7 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     rlEnableDepthTest();
     rlEnableDepthMask();
 
-    setSceneUniforms(s, cam, shadows, envTex);
+    setSceneUniforms(s, cam, shadows, envTex, scale);
     bindUnit(SHADOW_SLOT, shadows.tiles.empty() ? 0 : gpu.atlasTex);
     bindUnit(ENV_SLOT, envTex.id);
     if (envTex.id && s.showEnvironment) drawSkybox(cam);
@@ -735,15 +1076,21 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
             Vector3 p = Vector3Transform({ 0, 0, 0 }, MatrixMultiply(it.world, view));
             it.viewDepth = -p.z;
             clear.push_back(it);
-        } else drawItem(it, false);
+        } else drawItem(it, Pass::Lit);
     }
     std::sort(clear.begin(), clear.end(), [](const Item& a, const Item& b) { return a.viewDepth > b.viewDepth; });
     rlDisableDepthMask();
-    for (const Item& it : clear) drawItem(it, false);
+    for (const Item& it : clear) drawItem(it, Pass::Lit);
     rlEnableDepthMask();
 
     bindUnit(SHADOW_SLOT, 0);
     bindUnit(ENV_SLOT, 0);
+    LineStyles styles;
+    const DepthTarget* lt = nullptr;
+    if (s.lines.enabled) {
+        lt = &lineTarget(fbW, fbH);
+        renderLineBuffer(s, items, styles, *lt, vx, fbH - vy - vh, vw, vh, scale);
+    }
     rlDisableDepthTest();
     rlDisableBackfaceCulling();
     rlMatrixMode(RL_PROJECTION);
@@ -751,6 +1098,10 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     rlMatrixMode(RL_MODELVIEW);
     rlLoadIdentity();
     rlViewport(0, 0, fbW, fbH);
+    if (lt && styles.table.size() > 1) {
+        rlEnableFramebuffer(dofTarget ? dofTarget->fbo : target.id);
+        compositeLines(s, cam, *lt, styles, vh, scale, t);
+    }
     if (dofTarget) {
         rlEnableFramebuffer(target.id);
         rlScalef(scale, scale, 1.f);                    // the 2D state drawOffscreen bound
@@ -1001,7 +1352,7 @@ void render(Scene& s, int t, const Ctx& c, Rectangle viewport, Camera* camera) {
         Rectangle vp = viewport;
         if (vp.width <= 0 || vp.height <= 0) vp = { 0, 0, target.texture.width / scale, target.texture.height / scale };
         else vp = { c.o.x + vp.x * c.s, c.o.y + vp.y * c.s, vp.width * c.s, vp.height * c.s };
-        renderBody(s, cam, vp, target, scale);
+        renderBody(s, cam, vp, target, scale, t);
     });
 }
 

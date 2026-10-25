@@ -59,6 +59,7 @@ add_library(rmtn_engine STATIC
   src/engine/frame_stream.cpp
   src/engine/fonts.cpp
   src/engine/render.cpp
+  src/engine/filters.cpp
   src/engine/anim.cpp
   src/engine/layout.cpp
   src/engine/json.cpp
@@ -87,7 +88,8 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/asp.cpp
     examples/showcase/tokens.cpp
     examples/showcase/own_compute.cpp
-    examples/showcase/promo.cpp)
+    examples/showcase/promo.cpp
+    examples/showcase/npr.cpp)
   target_link_libraries(raymotion PRIVATE rmtn_engine)
 
   add_executable(raymotion_starter examples/starter/main.cpp)

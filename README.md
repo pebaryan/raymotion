@@ -124,6 +124,7 @@ Layer& l = node->isolate();
 l.opacity = 0.5f;                                   // no seams where children overlap
 l.blend = Blend::Screen;                            // Normal, Add, Multiply, Screen
 l.mask = [](const Ctx& cx, int t) { dr::circle(cx, {640, 360}, 10.f * t, WHITE); };
+l.filters = { Filter::watercolor(6), Filter::paperGrain() };   // illustration looks, see below
 
 // Transitions between scenes (fade / slide / wipe, with a direction and easing).
 TransitionSeries ts(c.roots, c.w, c.h);
@@ -199,6 +200,51 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   composites over the 2D content under it with the node's opacity, in any viewport.
   `gpu-3d` renders 240 frames of 1080p with IBL, two shadow casters and DOF in about 4 s.
 
+### Non-photorealistic rendering
+
+Illustration styles come from three independent pieces that combine freely: how a 3D
+material is shaded, ink lines around 3D objects, and image filters on any layer.
+
+```cpp
+g3d::Material m{mkColor(0xff6b5a)};
+m.shading = g3d::Shading::Toon;               // Standard, Toon, Gooch, Hatch
+m.toon.bands = 2;                             // flat light steps per light
+m.toon.rim = Color{255, 255, 255, 110};       // rim light; alpha is its strength
+
+scene->lines.enabled = true;                  // silhouettes, inner contours, creases
+scene->lines.width = 3;                       // composition px, at any supersampling
+scene->lines.wobble = 1.6f;                   // hand-drawn waver that re-rolls every
+scene->lines.boilEvery = 3;                   // 3 frames ("boiling" lines)
+ground.lineWidth = 0;                         // per material: no lines; or lineColor
+
+TNode* art = addRoot(c.roots, 0, 300);
+art->isolate().filters = { Filter::watercolor(7), Filter::paperGrain() };
+art->add(0, 300)->fn = g3d::draw(scene);      // 2D drawn in `art` gets the wash too
+```
+
+* **Shading** (`g3d::Shading`): `Toon` quantizes each light into `bands` with soft edges
+  (`softness`), adds a hard highlight and a rim light, and keeps shadows; `Gooch` shades
+  from a cool to a warm colour as the key (first) light comes round, for technical
+  illustration; `Hatch` draws pen strokes over the base colour, denser and crossed as the
+  light falls off (`ink`, `spacing`, `angle`, `weight`; screen-space strokes).
+* **Ink lines** (`Scene::lines`): a pass over object ids, view-space normals and depth
+  finds outer silhouettes, contours where a surface passes in front of itself (a depth
+  jump the surface's slope does not explain, `depthThreshold`) and creases
+  (`creaseAngle`). Lines have a constant width in composition px for any mesh, the nearer
+  object owns an edge (its `lineColor`/`lineWidth`), and where two objects touch the one
+  with lines draws the contact. They are drawn before depth of field and respect
+  viewports. With `wobble` they waver like a hand-drawn line and boil every `boilEvery`
+  frames, deterministically.
+* **Layer filters** (`Layer::filters`, run in order on the flattened layer): `posterize`
+  (brightness steps, hue kept), `halftone` (mono or CMYK dot screens), `paperGrain`,
+  `inkEdges` (dark lines where colour or alpha changes) and `watercolor` (bleeding edges,
+  darkened rims and pigment granulation, after Bousseau et al.). Sizes are composition
+  px and the patterns are fixed to the canvas, so a look holds at any supersampling and
+  does not crawl between frames.
+
+`npr-styles` shows one still life in eight styles (Standard, Toon, Toon + ink, Gooch,
+Hatching, Watercolour, Comic halftone, Poster) and then six of them side by side.
+
 ### Engine pieces
 
 * `rmtn/timeline.hpp` — `Comp`, the node tree (start/duration, `up` animates props,
@@ -215,8 +261,8 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
 * `rmtn/anim.hpp` — `interpolate`, `interpolateColors`, `spring`/`measureSpring`, `ease::`.
 * `rmtn/transitions.hpp` — `TransitionSeries` with fade, slide and wipe.
 * `rmtn/layout.hpp` — `layout::` rects, rows, columns, grids; `wrapText`, `dr::textBox`.
-* `rmtn/scene3d.hpp` — `g3d::` GPU scenes: geometry, models, materials, lights, shadows,
-  environments, cameras with depth of field.
+* `rmtn/scene3d.hpp` — `g3d::` GPU scenes: geometry, models, materials (physically based
+  or toon/Gooch/hatch), lights, shadows, environments, ink lines, cameras with depth of field.
 * `rmtn/json.hpp` — `Json` values for props (parse, typed lookups with fallbacks, merge).
 * `rmtn/prefab.hpp` — `prefab::add/use`: registered, parameterized subtree builders.
 * `rmtn/synth.hpp` — sine-sum note events + envelopes -> WAV soundtrack.
@@ -240,6 +286,7 @@ here-there-plain       1280x720  @30fps  108.0s  music=0   (plain-language cut, 
 here-there-feed        1080x1350 @30fps   88.0s  music=0   (portrait feed cut, Segoe UI)
 own-your-compute       1920x1080 @30fps   66.0s  audio=1   (story film: GPU 3D, particles, glitch; all assets from code)
 raymotion-promo        1920x1080 @60fps  210.0s  audio=1   (YouTube introduction: how it works, 16 features, credits)
+npr-styles             1920x1080 @30fps   53.8s  audio=0   (non-photorealistic rendering: eight illustration styles)
 ```
 
 `raymotion-promo` is the 3.5-minute introduction to the engine
@@ -268,10 +315,11 @@ out for Segoe UI and refuse to substitute another font (their tests skip without
 
 `ctest` runs: HT semantics and the authoring API (interpolation, springs, timing,
 transitions, layout, JSON; pure logic); layer compositing (group opacity, blend modes,
-masks, offsets at every supersampling level, wipes, text boxes); GPU 3D (placement and
+masks, offsets at every supersampling level, wipes, text boxes, illustration filters); GPU 3D (placement and
 depth, lighting, directional/spot/point and multi-light shadows, environment lighting and
 skybox, depth of field, viewports, transparency, hierarchy, OBJ and a generated skinned
-glTF, determinism); renderer regressions (supersampling edge levels
+glTF, determinism, toon/Gooch/hatch shading, ink lines in layers, viewports and at 2x,
+boiling wobble); renderer regressions (supersampling edge levels
 and coordinates, concave fills, fonts, FX shader uniforms, determinism, shutdown);
 Here-There layout checks; and a Python CLI suite (exact sizes, draft scaling, stale-frame
 cleanup, a real MP4 render, the starter project, props). Tests needing OpenGL carry the `gl`

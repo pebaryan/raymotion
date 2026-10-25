@@ -185,6 +185,43 @@ struct NodeProps {
 enum class Blend { Normal, Add, Multiply, Screen };
 enum class MaskMode { Alpha, Luma };
 
+// An image filter on a layer's flattened content (illustration looks; see Layer::filters).
+// Sizes are composition px, so a look holds at any supersampling. Patterns are fixed to
+// the canvas and the same every frame.
+struct Filter {
+    enum class Type {
+        Posterize,    // `levels` flat brightness steps; hue and saturation are kept
+        Halftone,     // printed dots: `size` cell, `angle` screen; mono ink or CMYK (`colored`)
+        Paper,        // paper grain and fibres darken the content by `strength` (`size` = grain scale)
+        InkEdges,     // dark `ink` lines `size` wide where colour or alpha changes by > `threshold`
+        Watercolor,   // bleeding edges (`size` px), edge darkening (`strength`), pigment granulation
+    };
+    Type type = Type::Posterize;
+    int levels = 4;
+    float size = 8;
+    float angle = 45;
+    bool colored = false;
+    float threshold = 0.12f;
+    float strength = 0.5f;
+    float granulation = 0.5f;
+    Color ink{ 24, 22, 30, 255 };
+    Color paper{ 250, 246, 236, 255 };    // halftone: colour between the dots
+
+    static Filter posterize(int levels = 4) { Filter f; f.type = Type::Posterize; f.levels = levels; return f; }
+    static Filter halftone(float cell = 8, float angle = 45, bool colored = false) {
+        Filter f; f.type = Type::Halftone; f.size = cell; f.angle = angle; f.colored = colored; return f;
+    }
+    static Filter paperGrain(float strength = 0.35f, float scale = 1) {
+        Filter f; f.type = Type::Paper; f.strength = strength; f.size = scale; return f;
+    }
+    static Filter inkEdges(float width = 2, Color ink = { 24, 22, 30, 255 }, float threshold = 0.12f) {
+        Filter f; f.type = Type::InkEdges; f.size = width; f.ink = ink; f.threshold = threshold; return f;
+    }
+    static Filter watercolor(float bleed = 6, float edgeDarkening = 0.6f, float granulation = 0.5f) {
+        Filter f; f.type = Type::Watercolor; f.size = bleed; f.strength = edgeDarkening; f.granulation = granulation; return f;
+    }
+};
+
 // A layer renders its node's subtree offscreen and composites the flattened result, so
 // opacity applies to the group as a whole (no seams where children overlap) and blend
 // modes and masks act on the group. Each layer costs one offscreen pass (two with a mask).
@@ -196,6 +233,7 @@ struct Layer {
     std::function<void(const Ctx& c, int t)> mask;   // drawn in the node's space; content shows where it covers
     MaskMode maskMode = MaskMode::Alpha;
     bool invertMask = false;
+    std::vector<Filter> filters;                     // applied in order to the content, before the mask (one pass each)
 };
 
 // ------------------------------------------------------------------ audio

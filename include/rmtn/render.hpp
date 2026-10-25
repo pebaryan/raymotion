@@ -38,6 +38,10 @@ void presentFrame(Comp& c, int frame, Canvas& canvas);
 // false without calling `body` when no canvas target is active (outside presentFrame).
 bool drawOffscreen(float alpha, const std::function<void(const RenderTexture& target, float scale)>& body);
 
+// Runs one layer filter over `src` (premultiplied, raylib RT orientation) into `dst` of the
+// same size; `scale` is target px per composition px. drawLayer uses it for Layer::filters.
+void applyFilter(const Filter& f, const RenderTexture& src, const RenderTexture& dst, float scale);
+
 // While presentFrame runs: the frame rate of the composition being drawn and the scale
 // from composition units to pixels of the current target (the supersample factor).
 // Outside it: 30 and 1.

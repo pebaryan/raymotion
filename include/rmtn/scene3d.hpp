@@ -75,6 +75,15 @@ using ModelPtr = std::shared_ptr<ModelAsset>;
 ModelPtr loadModel(const std::string& path);
 
 // ------------------------------------------------------------------ materials
+// How a lit material turns light into colour. The stylised modes use the scene's lights,
+// shadows and fog; Toon and Hatch also use its ambient sky and ground colours.
+enum class Shading {
+    Standard,   // physically based: roughness, metalness, environment reflections
+    Toon,       // cel: flat lighting bands, a hard-edged highlight and an optional rim light
+    Gooch,      // technical illustration: cool to warm as the key (first) light comes round
+    Hatch,      // pen and ink: strokes over the base colour, denser and crossed where darker
+};
+
 struct Material {
     Color color = WHITE;            // base colour (multiplies the texture and vertex colours)
     float roughness = 0.5f;         // 0 = mirror-sharp highlights, 1 = matte
@@ -85,6 +94,30 @@ struct Material {
     bool doubleSided = false;
     bool castShadow = true, receiveShadow = true;
     std::string map;                // optional base-colour texture file
+
+    Shading shading = Shading::Standard;
+    struct Toon {
+        int bands = 2;              // lit steps per light above the shadow (1 = lit or unlit)
+        float softness = 0.03f;     // width of each step's edge, as a fraction of the light range
+        float highlight = 0.6f;     // strength of the hard highlight (0 = none)
+        float highlightSize = 0.12f;// larger = bigger highlight spot
+        Color rim = BLANK;          // rim light colour; alpha is its strength (BLANK = none)
+        float rimWidth = 0.3f;      // how far the rim reaches in from the silhouette (0..1)
+    } toon;
+    struct Gooch {
+        Color warm{ 255, 200, 90, 255 }, cool{ 50, 80, 190, 255 };
+    } gooch;
+    struct Hatch {
+        Color ink{ 32, 28, 40, 255 };
+        float spacing = 7;          // composition px between strokes
+        float angle = 40;           // degrees; the cross strokes are at +90 and +45
+        float weight = 1;           // stroke thickness multiplier
+    } hatch;
+
+    // Ink lines, when the scene's lines are on (Scene::lines): colour (BLANK = the scene's)
+    // and a multiplier on the scene's line width (0 = no lines around this object).
+    Color lineColor = BLANK;
+    float lineWidth = 1;
 };
 
 // ------------------------------------------------------------------ objects
@@ -164,6 +197,21 @@ struct Scene {
     Color fogColor = BLACK;
     float fogNear = 0, fogFar = 0;  // linear fog by view distance; fogFar <= fogNear disables
     int shadowMapSize = 1024;       // per atlas tile (shrunk if the atlas would pass 8192)
+
+    // Ink lines found in screen space from depth, normals and object boundaries: outer
+    // silhouettes, inner contours where a surface passes in front of itself, and creases.
+    // Constant width in composition px for any mesh; opaque objects only. Drawn before
+    // depth of field, so they blur with what they outline.
+    struct Lines {
+        bool enabled = false;
+        Color color{ 22, 20, 30, 255 };
+        float width = 2;            // composition px (times each material's lineWidth)
+        float creaseAngle = 40;     // degrees between surface normals that make a crease line
+        float depthThreshold = 0.04f;   // relative depth jump that makes a contour line
+        float wobble = 0;           // hand-drawn displacement, composition px (0 = straight)
+        float wobbleScale = 60;     // composition px per wobble wave
+        int boilEvery = 2;          // frames per wobble pattern ("on twos"); 0 = never changes
+    } lines;
     std::function<void(int t, Scene& self)> up;
 
     Object3D* add(GeometryPtr g, Material m = {});

@@ -21,6 +21,7 @@ void registerAspFeed(Registry& out);
 void registerTokenStory(Registry& out);
 void registerOwnCompute(Registry& out);
 void registerPromo(Registry& out);
+void registerNpr(Registry& out);
 
 void register_scenes(Registry& out) {
 using namespace dr;
@@ -372,5 +373,6 @@ registerAspFeed(out);
 registerTokenStory(out);
 registerOwnCompute(out);
 registerPromo(out);
+registerNpr(out);
 } // register_scenes
 } // namespace rmtn

@@ -366,6 +366,164 @@ static void determinism() {
     UnloadImage(a); UnloadImage(b); UnloadImage(a2);
 }
 
+// ---- stylised shading and ink lines
+// A sphere lit from the upper left, in `m`'s shading; returns the frame.
+static Image litSphere(g3d::Material m, int frame = 0) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = { 0, 0, 5 };
+    s->add(g3d::Geometry::sphere(1.4f, 48, 64), m);
+    s->lights.push_back(g3d::Light::directional({ -4, 3, 3 }, WHITE, 1.0f));
+    s->ambient = 0.3f;
+    Comp c = sceneComp(s);
+    return render(c, frame);
+}
+
+static void toonShading() {
+    g3d::Material m{ mkColor(0x3080ff) };
+    m.shading = g3d::Shading::Toon;
+    m.toon.bands = 2; m.toon.softness = 0; m.toon.highlight = 0;
+    Image toon = litSphere(m);
+    m.shading = g3d::Shading::Standard;
+    Image smooth = litSphere(m);
+    // Across the sphere's equator: a few flat bands instead of a continuous ramp.
+    auto distinct = [](const Image& img) {
+        std::vector<int> seen;
+        for (int x = W / 2 - 60; x <= W / 2 + 60; x++) {
+            int l = luma(GetImageColor(img, x, H / 2));
+            if (std::find(seen.begin(), seen.end(), l) == seen.end()) seen.push_back(l);
+        }
+        return seen.size();
+    };
+    CHECK(distinct(toon) <= 6);                         // 3 levels plus edge pixels between them
+    CHECK(distinct(smooth) > 20);
+    // The lit side is uniform within a band; the far side is the darker ambient tone.
+    Color a = GetImageColor(toon, W / 2 - 30, H / 2 - 10), b = GetImageColor(toon, W / 2 - 22, H / 2 - 4);
+    CHECK(close(a, b, 1));
+    CHECK(luma(GetImageColor(toon, W / 2 + 50, H / 2 + 10)) < luma(a));
+    UnloadImage(toon); UnloadImage(smooth);
+
+    // A rim light brightens the silhouette.
+    m.shading = g3d::Shading::Toon;
+    m.toon.rim = Color{ 255, 255, 255, 255 }; m.toon.rimWidth = 0.3f;
+    Image rim = litSphere(m);
+    m.toon.rim = BLANK;
+    Image plain = litSphere(m);
+    const int edge = W / 2 + 54;                        // just inside the right silhouette (radius ~56 px)
+    CHECK(luma(GetImageColor(rim, edge, H / 2)) > luma(GetImageColor(plain, edge, H / 2)) + 40);
+    UnloadImage(rim); UnloadImage(plain);
+}
+
+static void goochShading() {
+    g3d::Material m{ GRAY };
+    m.shading = g3d::Shading::Gooch;
+    Image img = litSphere(m);
+    Color lit = GetImageColor(img, W / 2 - 35, H / 2 - 20), dark = GetImageColor(img, W / 2 + 40, H / 2 + 25);
+    CHECK(lit.r > lit.b);                                // warm toward the light
+    CHECK(dark.b > dark.r);                              // cool away from it
+    CHECK(luma(dark) > 30);                              // the far side keeps a tone, not black
+    UnloadImage(img);
+}
+
+static void hatchShading() {
+    g3d::Material m{ WHITE };
+    m.shading = g3d::Shading::Hatch;
+    m.hatch.ink = BLACK; m.hatch.spacing = 5;
+    Image img = litSphere(m);
+    // Ink coverage in a 20 x 20 patch: little toward the light, much more in shadow.
+    auto ink = [&](int cx, int cy) {
+        int n = 0;
+        for (int y = cy - 10; y < cy + 10; y++)
+            for (int x = cx - 10; x < cx + 10; x++) n += luma(GetImageColor(img, x, y)) < 128;
+        return n;
+    };
+    const int litInk = ink(W / 2 - 25, H / 2 - 18), darkInk = ink(W / 2 + 32, H / 2 + 22);
+    CHECK(litInk < 60);
+    CHECK(darkInk > 100 && darkInk > 3 * litInk);
+    CHECK(close(GetImageColor(img, 3, 3), BLACK));      // the background is not hatched
+    UnloadImage(img);
+}
+
+// A white unlit box on blue with red lines; `wrap` puts the scene node inside a layer.
+static Image inkedBox(Rectangle viewport, bool wrap, float lineWidth = 1, int frame = 0, float wobble = 0, int ss = 1,
+                      Filter filter = Filter::posterize(16)) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = { 0, 0, 5 };
+    g3d::Material m = unlit(WHITE);
+    m.lineWidth = lineWidth;
+    s->add(g3d::Geometry::box(1.5f, 1.5f, 1.5f), m)->rotation = { 25, 35, 0 };
+    s->lines.enabled = true;
+    s->lines.color = RED;
+    s->lines.width = 4;
+    s->lines.wobble = wobble;
+    Comp c;
+    c.w = W; c.h = H; c.duration = 10; c.background = BLUE;
+    TNode* n = addRoot(c.roots, 0, 10);
+    if (wrap) n->isolate().filters = { filter };
+    n->add(0, 10)->fn = g3d::draw(s, viewport);
+    return render(c, frame, ss);
+}
+static int countColor(const Image& img, Color want, int tol = 40) {
+    int n = 0;
+    for (int y = 0; y < img.height; y++)
+        for (int x = 0; x < img.width; x++) n += close(GetImageColor(img, x, y), want, tol);
+    return n;
+}
+
+static void inkLines() {
+    Image img = inkedBox({}, false);
+    CHECK(countColor(img, RED) > 400);                  // silhouette plus the visible creases
+    CHECK(close(px(img, { W / 2.f + 4, H / 2.f + 12 }), WHITE, 40) || close(px(img, { W / 2.f + 4, H / 2.f + 12 }), RED, 40));
+    CHECK(close(GetImageColor(img, 3, 3), BLUE));       // far from the box: untouched
+    // The silhouette: walking left from the centre, red comes before blue.
+    int x = W / 2;
+    while (x > 0 && !close(GetImageColor(img, x, H / 2), BLUE, 40)) x--;
+    bool redBeforeBlue = false;
+    for (int k = x; k < x + 8; k++) redBeforeBlue |= close(GetImageColor(img, k, H / 2), RED, 60);
+    CHECK(redBeforeBlue);
+    const int full = countColor(img, RED);
+    UnloadImage(img);
+
+    // lineWidth 0 opts an object out.
+    Image none = inkedBox({}, false, 0);
+    CHECK(countColor(none, RED) == 0);
+    UnloadImage(none);
+
+    // Inside a layer, and inside a viewport, the lines are still drawn; a viewport's edge
+    // is not a line even where it cuts the box.
+    Image layered = inkedBox({}, true);
+    CHECK(countColor(layered, RED) > full * 9 / 10);
+    UnloadImage(layered);
+    Image half = inkedBox({ 0, 0, (float)W, (float)H }, false);
+    CHECK(countColor(half, RED) > full * 9 / 10);
+    UnloadImage(half);
+    Image cut = inkedBox({ W / 2.f, 0, W / 2.f, (float)H }, false);
+    CHECK(countColor(cut, RED) > 100);
+    for (int y = 10; y < H - 10; y++) CHECK(!close(GetImageColor(cut, W / 2 + 1, y), RED, 40));
+    UnloadImage(cut);
+
+    // Wobble boils on twos: frames 0 and 1 match, frame 2 moves, and a frame re-renders the same.
+    Image w0 = inkedBox({}, false, 1, 0, 3), w1 = inkedBox({}, false, 1, 1, 3), w2 = inkedBox({}, false, 1, 2, 3),
+          again = inkedBox({}, false, 1, 2, 3);
+    CHECK(std::memcmp(w0.data, w1.data, (size_t)W * H * 4) == 0);
+    CHECK(std::memcmp(w0.data, w2.data, (size_t)W * H * 4) != 0);
+    CHECK(std::memcmp(w2.data, again.data, (size_t)W * H * 4) == 0);
+    UnloadImage(w0); UnloadImage(w1); UnloadImage(w2); UnloadImage(again);
+
+    // At 2x supersampling (widths stay in composition px), in a layer and in an inset viewport.
+    for (int mode = 0; mode < 3; mode++) {
+        Rectangle vp = mode == 2 ? Rectangle{ 20, 10, (float)W - 40, (float)H - 20 } : Rectangle{};
+        Image ss = inkedBox(vp, mode == 1, 1, 0, 0, 2);
+        CHECK(countColor(ss, RED) > full * 7 / 10);
+        UnloadImage(ss);
+    }
+    // A layer's filters run on the inked result.
+    for (Filter f : { Filter::paperGrain(0.01f), Filter::inkEdges(0.5f, BLACK, 5) }) {
+        Image inked = inkedBox({}, true, 1, 0, 0, 1, f);
+        CHECK(countColor(inked, RED, 80) > full * 9 / 10);
+        UnloadImage(inked);
+    }
+}
+
 // ---- models
 static void writeObjCube(const fs::path& path) {
     std::ofstream f(path);
@@ -534,6 +692,10 @@ int main() {
     environment(dir);
     depthOfField();
     determinism();
+    toonShading();
+    goochShading();
+    hatchShading();
+    inkLines();
     models(dir);
     shutdownGraphics();
     CloseWindow();

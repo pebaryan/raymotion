@@ -173,6 +173,15 @@ bool drawLayer(TNode& n, int t, const Ctx& c) {
         restoreBlend();
     }
     targets.pop_back();
+    if (!n.layer->filters.empty()) {
+        rlDrawRenderBatchActive();                     // finish the content before acquiring (see above)
+        for (const Filter& f : n.layer->filters) {
+            RenderTexture out = acquire(w, h);
+            applyFilter(f, content, out, parent.scale);
+            release(content);
+            content = out;
+        }
+    }
     bindTarget(parent);                                // flushes the layer passes
     composite(*n.layer, content, mask, alpha, parent.scale);
     release(content);
