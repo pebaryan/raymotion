@@ -222,6 +222,18 @@ struct Filter {
     }
 };
 
+// ------------------------------------------------------------------ motion blur
+// Several moments within one frame, averaged: a shutter `shutter` frames long (0.5 is a
+// 180-degree shutter) centred on the frame, sampled `samples` times (1: off). Set it on a
+// Comp for the whole picture or on a Layer for one node and what is under it.
+struct MotionBlur { int samples = 1; float shutter = 0.5f; };
+// While a blurred frame or layer is being sampled, the offset in frames of the moment being
+// drawn (0 otherwise). Animation code takes part by reading time as frameTime(t): for
+// example interpolate(frameTime(t), { 0, 30 }, { 0, 800 }). Code that uses t as it is
+// draws the same at every sample, so it stays sharp.
+double subframe();
+inline double frameTime(int t) { return t + subframe(); }
+
 // A layer renders its node's subtree offscreen and composites the flattened result, so
 // opacity applies to the group as a whole (no seams where children overlap) and blend
 // modes and masks act on the group. Each layer costs one offscreen pass (two with a mask).
@@ -234,6 +246,7 @@ struct Layer {
     MaskMode maskMode = MaskMode::Alpha;
     bool invertMask = false;
     std::vector<Filter> filters;                     // applied in order to the content, before the mask (one pass each)
+    MotionBlur motionBlur;                           // samples > 1: the node and its content, blurred
 };
 
 // ------------------------------------------------------------------ audio
@@ -282,7 +295,13 @@ struct TNode {
 // layer opacity applied per primitive and no mask). restoreBlend re-applies the engine's
 // 2D blend state after user drawing code, which may have changed it.
 bool drawLayer(TNode& n, int t, const Ctx& c);
+// A layer with motion blur: re-evaluates the node's props at each sample (lt: remapped
+// local frame, t: unremapped, as stepNode has them) and composites the average.
+bool drawLayerBlurred(TNode& n, int lt, int t, const Ctx& parentCtx);
 void restoreBlend();
+
+// The node's context from its parent's and its props.
+inline Ctx nodeCtx(const Ctx& parent, const NodeProps& p);
 
 void stepNode(TNode& n, int parentLocal, const Ctx& parentCtx);
 
@@ -296,19 +315,24 @@ inline void stepNode(TNode& n, int parentLocal, const Ctx& parentCtx) {
     int t = parentLocal - n.start;
     if (t < 0 || t >= n.dur) return;
     int lt = n.freezeAt >= 0 ? n.freezeAt : n.loopEvery > 0 ? t % n.loopEvery : t;
+    if (n.layer && n.layer->enabled && n.layer->motionBlur.samples > 1 && drawLayerBlurred(n, lt, t, parentCtx)) return;
     if (n.up) n.up(lt, n.props);
     if (n.layer && n.layerUp) n.layerUp(t, n.props, *n.layer);
-    Ctx c;
-    c.o = mapP(parentCtx, n.props.pos);
-    c.s = parentCtx.s * n.props.scale;
-    c.rot = parentCtx.rot + n.props.rot;
-    c.a = parentCtx.a * n.props.opacity;
+    Ctx c = nodeCtx(parentCtx, n.props);
     if (n.layer && n.layer->enabled) {
         if (drawLayer(n, lt, c)) return;
         c.a *= n.layer->opacity;
         c.o.x += n.layer->offset.x; c.o.y += n.layer->offset.y;
     }
     drawNodeContent(n, lt, c);
+}
+inline Ctx nodeCtx(const Ctx& parent, const NodeProps& p) {
+    Ctx c;
+    c.o = mapP(parent, p.pos);
+    c.s = parent.s * p.scale;
+    c.rot = parent.rot + p.rot;
+    c.a = parent.a * p.opacity;
+    return c;
 }
 inline void drawTree(const Nodes& roots, int frame) {
     Ctx root{ { 0, 0 }, 1.f, 0.f, 1.f };
@@ -323,6 +347,7 @@ struct Comp {
     int duration = 0;                        // total frames
     int supersample = 2;                     // antialiasing: draw at w*N x h*N, box-filter down (1, 2 or 4)
     Color background{ 4, 4, 10, 255 };       // cleared before the timeline tree draws
+    MotionBlur motionBlur;                   // samples > 1: every frame averages that many moments (not with `render`)
     Song song;                               // procedural soundtrack (used when music=true)
     Nodes roots;
     // Optional custom renderer replacing the timeline tree (multi-pass effects etc.).

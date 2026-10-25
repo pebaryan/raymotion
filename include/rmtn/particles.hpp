@@ -107,11 +107,11 @@ struct Emitter {
 };
 
 // Calls `f` for every particle alive at local frame t: the burst, then the stream in birth order.
-void each(const Emitter& e, int t, const std::function<void(const Particle&)>& f);
-std::vector<Particle> particles(const Emitter& e, int t);
-// Draws the particles alive at frame t through the node context.
-void draw(const Ctx& c, const Emitter& e, int t);
-// A node fn that draws `e`.
+void each(const Emitter& e, double t, const std::function<void(const Particle&)>& f);
+std::vector<Particle> particles(const Emitter& e, double t);
+// Draws the particles alive at frame t (fractional is fine) through the node context.
+void draw(const Ctx& c, const Emitter& e, double t);
+// A node fn that draws `e` at frameTime(t), so it follows motion blur.
 std::function<void(const Ctx& c, int t)> fn(Emitter e);
 
 // ---- presets: ordinary Emitters, ready to adjust

@@ -1,6 +1,6 @@
 ---
 name: raymotion
-description: Make videos with raymotion, a C++17 motion-graphics engine on raylib and ffmpeg (Remotion-style compositions as code). Use when asked to create, edit, preview or render a video, animation, explainer, title sequence or social clip with raymotion, or to animate diagrams (Mermaid, Graphviz DOT, BPMN, knowledge graphs, trees), molecules (SMILES, SDF) or proteins (PDB), particle effects (fireworks, confetti, rain, snow, fire), vector line art and SVG (draw-on, shape morphs, motion along paths), math equations (LaTeX/TeX formulas that write on and transform step by step), function plots and data charts (axes, graphs, vector fields, bar/line/pie charts, box plots, heatmaps, contour maps, radar, gauges, treemaps, sunbursts, Sankey and chord diagrams), 3D and non-Euclidean geometry (1D-2D-3D projections, surfaces, Moebius band, Klein bottle, tesseract, hyperbolic tilings, spherical geometry), camera moves over a large canvas (pan, zoom, fly-through, parallax), code walkthroughs (syntax-highlighted code that types in, focuses lines and animates changes between versions), or 3D scenes in code.
+description: Make videos with raymotion, a C++17 motion-graphics engine on raylib and ffmpeg (Remotion-style compositions as code). Use when asked to create, edit, preview or render a video, animation, explainer, title sequence or social clip with raymotion, or to animate diagrams (Mermaid, Graphviz DOT, BPMN, knowledge graphs, trees), molecules (SMILES, SDF) or proteins (PDB), particle effects (fireworks, confetti, rain, snow, fire), vector line art and SVG (draw-on, shape morphs, motion along paths), math equations (LaTeX/TeX formulas that write on and transform step by step), function plots and data charts (axes, graphs, vector fields, bar/line/pie charts, box plots, heatmaps, contour maps, radar, gauges, treemaps, sunbursts, Sankey and chord diagrams), 3D and non-Euclidean geometry (1D-2D-3D projections, surfaces, Moebius band, Klein bottle, tesseract, hyperbolic tilings, spherical geometry), camera moves over a large canvas (pan, zoom, fly-through, parallax), code walkthroughs (syntax-highlighted code that types in, focuses lines and animates changes between versions), kinetic typography (text revealed letter by letter or word by word, typed, decoded or morphed), motion blur, or 3D scenes in code.
 ---
 
 # raymotion
@@ -97,7 +97,8 @@ See the references for everything else:
   Sankey and chord diagrams, stream graphs, parallel coordinates), spaces (flat-to-3D
   views, 3D axes, surfaces, torus/Moebius/Klein, 4D, hyperbolic tilings, spherical
   geometry), the 2D camera (pan, zoom, fly, parallax, shake), code blocks (syntax
-  highlighting, typing, line focus, marks, morphs between versions), particles (bursts, streams, weather, fire, confetti, custom looks), images, video,
+  highlighting, typing, line focus, marks, morphs between versions), text animation
+  (staggered reveals, typing, decoding, per-glyph styling, morphs), motion blur, particles (bursts, streams, weather, fire, confetti, custom looks), images, video,
   audio and the procedural synth, props, prefabs, generated assets, deterministic randomness.
 - `references/3d.md`: GPU 3D scenes (geometry, models, materials, lights, shadows,
   environments, cameras, depth of field) and illustration styles (toon, Gooch, hatch,

@@ -22,3 +22,4 @@
 #include "space.hpp"
 #include "camera.hpp"
 #include "code.hpp"
+#include "textfx.hpp"

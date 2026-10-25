@@ -89,6 +89,75 @@ RenderTexture acquire(int w, int h) {
 }
 void release(RenderTexture rt) { if (rt.id) pool.push_back(rt); }
 
+// ---- motion blur: samples are summed into a float target, so still pixels come out unchanged
+double sampleOffset = 0;                // frames: subframe() while a blur is being sampled
+std::vector<RenderTexture> floatPool;
+bool floatPoolRegistered = false;
+
+RenderTexture acquireFloat(int w, int h) {
+    for (size_t i = 0; i < floatPool.size(); i++) {
+        if (floatPool[i].texture.width == w && floatPool[i].texture.height == h) {
+            RenderTexture rt = floatPool[i];
+            floatPool.erase(floatPool.begin() + (long)i);
+            return rt;
+        }
+    }
+    if (!floatPoolRegistered) {
+        floatPoolRegistered = true;
+        onGraphicsShutdown([] {
+            for (auto& rt : floatPool) UnloadRenderTexture(rt);
+            floatPool.clear();
+            floatPoolRegistered = false;
+        });
+    }
+    RenderTexture rt{};
+    rt.id = rlLoadFramebuffer();
+    rlEnableFramebuffer(rt.id);
+    rt.texture.id = rlLoadTexture(nullptr, w, h, PIXELFORMAT_UNCOMPRESSED_R32G32B32A32, 1);
+    rt.texture.width = w;
+    rt.texture.height = h;
+    rt.texture.format = PIXELFORMAT_UNCOMPRESSED_R32G32B32A32;
+    rt.texture.mipmaps = 1;
+    rlFramebufferAttach(rt.id, rt.texture.id, RL_ATTACHMENT_COLOR_CHANNEL0, RL_ATTACHMENT_TEXTURE2D, 0);
+    rlFramebufferComplete(rt.id);
+    rlDisableFramebuffer();
+    return rt;
+}
+void releaseFloat(RenderTexture rt) { if (rt.id) floatPool.push_back(rt); }
+
+// The moments a blur samples (frames from the frame itself) and their weights: out of 255
+// in all, so the weights sum to exactly one.
+double blurOffset(const MotionBlur& b, int k) { return b.shutter * ((k + 0.5) / b.samples - 0.5); }
+unsigned char blurWeight(const MotionBlur& b, int k) {
+    return (unsigned char)(std::lround(255.0 * (k + 1) / b.samples) - std::lround(255.0 * k / b.samples));
+}
+
+// dst += src * weight / 255 (premultiplied, all channels)
+void accumulate(const RenderTexture& src, const RenderTexture& dst, unsigned char weight) {
+    BeginTextureMode(dst);
+    rlSetBlendFactors(RL_ONE, RL_ONE, RL_FUNC_ADD);
+    BeginBlendMode(BLEND_CUSTOM);
+    const float w = (float)src.texture.width, h = (float)src.texture.height;
+    DrawTexturePro(src.texture, { 0, 0, w, -h }, { 0, 0, w, h }, { 0, 0 }, 0, Color{ weight, weight, weight, weight });
+    EndBlendMode();
+    EndTextureMode();
+}
+// dst = src, unblended
+void copyTarget(const RenderTexture& src, const RenderTexture& dst) {
+    BeginTextureMode(dst);
+    rlSetBlendFactors(RL_ONE, RL_ZERO, RL_FUNC_ADD);
+    BeginBlendMode(BLEND_CUSTOM);
+    const float w = (float)src.texture.width, h = (float)src.texture.height;
+    DrawTexturePro(src.texture, { 0, 0, w, -h }, { 0, 0, w, h }, { 0, 0 }, 0, WHITE);
+    EndBlendMode();
+    EndTextureMode();
+}
+void clearTarget(const RenderTexture& rt, Color c) {
+    BeginTextureMode(rt);
+    ClearBackground(c);
+    EndTextureMode();
+}
+
 // ---- layer compositing
 const char* MASK_FS = "#version 330\n"
 "in vec2 fragTexCoord; in vec4 fragColor;\n"
@@ -270,6 +339,67 @@ void restoreBlend() {
     if (!targets.empty()) standardBlend();
 }
 
+bool drawLayerBlurred(TNode& n, int lt, int t, const Ctx& parentCtx) {
+    if (targets.empty()) return false;
+    const Target parent = targets.back();
+    const MotionBlur blur = n.layer->motionBlur;
+    const int w = parent.rt.texture.width, h = parent.rt.texture.height;
+    rlDrawRenderBatchActive();                         // see drawLayer
+    RenderTexture sum = acquireFloat(w, h), sample = acquire(w, h), content = acquire(w, h);
+    RenderTexture mask = n.layer->mask ? acquire(w, h) : RenderTexture{};
+    clearTarget(sum, BLANK);
+    const double base = sampleOffset;
+    for (int k = 0; k < blur.samples; k++) {
+        // the node moves too: its props are evaluated at each moment
+        sampleOffset = base + blurOffset(blur, k);
+        if (n.up) n.up(lt, n.props);
+        if (n.layerUp) n.layerUp(t, n.props, *n.layer);
+        Ctx inner = nodeCtx(parentCtx, n.props);
+        inner.a = 1.f;
+        targets.push_back({ sample, parent.scale });
+        bindTarget(targets.back());
+        ClearBackground(BLANK);
+        drawNodeContent(n, lt, inner);
+        rlDrawRenderBatchActive();
+        targets.pop_back();
+        accumulate(sample, sum, blurWeight(blur, k));
+    }
+    sampleOffset = base;
+    if (n.up) n.up(lt, n.props);                       // opacity, mask and offset from the frame itself
+    if (n.layerUp) n.layerUp(t, n.props, *n.layer);
+    const Ctx c = nodeCtx(parentCtx, n.props);
+    Ctx inner = c;
+    inner.a = 1.f;
+    copyTarget(sum, content);
+    releaseFloat(sum);
+    release(sample);
+    if (mask.id) {
+        targets.push_back({ mask, parent.scale });
+        bindTarget(targets.back());
+        ClearBackground(BLANK);
+        n.layer->mask(inner, lt);
+        restoreBlend();
+        rlDrawRenderBatchActive();
+        targets.pop_back();
+    }
+    if (!n.layer->filters.empty()) {
+        for (const Filter& f : n.layer->filters) {
+            RenderTexture out = acquire(w, h);
+            applyFilter(f, content, out, parent.scale);
+            release(content);
+            content = out;
+        }
+    }
+    bindTarget(parent);
+    const float alpha = c.a * n.layer->opacity;
+    if (alpha > 0.f) composite(*n.layer, content, mask, alpha, parent.scale);
+    release(content);
+    release(mask);
+    return true;
+}
+
+double subframe() { return sampleOffset; }
+
 int frameRate() { return currentFps; }
 float canvasScale() { return targets.empty() ? 1.f : targets.back().scale; }
 Vector2 canvasSize() {
@@ -286,6 +416,32 @@ void presentFrame(Comp& c, int frame, Canvas& canvas) {
         c.render(c, frame, canvas.output());
         EndTextureMode();
         rlEnableBackfaceCulling();
+        return;
+    }
+    if (c.motionBlur.samples > 1) {
+        // the whole frame, drawn at each moment and averaged
+        const RenderTexture out = canvas.drawTarget();
+        const int w = out.texture.width, h = out.texture.height;
+        RenderTexture sum = acquireFloat(w, h), sample = acquire(w, h);
+        clearTarget(sum, BLANK);
+        const double base = sampleOffset;
+        for (int k = 0; k < c.motionBlur.samples; k++) {
+            sampleOffset = base + blurOffset(c.motionBlur, k);
+            targets.push_back({ sample, (float)canvas.scale() });
+            bindTarget(targets.back());
+            ClearBackground(c.background);
+            drawTree(c.roots, frame);
+            EndTextureMode();
+            targets.clear();
+            EndBlendMode();
+            accumulate(sample, sum, blurWeight(c.motionBlur, k));
+        }
+        sampleOffset = base;
+        copyTarget(sum, out);
+        releaseFloat(sum);
+        release(sample);
+        rlEnableBackfaceCulling();
+        canvas.resolve();
         return;
     }
     targets.push_back({ canvas.drawTarget(), (float)canvas.scale() });

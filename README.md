@@ -560,6 +560,64 @@ node->fn = [=](const Ctx& cx, int t) {
 binary search with line focus and notes, and refactors promises into async/await and
 then try/catch.
 
+### Text animation
+
+```cpp
+TextStyle st;
+st.size = 84;
+// Texts need their font, which loads with the window: lay them out on first use.
+const auto title = txt::later([st] { return txt::Text::make("Every frame is a function of time", st); });
+node->fn = [=](const Ctx& cx, int t) {
+    txt::Reveal r;                                   // letter by letter, 2 frames apart
+    r.by = txt::Unit::Word;                          // or Letter, Line
+    r.order = txt::Order::Center;                    // Forward, Backward, Center, Edges, Random
+    r.offset = { 0, 40 };                            // each word rises as it fades in
+    txt::draw(cx, title(), { 960, 540 }, t, r, { 0.5f, 0.5f });
+};
+```
+
+`txt::` lays text out once into glyphs (with wrapping and alignment from a `TextStyle`) and
+animates each one:
+
+* **Reveals:** by letter, word or line, with a stagger, a duration, an easing and an order.
+  Each unit starts faded, offset, scaled or rotated and eases into place. `r.out` plays
+  it backwards, so text leaves the same way.
+* **Typing and decoding:** `typewriter` shows the first n characters, with a caret that
+  blinks once typing stops. `scramble` cycles random characters until each one settles.
+* **Styling:** a `Styler` changes any glyph's offset, scale, rotation, alpha, colour or
+  character. `wave` and `highlight` are built in, and `chain` runs several.
+* **Morphs:** `Morph(from, to)` glides the letters the two texts share to their new places
+  and fades the rest out and in. At u = 0 and 1 it draws exactly the two texts.
+
+`text` shows reveals in each unit and order, a typed terminal command, a decoded headline,
+a wave and a walking highlight, and anagram morphs.
+
+### Motion blur
+
+```cpp
+node->isolate().motionBlur = { 16, 0.5f };           // 16 samples, a 180-degree shutter
+node->fn = [](const Ctx& cx, int t) {
+    const double x = interpolate(frameTime(t), { 0, 20 }, { 100, 1700 });   // read time as frameTime(t)
+    dr::circle(cx, { (float)x, 540 }, 60, GOLD);
+};
+// or the whole picture: comp.motionBlur = { 8, 0.5f };
+```
+
+Every frame is a pure function of time, so a frame can be drawn at any moment in between.
+Motion blur draws `samples` moments spread over a `shutter` (in frames, centred on the
+frame) and averages them in a float buffer. The blur is the real path of the motion, not
+a smear guessed from velocity, and anything that holds still stays exactly sharp.
+
+Code takes part by reading time as `frameTime(t)`; code that uses `t` as it is draws the
+same at every sample and stays sharp, which suits labels. Node `up` callbacks are
+evaluated again at each sample, so animated props blur too. Camera tracks and particles
+already use `frameTime`. Blur a layer for one node and its children, or a `Comp` for
+everything (not with a custom `render`). Each sample is a full draw of that subtree, so
+use 8 to 16 samples, and 32 for very fast moves.
+
+`motionblur` compares sharp and blurred motion side by side, sweeps the shutter angle, and
+whips a strip of cards past with a title flying in.
+
 ### Particles
 
 ```cpp
@@ -629,6 +687,10 @@ alone, out of order or twice with the same result, and costs only its live parti
   shake and camera-driven world nodes.
 * `rmtn/code.hpp` — `code::` highlighted code blocks in 13 languages, typewriter and
   line-by-line reveals, line focus, marks, and morphs between versions.
+* `rmtn/textfx.hpp` — `txt::` text animation: staggered reveals by letter, word or line,
+  typing, decoding, per-glyph stylers (waves, highlights), and morphs between texts.
+* Motion blur (`MotionBlur`, `frameTime` in `rmtn/timeline.hpp`) — samples within the
+  shutter averaged in a float buffer, per layer or for the whole composition.
 * `rmtn/json.hpp` — `Json` values for props (parse, typed lookups with fallbacks, merge).
 * `rmtn/prefab.hpp` — `prefab::add/use`: registered, parameterized subtree builders.
 * `rmtn/synth.hpp` — sine-sum note events + envelopes -> WAV soundtrack.
@@ -662,6 +724,8 @@ charts                 1920x1080 @30fps   58.0s  audio=1   (box plots, violins, 
 spaces                 1920x1080 @30fps   53.7s  audio=1   (1D to 2D to 3D, projections, surfaces, a torus glued, Möbius and Klein, spherical and hyperbolic geometry, a tesseract)
 camera                 1920x1080 @30fps   28.0s  audio=1   (a 2D camera: glide, fly, turn, shake and zoom over a big canvas, parallax, a HUD mini-map)
 code                   1920x1080 @30fps   35.3s  audio=1   (code blocks: typing, highlighting in many languages, line focus and marks, morphs between versions)
+text                   1920x1080 @30fps   32.0s  audio=1   (text animation: staggered reveals, typing, decoding, waves and highlights, morphs)
+motionblur             1920x1080 @30fps   23.0s  audio=1   (motion blur: sharp against blurred, shutter angles, whip pans and a flying title)
 ```
 
 `raymotion-promo` is the 3.5-minute introduction to the engine
@@ -719,6 +783,10 @@ their rendering (depth order, hidden labels, a camera world with a fixed HUD);
 code (highlighting in each language, tabs and columns, finding text, reveal counts, morph
 matching; no window) and its rendering (token colours, cards, focus, typewriter, morph
 end frames);
+text animation (layout, wrapping and alignment, reveal timing in every order, end frames
+identical to plain text, typewriter cut-offs, highlights, morph end frames); motion blur
+(still frames unchanged, smear width and ramp, layer blur on its own node only, props
+from `up`, particles);
 Here-There layout checks; and a Python CLI suite (exact sizes, draft scaling, stale-frame
 cleanup, a real MP4 render, the starter project, props). Tests needing OpenGL carry the `gl`
 label (`ctest -LE gl` skips them on headless machines).

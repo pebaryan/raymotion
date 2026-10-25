@@ -119,7 +119,7 @@ Particle evaluate(const Emitter& e, const Seeded& s, float age) {
 float streamStart(const Emitter& e) { return (float)e.from - (e.prewarm ? std::ceil(std::max(e.life.lo, e.life.hi)) : 0.f); }
 
 template <class F>
-void forEachSeeded(const Emitter& e, int t, F&& f) {
+void forEachSeeded(const Emitter& e, double t, F&& f) {
     const float maxLife = std::max(e.life.lo, e.life.hi);
     for (int i = 0; i < e.burst; i++) {
         const float birth = e.burstAt + (e.burstSpread > 0 ? (float)(rnd(e, i, BIRTH) * e.burstSpread) : 0.f);
@@ -193,27 +193,27 @@ void drawOne(const Ctx& c, const Emitter& e, const Seeded& s, const Particle& p)
 
 } // namespace
 
-void each(const Emitter& e, int t, const std::function<void(const Particle&)>& f) {
+void each(const Emitter& e, double t, const std::function<void(const Particle&)>& f) {
     forEachSeeded(e, t, [&](const Seeded& s) {
-        const float age = t - s.birth;
+        const float age = (float)(t - s.birth);
         if (age < s.life) f(evaluate(e, s, age));
     });
 }
 
-std::vector<Particle> particles(const Emitter& e, int t) {
+std::vector<Particle> particles(const Emitter& e, double t) {
     std::vector<Particle> out;
     each(e, t, [&](const Particle& p) { out.push_back(p); });
     return out;
 }
 
-void draw(const Ctx& c, const Emitter& e, int t) {
+void draw(const Ctx& c, const Emitter& e, double t) {
     if (e.additive) {
         // Colour adds up; alpha composites as usual, so the layer stays well-formed.
         rlSetBlendFactorsSeparate(RL_SRC_ALPHA, RL_ONE, RL_ONE, RL_ONE_MINUS_SRC_ALPHA, RL_FUNC_ADD, RL_FUNC_ADD);
         BeginBlendMode(BLEND_CUSTOM_SEPARATE);
     }
     forEachSeeded(e, t, [&](const Seeded& s) {
-        const float age = t - s.birth;
+        const float age = (float)(t - s.birth);
         if (age >= s.life) return;
         const Particle p = evaluate(e, s, age);
         if (p.alpha * p.color.a < 0.5f || p.size <= 0) return;
@@ -228,7 +228,7 @@ void draw(const Ctx& c, const Emitter& e, int t) {
 
 std::function<void(const Ctx& c, int t)> fn(Emitter e) {
     auto sp = std::make_shared<const Emitter>(std::move(e));
-    return [sp](const Ctx& c, int t) { draw(c, *sp, t); };
+    return [sp](const Ctx& c, int t) { draw(c, *sp, frameTime(t)); };
 }
 
 // ------------------------------------------------------------------ presets

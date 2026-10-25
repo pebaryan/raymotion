@@ -184,13 +184,13 @@ TNode* world(Nodes& list, int from, int duration, std::function<Shot(int)> shot,
     return follow(addRoot(list, from, duration), std::move(shot), frame, parallax);
 }
 TNode* world(Nodes& list, int from, int duration, const Track& track, float parallax) {
-    return world(list, from, duration, [track](int t) { return track.at(t); }, track.frame, parallax);
+    return world(list, from, duration, [track](int t) { return track.at(frameTime(t)); }, track.frame, parallax);
 }
 TNode* world(TNode* parent, int from, int duration, std::function<Shot(int)> shot, Vector2 frame, float parallax) {
     return follow(parent->add(from, duration), std::move(shot), frame, parallax);
 }
 TNode* world(TNode* parent, int from, int duration, const Track& track, float parallax) {
-    return world(parent, from, duration, [track](int t) { return track.at(t); }, track.frame, parallax);
+    return world(parent, from, duration, [track](int t) { return track.at(frameTime(t)); }, track.frame, parallax);
 }
 
 } } // rmtn::cam

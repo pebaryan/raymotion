@@ -1,0 +1,40 @@
+{
+  "ref": "D:/toolcache/voiceclone/clips/prompt_a.tight.wav",
+  "ref_text": "As a simulation tool, Biffrost is a co simulation",
+  "language": "English",
+  "atempo": 0.94,
+  "lines": [
+    {
+      "file": "s01-intro.wav",
+      "text": "Ask a knowledge graph a question in sparkle, and an answer comes back in milliseconds. Let's open up the engine, and follow one query, step by step."
+    },
+    {
+      "file": "s02-graph.wav",
+      "text": "First, the data. A knowledge graph stores facts as triples: a subject, a predicate, and an object. Ada Lovelace wrote Note G. Note G is about computing. Every triple is one labelled edge, and together, the triples form a graph."
+    },
+    {
+      "file": "s03-query.wav",
+      "text": "Now the question: who wrote something about computing? In sparkle, we describe the shape of the answer. Variables start with a question mark. Each line in the WHERE block is a triple pattern: a triple with holes in it."
+    },
+    {
+      "file": "s04-parse.wav",
+      "text": "The engine first parses the text into an algebra. The two triple patterns become one basic graph pattern. A projection on top keeps only the variables we selected."
+    },
+    {
+      "file": "s05-optimize.wav",
+      "text": "Next comes the optimizer. The order of the patterns does not change the answer, but it does change the work. Statistics say that four triples use wrote, but only two works are about computing. So the more selective pattern goes first."
+    },
+    {
+      "file": "s06-match.wav",
+      "text": "Now, matching. Using an index on predicate and object, the engine finds every triple that fits the first pattern. Each match binds the variable work: Note G, and Computing Machinery and Intelligence."
+    },
+    {
+      "file": "s07-join.wav",
+      "text": "For each binding, the second pattern is no longer a search. It is a lookup. Who wrote Note G? Ada Lovelace. Who wrote Computing Machinery and Intelligence? Alan Turing. This is a nested loop join, fed by indexes."
+    },
+    {
+      "file": "s08-results.wav",
+      "text": "Finally, the projection keeps person and work, and the solutions stream back as a table. Parse, optimize, match, join, and project. That is how a sparkle query becomes an answer."
+    }
+  ]
+}

@@ -82,7 +82,8 @@ add_library(rmtn_engine STATIC
   src/engine/space.cpp
   src/engine/space_geometry.cpp
   src/engine/camera.cpp
-  src/engine/code.cpp)
+  src/engine/code.cpp
+  src/engine/textfx.cpp)
 add_library(raymotion::engine ALIAS rmtn_engine)
 target_include_directories(rmtn_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 # Single-header decoders (stb_image, nanosvg), compiled privately into media.cpp.
@@ -115,7 +116,10 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/charts.cpp
     examples/showcase/spaces.cpp
     examples/showcase/camera.cpp
-    examples/showcase/code.cpp)
+    examples/showcase/code.cpp
+    examples/showcase/text.cpp
+    examples/showcase/motionblur.cpp
+    examples/showcase/sparql.cpp)
   target_link_libraries(raymotion PRIVATE rmtn_engine)
 
   add_executable(raymotion_starter examples/starter/main.cpp)
@@ -200,6 +204,14 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   target_link_libraries(raymotion_code_render_tests PRIVATE rmtn_engine)
   add_test(NAME code_rendering COMMAND raymotion_code_render_tests)
 
+  add_executable(raymotion_textfx_tests tests/textfx_tests.cpp)
+  target_link_libraries(raymotion_textfx_tests PRIVATE rmtn_engine)
+  add_test(NAME text_animation COMMAND raymotion_textfx_tests)
+
+  add_executable(raymotion_motionblur_tests tests/motionblur_tests.cpp)
+  target_link_libraries(raymotion_motionblur_tests PRIVATE rmtn_engine)
+  add_test(NAME motion_blur COMMAND raymotion_motionblur_tests)
+
   # Here-There layouts are designed for Segoe UI: exit 77 (skipped) where it is absent.
   add_executable(raymotion_plain_tests tests/ht_plain_tests.cpp)
   target_link_libraries(raymotion_plain_tests PRIVATE rmtn_engine)
@@ -210,7 +222,7 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   target_compile_definitions(raymotion_feed_tests PRIVATE RAYMOTION_FEED_STATE=1 RAYMOTION_FEED_RENDER=1)
   add_test(NAME ht_feed COMMAND raymotion_feed_tests)
 
-  set_tests_properties(renderer_regressions layer_compositing scene3d media diagram_rendering path_rendering math_rendering plot_rendering space_rendering code_rendering ht_plain_layout ht_feed PROPERTIES LABELS gl SKIP_RETURN_CODE 77)
+  set_tests_properties(renderer_regressions layer_compositing scene3d media diagram_rendering path_rendering math_rendering plot_rendering space_rendering code_rendering text_animation motion_blur ht_plain_layout ht_feed PROPERTIES LABELS gl SKIP_RETURN_CODE 77)
 
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND)

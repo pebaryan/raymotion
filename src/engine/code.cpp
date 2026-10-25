@@ -29,6 +29,7 @@ struct Spec {
     bool json = false;                // "key": -> Property
     bool shell = false;               // $VAR, commands, --flags, # only at a word start
     bool caseless = false;            // SQL
+    bool sparql = false;              // ?vars, <iris>, prefix:names
     bool none = false;                // plain text
 };
 
@@ -182,6 +183,19 @@ const Spec& spec(std::string lang) {
         s.caseless = true;
         return s;
     }();
+    static const Spec sparql = [] {
+        Spec s;
+        s.keywords = words("select construct ask describe where prefix base from named graph optional union minus filter bind "
+                           "values as distinct reduced order by asc desc group having limit offset service not exists in a "
+                           "insert delete data with using load clear drop create");
+        s.types = words("count sum avg min max sample group_concat str lang langmatches datatype bound if coalesce regex "
+                        "contains strstarts strends lcase ucase concat iri uri bnode isiri isuri isblank isliteral");
+        s.constants = words("true false undef");
+        s.lineComments = { "#" };
+        s.caseless = true;
+        s.sparql = true;
+        return s;
+    }();
     static const Spec text = [] { Spec s; s.none = true; return s; }();
     if (lang == "cpp" || lang == "c++" || lang == "c" || lang == "h" || lang == "hpp" || lang == "cc" || lang == "cxx") return cpp;
     if (lang == "csharp" || lang == "cs" || lang == "c#") return csharp;
@@ -195,6 +209,7 @@ const Spec& spec(std::string lang) {
     if (lang == "json") return json;
     if (lang == "bash" || lang == "sh" || lang == "shell" || lang == "zsh" || lang == "console") return bash;
     if (lang == "sql") return sql;
+    if (lang == "sparql" || lang == "rq") return sparql;
     if (lang == "text" || lang == "plain" || lang == "txt" || lang.empty()) return text;
     return cpp;
 }
@@ -352,6 +367,32 @@ std::vector<Raw> lex(const std::string& s, const Spec& sp) {
             const bool key = sp.json && ch == '"' && nextNonSpace(e) < n && s[nextNonSpace(e)] == ':';
             push(i, e, key ? Kind::Property : Kind::String);
             continue;
+        }
+        // SPARQL: ?variables, <iris>, prefix:names
+        if (sp.sparql) {
+            if ((ch == '?' || ch == '$') && i + 1 < n && identStart(s[i + 1])) {
+                size_t e = i + 1;
+                while (e < n && identChar(s[e])) e++;
+                push(i, e, Kind::Property);
+                continue;
+            }
+            if (ch == '<') {
+                size_t e = i + 1;
+                while (e < n && s[e] != '>' && !std::isspace((unsigned char)s[e]) && s[e] != '<') e++;
+                if (e < n && s[e] == '>' && e > i + 1) { push(i, e + 1, Kind::String); continue; }
+            }
+            if (identStart(ch) || ch == ':') {
+                size_t e = i;
+                while (e < n && (identChar(s[e]) || s[e] == '-')) e++;
+                if (e < n && s[e] == ':') {
+                    push(i, e + 1, Kind::Type);
+                    size_t l = e + 1;
+                    while (l < n && (identChar(s[l]) || s[l] == '-')) l++;
+                    if (l > e + 1) push(e + 1, l, Kind::Function);
+                    i = l;
+                    continue;
+                }
+            }
         }
         // shell variables and flags
         if (sp.shell && ch == '$') {

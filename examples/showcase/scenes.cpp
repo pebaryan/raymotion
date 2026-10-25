@@ -31,6 +31,9 @@ void registerCharts(Registry& out);
 void registerSpaces(Registry& out);
 void registerCamera(Registry& out);
 void registerCode(Registry& out);
+void registerText(Registry& out);
+void registerMotionBlur(Registry& out);
+void registerSparql(Registry& out);
 
 void register_scenes(Registry& out) {
 using namespace dr;
@@ -392,5 +395,8 @@ registerCharts(out);
 registerSpaces(out);
 registerCamera(out);
 registerCode(out);
+registerText(out);
+registerMotionBlur(out);
+registerSparql(out);
 } // register_scenes
 } // namespace rmtn

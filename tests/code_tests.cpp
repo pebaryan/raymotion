@@ -90,6 +90,10 @@ static void languages() {
 
     const code::Block sql = code::Block::parse("SELECT name FROM users WHERE id = 1 -- one", "sql");
     CHECK(kindOf(sql, 1, "SELECT") == Kind::Keyword && kindOf(sql, 1, "-- one") == Kind::Comment && kindOf(sql, 1, "1") == Kind::Number);
+    const code::Block rq = code::Block::parse("PREFIX ex: <http://ex.org/>\nSELECT ?who WHERE { ?who a ex:Person ; ex:age ?n . FILTER(?n > 30) } # adults", "sparql");
+    CHECK(kindOf(rq, 1, "PREFIX") == Kind::Keyword && kindOf(rq, 1, "ex:") == Kind::Type && kindOf(rq, 1, "<http://ex.org/>") == Kind::String);
+    CHECK(kindOf(rq, 2, "?who") == Kind::Property && kindOf(rq, 2, "a") == Kind::Keyword && kindOf(rq, 2, "Person") == Kind::Function);
+    CHECK(kindOf(rq, 2, "FILTER") == Kind::Keyword && kindOf(rq, 2, ">") == Kind::Operator && kindOf(rq, 2, "# adults") == Kind::Comment);
 
     const code::Block gl = code::Block::parse("#version 330\nuniform vec3 tint;\nvoid main() { gl_FragColor = vec4(tint, 1.0); }", "glsl");
     CHECK(kindOf(gl, 1, "#version") == Kind::Preprocessor && kindOf(gl, 2, "uniform") == Kind::Keyword && kindOf(gl, 2, "vec3") == Kind::Type);

@@ -362,6 +362,63 @@ node->fn = [=](const Ctx& cx, int t) {
 `Block::find(line, "text")` gives a column range. For a morph, give the card a fixed
 width with `st.columns` so it does not resize, or let it grow from one size to the other.
 
+## Text animation (`txt::`, `rmtn/textfx.hpp`)
+
+Lay text out once, then animate each glyph. Fonts load with the window, after
+registration, so wrap `Text::make` (and `Morph`) in `txt::later`, which makes it on first
+use; call it inside the node fn.
+
+```cpp
+const auto texts = txt::later([] {
+    TextStyle st;                                // font, size, spacing, lineHeight, color, align
+    st.font = fonts::ui(true);
+    st.size = 84;
+    st.color = WHITE;
+    st.align = Align::Center;                    // for several lines or a width
+    struct T { txt::Text title, line; txt::Morph swap; };
+    const txt::Text a = txt::Text::make("listen", st), b = txt::Text::make("silent", st);
+    return T{ txt::Text::make("Every frame\nis a function", st, 1200),   // width: wraps
+              txt::Text::make("Any glyph can be styled", st), txt::Morph(a, b) };
+});
+node->fn = [texts](const Ctx& cx, int t) {
+    const auto& [title, line, swap] = texts();
+    const Vector2 mid{ 0.5f, 0.5f };             // anchor: `at` is the block's centre
+    txt::Reveal r;                               // by Letter (default), Word or Line
+    r.order = txt::Order::Forward;               // Backward, Center, Edges, Random (r.seed)
+    r.stagger = 2; r.duration = 14;              // frames between units, frames per unit
+    r.ease = ease::out(ease::cubic);
+    r.fade = 1; r.offset = { 0, 30 }; r.scale = 1; r.rotate = 0;   // where each unit starts from
+    // r.out = true;                             // the same, leaving
+    txt::draw(cx, title, { 960, 300 }, t - 10, r, mid);           // txt::length(title, r): frames to finish
+    txt::draw(cx, line, { 960, 600 }, txt::chain({ txt::wave(t, 12),
+        txt::highlight(line.word(2).first, line.word(2).second, GOLD, 1, 10, 1.1f) }), mid);
+    // custom stylers: [&](const txt::Glyph& g, txt::GlyphLook& l) { l.alpha *= ...; l.offset.y += ...; }
+    // txt::typewriter(cx, text, at, (t - 20) * 0.8, true, t);  // chars shown, caret, blink clock
+    // txt::scramble(cx, text, at, t, r);                         // random characters settle per unit
+    swap.draw(cx, { 960, 850 }, (float)interpolate(t, { 60, 90 }, { 0, 1 }, clamped()), mid);
+};
+```
+
+`Glyph` has `index` (among visible glyphs), `word`, `line`, `inWord` and `pos`, for
+stylers. Times are plain doubles, so pass `frameTime(t)` to have them follow motion blur.
+
+## Motion blur
+
+```cpp
+node->isolate().motionBlur = { 16, 0.5f };      // samples, shutter in frames (0.5 = 180 degrees)
+node->up = [](int t, NodeProps& p) { p.pos.x = (float)interpolate(frameTime(t), { 0, 12 }, { 0, 1400 }, clamped()); };
+node->fn = [](const Ctx& cx, int t) {
+    dr::circle(cx, { 200, (float)(540 + 300 * std::sin(frameTime(t) * 0.3)) }, 50, GOLD);   // blurs
+    dr::text(fonts::ui(true), cx, "label", { 200, 300 }, 40, 0, WHITE, 0.5, 0.5);         // t: stays sharp
+};
+// comp.motionBlur = { 8, 0.5f };               // the whole picture (not with a custom `render`)
+```
+
+Only what reads `frameTime(t)` (or `t + subframe()`) moves between samples; `up` and
+`layerUp` run again at each sample. Camera tracks and `fx::fn` particles already use it.
+Each sample redraws the subtree: 8 to 16 is typical, 32 for whip pans. Blur the layer
+that moves rather than the whole comp when you can.
+
 ## Particles (`fx::`, `rmtn/particles.hpp`)
 
 Emitters are computed per frame from a seed (no simulation state), so they follow the
