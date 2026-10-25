@@ -14,6 +14,8 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <chrono>
+#include <thread>
 #include "rmtn/timeline.hpp"
 #include "rmtn/draw.hpp"
 #include "rmtn/synth.hpp"
@@ -135,10 +137,14 @@ const char* extension(Format f) { return f == Format::ProRes ? ".mov" : f == For
 std::string formatArgs(Format f, bool alpha, int crf) {
     if (f == Format::ProRes)
         return std::string(" -c:v prores_ks -profile:v 4444 -vendor apl0 -pix_fmt ") +
-               (alpha ? "yuva444p10le -alpha_bits 16" : "yuv444p10le") + " -c:a pcm_s16le";
+               (alpha ? "yuva444p10le -alpha_bits 16" : "yuv444p10le");
     // VP9 alpha needs auto-alt-ref off; the crf scale is 0..63, so ours is scaled up a little.
     return " -c:v libvpx-vp9 -crf " + std::to_string(std::min(63, crf + 12)) + " -b:v 0 -row-mt 1 -deadline good -cpu-used 4" +
-           (alpha ? " -pix_fmt yuva420p -auto-alt-ref 0" : " -pix_fmt yuv420p") + " -c:a libopus -b:a 160k";
+           (alpha ? " -pix_fmt yuva420p -auto-alt-ref 0" : " -pix_fmt yuv420p");
+}
+
+std::string audioArgs(Format f) {
+    return f == Format::ProRes ? " -c:a pcm_s16le" : f == Format::WebM ? " -c:a libopus -b:a 160k" : " -c:a aac -b:a 192k";
 }
 
 bool endsWith(const std::string& s, const char* tail) {
@@ -171,6 +177,81 @@ std::string shellLine(const std::string& cmd) {
 #else
     return cmd;
 #endif
+}
+
+// One argument of a child command line, quoted for the shell popen runs (props are JSON,
+// full of quotes).
+std::string shellArg(const std::string& s) {
+#ifdef _WIN32
+    std::string q = "\"";
+    size_t slashes = 0;
+    for (char ch : s) {
+        if (ch == '\\') { slashes++; q += ch; continue; }
+        if (ch == '"') q.append(slashes + 1, '\\');
+        slashes = 0;
+        q += ch;
+    }
+    q.append(slashes, '\\');
+    return q + "\"";
+#else
+    std::string q = "'";
+    for (char ch : s) q += ch == '\'' ? std::string("'\\''") : std::string(1, ch);
+    return q + "'";
+#endif
+}
+
+// --jobs: the frames are split into contiguous ranges, each drawn and encoded by a child
+// process (`--range A:B --chunk PATH`). Frames carry no state, so a range renders exactly
+// as it would inside one long render. Returns false if any child failed.
+bool renderChunks(const std::string& exe, const std::vector<std::string>& args, int duration, int jobs,
+                  const std::vector<std::string>& chunks) {
+    struct Child { FILE* out = nullptr; int a = 0, b = 0; std::atomic<int> done{ 0 }; std::atomic<bool> ended{ false }; std::thread reader; };
+    std::vector<Child> kids(jobs);
+    for (int j = 0; j < jobs; j++) {
+        Child& k = kids[j];
+        k.a = (int)((long long)duration * j / jobs);
+        k.b = (int)((long long)duration * (j + 1) / jobs);
+        std::string cmd = shellArg(exe);
+        for (const auto& a : args) cmd += " " + shellArg(a);
+        cmd += " --no-music --range " + std::to_string(k.a) + ":" + std::to_string(k.b);
+        if (!chunks.empty()) cmd += " --chunk " + shellArg(chunks[j]);
+        if (getenv("RAYMOTION_DEBUG_CMD")) printf("[CMD] %s\n", cmd.c_str());
+        k.out = popen(shellLine(cmd).c_str(), "r");
+        if (!k.out) { fprintf(stderr, "cannot start render process %d\n", j); return false; }
+    }
+    // Children print "[frame/total]"; each reader turns that into frames done in its range.
+    for (auto& k : kids)
+        k.reader = std::thread([&k] {
+            char line[256];
+            while (fgets(line, sizeof line, k.out)) {
+                int f = 0;
+                if (sscanf(line, " [%d/", &f) == 1) k.done = std::max(k.done.load(), f - k.a + 1);
+            }
+            k.ended = true;
+        });
+    int shown = -1;
+    for (;;) {
+        bool running = false;
+        int done = 0;
+        for (auto& k : kids) {
+            done += std::min(k.done.load(), k.b - k.a);
+            running |= k.done.load() < k.b - k.a;
+        }
+        if (done / 30 != shown / 30 || !running) { printf("[%4d/%4d] %d jobs\n", done, duration, jobs); fflush(stdout); shown = done; }
+        if (!running) break;
+        // a child that died early never reports its last frame, but its output ends
+        bool allEnded = true;
+        for (auto& k : kids) allEnded &= k.ended.load();
+        if (allEnded) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    bool ok = true;
+    for (int j = 0; j < jobs; j++) {
+        kids[j].reader.join();
+        const int rc = pclose(kids[j].out);
+        if (rc != 0) { fprintf(stderr, "render process %d (frames %d-%d) exited with %d\n", j, kids[j].a, kids[j].b - 1, rc); ok = false; }
+    }
+    return ok;
 }
 
 // --props value: inline JSON, or @path to a JSON file.
@@ -211,6 +292,8 @@ void usage() {
     puts("                          webm (VP9)");
     puts("                        --alpha  transparent background (prores, webm or");
     puts("                          --png-frames; prores is the default with --alpha)");
+    puts("                        --jobs N render N chunks of frames in parallel processes,");
+    puts("                          then join them without re-encoding");
     puts("  raymotion still   <name> --at FRAME [--png PATH] write one PNG frame");
     puts("                        --alpha  transparent background (an RGBA PNG)");
     puts("  raymotion props   <name>                        print the default props (JSON)");
@@ -243,9 +326,12 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
     const std::string want = argv[2];
 
     const char* crfArg = nullptr, *ffArg = nullptr, *atArg = nullptr, *pngArg = nullptr, *ssArg = nullptr, *propsArg = nullptr,
-               *encoderArg = nullptr, *presetArg = nullptr, *formatArg = nullptr;
+               *encoderArg = nullptr, *presetArg = nullptr, *formatArg = nullptr, *rangeArg = nullptr, *chunkArg = nullptr;
     bool draft = false, noMusic = false, pngFrames = false, alpha = false;
+    int jobs = 1;
+    std::vector<std::string> childArgs = { "render", argv[2] };   // what a --jobs child is given
     for (int i = 3; i < argc; i++) {
+        const int from = i;
         if (!strcmp(argv[i], "--crf") && i+1 < argc) crfArg = argv[++i];
         else if (!strcmp(argv[i], "--ffmpeg") && i+1 < argc) ffArg = argv[++i];
         else if (!strcmp(argv[i], "--encoder") && i+1 < argc) encoderArg = argv[++i];
@@ -259,7 +345,13 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
         else if (!strcmp(argv[i], "--png-frames")) pngFrames = true;
         else if (!strcmp(argv[i], "--format") && i+1 < argc) formatArg = argv[++i];
         else if (!strcmp(argv[i], "--alpha")) alpha = true;
+        else if (!strcmp(argv[i], "--jobs") && i+1 < argc) { jobs = atoi(argv[++i]); continue; }
+        else if (!strcmp(argv[i], "--range") && i+1 < argc) { rangeArg = argv[++i]; continue; }   // internal: a --jobs child
+        else if (!strcmp(argv[i], "--chunk") && i+1 < argc) { chunkArg = argv[++i]; continue; }
+        else continue;
+        for (int k = from; k <= i; k++) childArgs.push_back(argv[k]);
     }
+    if (jobs < 1) { puts("--jobs needs a positive count"); return 1; }
     Format format = alpha ? Format::ProRes : Format::Mp4;
     if (formatArg) {
         if (!strcmp(formatArg, "mp4")) format = Format::Mp4;
@@ -357,10 +449,17 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
 
     // ---- render: frames streamed into ffmpeg while the next ones draw ---------
     if (!strcmp(mode, "render")) {
+        // A --jobs child draws frames [first, last) only, into its own chunk file.
+        int first = 0, last = comp->duration;
+        if (rangeArg && (sscanf(rangeArg, "%d:%d", &first, &last) != 2 || first < 0 || last > comp->duration || first >= last)) {
+            printf("bad --range '%s'\n", rangeArg); return 1;
+        }
+        const bool child = rangeArg != nullptr;
+        jobs = std::max(1, std::min(jobs, comp->duration / 15));   // a chunk of at least half a second or so
         std::string dir = "out/" + comp->name + (draft ? "_draft_frames" : "_frames");
         std::filesystem::create_directories(dir);
         // Remove only generated numbered frames, never unrelated directory contents.
-        for (const auto& entry : std::filesystem::directory_iterator(dir)){
+        if (!child) for (const auto& entry : std::filesystem::directory_iterator(dir)){
             const std::string name=entry.path().filename().string();
             if (name.size()>=10 && name.front()=='f' && name.substr(name.size()-4)==".png" &&
                 std::all_of(name.begin()+1,name.end()-4,[](char ch){ return ch>='0' && ch<='9'; }) &&
@@ -371,10 +470,44 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
             ff = media::ffmpeg();
             if (ff.empty()) { puts("ffmpeg not found (use --ffmpeg PATH, or --png-frames to skip encoding)"); return 2; }
         }
-        std::string wav = "", mp4 = "out/" + comp->name + (draft ? "_draft" : "") + extension(format);
+        std::string wav = "", mp4 = chunkArg ? chunkArg : "out/" + comp->name + (draft ? "_draft" : "") + extension(format);
         if (!noMusic && !pngFrames && media::hasAudio(*comp)) {
             wav = dir + "/track.wav";
             if (!media::writeWav(wav, media::mixAudio(*comp, AUDIO_RATE), AUDIO_RATE)) { puts("wav write failed"); wav.clear(); }
+        }
+
+        if (jobs > 1 && !child) {
+            // Chunks are encoded with the final codec, so joining them is a stream copy;
+            // the soundtrack is muxed once, over the whole picture.
+            const auto t0 = std::chrono::steady_clock::now();
+            std::vector<std::string> chunks;
+            for (int j = 0; j < jobs && !pngFrames; j++)
+                chunks.push_back(dir + "/chunk" + std::to_string(j) + extension(format));
+            auto cleanup = [&] { std::error_code ec; for (const auto& c : chunks) std::filesystem::remove(c, ec); };
+            if (!renderChunks(std::filesystem::absolute(argv[0]).make_preferred().string(), childArgs, comp->duration, jobs, chunks)) { cleanup(); fprintf(stderr, "render failed\n"); return 3; }
+            if (pngFrames) {
+                printf("rendered %d frames in %.1fs with %d jobs -> %s/\n", comp->duration, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), jobs, dir.c_str());
+                return 0;
+            }
+            const std::string list = dir + "/chunks.txt";
+            {
+                std::ofstream out(std::filesystem::u8path(list), std::ios::binary);
+                for (const auto& c : chunks) out << "file '" << std::filesystem::path(c).filename().string() << "'\n";
+            }
+            std::string cmd = quote(ff) + " -y -hide_banner -loglevel warning -f concat -safe 0 -i " + quote(list);
+            if (!wav.empty()) cmd += " -i " + quote(wav) + " -map 0:v -map 1:a";
+            cmd += " -c:v copy";
+            if (!wav.empty()) cmd += audioArgs(format) + " -shortest";
+            if (format == Format::Mp4) cmd += " -movflags +faststart";
+            cmd += " " + quote(mp4);
+            if (getenv("RAYMOTION_DEBUG_CMD")) printf("[CMD] %s\n", cmd.c_str());
+            const int rc = system(shellLine(cmd).c_str());
+            cleanup();
+            std::error_code ec;
+            std::filesystem::remove(list, ec);
+            if (rc != 0) { fprintf(stderr, "render failed: joining the chunks, ffmpeg exited with %d\n", rc); return 3; }
+            printf("rendered %d frames in %.1fs with %d jobs -> %s\n", comp->duration, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), jobs, mp4.c_str());
+            return 0;
         }
 
         FILE* pipe = nullptr;
@@ -384,13 +517,12 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
                 " -f rawvideo -pix_fmt rgba -s " + std::to_string(W) + "x" + std::to_string(H) +
                 " -framerate " + std::to_string(comp->fps) + " -i -";
             if (!wav.empty()) cmd += " -i " + quote(wav);
-            cmd += " -frames:v " + std::to_string(comp->duration);
+            cmd += " -frames:v " + std::to_string(last - first);
             cmd += " -vf vflip";            // frames arrive bottom-up, straight from GL
             if (format == Format::Mp4) {
                 cmd += videoCodecArgs(encoderArg ? encoderArg : "h264", presetArg, crf) + " -movflags +faststart";
-                if (!wav.empty()) cmd += " -c:a aac -b:a 192k";
             } else cmd += formatArgs(format, alpha, crf);
-            if (!wav.empty()) cmd += " -shortest";
+            if (!wav.empty()) cmd += audioArgs(format) + " -shortest";
             cmd += " " + quote(mp4);
             if (getenv("RAYMOTION_DEBUG_CMD")) printf("[CMD] %s\n", cmd.c_str());
 #ifdef _WIN32
@@ -401,6 +533,7 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
             if (!pipe) { fprintf(stderr, "cannot start ffmpeg: %s\n", ff.c_str()); return 3; }
         }
 
+        if (child) SetConfigFlags(FLAG_WINDOW_HIDDEN);   // one window for a --jobs render, not one per chunk
         InitWindow(W, H, ("raymotion render - " + comp->name).c_str());
         Canvas canvas;
         if (!canvas.load(comp->w,comp->h,canvasScale(*comp,ssArg,draft))){ if (pipe) pclose(pipe); CloseWindow(); return 2; }
@@ -424,7 +557,7 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
         }
         double t0 = GetTime();
         bool ok = true;
-        for (int f = 0; f < comp->duration && ok; f++) {
+        for (int f = first; f < last && ok; f++) {
             BeginDrawing();
             drawFrame(*comp, f,canvas);
             EndDrawing();                 // flush before reading the canvas
@@ -446,8 +579,10 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
                 ok = stream.push(resize ? scaled : canvas.output());
                 if (!ok) fprintf(stderr, "ffmpeg stopped accepting frames at %d\n", f);
             }
-            if (f % 15 == 0 || f+1 == comp->duration)
+            if (f % 15 == 0 || f+1 == last) {
                 printf("[%4d/%4d]\n", f, comp->duration);
+                if (child) fflush(stdout);   // the parent reads progress through a pipe
+            }
         }
         if (pipe && !stream.close() && ok) { fprintf(stderr, "ffmpeg stopped accepting frames\n"); ok = false; }
         double dt = GetTime() - t0;
@@ -455,12 +590,12 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
         closeCanvas(canvas);
         if (pngFrames) {
             if (!ok) return 2;
-            printf("rendered %d frames in %.1fs -> %s/\n", comp->duration, dt, dir.c_str());
+            printf("rendered %d frames in %.1fs -> %s/\n", last - first, dt, dir.c_str());
             return 0;
         }
         int rc = pclose(pipe);
         if (!ok || rc != 0) { fprintf(stderr, "render failed: ffmpeg exited with %d (see its messages above)\n", rc); return 3; }
-        printf("rendered %d frames in %.1fs -> %s\n", comp->duration, dt, mp4.c_str());
+        printf("rendered %d frames in %.1fs -> %s\n", last - first, dt, mp4.c_str());
         return 0;
     }
 

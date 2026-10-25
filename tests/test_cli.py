@@ -147,6 +147,26 @@ class CliTests(unittest.TestCase):
         self.assertEqual(bad.returncode, 1)
         self.assertIn("no alpha", bad.stdout)
 
+    def test_jobs_render_matches_one_process(self):
+        def frames(name):
+            out = subprocess.run(["ffmpeg", "-v", "error", "-i", str(self.cwd / "out" / name), "-f", "framemd5", "-"],
+                                 capture_output=True, text=True, check=True).stdout
+            return [line.split(",")[-1] for line in out.splitlines() if not line.startswith("#")]
+        # ProRes is intra-only, so chunks joined by stream copy are the same frames, bit for bit.
+        self.run_cli("render", "probe", "--draft", "--no-music", "--format", "prores")
+        (self.cwd / "out" / "probe_draft.mov").rename(self.cwd / "out" / "one.mov")
+        self.assertIn("with 3 jobs", self.run_cli("render", "probe", "--draft", "--no-music", "--format", "prores", "--jobs", "3").stdout)
+        one, three = frames("one.mov"), frames("probe_draft.mov")
+        self.assertEqual(len(three), 60)
+        self.assertEqual(one, three)
+        # H.264 chunks join into one stream of the full length; no chunk files are left over.
+        self.run_cli("render", "probe", "--draft", "--no-music", "--jobs", "2")
+        self.assertEqual(len(frames("probe_draft.mp4")), 60)
+        self.assertEqual(list((self.cwd / "out" / "probe_draft_frames").glob("chunk*")), [])
+        # A PNG sequence is split the same way, every frame written once.
+        self.run_cli("render", "probe", "--draft", "--png-frames", "--jobs", "2")
+        self.assertEqual(len(list((self.cwd / "out" / "probe_draft_frames").glob("f*.png"))), 60)
+
     def test_starter_project(self):
         listing = self.run_cli("list", exe=STARTER).stdout
         self.assertIn("hello", listing)
