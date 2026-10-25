@@ -2,6 +2,7 @@
 #include "rmtn/render.hpp"
 #include "rmtn/fonts.hpp"
 #include <rlgl.h>
+#include <algorithm>
 
 namespace rmtn {
 
@@ -453,6 +454,15 @@ void presentFrame(Comp& c, int frame, Canvas& canvas) {
     EndBlendMode();
     rlEnableBackfaceCulling();
     canvas.resolve();
+}
+
+void unpremultiply(unsigned char* rgba, size_t pixels) {
+    for (size_t i = 0; i < pixels; i++, rgba += 4) {
+        const unsigned a = rgba[3];
+        if (a == 255) continue;
+        if (a == 0) { rgba[0] = rgba[1] = rgba[2] = 0; continue; }
+        for (int k = 0; k < 3; k++) rgba[k] = (unsigned char)std::min(255u, (rgba[k] * 255u + a / 2) / a);
+    }
 }
 
 void onGraphicsShutdown(std::function<void()> release) { releasers().push_back(std::move(release)); }

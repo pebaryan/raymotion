@@ -43,7 +43,11 @@ comments of `include/rmtn/*.hpp`).
 
 4. **Render.** `build/myvideo render intro --draft` (half size, fast) to check motion and
    timing, then `build/myvideo render intro` for the final `out/intro.mp4`. Use
-   `--png-frames` to get a PNG sequence when ffmpeg is unavailable.
+   `--png-frames` to get a PNG sequence when ffmpeg is unavailable. For overlays meant
+   for an editor (lower thirds, titles, callouts), don't paint a backdrop and render
+   with `--alpha`: ProRes 4444 with alpha (`out/intro.mov`) for Premiere, Resolve or
+   Final Cut, or `--alpha --format webm` for VP9 with alpha. Check with
+   `still --alpha`, which writes an RGBA PNG.
 
 Other commands: `preview <name>` plays in a live window with sound (needs a desktop),
 `props <name>` prints a composition's default props, `--props '{"title": "Hi"}'` or

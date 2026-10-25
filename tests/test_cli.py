@@ -106,6 +106,47 @@ class CliTests(unittest.TestCase):
         self.assertGreater(self.distinct_colors(smooth), self.distinct_colors(hard),
                            "supersampled frame has no extra edge shades")
 
+    def rgba(self, *args):
+        return subprocess.run(["ffmpeg", "-v", "error", *args, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "-"],
+                              capture_output=True, check=True).stdout
+
+    def test_alpha_still_is_straight_alpha(self):
+        clear, opaque = self.cwd / "clear.png", self.cwd / "opaque.png"
+        self.run_cli("still", "lowerthird", "--at", "70", "--alpha", "--draft", "--png", str(clear))
+        self.run_cli("still", "lowerthird", "--at", "70", "--draft", "--png", str(opaque))
+        a, o = self.rgba("-i", str(clear)), self.rgba("-i", str(opaque))
+        alphas = a[3::4]
+        self.assertEqual(alphas[0], 0, "background is not transparent")
+        self.assertTrue(any(0 < x < 255 for x in alphas), "no partial alpha (translucent panel, edges)")
+        self.assertTrue(all(x == 255 for x in o[3::4]), "a normal still has alpha")
+        # Straight alpha: composited over black, it is the normal render (premultiplied
+        # colour would come out darker at every edge).
+        err = sum(abs(a[i + k] * a[i + 3] / 255 - o[i + k]) for i in range(0, len(a), 4 * 7) for k in range(3))
+        self.assertLess(err / (len(a) / (4 * 7) * 3), 0.5)
+
+    def test_alpha_video_formats(self):
+        self.run_cli("render", "lowerthird", "--draft", "--alpha", "--no-music")
+        self.run_cli("render", "lowerthird", "--draft", "--alpha", "--format", "webm", "--no-music")
+        def probe(name):
+            out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                                  "stream=codec_name,pix_fmt,width:stream_tags=alpha_mode", "-of", "json",
+                                  str(self.cwd / "out" / name)], capture_output=True, text=True, check=True)
+            return json.loads(out.stdout)["streams"][0]
+        mov, webm = probe("lowerthird_draft.mov"), probe("lowerthird_draft.webm")
+        self.assertEqual((mov["codec_name"], mov["width"]), ("prores", 960))
+        self.assertTrue(mov["pix_fmt"].startswith("yuva"), mov)
+        self.assertEqual((webm["codec_name"], webm["tags"]["alpha_mode"]), ("vp9", "1"))
+        # The draft downscale keeps the transparency, and frames decode with it.
+        for args in (["-i", str(self.cwd / "out" / "lowerthird_draft.mov")],
+                     ["-c:v", "libvpx-vp9", "-i", str(self.cwd / "out" / "lowerthird_draft.webm")]):
+            alphas = self.rgba(*args, "-vf", "select=eq(n\\,70)")[3::4]
+            self.assertLess(alphas[0], 8)
+            self.assertGreater(max(alphas), 200)
+        bad = subprocess.run([str(EXE), "render", "lowerthird", "--draft", "--alpha", "--format", "mp4"],
+                             cwd=self.cwd, capture_output=True, text=True, timeout=60)
+        self.assertEqual(bad.returncode, 1)
+        self.assertIn("no alpha", bad.stdout)
+
     def test_starter_project(self):
         listing = self.run_cli("list", exe=STARTER).stdout
         self.assertIn("hello", listing)

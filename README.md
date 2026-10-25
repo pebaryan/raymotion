@@ -68,7 +68,8 @@ proteins, and the rules that keep frames deterministic, with a project template 
 build/raymotion list
 build/raymotion preview <name>                 # live window; esc or close quits
 build/raymotion render  <name> [--crf N] [--draft] [--no-music] [--png-frames] [--ss N]
-build/raymotion still   <name> --at FRAME [--png PATH] [--ss N]
+                               [--format mp4|prores|webm] [--alpha]
+build/raymotion still   <name> --at FRAME [--png PATH] [--ss N] [--alpha]
 build/raymotion props   <name>                 # print the default props as JSON
 build/raymotion prefabs                        # list prefabs and their default props
 # any command:  --props '{"title": "Hi"}'  or  --props @props.json
@@ -81,6 +82,17 @@ build/raymotion prefabs                        # list prefabs and their default 
   encoder (default `h264`, i.e. libx264; `h264_nvenc`/`hevc_nvenc` on NVIDIA GPUs) and
   `--preset NAME` its speed; `--crf N` maps to each encoder's own quality setting.
   `--png-frames` writes `out/<name>_frames/fNNNNN.png` instead and needs no ffmpeg.
+* **Transparent video for editors.** `--alpha` renders with a transparent background
+  (whatever the composition's `background`) into ProRes 4444 with alpha,
+  `out/<name>.mov`, which Premiere, Resolve and Final Cut import as a clip with
+  transparency. `--format webm` writes VP9 with alpha instead (browsers, OBS), and
+  `--format prores` without `--alpha` gives an opaque ProRes 4444 master. `--alpha` also
+  works with `still` and `--png-frames` (RGBA PNGs). The engine composites in
+  premultiplied alpha and hands the encoder straight alpha, so antialiased and
+  translucent edges keep their colour over any footage. Anything the composition paints
+  itself (a full-frame backdrop) stays opaque, so leave the background to `--alpha`.
+  Without `--alpha`, every output is opaque and a transparent `background` shows as
+  black.
 * ffmpeg lookup: `--ffmpeg PATH`, `RAYMOTION_FFMPEG`, a winget Gyan.FFmpeg install,
   `C:/Program Files/ffmpeg`, `C:/ffmpeg`, then `PATH`.
 * Output is exactly the composition size regardless of the desktop. `--draft` renders
@@ -726,6 +738,8 @@ camera                 1920x1080 @30fps   28.0s  audio=1   (a 2D camera: glide, 
 code                   1920x1080 @30fps   35.3s  audio=1   (code blocks: typing, highlighting in many languages, line focus and marks, morphs between versions)
 text                   1920x1080 @30fps   32.0s  audio=1   (text animation: staggered reveals, typing, decoding, waves and highlights, morphs)
 motionblur             1920x1080 @30fps   23.0s  audio=1   (motion blur: sharp against blurred, shutter angles, whip pans and a flying title)
+sparql                 1920x1080 @30fps  113.0s  audio=1   (a narrated explainer of SPARQL query processing: knowledge graph, query, algebra, optimizer, matching, joins)
+lowerthird             1920x1080 @30fps    6.0s  audio=0   (a name tag with no background: render with --alpha for ProRes 4444 or --format webm)
 ```
 
 `raymotion-promo` is the 3.5-minute introduction to the engine
@@ -788,7 +802,8 @@ identical to plain text, typewriter cut-offs, highlights, morph end frames); mot
 (still frames unchanged, smear width and ramp, layer blur on its own node only, props
 from `up`, particles);
 Here-There layout checks; and a Python CLI suite (exact sizes, draft scaling, stale-frame
-cleanup, a real MP4 render, the starter project, props). Tests needing OpenGL carry the `gl`
+cleanup, a real MP4 render, transparent stills and ProRes/WebM renders with alpha, the
+starter project, props). Tests needing OpenGL carry the `gl`
 label (`ctest -LE gl` skips them on headless machines).
 
 ## License

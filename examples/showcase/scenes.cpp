@@ -34,6 +34,7 @@ void registerCode(Registry& out);
 void registerText(Registry& out);
 void registerMotionBlur(Registry& out);
 void registerSparql(Registry& out);
+void registerLowerThird(Registry& out);
 
 void register_scenes(Registry& out) {
 using namespace dr;
@@ -398,5 +399,6 @@ registerCode(out);
 registerText(out);
 registerMotionBlur(out);
 registerSparql(out);
+registerLowerThird(out);
 } // register_scenes
 } // namespace rmtn

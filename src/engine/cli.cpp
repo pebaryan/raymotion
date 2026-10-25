@@ -1,6 +1,7 @@
 // cli.cpp -- raymotion command line: list | preview | render | still
 #include "rmtn/cli.hpp"
 #include <raylib.h>
+#include <rlgl.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -99,16 +100,23 @@ void closeCanvas(Canvas& canvas){
 }
 
 // Canvas pixels top-down, resized to the output size. Caller unloads.
-Image grabFrame(const Canvas& canvas,int W,int H){
+// With `alpha`, the canvas holds premultiplied colour over a transparent background: it is
+// resized premultiplied (so edges do not pick up dark fringes), then made straight. Without
+// it the frame is opaque, as in an mp4: a transparent background shows as black.
+Image grabFrame(const Canvas& canvas,int W,int H,bool alpha=false){
     Image image=LoadImageFromTexture(canvas.output().texture);
     if (!image.data) return image;
     ImageFlipVertical(&image);
     if (image.width!=W || image.height!=H) ImageResize(&image,W,H);
+    unsigned char* px=(unsigned char*)image.data;
+    const size_t count=(size_t)image.width*image.height;
+    if (alpha) unpremultiply(px,count);
+    else for (size_t i=0;i<count;i++) px[i*4+3]=255;
     return image;
 }
 
-bool saveFrame(const Canvas& canvas,int W,int H,const std::string& path){
-    Image image=grabFrame(canvas,W,H);
+bool saveFrame(const Canvas& canvas,int W,int H,const std::string& path,bool alpha=false){
+    Image image=grabFrame(canvas,W,H,alpha);
     if (!image.data) return false;
     bool ok=ExportImage(image,path.c_str());
     UnloadImage(image);
@@ -117,6 +125,21 @@ bool saveFrame(const Canvas& canvas,int W,int H,const std::string& path){
 }
 
 std::string quote(const std::string& s) { return "\"" + s + "\""; }
+
+// Output containers. mp4 is H.264 (or --encoder); prores is ProRes 4444 in .mov, the
+// editing format Premiere, Resolve and Final Cut take with alpha; webm is VP9, with alpha
+// for browsers and OBS.
+enum class Format { Mp4, ProRes, WebM };
+const char* extension(Format f) { return f == Format::ProRes ? ".mov" : f == Format::WebM ? ".webm" : ".mp4"; }
+
+std::string formatArgs(Format f, bool alpha, int crf) {
+    if (f == Format::ProRes)
+        return std::string(" -c:v prores_ks -profile:v 4444 -vendor apl0 -pix_fmt ") +
+               (alpha ? "yuva444p10le -alpha_bits 16" : "yuv444p10le") + " -c:a pcm_s16le";
+    // VP9 alpha needs auto-alt-ref off; the crf scale is 0..63, so ours is scaled up a little.
+    return " -c:v libvpx-vp9 -crf " + std::to_string(std::min(63, crf + 12)) + " -b:v 0 -row-mt 1 -deadline good -cpu-used 4" +
+           (alpha ? " -pix_fmt yuva420p -auto-alt-ref 0" : " -pix_fmt yuv420p") + " -c:a libopus -b:a 160k";
+}
 
 bool endsWith(const std::string& s, const char* tail) {
     const size_t n = strlen(tail);
@@ -184,7 +207,12 @@ void usage() {
     puts("                        --preset NAME encoder speed: ultrafast..veryslow for x264,");
     puts("                          p1..p7 for nvenc, speed|balanced|quality for amf");
     puts("                        --crf N  quality, lower is better (default 19)");
+    puts("                        --format F mp4 (default), prores (ProRes 4444 .mov) or");
+    puts("                          webm (VP9)");
+    puts("                        --alpha  transparent background (prores, webm or");
+    puts("                          --png-frames; prores is the default with --alpha)");
     puts("  raymotion still   <name> --at FRAME [--png PATH] write one PNG frame");
+    puts("                        --alpha  transparent background (an RGBA PNG)");
     puts("  raymotion props   <name>                        print the default props (JSON)");
     puts("  raymotion prefabs                               list prefabs and their default props");
     puts("options: --ffmpeg PATH overrides auto-detected ffmpeg binary");
@@ -215,8 +243,8 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
     const std::string want = argv[2];
 
     const char* crfArg = nullptr, *ffArg = nullptr, *atArg = nullptr, *pngArg = nullptr, *ssArg = nullptr, *propsArg = nullptr,
-               *encoderArg = nullptr, *presetArg = nullptr;
-    bool draft = false, noMusic = false, pngFrames = false;
+               *encoderArg = nullptr, *presetArg = nullptr, *formatArg = nullptr;
+    bool draft = false, noMusic = false, pngFrames = false, alpha = false;
     for (int i = 3; i < argc; i++) {
         if (!strcmp(argv[i], "--crf") && i+1 < argc) crfArg = argv[++i];
         else if (!strcmp(argv[i], "--ffmpeg") && i+1 < argc) ffArg = argv[++i];
@@ -229,7 +257,21 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
         else if (!strcmp(argv[i], "--draft")) draft = true;
         else if (!strcmp(argv[i], "--mute") || !strcmp(argv[i], "--no-music")) noMusic = true;
         else if (!strcmp(argv[i], "--png-frames")) pngFrames = true;
+        else if (!strcmp(argv[i], "--format") && i+1 < argc) formatArg = argv[++i];
+        else if (!strcmp(argv[i], "--alpha")) alpha = true;
     }
+    Format format = alpha ? Format::ProRes : Format::Mp4;
+    if (formatArg) {
+        if (!strcmp(formatArg, "mp4")) format = Format::Mp4;
+        else if (!strcmp(formatArg, "prores") || !strcmp(formatArg, "mov")) format = Format::ProRes;
+        else if (!strcmp(formatArg, "webm")) format = Format::WebM;
+        else { printf("unknown --format '%s' (mp4, prores or webm)\n", formatArg); return 1; }
+    }
+    if (alpha && format == Format::Mp4 && !pngFrames) {
+        puts("mp4 (H.264) has no alpha channel: use --format prores or --format webm with --alpha");
+        return 1;
+    }
+    if (encoderArg && format != Format::Mp4) { puts("--encoder applies to mp4 only"); return 1; }
 
     Registry comps; registerAll(comps);
     Comp* comp = nullptr;
@@ -238,6 +280,10 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
     if (!strcmp(mode, "props")) { puts(comp->defaultProps.dump().c_str()); return 0; }
     if (ffArg) media::setFfmpeg(ffArg);   // before the asset hook, which may encode with it
     prepare(*comp, propsArg ? loadProps(propsArg) : Json(), true);
+    if (alpha) {
+        comp->background = BLANK;
+        if (comp->render) fprintf(stderr, "note: '%s' draws with a custom renderer; its background may not be transparent\n", comp->name.c_str());
+    }
 
     int W = comp->w, H = comp->h;
     if (draft) { W = (W / 2) & ~1; H = (H / 2) & ~1; }   // yuv420p needs even dimensions
@@ -260,7 +306,7 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
         BeginDrawing();
         drawFrame(*comp, at, canvas);
         EndDrawing();              // capture the offscreen canvas, independent of desktop size
-        bool ok = saveFrame(canvas,W,H,path);
+        bool ok = saveFrame(canvas,W,H,path,alpha);
         closeCanvas(canvas);
         if (!ok) return 2;
         printf("wrote %s\n", path.c_str());
@@ -325,7 +371,7 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
             ff = media::ffmpeg();
             if (ff.empty()) { puts("ffmpeg not found (use --ffmpeg PATH, or --png-frames to skip encoding)"); return 2; }
         }
-        std::string wav = "", mp4 = "out/" + comp->name + (draft ? "_draft.mp4" : ".mp4");
+        std::string wav = "", mp4 = "out/" + comp->name + (draft ? "_draft" : "") + extension(format);
         if (!noMusic && !pngFrames && media::hasAudio(*comp)) {
             wav = dir + "/track.wav";
             if (!media::writeWav(wav, media::mixAudio(*comp, AUDIO_RATE), AUDIO_RATE)) { puts("wav write failed"); wav.clear(); }
@@ -340,8 +386,11 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
             if (!wav.empty()) cmd += " -i " + quote(wav);
             cmd += " -frames:v " + std::to_string(comp->duration);
             cmd += " -vf vflip";            // frames arrive bottom-up, straight from GL
-            cmd += videoCodecArgs(encoderArg ? encoderArg : "h264", presetArg, crf) + " -movflags +faststart";
-            if (!wav.empty()) cmd += " -c:a aac -b:a 192k -shortest";
+            if (format == Format::Mp4) {
+                cmd += videoCodecArgs(encoderArg ? encoderArg : "h264", presetArg, crf) + " -movflags +faststart";
+                if (!wav.empty()) cmd += " -c:a aac -b:a 192k";
+            } else cmd += formatArgs(format, alpha, crf);
+            if (!wav.empty()) cmd += " -shortest";
             cmd += " " + quote(mp4);
             if (getenv("RAYMOTION_DEBUG_CMD")) printf("[CMD] %s\n", cmd.c_str());
 #ifdef _WIN32
@@ -364,8 +413,13 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
                 scaled = LoadRenderTexture(W, H);
                 SetTextureFilter(canvas.output().texture, TEXTURE_FILTER_BILINEAR);
             }
-            if (!stream.open(W, H, [pipe](const unsigned char* rgba, size_t bytes) {
-                    return fwrite(rgba, 1, bytes, pipe) == bytes;
+            // Runs on the writer thread, so making alpha straight costs no drawing time.
+            std::vector<unsigned char> straight;
+            if (!stream.open(W, H, [pipe, alpha, straight](const unsigned char* rgba, size_t bytes) mutable {
+                    if (!alpha) return fwrite(rgba, 1, bytes, pipe) == bytes;
+                    straight.assign(rgba, rgba + bytes);
+                    unpremultiply(straight.data(), bytes / 4);
+                    return fwrite(straight.data(), 1, bytes, pipe) == bytes;
                 })) { fprintf(stderr, "cannot start frame readback\n"); pclose(pipe); closeCanvas(canvas); return 3; }
         }
         double t0 = GetTime();
@@ -376,12 +430,17 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
             EndDrawing();                 // flush before reading the canvas
             if (pngFrames) {
                 char fname[160]; snprintf(fname, sizeof fname, "%s/f%05d.png", dir.c_str(), f);
-                ok = saveFrame(canvas,W,H,fname);
+                ok = saveFrame(canvas,W,H,fname,alpha);
             } else {
                 if (resize) {
                     BeginTextureMode(scaled);
+                    ClearBackground(BLANK);
+                    // a copy, not a blend: transparent pixels must stay transparent
+                    rlSetBlendFactors(RL_ONE, RL_ZERO, RL_FUNC_ADD);
+                    BeginBlendMode(BLEND_CUSTOM);
                     DrawTexturePro(canvas.output().texture, { 0, 0, (float)comp->w, -(float)comp->h },
                                    { 0, 0, (float)W, (float)H }, { 0, 0 }, 0, WHITE);
+                    EndBlendMode();
                     EndTextureMode();
                 }
                 ok = stream.push(resize ? scaled : canvas.output());

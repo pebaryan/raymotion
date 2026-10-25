@@ -31,6 +31,11 @@ private:
 // supersampled when the canvas scale is > 1).
 void presentFrame(Comp& c, int frame, Canvas& canvas);
 
+// A canvas cleared to a transparent background (Comp::background with alpha 0) holds
+// premultiplied colour. Video codecs and PNG want straight alpha: this converts `pixels`
+// RGBA8 pixels in place (fully transparent pixels become 0, 0, 0, 0).
+void unpremultiply(unsigned char* rgba, size_t pixels);
+
 // Renders `body` into a transparent offscreen target the size of the current canvas
 // target (colour and depth cleared, 2D state bound with the supersample scale), then
 // composites it over the current target with `alpha` (premultiplied "over"). `body` may

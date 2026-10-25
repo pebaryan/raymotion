@@ -119,7 +119,8 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/code.cpp
     examples/showcase/text.cpp
     examples/showcase/motionblur.cpp
-    examples/showcase/sparql.cpp)
+    examples/showcase/sparql.cpp
+    examples/showcase/lowerthird.cpp)
   target_link_libraries(raymotion PRIVATE rmtn_engine)
 
   add_executable(raymotion_starter examples/starter/main.cpp)
