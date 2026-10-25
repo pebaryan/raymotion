@@ -46,7 +46,8 @@ double w = rrange(7, i, -50, 50);
 ```
 
 Colours: `mkColor(0xRRGGBB)`, `withAlpha(c, 0.5f)` (multiplies alpha), `mixC(a, b, u)`,
-raylib's named colours (`WHITE`, `RED`, ...) and `Fade(c, alpha)`.
+raylib's named colours (`WHITE`, `RED`, ...) and `Fade(c, alpha)`. raylib's colours are
+macros, so never name your own constants `GOLD`, `LIME`, `ORANGE`, `PINK`, `SKYBLUE` and so on.
 
 ## Drawing (`dr::`, through the node's `Ctx`)
 
@@ -105,6 +106,41 @@ l.filters = { Filter::watercolor(6), Filter::paperGrain() };
 ```
 
 Each layer costs an offscreen pass; use them for effects, not for every node.
+
+## Particles (`fx::`, `rmtn/particles.hpp`)
+
+Emitters are computed per frame from a seed (no simulation state), so they follow the
+pure-frame rule automatically. Positions are relative to the node; speeds are px per
+frame, gravity px per frame squared.
+
+```cpp
+fx::Emitter boom = fx::burst(150, { mkColor(0xffc365), mkColor(0xff6b8a) });   // preset, then adjust
+boom.burstAt = 20;                          // frame of the node's local time
+TNode* n = addRoot(c.roots, 0, 120);
+n->props.pos = { 960, 400 };
+n->fn = fx::fn(boom);                       // or fx::draw(cx, boom, t) inside your own fn
+
+fx::Emitter e;                              // from scratch
+e.rate = 2;                                 // particles per frame; or burst = N (+ burstAt, burstSpread)
+e.prewarm = true;                           // already full on the first frame (weather, ambience)
+e.area = fx::Area::Line; e.extent = { 1920, 0 };   // Point, Line, Rect, Circle, Ring
+e.life = { 40, 80 };                        // fx::Range: random per particle in [lo, hi]
+e.speed = { 1, 3 }; e.angle = -90; e.spread = 30;  // degrees: -90 up, 90 down; or outward = true
+e.gravity = { 0, 0.1f }; e.drag = 0.03f; e.turbulence = 20;
+e.look = fx::Look::Glow;                    // Dot, Glow, Streak, Square, Confetti, Star, Ring
+e.size = { 6, 14 }; e.sizeEnd = 0.2f;       // size multiplier at death
+e.colors = { WHITE };                       // one per particle; or overLife = { ... } as a gradient
+e.additive = true;                          // light adds up: glows, fire, sparks
+e.origin = [](float f) { return Vector2{ 10 * f, 0 }; };   // moving source, sampled at each birth
+e.draw = [](const Ctx& cx, const fx::Particle& p) {        // custom look (p.pos, p.size, p.alpha, p.u, p.random)
+    dr::circle(cx, p.pos, p.size / 2, withAlpha(p.color, p.alpha));
+};
+```
+
+Presets: `burst`, `sparks`, `fountain`, `confetti(width)`, `rain(width, height)`,
+`snow(width, height)`, `fire(width)`, `smoke(width)`, `embers(width, height)`. Put
+confetti, rain and snow at the top edge (`{ 960, -40 }`) and fire and smoke at their base.
+Vary `seed` between emitters that would otherwise look identical.
 
 ## Images, video and audio (`media::`)
 

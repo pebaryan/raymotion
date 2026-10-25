@@ -152,10 +152,10 @@ static void registerPrefabs() {
             const Color accent = colorProp(p, "accent", ACCENT), gold = colorProp(p, "gold", GOLDEN);
             n.fn = [count, seed, h, accent, gold](const Ctx& c, int t) {
                 for (int i = 0; i < count; i++) {
-                    const float x = (float)rrange(seed, 1, -960, 960) + 40 * (float)std::sin(t * 0.05 + i);
-                    const float v = (float)rrange(seed, 2, 3, 10);
-                    const float y = (float)std::fmod(t * v + (float)rrange(seed, 3, 0, h), h) - h / 2;
-                    const float s = (float)rrange(seed, 4, 6, 14), a = t * (float)rrange(seed, 5, 1, 6);
+                    const float x = (float)rrange(seed, i * 8 + 1, -960, 960) + 40 * (float)std::sin(t * 0.05 + i);
+                    const float v = (float)rrange(seed, i * 8 + 2, 3, 10);
+                    const float y = (float)std::fmod(t * v + (float)rrange(seed, i * 8 + 3, 0, h), h) - h / 2;
+                    const float s = (float)rrange(seed, i * 8 + 4, 6, 14), a = t * (float)rrange(seed, i * 8 + 5, 1, 6);
                     const Color col = (i % 3 == 0) ? gold : accent;
                     const float ca = std::cos(a * 3.14159f / 180), sa = std::sin(a * 3.14159f / 180);
                     const Vector2 p0{ x + ca * s - sa * s / 2, y + sa * s + ca * s / 2 },

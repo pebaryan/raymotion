@@ -71,7 +71,8 @@ add_library(rmtn_engine STATIC
   src/engine/diagram_draw.cpp
   src/engine/bpmn.cpp
   src/engine/chem.cpp
-  src/engine/chem3d.cpp)
+  src/engine/chem3d.cpp
+  src/engine/particles.cpp)
 add_library(raymotion::engine ALIAS rmtn_engine)
 target_include_directories(rmtn_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 # Single-header decoders (stb_image, nanosvg), compiled privately into media.cpp.
@@ -96,7 +97,8 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/own_compute.cpp
     examples/showcase/promo.cpp
     examples/showcase/npr.cpp
-    examples/showcase/diagrams.cpp)
+    examples/showcase/diagrams.cpp
+    examples/showcase/particles.cpp)
   target_link_libraries(raymotion PRIVATE rmtn_engine)
 
   add_executable(raymotion_starter examples/starter/main.cpp)
@@ -117,6 +119,9 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   add_executable(raymotion_diagram_tests tests/diagram_tests.cpp)
   target_link_libraries(raymotion_diagram_tests PRIVATE rmtn_engine)
   add_test(NAME diagram_parsing COMMAND raymotion_diagram_tests)
+  add_executable(raymotion_particle_tests tests/particle_tests.cpp)
+  target_link_libraries(raymotion_particle_tests PRIVATE rmtn_engine)
+  add_test(NAME particles COMMAND raymotion_particle_tests)
 
   # The rest need an OpenGL 3.3 context (label "gl"; on headless Linux run under xvfb).
   add_executable(raymotion_render_tests tests/render_tests.cpp)

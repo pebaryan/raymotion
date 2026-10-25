@@ -312,6 +312,35 @@ BPMN process with a token run, a knowledge graph with focus and dimming, a phylo
 caffeine in 2D and 3D and the crambin protein. The sample files are in `assets/data/`
 (crambin from the RCSB PDB and caffeine from PubChem, both public domain).
 
+### Particles
+
+```cpp
+fx::Emitter sparks = fx::burst(150, { GOLD, ORANGE });   // a preset, then adjust it
+sparks.burstAt = 30;
+sparks.gravity = { 0, 0.08f };
+node->fn = fx::fn(sparks);                              // or fx::draw(cx, e, t) inside your own fn
+```
+
+`fx::` emitters are computed, not simulated. Each particle's birth frame, lifetime and
+starting values come from the seed and its index, and its position at any age follows
+from closed-form motion (velocity, gravity, drag, smooth turbulence). Any frame renders
+alone, out of order or twice with the same result, and costs only its live particles.
+
+* **Emission:** a `burst` at a frame (optionally spread over a few frames), a `rate`
+  stream between `from` and `until`, `prewarm` to start full, and an `origin(frame)`
+  function for a moving source (trails, rockets, comets).
+* **Area and direction:** point, line, rect, circle or ring; an `angle` and a `spread`,
+  or `outward` from the centre.
+* **Looks:** `Dot`, `Glow`, `Streak` (tapered along the path), `Square`, `Confetti`
+  (spins and flutters), `Star`, `Ring`, or your own `draw(cx, particle)`. Size and colour
+  can change over each particle's life, and `additive` adds light for glows and fire.
+* **Presets:** `burst`, `sparks`, `fountain`, `confetti`, `rain`, `snow`, `fire`,
+  `smoke`, `embers`. Each returns an ordinary `Emitter` you can adjust.
+* `fx::particles(e, t)` / `fx::each(e, t, f)` hand you the live particles (position,
+  velocity, age, size, colour) for anything else you want to draw with them.
+
+`particles` shows fireworks, a campfire, rain, snow, a comet and a custom look.
+
 ### Engine pieces
 
 * `rmtn/timeline.hpp` — `Comp`, the node tree (start/duration, `up` animates props,
@@ -334,6 +363,7 @@ caffeine in 2D and 3D and the crambin protein. The sample files are in `assets/d
   layered, force and tree layouts; `Diagram` animations (build, trace, flow, morph, focus).
 * `rmtn/chem.hpp` — `chem::` molecules (SMILES, MOL/SDF, PDB), skeletal formulas, 3D
   ball-and-stick and protein cartoons.
+* `rmtn/particles.hpp` — `fx::` closed-form particle emitters, looks and presets.
 * `rmtn/json.hpp` — `Json` values for props (parse, typed lookups with fallbacks, merge).
 * `rmtn/prefab.hpp` — `prefab::add/use`: registered, parameterized subtree builders.
 * `rmtn/synth.hpp` — sine-sum note events + envelopes -> WAV soundtrack.
@@ -359,6 +389,7 @@ own-your-compute       1920x1080 @30fps   66.0s  audio=1   (story film: GPU 3D, 
 raymotion-promo        1920x1080 @60fps  210.0s  audio=1   (YouTube introduction: how it works, 16 features, credits)
 npr-styles             1920x1080 @30fps   53.8s  audio=0   (non-photorealistic rendering: eight illustration styles)
 diagrams               1920x1080 @30fps   56.0s  audio=1   (flowcharts, DOT, BPMN, knowledge graphs, trees, molecules, proteins)
+particles              1920x1080 @30fps   29.3s  audio=0   (fireworks, campfire, rain, snow, comet, custom looks, confetti)
 ```
 
 `raymotion-promo` is the 3.5-minute introduction to the engine
@@ -396,7 +427,9 @@ and coordinates, concave fills, fonts, FX shader uniforms, determinism, shutdown
 diagram parsing and layout (Mermaid, DOT, BPMN, Turtle, JSON-LD, JSON, Newick; layered,
 force and tree layouts; SMILES, SDF and PDB, rings, formulas, substructures, depictions;
 no window) and diagram rendering (build-up, highlights, traces, morphs, BPMN, skeletal
-formulas, 3D molecules and cartoons); Here-There layout checks; and a Python CLI suite (exact sizes, draft scaling, stale-frame
+formulas, 3D molecules and cartoons); particles (burst and stream counts, prewarm,
+determinism, closed-form motion against a stepped simulation, areas, presets; no window);
+Here-There layout checks; and a Python CLI suite (exact sizes, draft scaling, stale-frame
 cleanup, a real MP4 render, the starter project, props). Tests needing OpenGL carry the `gl`
 label (`ctest -LE gl` skips them on headless machines).
 

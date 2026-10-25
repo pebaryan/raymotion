@@ -15,3 +15,4 @@
 #include "prefab.hpp"
 #include "diagram.hpp"
 #include "chem.hpp"
+#include "particles.hpp"

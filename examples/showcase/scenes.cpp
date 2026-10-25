@@ -23,6 +23,7 @@ void registerOwnCompute(Registry& out);
 void registerPromo(Registry& out);
 void registerNpr(Registry& out);
 void registerDiagrams(Registry& out);
+void registerParticles(Registry& out);
 
 void register_scenes(Registry& out) {
 using namespace dr;
@@ -376,5 +377,6 @@ registerOwnCompute(out);
 registerPromo(out);
 registerNpr(out);
 registerDiagrams(out);
+registerParticles(out);
 } // register_scenes
 } // namespace rmtn

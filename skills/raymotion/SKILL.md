@@ -1,6 +1,6 @@
 ---
 name: raymotion
-description: Make videos with raymotion, a C++17 motion-graphics engine on raylib and ffmpeg (Remotion-style compositions as code). Use when asked to create, edit, preview or render a video, animation, explainer, title sequence or social clip with raymotion, or to animate diagrams (Mermaid, Graphviz DOT, BPMN, knowledge graphs, trees), molecules (SMILES, SDF) or proteins (PDB), or 3D scenes in code.
+description: Make videos with raymotion, a C++17 motion-graphics engine on raylib and ffmpeg (Remotion-style compositions as code). Use when asked to create, edit, preview or render a video, animation, explainer, title sequence or social clip with raymotion, or to animate diagrams (Mermaid, Graphviz DOT, BPMN, knowledge graphs, trees), molecules (SMILES, SDF) or proteins (PDB), particle effects (fireworks, confetti, rain, snow, fire), or 3D scenes in code.
 ---
 
 # raymotion
@@ -90,8 +90,8 @@ See the references for everything else:
 
 - `references/authoring.md`: animation (interpolate, springs, easings, keyframe
   tracks), text and layout, layers (opacity, blend modes, masks, filters), transitions,
-  images, video, audio and the procedural synth, props, prefabs, generated assets,
-  deterministic randomness.
+  particles (bursts, streams, weather, fire, confetti, custom looks), images, video,
+  audio and the procedural synth, props, prefabs, generated assets, deterministic randomness.
 - `references/3d.md`: GPU 3D scenes (geometry, models, materials, lights, shadows,
   environments, cameras, depth of field) and illustration styles (toon, Gooch, hatch,
   ink lines, watercolour and halftone filters).
