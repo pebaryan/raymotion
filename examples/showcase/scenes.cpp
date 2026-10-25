@@ -25,6 +25,7 @@ void registerNpr(Registry& out);
 void registerDiagrams(Registry& out);
 void registerParticles(Registry& out);
 void registerPaths(Registry& out);
+void registerEquations(Registry& out);
 
 void register_scenes(Registry& out) {
 using namespace dr;
@@ -380,5 +381,6 @@ registerNpr(out);
 registerDiagrams(out);
 registerParticles(out);
 registerPaths(out);
+registerEquations(out);
 } // register_scenes
 } // namespace rmtn

@@ -9,7 +9,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(FetchContent)
 FetchContent_Declare(raymotion
   GIT_REPOSITORY https://github.com/pebaryan/raymotion.git
-  GIT_TAG v0.4.0)                # a release tag; newer ones at github.com/pebaryan/raymotion/releases
+  GIT_TAG v0.5.0)                # a release tag; newer ones at github.com/pebaryan/raymotion/releases
 FetchContent_MakeAvailable(raymotion)
 
 add_executable(myvideo main.cpp)

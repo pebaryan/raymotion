@@ -353,6 +353,43 @@ node->fn = [curve, s](const Ctx& cx, int t) {
 morph sequence, an SVG landscape writing itself on (`assets/data/landscape.svg`) and
 motion along a path.
 
+### Equations
+
+```cpp
+auto f = math::Formula::tex(R"(\id{lhs}{e^{i\pi}} + 1 = 0)", { 96 });   // typeset once, while registering
+node->fn = [f](const Ctx& cx, int t) {
+    math::Look look;
+    look.colors["lhs"] = GOLD;                                           // colour a named part
+    math::write(cx, f, { 960, 540 }, { 0.5f, 0.5f }, t / 60.f, look);    // writes itself on
+};
+```
+
+`math::` typesets a TeX subset inside the engine. There is no LaTeX install and no
+external tool. It reads the OpenType MATH table of a math font (Latin Modern Math is
+bundled) and follows TeX's layout rules: atom spacing, script shifts and cramped styles,
+fraction and stack gaps, radicals, and limits on big operators. Delimiters stretch through
+the font's size variants and glyph assemblies. Every glyph and rule comes out as a vector
+path, so formulas stay sharp at any scale and draw through `vg::`.
+
+* **Input:** math italic letters, Greek, upright digits and ~200 symbols; `^ _` and primes;
+  `\frac \dfrac \tfrac \binom \sqrt[n]{}`; `\sum \prod \int \oint \lim \max ...` with
+  `\limits/\nolimits`; `\left \middle \right` and `\big ... \Bigg`; accents (`\hat \bar \vec
+  \dot \tilde \widehat ...`), `\overline \underline`; `\text \mathrm \mathbf \mathbb \mathcal
+  \mathfrak \operatorname`; spaces `\, \: \; \! \quad \qquad`; `matrix pmatrix bmatrix
+  vmatrix Bmatrix cases aligned gathered`, and a top-level `\\` (with `&` to align).
+  Unknown commands throw with their position.
+* **Parts:** `\id{name}{...}` names a piece of the formula. `Look` recolours parts or fades
+  them; `place` and `bounds(part)` give a part's ink box for highlight boxes, braces and
+  labels. `\color` and `\textcolor` colour the source directly.
+* **Animation:** `write` reveals the glyphs left to right, each outline drawing on and then
+  filling. `math::Transform(a, b)` turns one formula into another: pieces in parts of the
+  same name pair up first, then equal glyphs in reading order. Matched glyphs glide and
+  rescale, and the rest fade out or in.
+
+`equations` writes Euler's identity and the quadratic formula on, shows a gallery of
+layouts, labels the parts of E = mc², solves a quadratic step by step and rearranges
+Pythagoras by named parts.
+
 ### Particles
 
 ```cpp
@@ -407,6 +444,8 @@ alone, out of order or twice with the same result, and costs only its live parti
 * `rmtn/particles.hpp` — `fx::` closed-form particle emitters, looks and presets.
 * `rmtn/paths.hpp` — `vg::` Bézier paths and SVG path data, fills by winding rule,
   strokes with joins, caps and dashes, trims, morphs and SVG drawings.
+* `rmtn/math.hpp` — `math::` TeX formulas typeset with an OpenType math font, drawn as
+  paths, written on, coloured by part and transformed into one another.
 * `rmtn/json.hpp` — `Json` values for props (parse, typed lookups with fallbacks, merge).
 * `rmtn/prefab.hpp` — `prefab::add/use`: registered, parameterized subtree builders.
 * `rmtn/synth.hpp` — sine-sum note events + envelopes -> WAV soundtrack.
@@ -434,6 +473,7 @@ npr-styles             1920x1080 @30fps   53.8s  audio=0   (non-photorealistic r
 diagrams               1920x1080 @30fps   56.0s  audio=1   (flowcharts, DOT, BPMN, knowledge graphs, trees, molecules, proteins)
 particles              1920x1080 @30fps   29.3s  audio=0   (fireworks, campfire, rain, snow, comet, custom looks, confetti)
 vector-paths           1920x1080 @30fps   34.3s  audio=0   (draw-on, joins and dashes, fill rules, morphs, SVG, motion paths)
+equations              1920x1080 @30fps   32.3s  audio=1   (TeX formulas: write-on, layout gallery, named parts, step-by-step transforms)
 ```
 
 `raymotion-promo` is the 3.5-minute introduction to the engine
@@ -475,7 +515,10 @@ formulas, 3D molecules and cartoons); particles (burst and stream counts, prewar
 determinism, closed-form motion against a stepped simulation, areas, presets; no window);
 vector paths (SVG path data, arcs, lengths, trims, transforms, morphs, SVG files; no window)
 and their rendering (fill rules and holes, translucent overlaps, caps, joins, dashes,
-draw-on, fitted SVG drawings, determinism);
+draw-on, fitted SVG drawings, determinism); equations (parsing and its errors, TeX
+spacing, scripts and primes, fractions, limits, delimiters, radicals, matrices and
+alignment, parts, transform matching; no window) and their rendering (placement, part
+colours and opacity, write-on order, transform end frames, determinism);
 Here-There layout checks; and a Python CLI suite (exact sizes, draft scaling, stale-frame
 cleanup, a real MP4 render, the starter project, props). Tests needing OpenGL carry the `gl`
 label (`ctest -LE gl` skips them on headless machines).

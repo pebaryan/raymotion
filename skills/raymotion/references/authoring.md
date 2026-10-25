@@ -144,6 +144,40 @@ Move something along a path with `pointAt(u)`, and turn it to face along the pat
 `angleAt(u)`: `arrow.rotated(p.angleAt(u)).translated(p.pointAt(u))`. Build `Morph`s and
 parse paths while registering, not in `fn`.
 
+## Equations (`math::`, `rmtn/math.hpp`)
+
+TeX math typeset in-engine with the bundled Latin Modern Math font (no LaTeX needed) and
+drawn as vector paths. Typeset while registering: `tex` throws on bad input, and the
+message gives the offset.
+
+```cpp
+math::Options o(96);                          // px per em; also o.color, o.display = false (inline style), o.font
+auto f = math::Formula::tex(R"(\id{lhs}{(a+b)^2} = \id{rhs}{a^2 + 2ab + b^2})", o);
+auto g = math::Formula::tex(R"(x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a})", o);
+math::Transform step(f, g);                   // build once
+node->fn = [f, step](const Ctx& cx, int t) {
+    const Vector2 at{ 960, 540 }, anchor{ 0.5f, 0.5f };   // anchor: fractions of the formula box
+    math::Look look;                          // per-part colours and opacity, plus alpha for everything
+    look.colors["lhs"] = mkColor(0xffd166);
+    math::write(cx, f, at, anchor, (float)interpolate(t, { 0, 60 }, { 0, 1 }, clamped()), look);
+    const Rectangle r = math::place(f, at, anchor, "rhs");   // a part's ink box in node units
+    vg::stroke(cx, vg::Path::rect({ r.x - 12, r.y - 12, r.width + 24, r.height + 24 }, 12), vg::Stroke(WHITE, 4));
+    // later: step.draw(cx, at, anchor, u, look);   // matched glyphs glide, the rest fade
+    // or math::draw(cx, f, at, anchor, look) for a still formula
+};
+```
+
+Supported: `^ _ '`, `\frac \dfrac \tfrac \binom \sqrt[n]{}`, `\sum \prod \int \oint \lim`
+(with `\limits/\nolimits`), `\left( \middle| \right)`, `\big..\Bigg`, accents (`\hat \bar \vec
+\dot \tilde \widehat`), `\overline \underline`, `\text \mathrm \mathbf \mathbb \mathcal
+\mathfrak \operatorname{}`, Greek, ~200 symbols, `\, \: \; \! \quad \qquad`, environments
+`matrix pmatrix bmatrix vmatrix Bmatrix cases aligned gathered`, a top-level `\\` (with `&`
+to align), `\color{name|#rrggbb}`, `\textcolor{c}{..}`, `\phantom`, and `\id{name}{..}`
+for named parts. `Transform` matches parts with the same `\id` first, so give the terms that
+should travel matching ids in both formulas. Each formula holds `pieces` (glyphs and rules
+in formula px), `width`, `ascent` and `descent`, and `path()` gives its outline as a
+`vg::Path`.
+
 ## Particles (`fx::`, `rmtn/particles.hpp`)
 
 Emitters are computed per frame from a seed (no simulation state), so they follow the

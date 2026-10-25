@@ -22,6 +22,7 @@ Copy-Item (Join-Path $root "LICENSE") (Join-Path $stage "LICENSE.txt")
 Copy-Item (Join-Path $root "NOTICE") (Join-Path $stage "NOTICE.txt")
 Copy-Item (Join-Path $root "third_party/raylib/LICENSE") (Join-Path $stage "licenses/raylib-zlib.txt")
 Copy-Item (Join-Path $root "assets/fonts/Inter-OFL.txt") (Join-Path $stage "licenses/Inter-OFL.txt")
+Copy-Item (Join-Path $root "assets/fonts/LatinModernMath-GUST-FONT-LICENSE.txt") (Join-Path $stage "licenses/LatinModernMath-GUST-FONT-LICENSE.txt")
 
 @"
 raymotion $Version (Windows x64)

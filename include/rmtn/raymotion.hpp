@@ -17,3 +17,4 @@
 #include "chem.hpp"
 #include "particles.hpp"
 #include "paths.hpp"
+#include "math.hpp"
