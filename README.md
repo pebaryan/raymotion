@@ -338,7 +338,7 @@ here-there-feed        1080x1350 @30fps   88.0s  music=0   (portrait feed cut, S
 own-your-compute       1920x1080 @30fps   66.0s  audio=1   (story film: GPU 3D, particles, glitch; all assets from code)
 raymotion-promo        1920x1080 @60fps  210.0s  audio=1   (YouTube introduction: how it works, 16 features, credits)
 npr-styles             1920x1080 @30fps   53.8s  audio=0   (non-photorealistic rendering: eight illustration styles)
-diagrams               1920x1080 @30fps   56.0s  audio=0   (flowcharts, DOT, BPMN, knowledge graphs, trees, molecules, proteins)
+diagrams               1920x1080 @30fps   56.0s  audio=1   (flowcharts, DOT, BPMN, knowledge graphs, trees, molecules, proteins)
 ```
 
 `raymotion-promo` is the 3.5-minute introduction to the engine

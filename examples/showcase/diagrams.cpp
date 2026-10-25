@@ -3,8 +3,11 @@
 //   dg::load        Mermaid, Graphviz DOT, BPMN 2.0, Turtle / JSON-LD, Newick
 //   dg::Diagram     build-up, traces, token flows, morphs, focus and dimming
 //   chem::          SMILES / SDF skeletal formulas, 3D ball-and-stick, PDB protein cartoons
+// The score (soft 120 bpm pop on Fmaj7-G-Em7-Am) is synthesised into out/ on first use.
 //   raymotion render diagrams
 #include "rmtn/raymotion.hpp"
+#include "procgen.hpp"
+#include <filesystem>
 
 namespace rmtn {
 namespace {
@@ -12,6 +15,7 @@ namespace {
 constexpr int FPS = 30, XF = 20;
 const Color INK = mkColor(0x1e2233), PAPER = mkColor(0xf7f5ef), SUB = mkColor(0x5d6274), ACCENT = mkColor(0xe2533f);
 const Rectangle STAGE{ 80, 40, 1760, 760 };    // above the caption card
+const std::string SCORE = "out/diagrams-assets-v1/score.wav";
 
 Font bold() { return fonts::ui(true); }
 Font regular() { return fonts::ui(false); }
@@ -180,6 +184,61 @@ void proteinScene(TNode* n, int len) {
     };
 }
 
+// The score, in seconds: chapters start at 3.3 (flowchart), 11.3 (DOT), 18.7 (BPMN), 26.3
+// (knowledge graph), 34.7 (tree), 40.7 (molecules) and 48 (protein); each gets a bell, and
+// the traces and the morph get their own figures.
+void genScore(const std::string& path) {
+    using procgen::Score;
+    const double END = 56;
+    Score s(END);
+    struct Chord { int root; int pad[3]; int arp[4]; };
+    const Chord fmaj7{ 41, { 64, 69, 72 }, { 65, 69, 72, 76 } }, g{ 43, { 62, 67, 71 }, { 67, 71, 74, 79 } },
+                em7{ 40, { 62, 67, 71 }, { 64, 67, 71, 74 } }, am{ 45, { 60, 64, 69 }, { 69, 72, 76, 72 } },
+                c{ 36, { 60, 64, 67 }, { 72, 76, 79, 84 } };
+    const Chord prog[4] = { fmaj7, g, em7, am };
+    // Intro: pads, and plucks as caffeine's atoms appear.
+    for (int p : fmaj7.pad) s.pad(0, 1.9, p, 0.10f, 900);
+    for (int p : g.pad) s.pad(2, 1.9, p, 0.10f, 1000);
+    for (int i = 0; i < 12; i++) s.pluck(0.35 + i * 0.25, prog[i / 8].arp[i % 4] + 12, 0.07f, i % 2 ? 0.3f : 0.7f);
+    // Bars from 4 s to 48 s; the band joins in layers.
+    for (double t = 4; t < 48; t += 2) {
+        const Chord& ch = prog[(int)(t / 2) % 4];
+        const bool drums = t >= 12, full = t >= 20;
+        for (int p : ch.pad) s.pad(t, 1.9, p, 0.08f, full ? 1600 : 1100);
+        for (int e = 0; e < 8; e++) s.pluck(t + e * 0.25, ch.arp[e % 4], e % 4 == 0 ? 0.09f : 0.06f, e % 2 ? 0.3f : 0.7f);
+        for (int e = 0; e < 4; e++) s.bass(t + e * 0.5, 0.4, ch.root + (e == 3 ? 12 : 0), drums ? 0.26f : 0.18f);
+        if (drums) for (int b = 0; b < 4; b++) s.kick(t + b * 0.5, full ? 0.6f : 0.45f);
+        if (full) { s.clap(t + 0.5, 0.22f); s.clap(t + 1.5, 0.22f); }
+        if (t >= 8) for (int h = 0; h < 8; h++) s.hat(t + h * 0.25, h % 2 ? 0.10f : 0.06f, h % 2 ? 0.35f : 0.65f);
+    }
+    // A bell on each chapter change.
+    const double chapters[] = { 3.33, 11.33, 18.67, 26.33, 34.67, 40.67 };
+    for (int i = 0; i < 6; i++) s.bell(chapters[i], 79 + (i % 2) * 5, 0.10f, 0.5f);
+    // Flowchart trace: seven nodes, climbing.
+    const int up[7] = { 72, 74, 76, 79, 81, 84, 88 };
+    for (int i = 0; i < 7; i++) s.bell(7.33 + i * 0.39, up[i], 0.06f, 0.3f + 0.07f * i);
+    // DOT morph: a short swell into the new graph.
+    s.riser(12.9, 13.67, 0.12f);
+    // BPMN token: eight steps.
+    for (int i = 0; i < 8; i++) s.bell(22.33 + i * 0.42, up[i % 7] - 5 + (i == 7 ? 12 : 0), 0.05f, 0.7f - 0.05f * i);
+    // Knowledge graph: the camera dives in on Marie Curie.
+    s.riser(29.2, 30, 0.10f);
+    s.impact(30, 0.25f);
+    // Protein: drums drop out, a lift to C major under the growing chain.
+    const Chord lift[2] = { fmaj7, g };
+    for (int i = 0; i < 2; i++) {
+        const double t = 48 + i * 2;
+        for (int p : lift[i].pad) { s.pad(t, 1.9, p, 0.11f, 2000); }
+        s.bass(t, 1.9, lift[i].root, 0.22f);
+        for (int e = 0; e < 8; e++) s.pluck(t + e * 0.25, lift[i].arp[e % 4] + (e >= 4 ? 12 : 0), 0.07f, e % 2 ? 0.3f : 0.7f);
+    }
+    s.bell(48, 84, 0.10f, 0.5f);
+    for (int p : c.pad) { s.pad(52, 2.6, p, 0.13f, 2200, 0.35f); s.pad(52, 2.6, p - 12, 0.09f, 1200, 0.65f); }
+    s.bass(52, 3, c.root, 0.26f);
+    for (int i = 0; i < 4; i++) s.bell(52 + i * 0.5, c.arp[i], 0.09f, 0.2f + 0.2f * i);
+    media::writeWav(path, s.mix(), Score::RATE);           // (mix fades the last 3 s)
+}
+
 } // namespace
 
 void registerDiagrams(Registry& out) {
@@ -199,6 +258,12 @@ void registerDiagrams(Registry& out) {
         make(ts.add(len), len);
     }
     c.duration = ts.end();
+    c.assets = [](const Comp&, const Json&) {
+        if (std::filesystem::exists(SCORE)) return;
+        std::filesystem::create_directories(std::filesystem::path(SCORE).parent_path());
+        genScore(SCORE);
+    };
+    media::audio(addRoot(c.roots, 0, c.duration), SCORE);
     out.push_back(std::move(c));
 }
 
