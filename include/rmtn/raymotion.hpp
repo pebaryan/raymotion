@@ -24,3 +24,4 @@
 #include "code.hpp"
 #include "textfx.hpp"
 #include "subtitles.hpp"
+#include "audioviz.hpp"

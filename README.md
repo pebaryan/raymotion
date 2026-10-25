@@ -737,6 +737,34 @@ a composition lays out either way.
 burned in, one scene lights words up karaoke style, and the timings are saved to
 `out/captions.srt`.
 
+### Audio-reactive visuals
+
+```cpp
+auto music = aud::analyze("music.ogg");                 // decoded and analysed on first use
+media::audio(addRoot(c.roots, 0, c.duration), "music.ogg");
+node->up = [music](int t, NodeProps& p) { p.scale = 1 + 0.15f * music->pulse(frameTime(t)); };
+node->fn = [music](const Ctx& cx, int t) {
+    aud::bars(cx, { 160, 700, 1600, 260 }, music->spectrum(frameTime(t)), TEAL);
+};
+```
+
+The whole file is analysed once (cached per file and options) into per-frame tables, so
+any frame renders alone and the same each time. Times are node-local frames, and
+fractional values interpolate (motion blur sees in-between values).
+
+* `level` (loudness), `band(i)` / `spectrum` (log-spaced bands), `energy(lo, hi)` for a
+  frequency range, and `onset` (how sharply the sound rises), all 0..1 relative to the
+  track's own loud passages.
+* `beats()` (onset peaks), `beat(t)`, `beatCount`, `pulse(t, decay)` (1 on each beat,
+  falling off), `bpm()` (tempo from the beats' rhythm), and `waveform(t, points)`.
+* `aud::Options`: band count and range, dB range, attack and release smoothing, and
+  `startFrom` to line frame 0 up with a point in the file.
+* Drawing helpers: `aud::bars` (optionally mirrored), `aud::wave`, `aud::radial`.
+
+`audio-reactive` plays a generated 124 bpm track (intro, drums, riser, drop) under a
+pulsing disc ringed by its spectrum, particle bursts on every beat, spectrum bars, an
+oscilloscope, level meters and the detected tempo.
+
 ### Engine pieces
 
 * `rmtn/timeline.hpp` — `Comp`, the node tree (start/duration, `up` animates props,
@@ -820,6 +848,7 @@ text                   1920x1080 @30fps   32.0s  audio=1   (text animation: stag
 motionblur             1920x1080 @30fps   23.0s  audio=1   (motion blur: sharp against blurred, shutter angles, whip pans and a flying title)
 sparql                 1920x1080 @30fps  113.0s  audio=1   (a narrated explainer of SPARQL query processing: knowledge graph, query, algebra, optimizer, matching, joins)
 lowerthird             1920x1080 @30fps    6.0s  audio=0   (a name tag with no background: render with --alpha for ProRes 4444 or --format webm)
+audio-reactive         1920x1080 @30fps   24.0s  audio=1   (visuals driven by a music track: spectrum, beats, tempo, waveform, levels)
 captions               1920x1080 @30fps   26.1s  audio=1   (narrated by the system voice: scenes timed to phrases, burned-in and karaoke captions, an SRT sidecar)
 ```
 
@@ -886,7 +915,8 @@ identical to plain text, typewriter cut-offs, highlights, morph end frames); mot
 from `up`, particles);
 subtitles (SRT and WebVTT parsing, markup and errors, phrase timing and scene spans, SRT
 round trips, text-to-speech scripts through a stand-in engine with caching and failures)
-and burned-in captions;
+and burned-in captions; audio analysis (a tone's band and loudness, interpolation, the
+waveform, beats and tempo of click tracks, pulses, `startFrom`, caching by file; no window);
 Here-There layout checks; and a Python CLI suite (exact sizes, draft scaling, stale-frame
 cleanup, a real MP4 render, transparent stills and ProRes/WebM renders with alpha, the
 starter project, props). Tests needing OpenGL carry the `gl`

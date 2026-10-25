@@ -528,6 +528,29 @@ c.assets = [script](const Comp&, const Json&) {
 c.build = [script](Comp& comp, const Json&) { script->measure(); /* lay out from script->track() */ };
 ```
 
+## Audio-reactive visuals (`aud::`, `rmtn/audioviz.hpp`)
+
+```cpp
+aud::Options o; o.bands = 48; o.release = 4;              // also fps, startFrom, minHz/maxHz, range (dB), attack
+auto music = aud::analyze("music.ogg", o);                // shared per file + options, analysed on first query
+node->up = [music](int t, NodeProps& p) { p.scale = 1 + 0.15f * music->pulse(frameTime(t)); };
+node->fn = [music](const Ctx& cx, int t) {
+    const double ft = frameTime(t);
+    aud::bars(cx, { 160, 700, 1600, 260 }, music->spectrum(ft), TEAL, 0.3f, /*mirror*/ true);
+    aud::wave(cx, { 160, 80, 1600, 160 }, music->waveform(ft, 300), GOLD);
+    aud::radial(cx, { 960, 540 }, 150, 180, music->spectrum(ft), TEAL);
+};
+```
+
+- Queries take node-local frames (fractional interpolates): `level`, `band(i)`,
+  `spectrum`, `energy(t, loHz, hiHz)` (bass ~ 20-150, highs ~ 4000-16000), `onset`,
+  all 0..1 relative to the track's loud passages.
+- Beats: `beats()` (frames), `beat(int t)`, `beatCount(t)`, `pulse(t, decay)` (1 on the
+  beat, falling to 0 over `decay` frames), `bpm()`.
+- `waveform(t, points, window)` gives mono samples normalised to the track's peak.
+- `aud::analyze(stereo, rate, o)` analyses samples you already have. Analysis is lazy, so
+  the file may be written by `c.assets` after the composition is built.
+
 ## Props, prefabs and generated assets
 
 ```cpp
