@@ -38,6 +38,13 @@ void presentFrame(Comp& c, int frame, Canvas& canvas);
 // false without calling `body` when no canvas target is active (outside presentFrame).
 bool drawOffscreen(float alpha, const std::function<void(const RenderTexture& target, float scale)>& body);
 
+// Fills by winding number (vector paths): every triangle of `add` counts +1 and every one
+// of `subtract` -1 at the pixels it covers (3 points per triangle, composition coordinates).
+// Pixels whose count is odd (`evenOdd`) or non-zero get `color`, drawn over the current
+// target with its alpha. A fan of each closed contour, split by orientation, fills the
+// contours exactly by SVG's rules. Returns false without drawing when no canvas is active.
+bool fillWinding(const std::vector<Vector2>& add, const std::vector<Vector2>& subtract, Color color, bool evenOdd);
+
 // Runs one layer filter over `src` (premultiplied, raylib RT orientation) into `dst` of the
 // same size; `scale` is target px per composition px. drawLayer uses it for Layer::filters.
 void applyFilter(const Filter& f, const RenderTexture& src, const RenderTexture& dst, float scale);

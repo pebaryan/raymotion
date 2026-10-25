@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" width="800" height="450">
+  <!-- A small line-art landscape for the vector paths showcase (raymotion sample, Apache-2.0). -->
+  <path id="far-range" fill="#2e3a57" d="M0 300 L90 190 L150 240 L250 120 L340 230 L420 170 L520 260 L600 200 L700 250 L800 180 L800 340 L0 340 Z"/>
+  <path id="near-range" fill="#41557e" d="M0 340 L120 230 L200 290 L320 170 L450 330 L560 240 L680 320 L800 260 L800 360 L0 360 Z"/>
+  <path id="snow" fill="#e8eef8" d="M320 170 L350 207 L333 200 L320 214 L305 199 L291 205 Z M120 230 L140 248 L128 246 L118 256 L108 245 L100 249 Z M560 240 L583 259 L570 257 L558 268 L548 256 L538 259 Z"/>
+  <rect id="ground" x="0" y="355" width="800" height="95" fill="#24304a"/>
+  <path id="river" fill="none" stroke="#7fc8ff" stroke-width="12" stroke-linecap="round"
+        d="M330 357 C 300 380 420 385 380 405 S 250 430 300 450"/>
+  <g id="trees" fill="#83c167">
+    <path d="M90 370 L112 300 L134 370 Z"/>
+    <path d="M140 380 L158 322 L176 380 Z"/>
+    <path d="M610 375 L636 292 L662 375 Z"/>
+    <path d="M668 385 L688 320 L708 385 Z"/>
+  </g>
+  <g id="trunks" fill="#7a5a43">
+    <rect x="108" y="370" width="8" height="14"/>
+    <rect x="154" y="380" width="8" height="12"/>
+    <rect x="632" y="375" width="8" height="14"/>
+    <rect x="684" y="385" width="8" height="12"/>
+  </g>
+  <circle id="sun" cx="640" cy="105" r="44" fill="#ffd166"/>
+  <path id="rays" fill="none" stroke="#ffd166" stroke-width="7" stroke-linecap="round"
+        d="M640 40 L640 22 M640 170 L640 188 M575 105 L557 105 M705 105 L723 105 M594 59 L581 46 M686 151 L699 164 M686 59 L699 46 M594 151 L581 164"/>
+  <path id="birds" fill="none" stroke="#f4f1ea" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"
+        d="M180 90 q 14 -14 28 0 q 14 -14 28 0 M260 130 q 10 -10 20 0 q 10 -10 20 0 M230 60 q 8 -8 16 0 q 8 -8 16 0"/>
+</svg>

@@ -207,6 +207,65 @@ bool drawOffscreen(float alpha, const std::function<void(const RenderTexture&, f
     return true;
 }
 
+namespace {
+// ---- winding fills (vector paths)
+// The coverage pass adds +1 (or -1) per triangle to the red channel of a target cleared to
+// 128, so each pixel ends up holding 128 + its winding number; the shader then keeps the
+// pixels the fill rule says are inside.
+const char* WINDING_FS = "#version 330\n"
+"in vec2 fragTexCoord; in vec4 fragColor;\n"
+"uniform sampler2D texture0; uniform int evenOdd;\n"
+"out vec4 finalColor;\n"
+"void main(){\n"
+"    int w = int(floor(texture(texture0, fragTexCoord).r * 255.0 + 0.5)) - 128;\n"
+"    bool inside = evenOdd == 1 ? (abs(w) % 2) == 1 : w != 0;\n"
+"    finalColor = inside ? fragColor : vec4(0.0);\n"
+"}\n";
+Shader windingShader{};
+int evenOddLoc = -1;
+
+void drawTriangles(const std::vector<Vector2>& tris, Color col) {
+    for (size_t i = 0; i + 2 < tris.size(); i += 3) DrawTriangle(tris[i], tris[i + 1], tris[i + 2], col);
+}
+
+} // namespace
+
+bool fillWinding(const std::vector<Vector2>& add, const std::vector<Vector2>& subtract, Color color, bool evenOdd) {
+    if (targets.empty()) return false;
+    if (color.a == 0 || (add.empty() && subtract.empty())) return true;
+    if (!windingShader.id) {
+        windingShader = LoadShaderFromMemory(nullptr, WINDING_FS);
+        evenOddLoc = GetShaderLocation(windingShader, "evenOdd");
+        onGraphicsShutdown([] { UnloadShader(windingShader); windingShader = Shader{}; });
+    }
+    const Target parent = targets.back();
+    rlDrawRenderBatchActive();
+    const int w = parent.rt.texture.width, h = parent.rt.texture.height;
+    RenderTexture counts = acquire(w, h);
+    bindTarget({ counts, parent.scale });
+    ClearBackground(Color{ 128, 0, 0, 0 });
+    rlSetBlendFactorsSeparate(RL_ONE, RL_ONE, RL_ONE, RL_ONE, RL_FUNC_ADD, RL_FUNC_ADD);
+    BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+    drawTriangles(add, Color{ 1, 0, 0, 0 });
+    rlDrawRenderBatchActive();
+    if (!subtract.empty()) {
+        rlSetBlendFactorsSeparate(RL_ONE, RL_ONE, RL_ONE, RL_ONE, RL_FUNC_REVERSE_SUBTRACT, RL_FUNC_REVERSE_SUBTRACT);
+        BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+        drawTriangles(subtract, Color{ 1, 0, 0, 0 });
+        rlDrawRenderBatchActive();
+    }
+    bindTarget(parent);                                // standard blend: colour over the content
+    BeginShaderMode(windingShader);
+    int eo = evenOdd ? 1 : 0;
+    SetShaderValue(windingShader, evenOddLoc, &eo, SHADER_UNIFORM_INT);
+    DrawTexturePro(counts.texture, { 0, 0, (float)w, (float)-h }, { 0, 0, w / parent.scale, h / parent.scale },
+                   { 0, 0 }, 0, color);
+    EndShaderMode();
+    rlDrawRenderBatchActive();
+    release(counts);
+    return true;
+}
+
 void restoreBlend() {
     if (!targets.empty()) standardBlend();
 }

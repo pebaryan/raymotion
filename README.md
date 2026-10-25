@@ -312,6 +312,47 @@ BPMN process with a token run, a knowledge graph with focus and dimming, a phylo
 caffeine in 2D and 3D and the crambin protein. The sample files are in `assets/data/`
 (crambin from the RCSB PDB and caffeine from PubChem, both public domain).
 
+### Vector paths
+
+```cpp
+vg::Path curve = vg::Path::parse("M 100 500 C 400 100 800 900 1100 500");   // or moveTo/lineTo/cubicTo/arcTo
+vg::Stroke s;
+s.color = SKYBLUE;
+s.width = 8;
+node->fn = [curve, s](const Ctx& cx, int t) {
+    const float u = (float)interpolate(t, { 0, 60 }, { 0, 1 }, clamped());
+    vg::stroke(cx, curve.trim(0, u), s);                   // draws itself on
+    dr::circle(cx, curve.pointAt(u), 10, GOLD);            // a marker riding the curve
+};
+```
+
+`vg::` is Bézier geometry plus a renderer for it:
+
+* **Paths:** lines, quadratic and cubic curves, SVG elliptical arcs, and full SVG path data
+  (`Path::parse`, every command, relative or absolute). Shapes: rect (rounded), circle,
+  ellipse, arc, regular polygon, star, polyline, and a smooth curve through points.
+  Paths can be translated, scaled, rotated, reversed or put through any point function.
+* **Measuring:** `length`, `pointAt(u)` and `angleAt(u)` by arc length (for motion along a
+  path), `bounds`, and `trim(from, to)`, which cuts the curves exactly. Trims can run through
+  the contours in order or cut every contour at once.
+* **Fills** follow SVG's nonzero and even-odd rules exactly, with holes and self-crossing
+  contours. The GPU counts each pixel's winding number in an offscreen pass, so translucent
+  fills never double up.
+* **Strokes:** miter, round and bevel joins; butt, round and square caps; dash patterns
+  with an offset (marching ants, dotted lines). Translucent strokes cover each pixel once,
+  even where they cross themselves.
+* **Animation helpers:** `vg::write` (the outline draws on, then the fill fades in) and
+  `vg::Morph`, which matches contours, resamples them and aligns them so shapes turn
+  into one another with the least travel. `vg::mix` blends two styles.
+* **SVG files:** `vg::Drawing::load("art.svg")` reads paths, basic shapes, groups,
+  transforms and styles (through nanosvg; gradients are drawn as their average colour).
+  `vg::draw` and `vg::write` fit the drawing into a box, and `write` reveals the shapes
+  one after another.
+
+`vector-paths` shows draw-on with a marker, joins, caps and dashes, both fill rules, a
+morph sequence, an SVG landscape writing itself on (`assets/data/landscape.svg`) and
+motion along a path.
+
 ### Particles
 
 ```cpp
@@ -364,6 +405,8 @@ alone, out of order or twice with the same result, and costs only its live parti
 * `rmtn/chem.hpp` — `chem::` molecules (SMILES, MOL/SDF, PDB), skeletal formulas, 3D
   ball-and-stick and protein cartoons.
 * `rmtn/particles.hpp` — `fx::` closed-form particle emitters, looks and presets.
+* `rmtn/paths.hpp` — `vg::` Bézier paths and SVG path data, fills by winding rule,
+  strokes with joins, caps and dashes, trims, morphs and SVG drawings.
 * `rmtn/json.hpp` — `Json` values for props (parse, typed lookups with fallbacks, merge).
 * `rmtn/prefab.hpp` — `prefab::add/use`: registered, parameterized subtree builders.
 * `rmtn/synth.hpp` — sine-sum note events + envelopes -> WAV soundtrack.
@@ -390,6 +433,7 @@ raymotion-promo        1920x1080 @60fps  210.0s  audio=1   (YouTube introduction
 npr-styles             1920x1080 @30fps   53.8s  audio=0   (non-photorealistic rendering: eight illustration styles)
 diagrams               1920x1080 @30fps   56.0s  audio=1   (flowcharts, DOT, BPMN, knowledge graphs, trees, molecules, proteins)
 particles              1920x1080 @30fps   29.3s  audio=0   (fireworks, campfire, rain, snow, comet, custom looks, confetti)
+vector-paths           1920x1080 @30fps   34.3s  audio=0   (draw-on, joins and dashes, fill rules, morphs, SVG, motion paths)
 ```
 
 `raymotion-promo` is the 3.5-minute introduction to the engine
@@ -429,6 +473,9 @@ force and tree layouts; SMILES, SDF and PDB, rings, formulas, substructures, dep
 no window) and diagram rendering (build-up, highlights, traces, morphs, BPMN, skeletal
 formulas, 3D molecules and cartoons); particles (burst and stream counts, prewarm,
 determinism, closed-form motion against a stepped simulation, areas, presets; no window);
+vector paths (SVG path data, arcs, lengths, trims, transforms, morphs, SVG files; no window)
+and their rendering (fill rules and holes, translucent overlaps, caps, joins, dashes,
+draw-on, fitted SVG drawings, determinism);
 Here-There layout checks; and a Python CLI suite (exact sizes, draft scaling, stale-frame
 cleanup, a real MP4 render, the starter project, props). Tests needing OpenGL carry the `gl`
 label (`ctest -LE gl` skips them on headless machines).

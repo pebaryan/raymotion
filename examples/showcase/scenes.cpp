@@ -24,6 +24,7 @@ void registerPromo(Registry& out);
 void registerNpr(Registry& out);
 void registerDiagrams(Registry& out);
 void registerParticles(Registry& out);
+void registerPaths(Registry& out);
 
 void register_scenes(Registry& out) {
 using namespace dr;
@@ -378,5 +379,6 @@ registerPromo(out);
 registerNpr(out);
 registerDiagrams(out);
 registerParticles(out);
+registerPaths(out);
 } // register_scenes
 } // namespace rmtn

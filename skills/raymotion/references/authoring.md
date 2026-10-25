@@ -107,6 +107,43 @@ l.filters = { Filter::watercolor(6), Filter::paperGrain() };
 
 Each layer costs an offscreen pass; use them for effects, not for every node.
 
+## Vector paths (`vg::`, `rmtn/paths.hpp`)
+
+Bézier paths for line art, icons, curves that draw themselves on, shape morphs and SVG
+files. Coordinates, stroke widths and dash lengths are in node units (they scale with the node).
+
+```cpp
+vg::Path wave = vg::Path::parse("M 200 600 C 500 200 900 1000 1200 600");   // SVG path data
+vg::Path shape = vg::Path::rect({ 300, 300, 400, 240 }, 24);   // also circle, ellipse, arc, regular, star,
+                                                               // polyline, smooth(points), line
+vg::Path built;                                                // or build it: moveTo, lineTo, quadTo,
+built.moveTo({ 0, 0 }).cubicTo({ 50, -80 }, { 150, -80 }, { 200, 0 }).close();   // cubicTo, arcTo, close
+vg::Path moved = built.rotated(30).scaled(2, 2).translated({ 960, 540 });
+
+vg::Stroke s;                                 // color, width, join (Miter, Round, Bevel), cap (Butt, Round, Square)
+s.color = mkColor(0x58c4dd);
+s.width = 6;
+s.dash = { 18, 12 };                          // optional; dashOffset = -t marches them
+vg::Style st = vg::Style::filled(mkColor(0xffd166));   // or Style::outlined(color, width); st.stroke = s;
+st.rule = vg::FillRule::EvenOdd;              // NonZero (default) or EvenOdd, for holes
+
+vg::Morph morph(vg::Path::circle({ 960, 540 }, 200), vg::Path::star({ 960, 540 }, 240, 100, 5));   // build once
+auto art = std::make_shared<vg::Drawing>();   // SVG file: loaded on first draw
+node->fn = [wave, shape, st, s, morph, art](const Ctx& cx, int t) {
+    const float u = (float)interpolate(t, { 0, 60 }, { 0, 1 }, clamped());
+    vg::stroke(cx, wave.trim(0, u), s);       // draw-on; trim(a, b, true) cuts every contour at once
+    dr::circle(cx, wave.pointAt(u), 10, WHITE);   // also wave.angleAt(u) in degrees, length(), bounds()
+    vg::write(cx, shape, st, u);              // outline draws on, then the fill fades in
+    vg::draw(cx, morph.at(u), st);            // or vg::fill / vg::stroke
+    if (art->shapes.empty()) *art = vg::Drawing::load("data/landscape.svg");
+    vg::write(cx, *art, { 1100, 100, 700, 400 }, u);   // fitted into the box; vg::draw(cx, *art, box) for still
+};
+```
+
+Move something along a path with `pointAt(u)`, and turn it to face along the path with
+`angleAt(u)`: `arrow.rotated(p.angleAt(u)).translated(p.pointAt(u))`. Build `Morph`s and
+parse paths while registering, not in `fn`.
+
 ## Particles (`fx::`, `rmtn/particles.hpp`)
 
 Emitters are computed per frame from a seed (no simulation state), so they follow the
