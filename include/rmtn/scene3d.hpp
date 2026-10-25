@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 #include "timeline.hpp"
+#include "particles.hpp"
 
 namespace rmtn {
 namespace g3d {
@@ -134,12 +135,18 @@ struct Object3D {
     bool modelMaterials = true;     // model: keep the file's colours/textures (else `material`)
     int animation = -1;             // model: animation index to pose, -1 = bind pose
     float animationFrame = 0;       // model: keyframe (fractional ok)
+    // Particles born in this object's space (fx::Emitter3D). With a `geometry` too, each
+    // particle is an instance of it in `material` (tinted by the particle's colour), and the
+    // geometry itself is not drawn.
+    std::shared_ptr<const fx::Emitter3D> emitter;
 
     std::function<void(int t, Object3D& self)> up;      // animate from the local frame
     std::vector<std::unique_ptr<Object3D>> children;
 
     Object3D* add(GeometryPtr g, Material m = {});
     Object3D* add(ModelPtr m);
+    Object3D* add(fx::Emitter3D e);                    // particles (billboards, streaks, quads)
+    Object3D* add(fx::Emitter3D e, GeometryPtr g, Material m = {});   // mesh particles
     Object3D* add();                                   // empty group
 };
 
@@ -216,6 +223,8 @@ struct Scene {
 
     Object3D* add(GeometryPtr g, Material m = {});
     Object3D* add(ModelPtr m);
+    Object3D* add(fx::Emitter3D e);
+    Object3D* add(fx::Emitter3D e, GeometryPtr g, Material m = {});
     Object3D* add();
     Object3D* find(const std::string& name);         // depth-first, nullptr when absent
 };

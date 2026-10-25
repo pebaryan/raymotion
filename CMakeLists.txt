@@ -110,6 +110,7 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/npr.cpp
     examples/showcase/diagrams.cpp
     examples/showcase/particles.cpp
+    examples/showcase/particles3d.cpp
     examples/showcase/paths.cpp
     examples/showcase/equations.cpp
     examples/showcase/plots.cpp

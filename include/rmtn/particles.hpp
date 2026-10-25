@@ -135,4 +135,103 @@ Emitter smoke(float width = 60);
 // Slow glowing motes rising over an area `width` x `height` centred on the origin.
 Emitter embers(float width = 1920, float height = 1080);
 
+// ------------------------------------------------------------------ 3D
+// The same emitters in a g3d scene, in world units: attach one with Scene::add or
+// Object3D::add (rmtn/scene3d.hpp) and its particles live in that object's space, so they
+// move with it. They are depth-tested against the scene's geometry and fogged with it.
+// Dots, glows, stars and rings face the camera; streaks lie along their motion; squares
+// and confetti are paper quads that tumble in 3D. Given a geometry, each particle is a lit
+// instance of it instead (debris, pebbles), with shadows and ink lines.
+//
+//   fx::Emitter3D e = fx::fire3d(0.3f);
+//   scene->add(e)->position = { 0, 0, 0 };
+//   scene->add(fx::debris3d(40), g3d::Geometry::box(1, 1, 1), { GRAY, 0.8f });
+
+// Where 3D particles are born, around the emitter's origin (plus `origin` if set).
+enum class Volume {
+    Point,
+    Line,      // the segment from -extent/2 to +extent/2
+    Box,       // a box of size `extent`, centred
+    Sphere,    // a ball of radius extent.x
+    Shell,     // the surface of a sphere of radius extent.x
+    Disc,      // a disc of radius extent.x in the xz plane (the ground)
+    Ring,      // the edge of that disc
+};
+
+struct Particle3D {
+    int index = 0;
+    float birth = 0;          // frame
+    float age = 0, life = 1, u = 0;
+    Vector3 pos{ 0, 0, 0 };   // in the emitter's object space
+    Vector3 vel{ 0, 0, 0 };   // units per frame (without turbulence)
+    float size = 1;           // world units, after `sizeEnd`
+    float rotation = 0;       // degrees: about the view axis (billboards) or `axis` (quads, meshes)
+    Vector3 axis{ 0, 1, 0 };  // a fixed random unit axis per particle
+    float alpha = 1;
+    Color color = WHITE;
+    float random = 0;
+};
+
+struct Emitter3D {
+    unsigned long long seed = 1;
+
+    // ---- emission, as Emitter
+    int burst = 0, burstAt = 0, burstSpread = 0;
+    float rate = 0;
+    int from = 0, until = -1;
+    bool prewarm = false;
+    int maxParticles = 20000;
+    Range life{ 30, 60 };
+
+    // ---- birth place
+    Volume area = Volume::Point;
+    Vector3 extent{ 0, 0, 0 };
+    std::function<Vector3(float frame)> origin;   // optional moving source, sampled at each birth
+
+    // ---- motion (units per frame; gravity per frame squared; +y is up)
+    Range speed{ 0.02f, 0.06f };
+    Vector3 direction{ 0, 1, 0 };   // the axis of the cone of directions
+    float spread = 360;             // the cone's full angle, degrees (360: every direction)
+    bool outward = false;           // aim away from the centre of the area instead
+    Vector3 gravity{ 0, 0, 0 };
+    float drag = 0;
+    float turbulence = 0;           // units of smooth wandering
+    float turbulenceFreq = 0.08f;
+    bool floor = false;             // particles that fall to y = floorY (object space) stop there
+    float floorY = 0;
+
+    // ---- look (for mesh particles, give the emitter a geometry instead)
+    Look look = Look::Dot;
+    Range size{ 0.04f, 0.08f };     // world units across
+    float sizeEnd = 1;
+    std::vector<Color> colors{ WHITE };
+    std::vector<Color> overLife;
+    float fadeIn = 0.05f, fadeOut = 0.35f;
+    Range rotation{ 0, 360 }, spin{ 0, 0 };
+    float stretch = 3;
+    bool additive = false;
+};
+
+void each(const Emitter3D& e, double t, const std::function<void(const Particle3D&)>& f);
+std::vector<Particle3D> particles(const Emitter3D& e, double t);
+// Where particle `p` was `ago` frames earlier (a streak's tail).
+Vector3 positionAt(const Emitter3D& e, const Particle3D& p, float ago);
+
+// ---- 3D presets (sizes in world units; a scene of about a metre per unit)
+Emitter3D burst3d(int count = 150, std::vector<Color> colors = { { 255, 210, 120, 255 }, { 255, 120, 80, 255 } });
+Emitter3D sparks3d(float rate = 4, Color color = { 255, 190, 90, 255 });
+Emitter3D fountain3d(float rate = 4, Color color = { 120, 200, 255, 255 });
+// Confetti falling from a `width` x `depth` area through the origin (put it overhead).
+Emitter3D confetti3d(float width = 6, float depth = 6, std::vector<Color> colors = { { 255, 107, 90, 255 }, { 255, 195, 101, 255 },
+                                                                                     { 71, 218, 216, 255 }, { 140, 120, 255, 255 } });
+// Snow and rain over a `width` x `depth` area, falling `height` from the origin.
+Emitter3D snow3d(float width = 10, float depth = 10, float height = 5);
+Emitter3D rain3d(float width = 10, float depth = 10, float height = 5);
+// Flames, smoke and embers rising from a disc of `radius` on the ground.
+Emitter3D fire3d(float radius = 0.25f);
+Emitter3D smoke3d(float radius = 0.2f);
+Emitter3D embers3d(float radius = 0.4f);
+// Chunks thrown up and out that land and rest on y = 0 (give it a geometry: Scene::add(e, geometry)).
+Emitter3D debris3d(int count = 40);
+
 } } // rmtn::fx

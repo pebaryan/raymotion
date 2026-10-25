@@ -273,6 +273,47 @@ void main() {
 }
 )";
 
+// Particles: camera-facing (or oriented) quads from the batch. The shape rides in the
+// texture coordinate, u + 2 * shape, so a sorted run of mixed looks is one draw.
+const char* PARTICLE_FS = R"(#version 330
+in vec2 fragTexCoord; in vec4 fragColor;
+out vec4 finalColor;
+float star5(vec2 p, float r, float rf) {             // after Inigo Quilez's sdStar5
+    const vec2 k1 = vec2(0.809016994375, -0.587785252292), k2 = vec2(-k1.x, k1.y);
+    p.x = abs(p.x);
+    p -= 2.0 * max(dot(k1, p), 0.0) * k1;
+    p -= 2.0 * max(dot(k2, p), 0.0) * k2;
+    p.x = abs(p.x);
+    p.y -= r;
+    vec2 ba = rf * vec2(-k1.y, k1.x) - vec2(0, 1);
+    float h = clamp(dot(p, ba) / dot(ba, ba), 0.0, r);
+    return length(p - ba * h) * sign(p.y * ba.x - p.x * ba.y);
+}
+void main() {
+    int shape = int(floor(fragTexCoord.x * 0.5));
+    vec2 uv = vec2(fragTexCoord.x - 2.0 * float(shape), fragTexCoord.y);
+    vec2 p = uv * 2.0 - 1.0;
+    float r = length(p), aa = max(fwidth(r), 1e-3), a = 1.0;
+    vec3 col = fragColor.rgb;
+    if (shape == 0) a = 1.0 - smoothstep(1.0 - aa, 1.0, r);                  // dot
+    else if (shape == 1) a = max(0.0, 1.0 - r);                               // glow
+    else if (shape == 2) {                                                    // glow with a hot core
+        float halo = max(0.0, 1.0 - r), core = max(0.0, 1.0 - r / 0.35);
+        vec3 sum = col * halo + mix(col, vec3(1.0), 0.6) * core;
+        a = min(1.0, halo + core);
+        col = a > 0.0 ? min(sum / a, vec3(1.0)) : col;
+    } else if (shape == 3) {                                                  // streak, tail at u = 0
+        float w = max(fwidth(p.y), 1e-3);
+        a = smoothstep(0.0, 0.9, uv.x) * (1.0 - smoothstep(1.0 - w, 1.0, abs(p.y)));
+    } else if (shape == 5) {
+        float d = star5(vec2(p.x, -p.y), 1.0, 0.42);
+        a = 1.0 - smoothstep(-aa, aa, d);
+    } else if (shape == 6) a = 1.0 - smoothstep(0.12 - aa, 0.12 + aa, abs(r - 0.88));   // ring
+    if (fragColor.a * a <= 0.002) discard;
+    finalColor = vec4(col, fragColor.a * a);
+}
+)";
+
 // Depth of field: a gather blur over a golden-angle spiral (after Dennis Gustafsson's
 // "Bokeh depth of field in a single pass"). Colour is premultiplied, so alpha blurs too.
 const char* DOF_FS = R"(#version 330
@@ -434,7 +475,7 @@ struct DepthTarget { unsigned int fbo = 0, color = 0, depth = 0; int w = 0, h = 
 
 struct Gpu {
     bool ready = false;
-    Shader lit{}, depth{}, dof{}, gbuf{}, line{};
+    Shader lit{}, depth{}, dof{}, gbuf{}, line{}, particle{};
     LitLocs L{};
     DofLocs D{};
     GbufLocs G{};
@@ -463,6 +504,7 @@ void releaseGpu() {
     if (gpu.dof.id) UnloadShader(gpu.dof);
     if (gpu.gbuf.id) UnloadShader(gpu.gbuf);
     if (gpu.line.id) UnloadShader(gpu.line);
+    if (gpu.particle.id) UnloadShader(gpu.particle);
     if (gpu.material.maps) {
         gpu.material.maps[MATERIAL_MAP_DIFFUSE].texture = whiteTexture();   // cached textures are freed below
         UnloadMaterial(gpu.material);
@@ -484,8 +526,9 @@ void ensureGpu() {
     gpu.dof = LoadShaderFromMemory(nullptr, DOF_FS);
     gpu.gbuf = LoadShaderFromMemory((head + LIT_VS_BODY).c_str(), GBUF_FS);
     gpu.line = LoadShaderFromMemory(nullptr, LINE_FS);
+    gpu.particle = LoadShaderFromMemory(nullptr, PARTICLE_FS);
     if (!IsShaderValid(gpu.lit) || !IsShaderValid(gpu.depth) || !IsShaderValid(gpu.dof) ||
-        !IsShaderValid(gpu.gbuf) || !IsShaderValid(gpu.line))
+        !IsShaderValid(gpu.gbuf) || !IsShaderValid(gpu.line) || !IsShaderValid(gpu.particle))
         throw std::runtime_error("g3d: shader compilation failed");
     auto loc = [](const char* name) { return GetShaderLocation(gpu.lit, name); };
     gpu.L = { loc("viewPos"), loc("skyColor"), loc("groundColor"), loc("lightCount"), loc("lightType"),
@@ -613,7 +656,16 @@ Vector3 linear(Color c, float k = 1) {
 }
 
 // ---- scene traversal -----------------------------------------------------------------
-struct Item { Object3D* obj; Matrix world; float viewDepth; };
+// A mesh particle is an item of its emitter object with its own transform, fade and tint.
+struct Item {
+    Object3D* obj; Matrix world; float viewDepth;
+    float alpha = 1;
+    Color tint = WHITE;
+    bool particle = false;
+};
+float opacityOf(const Item& it) { return it.obj->material.opacity * it.alpha; }
+// An emitter without a geometry: its particles are drawn as billboards after the meshes.
+struct Emitting { const Object3D* obj; Matrix world; };
 
 void animate(std::vector<std::unique_ptr<Object3D>>& list, int t) {
     for (auto& o : list) {
@@ -622,15 +674,30 @@ void animate(std::vector<std::unique_ptr<Object3D>>& list, int t) {
     }
 }
 
-void collect(std::vector<std::unique_ptr<Object3D>>& list, const Matrix& parent, std::vector<Item>& out) {
+void collect(std::vector<std::unique_ptr<Object3D>>& list, const Matrix& parent, std::vector<Item>& out,
+             std::vector<Emitting>& emitters, double t) {
     for (auto& o : list) {
         if (!o->visible) continue;
         Matrix local = MatrixMultiply(MatrixMultiply(MatrixScale(o->scale.x, o->scale.y, o->scale.z),
                                                      MatrixRotateXYZ(Vector3Scale(o->rotation, DEG2RAD))),
                                       MatrixTranslate(o->position.x, o->position.y, o->position.z));
         Matrix world = MatrixMultiply(local, parent);
-        if (o->geometry || o->model) out.push_back({ o.get(), world, 0 });
-        collect(o->children, world, out);
+        if (o->emitter && o->geometry) {
+            fx::each(*o->emitter, t, [&](const fx::Particle3D& p) {
+                const float a = p.alpha * p.color.a / 255.f;
+                if (a <= 0.002f || p.size <= 0) return;
+                const Matrix m = MatrixMultiply(MatrixMultiply(MatrixScale(p.size, p.size, p.size),
+                                                               MatrixRotate(p.axis, p.rotation * DEG2RAD)),
+                                                MatrixTranslate(p.pos.x, p.pos.y, p.pos.z));
+                Item it{ o.get(), MatrixMultiply(m, world), 0 };
+                it.alpha = a;
+                it.tint = p.color;
+                it.particle = true;
+                out.push_back(it);
+            });
+        } else if (o->emitter) emitters.push_back({ o.get(), world });
+        else if (o->geometry || o->model) out.push_back({ o.get(), world, 0 });
+        collect(o->children, world, out, emitters, t);
     }
 }
 
@@ -692,12 +759,20 @@ void drawItem(const Item& it, Pass pass) {
     const int skinnedLoc = pass == Pass::Lit ? gpu.L.skinned : pass == Pass::Depth ? gpu.depthSkinned : gpu.G.skinned;
     ::Material mat = gpu.material;
     mat.shader = sh;
-    if (pass == Pass::Lit) setMaterial(o.material);
+    if (pass == Pass::Lit) {
+        if (it.particle) {
+            g3d::Material m = o.material;
+            m.opacity = opacityOf(it);
+            setMaterial(m);
+        } else setMaterial(o.material);
+    }
     if (o.material.doubleSided) rlDisableBackfaceCulling(); else rlEnableBackfaceCulling();
 
     if (o.geometry) {
         mat.maps[MATERIAL_MAP_DIFFUSE].texture = o.material.map.empty() ? whiteTexture() : texture(o.material.map);
-        mat.maps[MATERIAL_MAP_DIFFUSE].color = o.material.color;
+        const Color c = o.material.color, k = it.tint;
+        mat.maps[MATERIAL_MAP_DIFFUSE].color = { (unsigned char)(c.r * k.r / 255), (unsigned char)(c.g * k.g / 255),
+                                                 (unsigned char)(c.b * k.b / 255), c.a };
         setBones(bonesLoc, skinnedLoc, sh, nullptr, false);
         DrawMesh(o.geometry->mesh(), mat, it.world);
         return;
@@ -790,7 +865,7 @@ Shadows renderShadows(const Scene& s, const std::vector<Item>& items) {
         t.rect = { (float)col / grid, (float)row / grid, 1.f / grid, 1.f / grid };
         rlViewport(col * tile, row * tile, tile, tile);
         for (const Item& it : items)
-            if (it.obj->material.castShadow && it.obj->material.opacity >= 1.f && !it.obj->material.unlit) drawItem(it, Pass::Depth);
+            if (it.obj->material.castShadow && opacityOf(it) >= 1.f && !it.obj->material.unlit) drawItem(it, Pass::Depth);
         out.tiles.push_back(t);
     };
     for (int i = 0; i < count; i++) {
@@ -970,7 +1045,7 @@ void renderLineBuffer(const Scene& s, const std::vector<Item>& items, LineStyles
     rlDisableColorBlend();                       // ids and styles are data: write them unblended
     for (size_t i = 0; i < items.size(); i++) {
         const g3d::Material& m = items[i].obj->material;
-        if (m.opacity < 1.f) continue;
+        if (opacityOf(items[i]) < 1.f) continue;
         const float id = (float)(i % 254 + 1), style = (float)styles.of(s, m, scale);
         SetShaderValue(gpu.gbuf, gpu.G.objectId, &id, SHADER_UNIFORM_FLOAT);
         SetShaderValue(gpu.gbuf, gpu.G.lineStyle, &style, SHADER_UNIFORM_FLOAT);
@@ -1016,10 +1091,154 @@ void compositeLines(const Scene& s, const Camera& cam, const DepthTarget& lt, co
     bindUnit(DEPTH_SLOT, 0);
 }
 
+// ---- particles ---------------------------------------------------------------------------
+// One billboard (or oriented quad) of the particle pass, in world space.
+struct Quad { Vector3 c[4]; Color color; int shape; float depth; };
+
+enum Shape { DOT, GLOW, GLOW_HOT, STREAK, FLAT, STAR, RING };
+
+// `v` turned and scaled by `m`, without its translation.
+Vector3 direction(Vector3 v, const Matrix& m) {
+    return { m.m0 * v.x + m.m4 * v.y + m.m8 * v.z, m.m1 * v.x + m.m5 * v.y + m.m9 * v.z, m.m2 * v.x + m.m6 * v.y + m.m10 * v.z };
+}
+
+Color fogged(const Scene& s, Color c, float dist, bool additive) {
+    if (s.fogFar <= s.fogNear) return c;
+    const float f = std::clamp((dist - s.fogNear) / (s.fogFar - s.fogNear), 0.f, 1.f);
+    if (additive) return { c.r, c.g, c.b, (unsigned char)(c.a * (1 - f)) };   // light fades out in fog
+    auto lin = [](unsigned char v) { return std::pow(v / 255.f, 2.2f); };
+    auto mix = [&](unsigned char a, unsigned char b) {
+        return (unsigned char)std::lround(255 * std::pow(lin(a) + (lin(b) - lin(a)) * f, 1 / 2.2f));
+    };
+    return { mix(c.r, s.fogColor.r), mix(c.g, s.fogColor.g), mix(c.b, s.fogColor.b), c.a };
+}
+
+void particleQuads(const Scene& s, const Camera& cam, const Emitting& em, const Matrix& view, double t,
+                   std::vector<Quad>& out) {
+    const fx::Emitter3D& e = *em.obj->emitter;
+    const Matrix& w = em.world;
+    const float unitScale = Vector3Length({ w.m0, w.m1, w.m2 });
+    const Vector3 right{ view.m0, view.m4, view.m8 }, up{ view.m1, view.m5, view.m9 };
+    auto toWorld = [&](Vector3 p) { return Vector3Transform(p, w); };
+    auto depthOf = [&](Vector3 p) { return -Vector3Transform(p, view).z; };
+    fx::each(e, t, [&](const fx::Particle3D& p) {
+        Color col = withAlpha(p.color, p.alpha);
+        if (col.a == 0 || p.size <= 0) return;
+        const Vector3 c = toWorld(p.pos);
+        const float h = p.size * unitScale / 2;
+        col = fogged(s, col, Vector3Distance(c, cam.position), e.additive);
+        Quad q{};
+        q.color = col;
+        q.depth = depthOf(c);
+        auto billboard = [&](int shape, float rotation) {
+            const float ca = std::cos(rotation * DEG2RAD), sa = std::sin(rotation * DEG2RAD);
+            const Vector3 r = Vector3Scale(Vector3Add(Vector3Scale(right, ca), Vector3Scale(up, sa)), h);
+            const Vector3 u = Vector3Scale(Vector3Subtract(Vector3Scale(up, ca), Vector3Scale(right, sa)), h);
+            q.shape = shape;
+            q.c[0] = Vector3Subtract(Vector3Subtract(c, r), u);
+            q.c[1] = Vector3Subtract(Vector3Add(c, r), u);
+            q.c[2] = Vector3Add(Vector3Add(c, r), u);
+            q.c[3] = Vector3Add(Vector3Subtract(c, r), u);
+            out.push_back(q);
+        };
+        switch (e.look) {
+            case fx::Look::Dot: billboard(DOT, 0); break;
+            case fx::Look::Glow: billboard(e.additive ? GLOW_HOT : GLOW, 0); break;
+            case fx::Look::Star: billboard(STAR, p.rotation); break;
+            case fx::Look::Ring: billboard(RING, 0); break;
+            case fx::Look::Streak: {
+                const Vector3 tail = toWorld(fx::positionAt(e, p, e.stretch));
+                const Vector3 along = Vector3Subtract(c, tail);
+                const float len = Vector3Length(along);
+                if (len < h * 0.5f) { billboard(DOT, 0); break; }
+                const Vector3 dir = Vector3Scale(along, 1 / len);
+                const Vector3 side = Vector3Scale(Vector3Normalize(Vector3CrossProduct(dir, Vector3Subtract(c, cam.position))), h);
+                const Vector3 head = Vector3Add(c, Vector3Scale(dir, h));   // a rounded-off tip past the particle
+                q.shape = STREAK;
+                q.c[0] = Vector3Subtract(tail, Vector3Scale(side, 0.3f));
+                q.c[1] = Vector3Subtract(head, side);
+                q.c[2] = Vector3Add(head, side);
+                q.c[3] = Vector3Add(tail, Vector3Scale(side, 0.3f));
+                out.push_back(q);
+                break;
+            }
+            case fx::Look::Square: case fx::Look::Confetti: {
+                // A paper quad spanned by the particle's axis and a direction turning about it.
+                const Vector3 a = p.axis;
+                const Vector3 ref = std::fabs(a.y) < 0.9f ? Vector3{ 0, 1, 0 } : Vector3{ 1, 0, 0 };
+                const Vector3 e1 = Vector3Normalize(Vector3CrossProduct(a, ref)), e2 = Vector3CrossProduct(a, e1);
+                const float ca = std::cos(p.rotation * DEG2RAD), sa = std::sin(p.rotation * DEG2RAD);
+                const Vector3 b = Vector3Add(Vector3Scale(e1, ca), Vector3Scale(e2, sa));
+                const Vector3 n = direction(Vector3CrossProduct(a, b), w);
+                const float hw = h, hh = e.look == fx::Look::Confetti ? h * 0.55f : h;
+                const Vector3 A = Vector3Scale(Vector3Normalize(direction(a, w)), hh);
+                const Vector3 B = Vector3Scale(Vector3Normalize(direction(b, w)), hw);
+                // Lit a little from above, the back of the paper darker.
+                const Vector3 nn = Vector3Normalize(n);
+                const bool back = Vector3DotProduct(nn, Vector3Subtract(cam.position, c)) < 0;
+                const float k = (0.72f + 0.28f * std::fabs(nn.y)) * (back && e.look == fx::Look::Confetti ? 0.78f : 1.f);
+                q.color = { (unsigned char)(col.r * k), (unsigned char)(col.g * k), (unsigned char)(col.b * k), col.a };
+                q.shape = FLAT;
+                q.c[0] = Vector3Subtract(Vector3Subtract(c, A), B);
+                q.c[1] = Vector3Subtract(Vector3Add(c, A), B);
+                q.c[2] = Vector3Add(Vector3Add(c, A), B);
+                q.c[3] = Vector3Add(Vector3Subtract(c, A), B);
+                out.push_back(q);
+                break;
+            }
+        }
+    });
+}
+
+void submit(const std::vector<Quad>& quads) {
+    static const float U[4] = { 0, 1, 1, 0 }, V[4] = { 0, 0, 1, 1 };
+    for (const Quad& q : quads) {
+        rlCheckRenderBatchLimit(4);
+        rlBegin(RL_QUADS);
+        rlColor4ub(q.color.r, q.color.g, q.color.b, q.color.a);
+        // streaks run tail (u = 0) to head (u = 1) along corners 0/3 -> 1/2
+        for (int i = 0; i < 4; i++) {
+            const float u = q.shape == STREAK ? (i == 1 || i == 2 ? 1.f : 0.f) : U[i];
+            const float v = q.shape == STREAK ? (i == 0 || i == 1 ? 0.f : 1.f) : V[i];
+            rlTexCoord2f(u + 2.f * q.shape, v);
+            rlVertex3f(q.c[i].x, q.c[i].y, q.c[i].z);
+        }
+        rlEnd();
+    }
+}
+
+// Depth-tested against the meshes but not writing depth: alpha-blended particles back to
+// front, then the additive ones, whose order does not matter.
+void drawParticles(const Scene& s, const Camera& cam, const std::vector<Emitting>& emitters, const Matrix& view, double t) {
+    std::vector<Quad> blended, added;
+    for (const Emitting& em : emitters) particleQuads(s, cam, em, view, t, em.obj->emitter->additive ? added : blended);
+    if (blended.empty() && added.empty()) return;
+    std::sort(blended.begin(), blended.end(), [](const Quad& a, const Quad& b) { return a.depth > b.depth; });
+    rlDrawRenderBatchActive();
+    rlDisableDepthMask();
+    rlDisableBackfaceCulling();
+    rlSetTexture(rlGetTextureIdDefault());
+    BeginShaderMode(gpu.particle);
+    submit(blended);
+    if (!added.empty()) {
+        rlDrawRenderBatchActive();
+        rlSetBlendFactorsSeparate(RL_SRC_ALPHA, RL_ONE, RL_ONE, RL_ONE_MINUS_SRC_ALPHA, RL_FUNC_ADD, RL_FUNC_ADD);
+        BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+        submit(added);
+        rlDrawRenderBatchActive();
+        restoreBlend();
+    }
+    EndShaderMode();
+    rlSetTexture(0);
+    rlEnableDepthMask();
+}
+
 void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target, float scale, int t) {
     ensureGpu();
     std::vector<Item> items;
-    collect(s.objects, MatrixIdentity(), items);
+    std::vector<Emitting> emitters;
+    const double ft = frameTime(t);              // particles follow motion-blur subframes
+    collect(s.objects, MatrixIdentity(), items, emitters, ft);
     const Texture2D envTex = environmentTexture(s);
 
     // Background, in 2D before the viewport changes.
@@ -1072,7 +1291,7 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     if (envTex.id && s.showEnvironment) drawSkybox(cam);
     std::vector<Item> clear;
     for (Item& it : items) {
-        if (it.obj->material.opacity < 1.f) {
+        if (opacityOf(it) < 1.f) {
             Vector3 p = Vector3Transform({ 0, 0, 0 }, MatrixMultiply(it.world, view));
             it.viewDepth = -p.z;
             clear.push_back(it);
@@ -1082,6 +1301,7 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     rlDisableDepthMask();
     for (const Item& it : clear) drawItem(it, Pass::Lit);
     rlEnableDepthMask();
+    if (!emitters.empty()) drawParticles(s, cam, emitters, view, ft);
 
     bindUnit(SHADOW_SLOT, 0);
     bindUnit(ENV_SLOT, 0);
@@ -1263,6 +1483,16 @@ Object3D* Object3D::add(ModelPtr m) {
     o->model = std::move(m);
     return o;
 }
+Object3D* Object3D::add(fx::Emitter3D e) {
+    Object3D* o = add();
+    o->emitter = std::make_shared<const fx::Emitter3D>(std::move(e));
+    return o;
+}
+Object3D* Object3D::add(fx::Emitter3D e, GeometryPtr g, Material m) {
+    Object3D* o = add(std::move(g), std::move(m));
+    o->emitter = std::make_shared<const fx::Emitter3D>(std::move(e));
+    return o;
+}
 Object3D* Object3D::add() {
     children.push_back(std::make_unique<Object3D>());
     return children.back().get();
@@ -1295,6 +1525,16 @@ Object3D* Scene::add(GeometryPtr g, Material m) {
 Object3D* Scene::add(ModelPtr m) {
     Object3D* o = add();
     o->model = std::move(m);
+    return o;
+}
+Object3D* Scene::add(fx::Emitter3D e) {
+    Object3D* o = add();
+    o->emitter = std::make_shared<const fx::Emitter3D>(std::move(e));
+    return o;
+}
+Object3D* Scene::add(fx::Emitter3D e, GeometryPtr g, Material m) {
+    Object3D* o = add(std::move(g), std::move(m));
+    o->emitter = std::make_shared<const fx::Emitter3D>(std::move(e));
     return o;
 }
 Object3D* Scene::add() {

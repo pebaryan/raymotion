@@ -667,6 +667,31 @@ alone, out of order or twice with the same result, and costs only its live parti
 
 `particles` shows fireworks, a campfire, rain, snow, a comet and a custom look.
 
+**In 3D scenes**, `fx::Emitter3D` is the same emitter in world units, added to a `g3d`
+scene or object (its particles live in that object's space and move with it):
+
+```cpp
+scene->add(fx::fire3d(0.25f))->position = { -3, 0, 0 };          // flames, smoke3d, embers3d...
+fx::Emitter3D shell = fx::burst3d(260, { PINK, GOLD });
+shell.burstAt = 160;
+scene->add(shell)->position = { 0, 7, -5 };
+scene->add(fx::debris3d(40), g3d::Geometry::box(1, 1, 1), crate);  // mesh particles
+```
+
+* They are depth-tested against the scene's meshes (hidden behind them) and fogged with
+  them. Dots, glows, stars and rings face the camera, streaks lie along their motion, and
+  squares and confetti are paper quads that tumble in 3D.
+* Birth volumes: point, line, box, sphere, shell, and a disc or ring on the ground; a
+  cone of directions (`direction`, `spread` up to 360 for all round) or `outward`.
+* **Mesh particles:** with a geometry and material, each particle is a lit instance, with
+  shadows and ink lines. `floor` makes particles land on a plane and rest there, no longer
+  spinning (still closed-form: the landing is found by bisection).
+* Presets: `burst3d`, `sparks3d`, `fountain3d`, `confetti3d`, `snow3d`, `rain3d`,
+  `fire3d`, `smoke3d`, `embers3d`, `debris3d`.
+
+`particles-3d` shows a campfire lighting a night yard, a fountain, a crate bursting into
+chunks that land, fireworks and confetti, under an orbiting camera.
+
 ### Engine pieces
 
 * `rmtn/timeline.hpp` — `Comp`, the node tree (start/duration, `up` animates props,
@@ -684,7 +709,8 @@ alone, out of order or twice with the same result, and costs only its live parti
 * `rmtn/transitions.hpp` — `TransitionSeries` with fade, slide and wipe.
 * `rmtn/layout.hpp` — `layout::` rects, rows, columns, grids; `wrapText`, `dr::textBox`.
 * `rmtn/scene3d.hpp` — `g3d::` GPU scenes: geometry, models, materials (physically based
-  or toon/Gooch/hatch), lights, shadows, environments, ink lines, cameras with depth of field.
+  or toon/Gooch/hatch), lights, shadows, environments, ink lines, cameras with depth of
+  field, particle emitters.
 * `rmtn/diagram.hpp` — `dg::` graphs from Mermaid, DOT, BPMN, RDF, JSON and Newick;
   layered, force and tree layouts; `Diagram` animations (build, trace, flow, morph, focus).
 * `rmtn/chem.hpp` — `chem::` molecules (SMILES, MOL/SDF, PDB), skeletal formulas, 3D
@@ -737,6 +763,7 @@ raymotion-promo        1920x1080 @60fps  210.0s  audio=1   (YouTube introduction
 npr-styles             1920x1080 @30fps   53.8s  audio=0   (non-photorealistic rendering: eight illustration styles)
 diagrams               1920x1080 @30fps   56.0s  audio=1   (flowcharts, DOT, BPMN, knowledge graphs, trees, molecules, proteins)
 particles              1920x1080 @30fps   29.3s  audio=0   (fireworks, campfire, rain, snow, comet, custom looks, confetti)
+particles-3d           1920x1080 @30fps   14.0s  audio=0   (particles in a 3D scene: campfire, fountain, landing debris, fireworks, confetti)
 vector-paths           1920x1080 @30fps   34.3s  audio=0   (draw-on, joins and dashes, fill rules, morphs, SVG, motion paths)
 equations              1920x1080 @30fps   32.3s  audio=1   (TeX formulas: write-on, layout gallery, named parts, step-by-step transforms)
 plots                  1920x1080 @30fps   40.7s  audio=1   (graphs, tangents, Riemann sums, curves, vector fields, number lines, charts)
@@ -780,13 +807,15 @@ masks, offsets at every supersampling level, wipes, text boxes, illustration fil
 depth, lighting, directional/spot/point and multi-light shadows, environment lighting and
 skybox, depth of field, viewports, transparency, hierarchy, OBJ and a generated skinned
 glTF, determinism, toon/Gooch/hatch shading, ink lines in layers, viewports and at 2x,
-boiling wobble); renderer regressions (supersampling edge levels
+boiling wobble, particles: placement, occlusion, mesh particles, additive light, fog);
+renderer regressions (supersampling edge levels
 and coordinates, concave fills, fonts, FX shader uniforms, determinism, shutdown);
 diagram parsing and layout (Mermaid, DOT, BPMN, Turtle, JSON-LD, JSON, Newick; layered,
 force and tree layouts; SMILES, SDF and PDB, rings, formulas, substructures, depictions;
 no window) and diagram rendering (build-up, highlights, traces, morphs, BPMN, skeletal
 formulas, 3D molecules and cartoons); particles (burst and stream counts, prewarm,
-determinism, closed-form motion against a stepped simulation, areas, presets; no window);
+determinism, closed-form motion against a stepped simulation, areas, presets; in 3D the
+shared schedule, cones, volumes, floor landings and presets; no window);
 vector paths (SVG path data, arcs, lengths, trims, transforms, morphs, SVG files; no window)
 and their rendering (fill rules and holes, translucent overlaps, caps, joins, dashes,
 draw-on, fitted SVG drawings, determinism); equations (parsing and its errors, TeX

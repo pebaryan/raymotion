@@ -187,6 +187,144 @@ static void presets() {
     CHECK(lowest > 1000);
 }
 
+static float len3(Vector3 v) { return std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z); }
+
+// 3D emitters share the 2D schedule: the same settings give the same particle counts.
+static void schedule3d() {
+    fx::Emitter e2;
+    fx::Emitter3D e3;
+    e2.burst = e3.burst = 30;
+    e2.burstSpread = e3.burstSpread = 6;
+    e2.rate = e3.rate = 1.5f;
+    e2.life = e3.life = { 20, 40 };
+    e2.until = e3.until = 80;
+    for (int t : { 0, 3, 10, 50, 79, 85, 119, 125 }) {
+        const size_t n3 = fx::particles(e3, t).size(), n2 = fx::particles(e2, t).size();
+        CHECK(n3 > 0 ? std::abs((int)n3 - (int)n2) <= 6 : n2 <= 6);    // births jitter by their own seeds
+    }
+    CHECK(fx::particles(e3, 121).empty());
+    // Determinism, and colours do not move anything.
+    fx::Emitter3D d = fx::burst3d(60);
+    d.turbulence = 0.3f;
+    const auto a = fx::particles(d, 30);
+    fx::particles(d, 2);
+    const auto b = fx::particles(d, 30);
+    CHECK(a.size() == b.size() && a.size() == 60);
+    d.colors = { RED, GREEN };
+    const auto c = fx::particles(d, 30);
+    for (size_t i = 0; i < a.size() && i < b.size() && i < c.size(); i++) {
+        CHECK(a[i].pos.x == b[i].pos.x && a[i].pos.y == b[i].pos.y && a[i].pos.z == b[i].pos.z);
+        CHECK(a[i].pos.z == c[i].pos.z);
+    }
+}
+
+static void cones3d() {
+    fx::Emitter3D e;
+    e.burst = 400;
+    e.speed = { 1, 1 };
+    e.direction = { 1, 0, 0 };
+    e.spread = 60;                                   // within 30 degrees of +x
+    for (const fx::Particle3D& p : fx::particles(e, 0)) CHECK(p.vel.x / len3(p.vel) >= std::cos(30 * PI / 180) - 1e-4);
+    e.spread = 0;
+    for (const fx::Particle3D& p : fx::particles(e, 0)) CHECK(near(p.vel.x, 1, 1e-4f));
+    e.spread = 360;                                  // every direction, evenly
+    Vector3 mean{ 0, 0, 0 };
+    int up = 0;
+    for (const fx::Particle3D& p : fx::particles(e, 0)) {
+        mean.x += p.vel.x / 400; mean.y += p.vel.y / 400; mean.z += p.vel.z / 400;
+        up += p.vel.y > 0;
+    }
+    CHECK(len3(mean) < 0.12f && up > 160 && up < 240);
+}
+
+static void volumes3d() {
+    fx::Emitter3D e;
+    e.burst = 300;
+    e.speed = { 0, 0 };
+    e.extent = { 2, 1, 3 };
+    e.area = fx::Volume::Box;
+    for (const fx::Particle3D& p : fx::particles(e, 0)) CHECK(std::fabs(p.pos.x) <= 1 && std::fabs(p.pos.y) <= 0.5f && std::fabs(p.pos.z) <= 1.5f);
+    e.area = fx::Volume::Shell;
+    for (const fx::Particle3D& p : fx::particles(e, 0)) CHECK(near(len3(p.pos), 2, 1e-3f));
+    e.area = fx::Volume::Sphere;
+    int inner = 0;
+    for (const fx::Particle3D& p : fx::particles(e, 0)) { CHECK(len3(p.pos) <= 2.001f); inner += len3(p.pos) < 1; }
+    CHECK(inner > 15 && inner < 75);                 // uniform in volume: 1/8 within half the radius
+    e.area = fx::Volume::Disc;
+    for (const fx::Particle3D& p : fx::particles(e, 0)) CHECK(p.pos.y == 0 && std::hypot(p.pos.x, p.pos.z) <= 2.001f);
+    e.area = fx::Volume::Ring;
+    e.speed = { 1, 1 };
+    e.outward = true;
+    e.spread = 0;
+    for (const fx::Particle3D& p : fx::particles(e, 0)) {
+        CHECK(near(std::hypot(p.pos.x, p.pos.z), 2, 1e-3f));
+        CHECK(p.pos.x * p.vel.x + p.pos.z * p.vel.z > 0.99f * 2);
+    }
+    fx::Emitter3D m;
+    m.rate = 1;
+    m.speed = { 0, 0 };
+    m.life = { 100, 100 };
+    m.origin = [](float f) { return Vector3{ 0, 0, 0.5f * f }; };
+    for (const fx::Particle3D& p : fx::particles(m, 40)) CHECK(near(p.pos.z, 0.5f * (40 - p.age), 1e-3f));
+}
+
+// The same closed form as in 2D, per axis; and the floor.
+static void motion3d() {
+    fx::Emitter3D e;
+    e.burst = 1;
+    e.life = { 200, 200 };
+    e.speed = { 0.2f, 0.2f };
+    e.direction = { 0, 1, 1 };
+    e.spread = 0;
+    e.gravity = { 0.001f, -0.004f, 0 };
+    e.drag = 0.03f;
+    const double k = -std::log(1.0 - 0.03), v0 = 0.2 / std::sqrt(2.0);
+    for (int t : { 10, 60, 150 }) {
+        auto axis = [&](double v, double g) { const double term = g / k, dec = std::exp(-k * t); return term * t + (v - term) * (1 - dec) / k; };
+        const fx::Particle3D p = fx::particles(e, t)[0];
+        CHECK(near(p.pos.x, (float)axis(0, 0.001), 1e-3f) && near(p.pos.y, (float)axis(v0, -0.004), 1e-3f) && near(p.pos.z, (float)axis(v0, 0), 1e-3f));
+    }
+    // A streak's tail is where the particle was.
+    const fx::Particle3D p = fx::particles(e, 60)[0], q = fx::particles(e, 57)[0];
+    const Vector3 tail = fx::positionAt(e, p, 3);
+    CHECK(near(tail.x, q.pos.x, 1e-4f) && near(tail.y, q.pos.y, 1e-4f) && near(tail.z, q.pos.z, 1e-4f));
+
+    // Debris lands on the floor and stays put, no longer spinning.
+    fx::Emitter3D d = fx::debris3d(30);
+    for (int t = 0; t < 150; t += 5)
+        for (const fx::Particle3D& r : fx::particles(d, t)) CHECK(r.pos.y >= -1e-4f);
+    const auto late = fx::particles(d, 120), later = fx::particles(d, 140);
+    CHECK(late.size() == 30 && later.size() == 30);
+    for (size_t i = 0; i < late.size() && i < later.size(); i++) {
+        CHECK(late[i].pos.y == 0 && later[i].pos.x == late[i].pos.x && later[i].rotation == late[i].rotation);
+        CHECK(late[i].vel.x == 0 && late[i].vel.y == 0);
+    }
+    float peak = 0;
+    for (const fx::Particle3D& r : fx::particles(d, 12)) peak = std::max(peak, r.pos.y);
+    CHECK(peak > 0.3f);                              // thrown up first
+}
+
+static void presets3d() {
+    const std::pair<const char*, fx::Emitter3D> all[] = {
+        { "burst3d", fx::burst3d() }, { "sparks3d", fx::sparks3d() }, { "fountain3d", fx::fountain3d() },
+        { "confetti3d", fx::confetti3d() }, { "snow3d", fx::snow3d() }, { "rain3d", fx::rain3d() },
+        { "fire3d", fx::fire3d() }, { "smoke3d", fx::smoke3d() }, { "embers3d", fx::embers3d() }, { "debris3d", fx::debris3d() } };
+    for (const auto& [name, e] : all) {
+        const size_t n = fx::particles(e, 60).size();
+        if (n < 5 || n > 8000) { std::fprintf(stderr, "  preset %s: %zu particles at frame 60\n", name, n); failures++; }
+    }
+    CHECK(fx::particles(fx::snow3d(), 0).size() > 100);
+    // Weather falls through its height; fire and smoke rise.
+    float lowest = 0;
+    for (const fx::Particle3D& p : fx::particles(fx::rain3d(10, 10, 5), 0)) lowest = std::min(lowest, p.pos.y);
+    CHECK(lowest < -4.5f);
+    for (const fx::Particle3D& p : fx::particles(fx::fire3d(), 60)) CHECK(p.pos.y >= 0);
+    double rise = 0;
+    const auto smoke = fx::particles(fx::smoke3d(), 200);
+    for (const fx::Particle3D& p : smoke) rise += p.pos.y / smoke.size();
+    CHECK(rise > 0.5);
+}
+
 int main() {
     bursts();
     streams();
@@ -194,6 +332,11 @@ int main() {
     motion();
     areasAndLooks();
     presets();
+    schedule3d();
+    cones3d();
+    volumes3d();
+    motion3d();
+    presets3d();
     if (failures) { std::fprintf(stderr, "%d particle check(s) failed\n", failures); return 1; }
     std::printf("particle tests passed\n");
     return 0;

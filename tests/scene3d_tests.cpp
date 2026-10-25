@@ -674,6 +674,97 @@ static void models(const fs::path& dir) {
     CHECK(threw);
 }
 
+// One still particle of `look` at `at`, `size` across.
+static fx::Emitter3D still(Vector3 at, float size, Color c, fx::Look look = fx::Look::Dot) {
+    fx::Emitter3D e;
+    e.burst = 1;
+    e.life = { 100, 100 };
+    e.speed = { 0, 0 };
+    e.size = { size, size };
+    e.colors = { c };
+    e.fadeIn = e.fadeOut = 0;
+    e.look = look;
+    e.origin = [at](float) { return at; };
+    return e;
+}
+
+static void particles3d() {
+    // A billboard lands where its centre projects, depth-tested against the meshes.
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = { 0, 0, 5 };
+    s->add(still({ -1, 0, 0 }, 0.6f, GREEN));                    // in the open
+    s->add(still({ 1, 0, -1 }, 0.6f, YELLOW));                   // behind the box
+    s->add(g3d::Geometry::box(1, 1, 0.2f), unlit(RED))->position = { 1.2f, 0, 0 };
+    Comp c = sceneComp(s, BLUE);
+    Image img = render(c, 5);
+    CHECK(close(px(img, project(s->camera, { -1, 0, 0 })), GREEN, 6));
+    CHECK(close(px(img, project(s->camera, { 1, 0, -1 })), RED));
+    const Vector2 edge = project(s->camera, { -1.45f, 0, 0 });       // outside the 0.3 radius
+    CHECK(close(px(img, edge), BLUE));
+    UnloadImage(img);
+
+    // Mesh particles: lit instances of the geometry; the emitter object itself is not drawn.
+    auto m = std::make_shared<g3d::Scene>();
+    m->camera.position = { 0, 0, 5 };
+    fx::Emitter3D chunks = still({ 1, 0, 0 }, 0.8f, WHITE);
+    chunks.rotation = { 0, 0 };
+    g3d::Object3D* em = m->add(chunks, g3d::Geometry::box(1, 1, 1), unlit(ORANGE));
+    em->position = { -0.5f, 0, 0 };                              // particles live in the object's space
+    Comp mc = sceneComp(m, BLUE);
+    img = render(mc, 5);
+    CHECK(close(px(img, project(m->camera, { 0.5f, 0, 0 })), ORANGE));
+    CHECK(close(px(img, project(m->camera, { -0.5f, 0, 0 })), BLUE));
+    UnloadImage(img);
+
+    // Additive glows add light; alpha-blended ones paint over.
+    auto g = std::make_shared<g3d::Scene>();
+    g->camera.position = { 0, 0, 5 };
+    fx::Emitter3D glow = still({ 0, 0, 0 }, 1, Color{ 120, 60, 20, 255 }, fx::Look::Glow);
+    glow.additive = true;
+    g->add(glow);
+    g->add(glow);
+    Comp gc = sceneComp(g, Color{ 60, 60, 60, 255 });
+    img = render(gc, 5);
+    const Color centre = px(img, { W / 2.f, H / 2.f });
+    CHECK(centre.r > 200 && centre.g > 150 && centre.b > 80);   // two glows and their hot cores over grey
+    UnloadImage(img);
+
+    // Fog takes far particles towards the fog colour, like the meshes.
+    auto f = std::make_shared<g3d::Scene>();
+    f->camera.position = { 0, 0, 5 };
+    f->fogColor = BLUE;
+    f->fogNear = 1;
+    f->fogFar = 3;
+    f->add(still({ 0, 0, -2 }, 1.2f, RED));
+    Comp fc = sceneComp(f, BLACK);
+    img = render(fc, 5);
+    CHECK(close(px(img, { W / 2.f, H / 2.f }), BLUE, 3));
+    UnloadImage(img);
+
+    // Streaks, stars, rings and confetti draw something, and a frame renders the same twice.
+    auto mix = std::make_shared<g3d::Scene>();
+    mix->camera.position = { 0, 1, 6 };
+    mix->add(fx::burst3d(80));
+    mix->add(fx::confetti3d(4, 4))->position = { 0, 2, 0 };
+    fx::Emitter3D stars = fx::burst3d(30);
+    stars.look = fx::Look::Star;
+    stars.size = { 0.2f, 0.3f };
+    mix->add(stars);
+    Comp xc = sceneComp(mix, BLACK);
+    Image a = render(xc, 8), b = render(xc, 8);
+    int lit = 0;
+    bool same = true;
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            const Color p = GetImageColor(a, x, y), q = GetImageColor(b, x, y);
+            lit += luma(p) > 40;
+            same &= p.r == q.r && p.g == q.g && p.b == q.b;
+        }
+    CHECK(lit > 150 && same);
+    UnloadImage(a);
+    UnloadImage(b);
+}
+
 int main() {
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
@@ -697,6 +788,7 @@ int main() {
     hatchShading();
     inkLines();
     models(dir);
+    particles3d();
     shutdownGraphics();
     CloseWindow();
     std::error_code ec;
