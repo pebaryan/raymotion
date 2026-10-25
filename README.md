@@ -692,6 +692,51 @@ scene->add(fx::debris3d(40), g3d::Geometry::box(1, 1, 1), crate);  // mesh parti
 `particles-3d` shows a campfire lighting a night yard, a fountain, a crate bursting into
 chunks that land, fireworks and confetti, under an orbiting camera.
 
+### Subtitles and voice-over
+
+```cpp
+sub::Track track = sub::load("voiceover.srt");            // SRT or WebVTT
+addRoot(c.roots, 0, c.duration)->fn = sub::captions(track);   // burned in, white with an outline
+
+// Scenes timed to what is said: span i runs from phrase i to phrase i + 1.
+auto spans = track.spans({ "First,", "Then the optimizer", "Finally" }, c.fps, 30);
+addRoot(c.roots, spans[1].from, spans[1].length)->fn = optimizerScene;
+c.duration = spans.back().from + spans.back().length;
+```
+
+* `sub::parse` / `sub::load` read SRT and WebVTT (BOM, CRLF, VTT cue settings, markup
+  stripped, `<i>` kept as italic); `toSrt` / `writeSrt` write them back.
+* `track.when(phrase)` is the moment a phrase starts being spoken: its cue's start plus
+  its share of the cue's characters, matched ignoring case and punctuation.
+  `frameOf`, `spans` and `shifted` build on it.
+* `sub::Style`: font and size, wrap width, bottom gap, alignment, outline, a backing
+  box, fades, and karaoke (`upcoming` colours the words not yet spoken).
+  `sub::draw(cx, cue, seconds, style)` draws one cue inside your own fn.
+
+**Text to speech.** `tts::Script` speaks lines with any engine that runs from a shell
+(the command gets `{textfile}` and `{out}`), caches each take by a hash of command and
+text, and lays the lines out one after another:
+
+```cpp
+auto script = std::make_shared<tts::Script>(tts::Voice::system(), lines, 0.45);
+c.assets = [script](const Comp&, const Json&) { script->generate(); };   // speaks new lines only
+c.build = [script](Comp& comp, const Json&) {
+    script->measure();                                   // real durations once the takes exist
+    const sub::Track track = script->track();            // a cue per line
+    script->attach(addRoot(comp.roots, 0, comp.duration), comp.fps);
+    ...
+};
+```
+
+`tts::Voice::system()` is the operating system's voice (Windows SAPI through PowerShell,
+macOS `say`, else `espeak-ng`). Set `command` for anything else, such as piper or a
+cloned voice. Before the takes exist, durations are estimated from the word count, so
+a composition lays out either way.
+
+`captions` is narrated by the system voice: scenes start on their phrases, captions are
+burned in, one scene lights words up karaoke style, and the timings are saved to
+`out/captions.srt`.
+
 ### Engine pieces
 
 * `rmtn/timeline.hpp` — `Comp`, the node tree (start/duration, `up` animates props,
@@ -775,6 +820,7 @@ text                   1920x1080 @30fps   32.0s  audio=1   (text animation: stag
 motionblur             1920x1080 @30fps   23.0s  audio=1   (motion blur: sharp against blurred, shutter angles, whip pans and a flying title)
 sparql                 1920x1080 @30fps  113.0s  audio=1   (a narrated explainer of SPARQL query processing: knowledge graph, query, algebra, optimizer, matching, joins)
 lowerthird             1920x1080 @30fps    6.0s  audio=0   (a name tag with no background: render with --alpha for ProRes 4444 or --format webm)
+captions               1920x1080 @30fps   26.1s  audio=1   (narrated by the system voice: scenes timed to phrases, burned-in and karaoke captions, an SRT sidecar)
 ```
 
 `raymotion-promo` is the 3.5-minute introduction to the engine
@@ -838,6 +884,9 @@ text animation (layout, wrapping and alignment, reveal timing in every order, en
 identical to plain text, typewriter cut-offs, highlights, morph end frames); motion blur
 (still frames unchanged, smear width and ramp, layer blur on its own node only, props
 from `up`, particles);
+subtitles (SRT and WebVTT parsing, markup and errors, phrase timing and scene spans, SRT
+round trips, text-to-speech scripts through a stand-in engine with caching and failures)
+and burned-in captions;
 Here-There layout checks; and a Python CLI suite (exact sizes, draft scaling, stale-frame
 cleanup, a real MP4 render, transparent stills and ProRes/WebM renders with alpha, the
 starter project, props). Tests needing OpenGL carry the `gl`

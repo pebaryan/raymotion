@@ -23,3 +23,4 @@
 #include "camera.hpp"
 #include "code.hpp"
 #include "textfx.hpp"
+#include "subtitles.hpp"

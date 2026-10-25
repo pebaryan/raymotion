@@ -489,6 +489,45 @@ c.assets = [](const Comp&, const Json&) {
 media::audio(addRoot(c.roots, 0, c.duration), "out/music.wav");
 ```
 
+## Subtitles and voice-over (`sub::`, `tts::`, `rmtn/subtitles.hpp`)
+
+```cpp
+sub::Track track = sub::load("voiceover.srt");            // SRT or WebVTT; or sub::parse(text)
+sub::Style style = sub::defaultStyle();                   // white, dark outline, bottom centre
+style.box = withAlpha(BLACK, 0.6f);                       // optional backing box
+addRoot(c.roots, 0, c.duration)->fn = sub::captions(track, style);
+
+double s = track.when("the optimizer");                   // seconds: cue start + share of its characters
+int f = track.frameOf("Finally", c.fps);
+auto spans = track.spans({ "First,", "Then the optimizer", "Finally" }, c.fps, 30);   // {from, length} per scene
+sub::writeSrt("out/voiceover.srt", track);
+```
+
+- Phrases match ignoring case, punctuation and line breaks; a missing phrase throws.
+  `when(phrase, after)` searches from `after` seconds for repeated words.
+- Style: `text` (font, size, colour), `maxWidth`, `bottom`, `align` / `margin`,
+  `outline` / `outlineWidth`, `box` / `boxPadding` / `boxRadius`, `fade` (frames).
+  Karaoke: set `upcoming` to the colour of words not yet spoken.
+- `sub::draw(cx, cue, seconds, style)` draws a cue anywhere in your own fn (for example
+  big and mid-screen); `track.at(seconds)` finds the cue showing.
+
+Text to speech: `tts::Script(voice, lines, gap, lead)` speaks lines one after another.
+`generate()` runs the engine for takes not yet cached (call it from `c.assets`; it
+throws when the engine fails, so catch it to fall back), and `measure()` reads cached
+durations without speaking (call it from `c.build`). Before the takes exist, durations
+are estimated at `wordsPerSecond`. `track()` gives a cue per line, and
+`attach(node, fps, volume)` plays the takes.
+
+```cpp
+tts::Voice voice = tts::Voice::system();                  // SAPI / say / espeak-ng
+voice.command = "piper --model en_US-amy-medium.onnx --output_file {out} < {textfile}";   // or any engine
+auto script = std::make_shared<tts::Script>(voice, lines, 0.45, 0.4);
+c.assets = [script](const Comp&, const Json&) {
+    try { script->generate(); } catch (const std::exception& e) { fprintf(stderr, "note: %s\n", e.what()); }
+};
+c.build = [script](Comp& comp, const Json&) { script->measure(); /* lay out from script->track() */ };
+```
+
 ## Props, prefabs and generated assets
 
 ```cpp

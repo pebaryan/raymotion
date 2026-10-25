@@ -83,7 +83,8 @@ add_library(rmtn_engine STATIC
   src/engine/space_geometry.cpp
   src/engine/camera.cpp
   src/engine/code.cpp
-  src/engine/textfx.cpp)
+  src/engine/textfx.cpp
+  src/engine/subtitles.cpp)
 add_library(raymotion::engine ALIAS rmtn_engine)
 target_include_directories(rmtn_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 # Single-header decoders (stb_image, nanosvg), compiled privately into media.cpp.
@@ -111,6 +112,7 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/diagrams.cpp
     examples/showcase/particles.cpp
     examples/showcase/particles3d.cpp
+    examples/showcase/captions.cpp
     examples/showcase/paths.cpp
     examples/showcase/equations.cpp
     examples/showcase/plots.cpp
@@ -145,6 +147,9 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   add_executable(raymotion_particle_tests tests/particle_tests.cpp)
   target_link_libraries(raymotion_particle_tests PRIVATE rmtn_engine)
   add_test(NAME particles COMMAND raymotion_particle_tests)
+  add_executable(raymotion_subtitle_tests tests/subtitle_tests.cpp)
+  target_link_libraries(raymotion_subtitle_tests PRIVATE rmtn_engine)
+  add_test(NAME subtitles COMMAND raymotion_subtitle_tests)
   add_executable(raymotion_path_tests tests/path_tests.cpp)
   target_link_libraries(raymotion_path_tests PRIVATE rmtn_engine)
   add_test(NAME paths COMMAND raymotion_path_tests)
