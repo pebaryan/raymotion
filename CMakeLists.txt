@@ -75,7 +75,13 @@ add_library(rmtn_engine STATIC
   src/engine/particles.cpp
   src/engine/paths.cpp
   src/engine/math_font.cpp
-  src/engine/math.cpp)
+  src/engine/math.cpp
+  src/engine/plot.cpp
+  src/engine/plot_charts.cpp
+  src/engine/plot_diagrams.cpp
+  src/engine/space.cpp
+  src/engine/space_geometry.cpp
+  src/engine/camera.cpp)
 add_library(raymotion::engine ALIAS rmtn_engine)
 target_include_directories(rmtn_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 # Single-header decoders (stb_image, nanosvg), compiled privately into media.cpp.
@@ -103,7 +109,11 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/diagrams.cpp
     examples/showcase/particles.cpp
     examples/showcase/paths.cpp
-    examples/showcase/equations.cpp)
+    examples/showcase/equations.cpp
+    examples/showcase/plots.cpp
+    examples/showcase/charts.cpp
+    examples/showcase/spaces.cpp
+    examples/showcase/camera.cpp)
   target_link_libraries(raymotion PRIVATE rmtn_engine)
 
   add_executable(raymotion_starter examples/starter/main.cpp)
@@ -133,6 +143,13 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   add_executable(raymotion_math_tests tests/math_tests.cpp)
   target_link_libraries(raymotion_math_tests PRIVATE rmtn_engine)
   add_test(NAME math COMMAND raymotion_math_tests)
+  add_executable(raymotion_plot_tests tests/plot_tests.cpp)
+  target_link_libraries(raymotion_plot_tests PRIVATE rmtn_engine)
+  add_test(NAME plots COMMAND raymotion_plot_tests)
+
+  add_executable(raymotion_space_tests tests/space_tests.cpp)
+  target_link_libraries(raymotion_space_tests PRIVATE rmtn_engine)
+  add_test(NAME spaces COMMAND raymotion_space_tests)
 
   # The rest need an OpenGL 3.3 context (label "gl"; on headless Linux run under xvfb).
   add_executable(raymotion_render_tests tests/render_tests.cpp)
@@ -165,6 +182,13 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   add_executable(raymotion_math_render_tests tests/math_render_tests.cpp)
   target_link_libraries(raymotion_math_render_tests PRIVATE rmtn_engine)
   add_test(NAME math_rendering COMMAND raymotion_math_render_tests)
+  add_executable(raymotion_plot_render_tests tests/plot_render_tests.cpp)
+  target_link_libraries(raymotion_plot_render_tests PRIVATE rmtn_engine)
+  add_test(NAME plot_rendering COMMAND raymotion_plot_render_tests)
+
+  add_executable(raymotion_space_render_tests tests/space_render_tests.cpp)
+  target_link_libraries(raymotion_space_render_tests PRIVATE rmtn_engine)
+  add_test(NAME space_rendering COMMAND raymotion_space_render_tests)
 
   # Here-There layouts are designed for Segoe UI: exit 77 (skipped) where it is absent.
   add_executable(raymotion_plain_tests tests/ht_plain_tests.cpp)
@@ -176,7 +200,7 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   target_compile_definitions(raymotion_feed_tests PRIVATE RAYMOTION_FEED_STATE=1 RAYMOTION_FEED_RENDER=1)
   add_test(NAME ht_feed COMMAND raymotion_feed_tests)
 
-  set_tests_properties(renderer_regressions layer_compositing scene3d media diagram_rendering path_rendering math_rendering ht_plain_layout ht_feed PROPERTIES LABELS gl SKIP_RETURN_CODE 77)
+  set_tests_properties(renderer_regressions layer_compositing scene3d media diagram_rendering path_rendering math_rendering plot_rendering space_rendering ht_plain_layout ht_feed PROPERTIES LABELS gl SKIP_RETURN_CODE 77)
 
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND)

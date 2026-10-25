@@ -18,3 +18,6 @@
 #include "particles.hpp"
 #include "paths.hpp"
 #include "math.hpp"
+#include "plot.hpp"
+#include "space.hpp"
+#include "camera.hpp"

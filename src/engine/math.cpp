@@ -337,6 +337,15 @@ private:
             for (size_t j = 1; j < row.size(); j += 2) row[j].insert(row[j].begin(), make(K::Group));
     }
 
+    // \{ \} \$ \% \& \# \_ inside \text{} stand for the characters themselves.
+    static std::string unescape(const std::string& t) {
+        std::string out;
+        for (size_t i = 0; i < t.size(); i++) {
+            if (t[i] == '\\' && i + 1 < t.size() && std::string("{}$%&#_").find(t[i + 1]) != std::string::npos) i++;
+            out += t[i];
+        }
+        return out;
+    }
     std::string rawArg() {
         skipSpace();
         if (end() || s_[pos_] != '{') fail("expected '{'");
@@ -617,7 +626,7 @@ private:
             return n;
         }
         if (c == "overline" || c == "underline") { auto n = make(c == "overline" ? K::Over : K::Under); n->a = arg(); return n; }
-        if (c == "text" || c == "textrm" || c == "mbox" || c == "textnormal") { auto n = make(K::Text); n->text = rawArg(); return n; }
+        if (c == "text" || c == "textrm" || c == "mbox" || c == "textnormal") { auto n = make(K::Text); n->text = unescape(rawArg()); return n; }
         if (c == "operatorname" || c == "operatornamewithlimits") {
             bool star = false;
             if (!end() && s_[pos_] == '*') { pos_++; star = true; }

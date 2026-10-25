@@ -35,6 +35,8 @@ static void parsing() {
     CHECK(rules(tex(R"(\sqrt{x})")) == 1);
     CHECK(rules(tex(R"(\binom{n}{k})")) == 0);
     CHECK(tex(R"(\text{if } x)").pieces.size() == 3);   // spaces in \text take room, not pieces
+    CHECK(tex(R"(\text{R\&D \$5})").pieces.size() == 5);   // escapes are the characters themselves
+    CHECK(std::fabs(tex(R"(\text{R\&D})").width - tex(R"(\text{R&D})").width) < 0.01f);
     CHECK(tex(R"(\phantom{xyz}a)").pieces.size() == 1);
     CHECK(tex(R"(\phantom{xyz}a)").width > tex("a").width * 2);
     CHECK(tex(R"(\sin x)").pieces.size() == 4);

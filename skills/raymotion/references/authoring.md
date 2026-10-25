@@ -178,6 +178,152 @@ should travel matching ids in both formulas. Each formula holds `pieces` (glyphs
 in formula px), `width`, `ascent` and `descent`, and `path()` gives its outline as a
 `vg::Path`.
 
+## Plots and charts (`plot::`, `rmtn/plot.hpp`)
+
+Axes, graphs and data charts drawn as vector paths, with numbers set in the math font.
+Every drawing call takes a reveal `u` (0..1). Build paths and tables while registering.
+
+```cpp
+plot::Axes ax({ 260, 120, 1400, 700 }, { -6.5, 6.5 }, { -2, 2 });   // box in node px, x range, y range
+// Range(min, max, step); step 0 = automatic. ax.map(x, y) -> px, ax.unmap(px) -> data
+auto f = [](double x) { return std::sin(x); };
+const vg::Path g = plot::graph(ax, f);       // adaptive; breaks at poles/holes; clipped to the box
+const vg::Path c = plot::parametric(ax, [](double t) { return Vector2{ (float)std::cos(3 * t), (float)std::sin(2 * t) }; }, 0, 6.2832);
+const vg::Path fill = plot::area(ax, f, 0, 3.14159);          // also polar(ax, r), riemann(ax, f, a, b, n), tangent(ax, f, x)
+const plot::Table data = plot::Table::parseCsv("year, Solar, Wind\n2022, 33, 41\n2023, 45, 44\n");   // or Table::csv("data/x.csv")
+node->fn = [ax, g, c, fill, f, data](const Ctx& cx, int t) {
+    const float u = (float)interpolate(t, { 0, 60 }, { 0, 1 }, clamped());
+    plot::AxesStyle st;                       // framed, arrows, ticks, xNumbers/yNumbers, xGrid/yGrid,
+    st.xLabel = "x";                          // xLabel/yLabel (TeX), colours and sizes
+    plot::axes(cx, ax, st, u);                // grows out of the origin
+    vg::fill(cx, fill, withAlpha(mkColor(0x58c4dd), 0.35f));
+    vg::stroke(cx, g.trim(0, u), vg::Stroke(mkColor(0x58c4dd), 5));
+    vg::stroke(cx, c.trim(0, u), vg::Stroke(mkColor(0xffd166), 4));
+    plot::label(cx, R"(y = \sin x)", ax.map(-6, 1.6), { 0, 0.5f }, 44);   // any TeX, anchored
+    plot::field(cx, ax, [](Vector2 p) { return Vector2{ -p.y, p.x }; }, {}, u);   // arrows on a grid
+    plot::ChartStyle cs;                      // box, y range, palette, stacked, values, legend, text size
+    cs.box = { 1100, 600, 700, 300 };
+    plot::bars(cx, data, cs, u);              // also plot::lines(cx, data, cs, u)
+    plot::PieStyle ps;                        // inner (donut), explode, labels, palette
+    plot::pie(cx, data, { 400, 750 }, 150, ps, u);   // the first series
+};
+```
+
+`plot::numberLine({ x, y }, length, { -5, 5, 1 })` gives a flat `Axes` for number lines.
+To animate a chart to new data, draw `plot::Table::mix(before, after, w)` with `w` going
+0 to 1. Charts use the first eight `plot::palette(i)` colours unless `Series::color` or
+the style's `palette` sets them.
+
+Statistical, business, hierarchy and flow charts follow the same pattern: build the
+data once, then draw it with a reveal `u`:
+
+```cpp
+const std::vector<plot::Series> groups = { { "Control", samplesA }, { "Dose", samplesB } };   // raw samples
+const plot::Tree budget = plot::Tree::parse("Sales/Field, 22\nSales/Partners, 9\nOps/IT, 7\n");   // or Tree::csv(file)
+const auto flows = plot::parseFlows("from, to, TWh\nGas, Power, 25\nPower, Homes, 18\n");      // or flowsCsv(file)
+const plot::Bins bins = plot::bin(samplesA);                // automatic bin width
+node->fn = [=](const Ctx& cx, int t) {
+    const float u = (float)interpolate(t, { 0, 90 }, { 0, 1 }, clamped());
+    plot::ChartStyle cs;                                    // box, y range (auto from data), palette
+    plot::boxplot(cx, groups, cs, u);                       // also plot::violin(cx, groups, cs, u)
+    plot::sunburst(cx, budget, { 500, 420 }, 300, {}, u);   // also plot::treemap(cx, budget, box, {}, u)
+    plot::sankey(cx, flows, { 200, 120, 1500, 640 }, {}, u);
+    plot::histogram(cx, ax, bins, SKYBLUE, u);              // ax: an Axes you draw with plot::axes
+};
+```
+
+| Call | Data | Notes |
+| --- | --- | --- |
+| `areas(cx, table, ChartStyle, u)` | `Table` | `style.stacked` stacks the series |
+| `waterfall(cx, table, WaterfallStyle, u)` | first series = changes | `total`, `totalLabel`, `rise`/`fall`/`sum` colours |
+| `boxplot` / `violin(cx, groups, ChartStyle, u)` | `vector<Series>` of samples | whiskers at 1.5 IQR; `summarize(v)` gives the numbers |
+| `histogram(cx, axes, bin(v), color, u)` | `Bins` | `density(v)` returns a function to `graph` (scale by `n * bins.width`) |
+| `errorBars(cx, axes, pts, err, color, width, cap, u)` | points, ± errors | pair with `scatter` |
+| `heatmap(cx, table, HeatmapStyle, u)` | rows = categories, columns = series | `colors = plot::viridis` / `plot::diverging` / any `Color(float)` |
+| `bubbles(cx, axes, { { x, y, size, "label" } }, BubbleStyle, u)` | `vector<Bubble>` | area ∝ size, `maxRadius` |
+| `candles(cx, axes, { { open, high, low, close } }, CandleStyle, u)` | `vector<Candle>` | candle i at x = i + 0.5 |
+| `radar(cx, table, center, radius, RadarStyle, u)` | categories = spokes | `r` range, legend under the web |
+| `gauge(cx, value, center, radius, GaugeStyle, u)` | one number | `range`, `zones` (threshold, colour), `unit` (TeX), `title` |
+| `funnel(cx, table, box, FunnelStyle, u)` | first series = stages | percent of the first stage |
+| `sunburst` / `treemap` | `Tree` | parents sum their children; `depth` limits the levels |
+| `sankey(cx, flows, box, SankeyStyle, u)` | `vector<Flow>` | columns from the flow graph; ribbons coloured by source |
+| `chord(cx, flows, center, radius, ChordStyle, u)` | `vector<Flow>` | arcs as long as sent + received |
+| `contours(cx, contour(axes, f, levels, cell), ContourStyle, u)` | `f(x, y)` | build the `ContourMap` once; `fill`, `labels`, `colors` |
+| `parallel(cx, table, box, ParallelStyle, u)` | rows = categories, axes = series | `colorBy` a dimension, `highlight` one row |
+| `stream(cx, table, ChartStyle, u)` | `Table` | centred, smoothed stacks; names inside the streams |
+
+`plot::nice(lo, hi, pad)` rounds a data extent out to whole ticks for your own `Axes`.
+Text labels are plain text: names go through `\text{}`, so `&`, `$`, `%` are fine.
+
+## Spaces and geometry (`space::`, `rmtn/space.hpp`)
+
+3D and non-Euclidean scenes drawn as vector paths inside 2D nodes. A `View` projects; a
+`Scene` collects items and draws them back to front (labels included, so surfaces hide
+them). Build meshes once while registering.
+
+```cpp
+const space::Mesh hill = space::Mesh::graph([](double x, double y) { return std::exp(-(x * x + y * y) / 4); }, { -3, 3 }, { -3, 3 }, 40, 40);
+node->fn = [hill](const Ctx& cx, int t) {
+    const float k = (float)interpolate(t, { 30, 90 }, { 0, 1 }, clamped());
+    // flat({centre}, px per unit) is a 2D plot; tilted(centre, scale, yaw, pitch, perspective) has z up
+    space::View v = space::View::mix(space::View::flat({ 960, 540 }, 110), space::View::tilted({ 960, 560 }, 100, -32, -64, 0.3f), k);
+    space::Scene s(v);
+    space::Axes3 a;                            // x, y, z plot::Ranges
+    space::Axes3Style st;                      // numbers, gridXY/XZ/YZ, labels (TeX), colours
+    space::axes(s, a, st, { 1, 1, k });        // how far each axis has grown: 1D -> 2D -> 3D
+    space::MeshStyle ms;                       // color, back, colorAt(p), cellColor(r, c), opacity, shade, wire
+    ms.colorAt = [](Vector3 p) { return plot::viridis(p.z); };
+    s.mesh(hill.mapped([k](Vector3 p) { return Vector3{ p.x, p.y, p.z * k }; }), ms);
+    const Vector3 p{ 2, 1.5f, 1.2f * k };
+    s.arrow({ 0, 0, 0 }, p, mkColor(0xffd166), 5);
+    space::guides(s, p, mkColor(0x8a90a2));    // dashed drops to the planes
+    s.line(p, space::projectOnPlane(p, { 0, 0, 0 }, { 0, 0, 1 }), mkColor(0x83c167));
+    s.label(p, R"(\vec v)", 40);               // also curve(pts, stroke), point, face, plane
+    s.draw(cx);
+};
+```
+
+* `surfaces::sphere`, `torus`, `glueTorus(roll, bend)` (sheet -> tube -> torus, both 0..1),
+  `moebius(join)`, `klein()`; `Mesh::grid(rows, cols, f(u, v), wrapCols, wrapRows)` for
+  your own, `Mesh::mix(a, b, u)` to morph between two of the same shape.
+* 4D: `rotate4(v, axisA, axisB, deg)` (0 = x .. 3 = w), `project4(v, distance)`,
+  `tesseract()` (16 vertices, 32 edges).
+* Hyperbolic (`space::hyperbolic`, points are `std::complex<double>` in the unit disk):
+  `tiling(p, q)` gives `Tile`s (`vertices`, `center`, `parity`, `ring`); `polygon`,
+  `geodesic`, `line`, `circle`, `reflect`, `distance`, `isometry(z, a, deg)` (moves a to
+  0: animate `a` to glide the plane); `toHalfPlane` / `toDisk`. Draw with
+  `path(pts, map, closed, clip)` where map is `Disk{ centre, radius }.map` or
+  `[](C z) { return HalfPlane{}.map(toHalfPlane(z)); }`.
+* Spherical (`space::sphere`): `arc(a, b, radius)`, `circle(pole, radius, latitude)`,
+  `angle(a, b, c)` (radians, at b), `stereographic(p, r)` / `fromPlane(q, r)` (from the
+  north pole onto z = 0; points near the pole go far).
+
+## Camera (`cam::`, `rmtn/camera.hpp`)
+
+A 2D camera over a canvas bigger than the frame. Put the canvas under a `cam::world` node
+and draw it in canvas px; nodes outside stay fixed (captions, HUDs).
+
+```cpp
+cam::Track tr;                                                   // tr.frame defaults to 1920x1080
+tr.start(cam::Shot::fit({ 0, 0, 6000, 3400 }))                    // fit(rect, frame, margin, turnDeg)
+  .hold(30)
+  .to(100, cam::Shot::fit({ 400, 2100, 1000, 700 }))              // ease defaults to inOut(cubic)
+  .fly(220, cam::Shot::fit({ 4600, 600, 1000, 700 }))             // zooms out across a long pan
+  .to(280, cam::Shot{ { 5000, 900 }, 8, -10 }, ease::out(ease::cubic));   // centre, zoom, turn (deg)
+auto shot = [tr](int t) { return cam::shake(tr.at(t), t, t > 200 ? 6.f : 0.f); };   // optional wobble
+cam::world(c.roots, 0, 300, shot, { 1920, 1080 }, 0.35f)->fn = [](const Ctx& cx, int) { /* far layer */ };
+cam::world(c.roots, 0, 300, shot)->fn = [](const Ctx& cx, int t) { /* the canvas, canvas px */ };
+addRoot(c.roots, 0, 300)->fn = [tr](const Ctx& cx, int t) {
+    const Rectangle seen = cam::visible(tr.at(t));                // canvas rect in view: a mini-map
+    const Vector2 onScreen = cam::toFrame(tr.at(t), { 5000, 900 });   // pin a caption to a canvas point
+    (void)seen; (void)onScreen;
+};
+```
+
+`cam::world(parent, from, len, track)` nests a camera inside a scene. `Shot::mix(a, b, u)`
+and `Shot::fly(a, b, u, frame)` give the blends directly. Vector paths, formulas and plots
+stay sharp at any zoom; raylib text (`dr::text`) and images go soft past about 2x.
+
 ## Particles (`fx::`, `rmtn/particles.hpp`)
 
 Emitters are computed per frame from a seed (no simulation state), so they follow the

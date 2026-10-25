@@ -390,6 +390,131 @@ path, so formulas stay sharp at any scale and draw through `vg::`.
 layouts, labels the parts of E = mc², solves a quadratic step by step and rearranges
 Pythagoras by named parts.
 
+### Plots and charts
+
+```cpp
+plot::Axes ax({ 260, 140, 1400, 760 }, { -6.5, 6.5 }, { -2, 2 });   // box (node px), x range, y range
+const vg::Path sine = plot::graph(ax, [](double x) { return std::sin(x); });   // build once
+node->fn = [ax, sine](const Ctx& cx, int t) {
+    plot::AxesStyle st;
+    st.xLabel = "x";
+    st.yLabel = R"(\sin x)";
+    plot::axes(cx, ax, st, t / 30.f);                                  // grows from the origin
+    vg::stroke(cx, sine.trim(0, (t - 20) / 60.f), vg::Stroke(SKYBLUE, 5));
+};
+```
+
+`plot::` covers mathematical plots and data charts. Everything is drawn as vector paths,
+numbers and labels are set in the math font, and every drawing call takes a reveal
+parameter `u`:
+
+* **Axes:** `Axes` maps a data range onto a box; `axes()` draws axes through the origin
+  or framed at the edges, with arrows, ticks, numbers, grids and TeX axis labels. Tick steps
+  are picked automatically (1, 2 or 5 × 10ⁿ) and widen until labels fit. `numberLine()`
+  is a flat `Axes`.
+* **Graphs** come back as `vg::Path`s you can stroke, trim, measure or morph:
+  `graph(axes, f)` samples adaptively, breaks at poles and holes (tan x, 1/x, √x), and
+  clips to the box. Also `parametric`, `polar`, `area` (between two functions), `riemann`
+  rectangles and `tangent` lines.
+* **Fields:** `field(axes, v)` draws arrows on a grid, coloured and sized by magnitude.
+  `scatter` places dots.
+* **Charts:** a `Table` (categories × series, from code or a CSV file) feeds `bars`
+  (grouped or stacked), `lines` and `pie` (or a donut). They grow in with `u`.
+  `Table::mix(a, b, w)` blends two datasets, so a chart can animate to new data.
+  `areas` stacks or overlaps filled series, and `waterfall` runs changes into a total.
+* **Statistics:** `boxplot` and `violin` take raw samples per group; `summarize`,
+  `density` (a kernel estimate you can `graph`) and `bin` do the numbers, `histogram` and
+  `errorBars` draw them. `heatmap` colours a table's cells with `viridis` or `diverging`
+  (or any map) and adds a colour bar.
+* **Business charts:** `bubbles` (area ∝ size), `radar`, KPI `gauge`s with colour zones,
+  `funnel`s and `candles` (OHLC).
+* **Hierarchies and flows:** a `Tree` (built in code or parsed from `"Sales/Field, 22"`
+  lines) feeds `sunburst` and squarified `treemap`s. `Flow`s (`"from, to, value"`) feed
+  `sankey`, which lays the nodes out in columns and orders them to keep ribbons short, and
+  `chord`, which sets the groups round a circle with ribbons between them.
+* **More dimensions:** `contour(axes, f)` builds contour lines and filled bands of
+  f(x, y) once (marching squares), and `contours` draws them with level labels.
+  `parallel` draws parallel coordinates (one axis per series, a line per row, coloured by
+  a dimension, with an optional highlighted row), and `stream` draws a stream graph.
+
+`plots` draws sin and cos with a tangent riding the curve, refines Riemann sums into an
+integral, traces a Lissajous figure and a polar rose, sends a trajectory through a vector
+field, walks a point along a number line, and animates bar, line and donut charts.
+`charts` shows the rest: box plots and violins, a histogram with its density, error bars,
+a heatmap, bubbles, radar and gauges, a waterfall and a funnel, a sunburst and treemap of
+one budget, a Sankey and a chord diagram, a stream graph, a contour map, parallel
+coordinates, stacked areas and candlesticks.
+
+### Spaces and geometry
+
+```cpp
+node->fn = [](const Ctx& cx, int t) {
+    const float k = std::clamp((t - 60) / 60.f, 0.f, 1.f);         // 0: flat, 1: 3D
+    space::View v = space::View::mix(space::View::flat({ 960, 540 }, 110),
+                                     space::View::tilted({ 960, 560 }, 100), k);
+    space::Scene s(v);
+    space::axes(s, {}, {}, { 1, 1, k });                            // the z axis grows in
+    s.arrow({ 0, 0, 0 }, { 2, 1.5f, 1.8f * k }, SKYBLUE, 5);
+    space::guides(s, { 2, 1.5f, 1.8f * k }, GRAY);
+    s.draw(cx);                                                       // depth-sorted, back to front
+};
+```
+
+`space::` draws 3D and non-Euclidean scenes as vector paths, so they sit in 2D
+compositions, take any `vg::Stroke` and blend with everything else:
+
+* **Views:** a `View` projects 3D points (orthographic, or with some perspective). `flat()`
+  is a 2D plot, `tilted()` a 3D view with z up, and `View::mix` blends any two, which is how
+  a plot goes from 1D to 2D to 3D or turns to look along an axis.
+* **Scenes:** a `Scene` collects lines, curves (dashes run on across pieces), arrows,
+  points, faces, meshes, planes and TeX labels, then draws them back to front, so a surface
+  in front hides a label behind it. `axes()` draws 3D axes with ticks, numbers, grids and
+  labels, each growing out on its own; `guides()` drops dashed lines to the planes.
+  `projectOnPlane` and `projectOnLine` give shadows and projections.
+* **Surfaces:** `Mesh::graph(f)` (z = f(x, y)) or `Mesh::grid(u, v)`, coloured per face or
+  per cell, shaded, with a wireframe. `Mesh::mix` morphs one into another.
+  `surfaces::` has a sphere, a torus, `glueTorus(roll, bend)` (a sheet rolled into a tube
+  and bent round into a torus), `moebius(join)` and a Klein bottle.
+* **Four dimensions:** `rotate4` in any of the six planes, `project4` to 3D, `tesseract()`.
+* **Hyperbolic geometry:** the Poincaré disk and the upper half-plane (`toHalfPlane`,
+  `toDisk`), distances, `isometry` (move a point to the centre and turn), geodesic
+  segments and lines, polygons, circles, reflections, and regular `{p, q}` `tiling`s.
+  `path()` maps the sampled points to screen paths, clipped if you like.
+* **Spherical geometry:** great-circle `arc`s, small `circle`s, spherical `angle`s and
+  `stereographic` projection (and back).
+
+`spaces` walks a point from a number line into 3D, shows a helix's shadows from above and
+from the side, raises a surface, glues a torus, joins a Möbius band beside a turning Klein
+bottle, draws a triangle with three right angles and projects it stereographically, moves
+the `{7,3}` tiling by an isometry and opens it into the half-plane, and turns a tesseract.
+
+### Camera
+
+```cpp
+cam::Track track;
+track.start(cam::Shot::fit({ 0, 0, 6000, 3400 }))                 // the whole canvas
+     .to(90, cam::Shot::fit({ 400, 2100, 1000, 700 }))            // glide in
+     .fly(200, cam::Shot::fit({ 4600, 600, 1000, 700 }))          // out, across and back in
+     .to(260, cam::Shot{ { 5000, 900 }, 8, -10 });                // zoom 8, turned 10 degrees
+cam::world(c.roots, 0, 300, track, 0.35f)->fn = stars;            // a far layer: parallax
+cam::world(c.roots, 0, 300, track)->fn = canvas;                  // the canvas, in canvas px
+addRoot(c.roots, 0, 300)->fn = hud;                               // fixed to the frame
+```
+
+`cam::` is a 2D camera that pans, zooms and turns over a canvas bigger than the frame.
+Everything under a `cam::world` node moves with it (shapes, text, paths, formulas, plots,
+diagrams, 3D scenes); nodes outside stay put, like a HUD. A `Shot` is the canvas point at
+the middle of the frame, a zoom and a turn; `Shot::fit` frames a rectangle. `Shot::mix`
+blends two shots so the motion stays steady on screen (geometric zoom), and `Shot::fly`
+is the Van Wijk–Nuij smooth zoom, which pulls back during a long pan. A `Track` keys
+shots with `to`, `fly` and `hold`. `parallax` below 1 makes a far layer, above 1 a near
+one. `shake` adds a seeded handheld wobble, and `toFrame`, `toCanvas` and `visible`
+convert between the two spaces (for a mini-map, say).
+
+`camera` tours a 6000 × 3400 canvas: it glides, flies, turns, shakes at a burst, zooms 11×
+into an inscription and pulls back out, over a parallax starfield and under a fixed
+mini-map.
+
 ### Particles
 
 ```cpp
@@ -446,6 +571,17 @@ alone, out of order or twice with the same result, and costs only its live parti
   strokes with joins, caps and dashes, trims, morphs and SVG drawings.
 * `rmtn/math.hpp` — `math::` TeX formulas typeset with an OpenType math font, drawn as
   paths, written on, coloured by part and transformed into one another.
+* `rmtn/plot.hpp` — `plot::` axes and number lines, function, parametric and polar
+  graphs, areas, Riemann sums, vector fields; bar, line, area, pie and waterfall charts
+  from data or CSV; box plots, violins, histograms, densities, error bars and heatmaps;
+  bubbles, radar, gauges, funnels and candles; sunbursts, treemaps, Sankey and chord
+  diagrams, stream graphs, parallel coordinates and contour maps.
+* `rmtn/space.hpp` — `space::` 3D views that blend from flat to tilted, depth-sorted
+  scenes, 3D axes, surfaces and meshes, the torus, Möbius band and Klein bottle, 4D
+  rotation and projection, the hyperbolic disk and half-plane with `{p, q}` tilings, and
+  spherical geometry.
+* `rmtn/camera.hpp` — `cam::` shots, fits, smooth zooms, keyframed tracks, parallax,
+  shake and camera-driven world nodes.
 * `rmtn/json.hpp` — `Json` values for props (parse, typed lookups with fallbacks, merge).
 * `rmtn/prefab.hpp` — `prefab::add/use`: registered, parameterized subtree builders.
 * `rmtn/synth.hpp` — sine-sum note events + envelopes -> WAV soundtrack.
@@ -474,6 +610,10 @@ diagrams               1920x1080 @30fps   56.0s  audio=1   (flowcharts, DOT, BPM
 particles              1920x1080 @30fps   29.3s  audio=0   (fireworks, campfire, rain, snow, comet, custom looks, confetti)
 vector-paths           1920x1080 @30fps   34.3s  audio=0   (draw-on, joins and dashes, fill rules, morphs, SVG, motion paths)
 equations              1920x1080 @30fps   32.3s  audio=1   (TeX formulas: write-on, layout gallery, named parts, step-by-step transforms)
+plots                  1920x1080 @30fps   40.7s  audio=1   (graphs, tangents, Riemann sums, curves, vector fields, number lines, charts)
+charts                 1920x1080 @30fps   58.0s  audio=1   (box plots, violins, histograms, heatmaps, bubbles, radar, gauges, waterfalls, funnels, sunbursts, treemaps, Sankey, chord, streams, contours, parallel coordinates, candles)
+spaces                 1920x1080 @30fps   53.7s  audio=1   (1D to 2D to 3D, projections, surfaces, a torus glued, Möbius and Klein, spherical and hyperbolic geometry, a tesseract)
+camera                 1920x1080 @30fps   28.0s  audio=1   (a 2D camera: glide, fly, turn, shake and zoom over a big canvas, parallax, a HUD mini-map)
 ```
 
 `raymotion-promo` is the 3.5-minute introduction to the engine
@@ -518,7 +658,16 @@ and their rendering (fill rules and holes, translucent overlaps, caps, joins, da
 draw-on, fitted SVG drawings, determinism); equations (parsing and its errors, TeX
 spacing, scripts and primes, fractions, limits, delimiters, radicals, matrices and
 alignment, parts, transform matching; no window) and their rendering (placement, part
-colours and opacity, write-on order, transform end frames, determinism);
+colours and opacity, write-on order, transform end frames, determinism); plots (tick
+ranges, mapping, graphs with poles and holes, clipping, curves, areas, Riemann sums,
+tangents, CSV tables, chart ranges, summaries, densities, bins, trees, flows, colour
+maps, contour rings and bands; no window) and their rendering (axes growing from the origin, bar slots and heights,
+pie order, line draw-on, fields, heatmap colours, treemap areas, waterfall steps, Sankey
+ribbons, gauge fill, chord arcs, contour bands, parallel lines, streams, determinism);
+spaces and the camera (flat and tilted views, depth, projections, meshes, gluing, the
+Möbius closure, the tesseract, `{p, q}` tilings, isometries, geodesics, spherical angles,
+stereographic projection, shots, fits, blends, smooth zooms, tracks, shake; no window) and
+their rendering (depth order, hidden labels, a camera world with a fixed HUD);
 Here-There layout checks; and a Python CLI suite (exact sizes, draft scaling, stale-frame
 cleanup, a real MP4 render, the starter project, props). Tests needing OpenGL carry the `gl`
 label (`ctest -LE gl` skips them on headless machines).
