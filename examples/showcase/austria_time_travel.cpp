@@ -1857,7 +1857,8 @@ void registerAustriaTimeTravel(Registry& out) {
     cap.text.size = 34;
     cap.bottom = 58;
     cap.maxWidth = 1500;
-    addRoot(c.roots, 0, c.duration)->fn = sub::captions(captionTrack(chapters), cap);
+    const sub::Track captions = captionTrack(chapters);
+    addRoot(c.roots, 0, c.duration)->fn = sub::captions(captions, cap);
 
     // The voice, the music.
     Plan score;
@@ -1888,7 +1889,11 @@ void registerAustriaTimeTravel(Registry& out) {
     mark(8, 0, "On the twenty"); score.at["neutral"] = score.at["On the twenty"];
     mark(10, 0, "Happy"); score.at["happy"] = score.at["Happy"];
     const std::string file = "out/austria-time-travel-assets-v1/score-" + std::to_string(c.duration) + ".wav";
-    c.assets = [score, file](const Comp&, const Json&) {
+    c.assets = [score, file, captions](const Comp&, const Json&) {
+        sub::Track srt = captions;            // the captions as a sidecar, for uploads: no
+        for (size_t i = 0; i + 1 < srt.cues.size(); i++)   // crossfade overlaps, one line at a time
+            srt.cues[i].end = std::min(srt.cues[i].end, srt.cues[i + 1].start);
+        sub::writeSrt("out/austria-time-travel.srt", srt);
         if (std::filesystem::exists(file)) return;
         std::filesystem::create_directories(std::filesystem::path(file).parent_path());
         genScore(file, score);
@@ -1897,6 +1902,39 @@ void registerAustriaTimeTravel(Registry& out) {
     bed.volume = 0.8f;
     media::audio(addRoot(c.roots, 0, c.duration), file, bed);
     out.push_back(std::move(c));
+
+    // The thumbnail: a still of the flag at golden hour, the title and the dial's two ends.
+    // build/raymotion still austria-time-travel-thumb --at 30 --png out/austria-time-travel-thumb.png
+    Comp th;
+    th.name = "austria-time-travel-thumb";
+    th.w = W; th.h = H; th.fps = FPS;
+    th.background = BG;
+    th.duration = 60;
+    auto flag = flagScene([](int) { g3d::Sky k = g3d::Sky::at(17.6f); k.clouds = 0.4f; return k; }, [](int) { return 1.9f; });
+    flag->camera.up = [](int, g3d::Camera& cam) {
+        cam.target = { -2.6f, 6.5f, 0 };
+        cam.position = { 5.6f, 3.4f, 11.4f };
+    };
+    addRoot(th.roots, 0, th.duration)->fn = g3d::draw(flag);
+    addRoot(th.roots, 0, th.duration)->fn = [](const Ctx& cx, int t) { drawWarp(cx, 0.2f, t); };
+    addRoot(th.roots, 0, th.duration)->fn = [](const Ctx& cx, int) {
+        dr::rectGrad4(cx, 0, 0, 1240, H, withAlpha(BG, 0.94f), withAlpha(BG, 0), withAlpha(BG, 0), withAlpha(BG, 0.94f));
+        dr::text(bold(), cx, "TIME TRAVEL", { 96, 150 }, 54, 14, AMBER);
+        dr::text(serifBold(), cx, "AUSTRIA", { 84, 210 }, 210, 4, INK);
+        // The dial: 3300 BC, an arrow, 2026.
+        Ctx plate = cx;
+        dr::roundRect(plate, 96, 520, 850, 190, 22, withAlpha(mkColor(0x0b0f17), 0.82f));
+        dr::text(bold(), cx, "3300", { 136, 548 }, 120, 0, INK);
+        dr::text(bold(), cx, "BC", { 136 + dr::measure(bold(), "3300", 120, 0).x + 14, 610 }, 40, 3, AMBER);
+        dr::text(bold(), cx, "\xE2\x86\x92", { 520, 556 }, 96, 0, AMBER);
+        dr::text(bold(), cx, "2026", { 630, 548 }, 120, 0, INK);
+        dr::text(serifItalic(), cx, "5,000 years in 140 seconds", { 100, 760 }, 58, 0, INK);
+        dr::rect(cx, 100, 860, 70, 10, FLAG_RED);
+        dr::rect(cx, 170, 860, 70, 10, INK);
+        dr::rect(cx, 240, 860, 70, 10, FLAG_RED);
+        dr::text(regular(), cx, "NATIONAL DAY  \xC2\xB7  26 OCTOBER", { 332, 851 }, 26, 5, DIM);
+    };
+    out.push_back(std::move(th));
 }
 
 } // namespace rmtn
