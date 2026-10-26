@@ -1,6 +1,7 @@
 // scene3d_tests.cpp -- GPU 3D scenes: placement, depth, lighting, shadows, viewports,
 // transparency, hierarchy, models (OBJ and a generated skinned glTF), determinism.
 #include "rmtn/raymotion.hpp"
+#include <raymath.h>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -326,6 +327,138 @@ static void environment(const fs::path& dir) {
     UnloadImage(img);
 }
 
+// A box that glows white (emissive, so it shows without lights) and takes fog.
+static g3d::Material glowing() {
+    g3d::Material m;
+    m.color = BLACK;
+    m.emissive = WHITE;
+    m.roughness = 1;
+    return m;
+}
+
+static void skyAndFog() {
+    // Presets: the sun is up at noon, down at midnight, low at dawn; mixing goes halfway.
+    CHECK(g3d::Sky::at(12).sunDirection.y > 0.6f && g3d::Sky::at(0).sunDirection.y < -0.5f);
+    CHECK(g3d::Sky::at(6.5f).sunDirection.x > 0.8f && g3d::Sky::at(17.5f).sunDirection.x < -0.8f);
+    CHECK(g3d::Sky::at(0).stars > 0.9f && g3d::Sky::at(12).stars < 0.1f && g3d::Sky::at(12).enabled);
+    const g3d::Sky half = g3d::Sky::mix(g3d::Sky::day(), g3d::Sky::night(), 0.5f);
+    CHECK(std::abs(half.zenith.b - (g3d::Sky::day().zenith.b + g3d::Sky::night().zenith.b) / 2) <= 1);
+
+    // The backdrop: bluer up, dark ground down, the sun where light 0 shines from.
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = { 0, 1, 5 };
+    s->camera.target = { 0, 1, 0 };
+    s->sky = g3d::Sky::day();
+    s->sky.clouds = 0;
+    s->sky.sunLight = 0;
+    s->lights.push_back(g3d::Light::directional({ 8, 12, -60 }, WHITE, 1));
+    Comp c = sceneComp(s);
+    Image img = render(c, 0);
+    const Color top = GetImageColor(img, W / 2, 1), bottom = GetImageColor(img, W / 2, H - 2);
+    CHECK(top.b > top.r + 30 && luma(bottom) + 40 < luma(top));
+    const Vector3 toSun = Vector3Normalize({ 8, 12, -60 });
+    const Vector2 sunPx = project(s->camera, Vector3Add(s->camera.position, Vector3Scale(toSun, 50)));
+    CHECK(sunPx.x > 0 && sunPx.x < W && sunPx.y > 0 && sunPx.y < H);
+    CHECK(luma(px(img, sunPx)) > 235 && luma(px(img, { W - 4.f, H / 2.f - 30 })) < 225);
+    CHECK(allOpaque(img));
+    UnloadImage(img);
+    // With depth of field the sky still fills the frame (it must leave the 2D matrices as it found them).
+    s->camera.dof = { 5, 0.5f, 6 };
+    img = render(c, 0);
+    for (Vector2 q : { Vector2{ 2, 2 }, Vector2{ W - 3.f, 2 }, Vector2{ 2, H - 3.f }, Vector2{ W - 3.f, H - 3.f } })
+        CHECK(!close(px(img, q), BLACK, 12));
+    CHECK(px(img, { W / 2.f, 1 }).b > px(img, { W / 2.f, 1 }).r + 30);
+    UnloadImage(img);
+
+    // It lights the scene: a matte sphere with no lights at all is lit from above, sky blue.
+    auto lit = std::make_shared<g3d::Scene>();
+    lit->camera.position = { 0, 0, 5 };
+    lit->sky = g3d::Sky::day();
+    lit->sky.show = false;
+    g3d::Material matte;
+    matte.roughness = 1;
+    lit->add(g3d::Geometry::sphere(1, 48, 64), matte);
+    Comp lc = sceneComp(lit);
+    img = render(lc, 0);
+    const Color crown = px(img, project(lit->camera, { 0, 0.9f, 0.4f })), belly = px(img, project(lit->camera, { 0, -0.9f, 0.4f }));
+    CHECK(luma(crown) > 60 && crown.b > crown.r && luma(crown) > luma(belly) + 20);
+    CHECK(close(GetImageColor(img, 3, 3), BLACK));               // show = false: no backdrop
+    UnloadImage(img);
+
+    // Remade each frame: clouds drift.
+    auto cl = std::make_shared<g3d::Scene>();
+    cl->camera.position = { 0, 0, 0 };
+    cl->camera.target = { 0, 1, -0.3f };
+    cl->sky = g3d::Sky::day();
+    cl->sky.clouds = 0.6f;
+    cl->sky.cloudDrift = { 0.01f, 0 };
+    Comp cc = sceneComp(cl);
+    Image a = render(cc, 0), b = render(cc, 6);
+    int changed = 0;
+    for (int y = 0; y < H; y += 4)
+        for (int x = 0; x < W; x += 4) changed += !close(GetImageColor(a, x, y), GetImageColor(b, x, y), 6);
+    CHECK(changed > 50);
+    UnloadImage(a);
+    UnloadImage(b);
+
+    // Exponential fog: a far glowing box is red with fog, a near one still white.
+    auto f = std::make_shared<g3d::Scene>();
+    f->camera.position = { 0, 0, 0 };
+    f->camera.target = { 0, 0, -1 };
+    f->fogMode = g3d::FogMode::Exponential;
+    f->fogDensity = 0.12f;
+    f->fogColor = RED;
+    f->add(g3d::Geometry::box(0.5f, 0.5f, 0.5f), glowing())->position = { -0.6f, 0, -2 };
+    f->add(g3d::Geometry::box(5, 5, 5), glowing())->position = { 12, 0, -30 };
+    Comp fc = sceneComp(f);
+    img = render(fc, 0);
+    const Color nearC = px(img, project(f->camera, { -0.6f, 0, -1.75f })), farC = px(img, project(f->camera, { 12, 0, -27.5f }));
+    CHECK(nearC.g > 170 && farC.r > farC.g + 150);
+    UnloadImage(img);
+
+    // Exponential squared: clearer near, as thick far.
+    f->fogMode = g3d::FogMode::Exponential2;
+    img = render(fc, 0);
+    const Color near2 = px(img, project(f->camera, { -0.6f, 0, -1.75f }));
+    CHECK(near2.g > nearC.g);
+    UnloadImage(img);
+
+    // Height fog: thick low down, thin up high, at the same distance.
+    auto hf = std::make_shared<g3d::Scene>();
+    hf->camera.position = { 0, 0, 0 };
+    hf->camera.target = { 0, 0, -1 };
+    hf->fogMode = g3d::FogMode::Exponential;
+    hf->fogDensity = 1;
+    hf->fogHeight = -2;
+    hf->fogFalloff = 1.5f;
+    hf->fogColor = RED;
+    hf->add(g3d::Geometry::box(1, 1, 1), glowing())->position = { 0, -2.2f, -9 };
+    hf->add(g3d::Geometry::box(1, 1, 1), glowing())->position = { 0, 2.2f, -9 };
+    Comp hc = sceneComp(hf);
+    img = render(hc, 0);
+    const Color low = px(img, project(hf->camera, { 0, -2.2f, -8.5f })), high = px(img, project(hf->camera, { 0, 2.2f, -8.5f }));
+    CHECK(low.r > low.g + 100 && high.g > 150);
+    UnloadImage(img);
+
+    // Fog from the sky: a far box melts into the backdrop around it.
+    auto fs3 = std::make_shared<g3d::Scene>();
+    fs3->camera.position = { 0, 0, 0 };
+    fs3->camera.target = { 0, 0, -1 };
+    fs3->sky = g3d::Sky::dusk();
+    fs3->sky.clouds = 0;
+    fs3->fogMode = g3d::FogMode::Exponential;
+    fs3->fogDensity = 0.08f;
+    fs3->fogFromSky = true;
+    fs3->fogColor = GREEN;                                        // not used
+    fs3->add(g3d::Geometry::box(20, 6, 1), glowing())->position = { 0, 0, -120 };
+    Comp sc = sceneComp(fs3);
+    img = render(sc, 0);
+    const Vector2 mid = project(fs3->camera, { 0, 0, -119.5f });
+    CHECK(close(px(img, mid), px(img, { mid.x, mid.y - 30 }), 18));
+    CHECK(px(img, mid).g < 200 || px(img, mid).r > 150);         // sky colours, not green
+    UnloadImage(img);
+}
+
 static void depthOfField() {
     // Counts partially covered (blurred) pixels across a box's edges along one row.
     auto softness = [](const Image& img, int y, int x0, int x1) {
@@ -351,6 +484,25 @@ static void depthOfField() {
     }
     CHECK(farSoft[0] <= 2 && farSoft[1] >= 6);                                  // far edges blur
     CHECK(nearSoft[1] <= nearSoft[0] + 2);                                      // the focused box stays sharp
+
+    // A tilted plane of focus: a far box high in the frame and a near one low are both off
+    // the focus distance, so both blur, until the plane leans back through the two of them.
+    int topSoft[2], lowSoft[2];
+    for (int k = 0; k < 2; k++) {
+        auto s = std::make_shared<g3d::Scene>();
+        s->camera.position = { 0, 0, 0 };
+        s->camera.target = { 0, 0, -1 };
+        s->camera.dof = { 13.33f, 3, 10, k ? 48.f : 0.f };
+        s->add(g3d::Geometry::box(2, 2, 0.1f), unlit(WHITE))->position = { 0, 6, -20 };
+        s->add(g3d::Geometry::box(1, 1, 0.1f), unlit(WHITE))->position = { 0, -3, -10 };
+        Comp c = sceneComp(s);
+        Image img = render(c, 0);
+        topSoft[k] = softness(img, (int)project(s->camera, { 0, 6, -20 }).y, 0, W);
+        lowSoft[k] = softness(img, (int)project(s->camera, { 0, -3, -10 }).y, 0, W);
+        UnloadImage(img);
+    }
+    CHECK(topSoft[0] >= 6 && lowSoft[0] >= 6);
+    CHECK(topSoft[1] <= 3 && lowSoft[1] <= 3);
 }
 
 static void determinism() {
@@ -781,6 +933,7 @@ int main() {
     transparencyAndHierarchy();
     moreShadows();
     environment(dir);
+    skyAndFog();
     depthOfField();
     determinism();
     toonShading();

@@ -1,5 +1,5 @@
 // filters.cpp -- layer image filters for illustration looks (posterize, halftone, paper,
-// ink edges, watercolour), one full-target pass each over premultiplied content.
+// ink edges, watercolour) and tilt-shift, one full-target pass each over premultiplied content.
 #include "rmtn/render.hpp"
 #include <rlgl.h>
 #include <algorithm>
@@ -16,6 +16,7 @@ uniform int mode; uniform vec2 texel; uniform float pxScale;
 uniform int levels; uniform float size; uniform float angle; uniform int colored;
 uniform float threshold; uniform float strength; uniform float granulation;
 uniform vec4 ink; uniform vec4 paper;
+uniform float position; uniform float band; uniform float falloff;
 out vec4 finalColor;
 
 vec3 unpre(vec4 c) { return c.a > 0.0 ? c.rgb / c.a : vec3(0.0); }
@@ -31,7 +32,8 @@ float fbm(vec2 p) {
     for (int i = 0; i < 5; i++) { s += a * vnoise(p); p = p * 2.03 + 17.1; a *= 0.5; }
     return s / 0.97;
 }
-vec4 at(vec2 d) { return texture(texture0, fragTexCoord + d * pxScale * texel); }
+// Clamped to the target, so taps beyond the frame repeat its edge rather than wrap round.
+vec4 at(vec2 d) { return texture(texture0, clamp(fragTexCoord + d * pxScale * texel, 0.5 * texel, 1.0 - 0.5 * texel)); }
 
 // Coverage of one halftone screen at `ang` (radians) for ink amount k: dot area ~ k.
 float screen(vec2 p, float ang, float k) {
@@ -81,7 +83,7 @@ void main() {
         float mag = max(length(vec2(length(gx.rgb), length(gy.rgb))) / 1.732, length(vec2(gx.a, gy.a))) / 4.0;
         float e = smoothstep(threshold, threshold * 1.5 + 0.02, mag) * ink.a;
         finalColor = c * (1.0 - e) + vec4(ink.rgb, 1.0) * e;
-    } else {                                                          // watercolour
+    } else if (mode == 4) {                                           // watercolour
         vec2 w = vec2(fbm(p / (size * 5.0)), fbm(p / (size * 5.0) + 31.7)) - 0.5;
         vec2 off = w * size * 2.0;                                    // bleed: wander the edges
         vec4 s = at(off);
@@ -98,13 +100,34 @@ void main() {
         float d = 1.0 + strength * edge + gran + wash;                // pigment density
         vec3 col = clamp(u - (u - u * u) * (d - 1.0), 0.0, 1.0);      // Bousseau et al.'s density model
         finalColor = vec4(col * s.a, s.a);
+    } else if (mode == 5) {                                           // tilt-shift
+        // Distance from the focus line (through the centre at `position` from the top, at
+        // `angle`), as a fraction of the height; blur grows from the band's edge.
+        vec2 dims = 1.0 / (texel * pxScale);
+        vec2 mid = vec2(dims.x * 0.5, dims.y * (1.0 - position));
+        float ang = radians(angle);
+        float dist = abs(dot(p - mid, vec2(-sin(ang), cos(ang)))) / dims.y;
+        float r = size * smoothstep(band, band + max(falloff, 1e-4), dist);
+        vec4 sum = c;
+        float n = 1.0;
+        if (r > 0.25) {
+            for (int i = 0; i < 64; i++) {                            // a golden-angle disc
+                float rr = r * sqrt((float(i) + 0.5) / 64.0), a = float(i) * 2.39996323;
+                sum += at(vec2(cos(a), sin(a)) * rr);
+                n += 1.0;
+            }
+        }
+        vec4 b = sum / n;
+        vec3 u = unpre(b);
+        u = clamp(mix(vec3(luma(u)), u, 1.0 + strength), 0.0, 1.0);
+        finalColor = vec4(u * b.a, b.a);
     }
 }
 )";
 
 Shader shader{};
 int L_mode = -1, L_texel, L_pxScale, L_levels, L_size, L_angle, L_colored, L_threshold, L_strength, L_granulation,
-    L_ink, L_paper;
+    L_ink, L_paper, L_position, L_band, L_falloff;
 
 void ensureShader() {
     if (shader.id) return;
@@ -113,6 +136,7 @@ void ensureShader() {
     L_mode = loc("mode"); L_texel = loc("texel"); L_pxScale = loc("pxScale"); L_levels = loc("levels");
     L_size = loc("size"); L_angle = loc("angle"); L_colored = loc("colored"); L_threshold = loc("threshold");
     L_strength = loc("strength"); L_granulation = loc("granulation"); L_ink = loc("ink"); L_paper = loc("paper");
+    L_position = loc("position"); L_band = loc("band"); L_falloff = loc("falloff");
     onGraphicsShutdown([] { UnloadShader(shader); shader = Shader{}; });
 }
 
@@ -139,6 +163,9 @@ void applyFilter(const Filter& f, const RenderTexture& src, const RenderTexture&
     SetShaderValue(shader, L_granulation, &f.granulation, SHADER_UNIFORM_FLOAT);
     SetShaderValue(shader, L_ink, &ink, SHADER_UNIFORM_VEC4);
     SetShaderValue(shader, L_paper, &paper, SHADER_UNIFORM_VEC4);
+    SetShaderValue(shader, L_position, &f.position, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(shader, L_band, &f.band, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(shader, L_falloff, &f.falloff, SHADER_UNIFORM_FLOAT);
     SetTextureWrap(src.texture, TEXTURE_WRAP_CLAMP);          // neighbours past the edge repeat the edge
     BeginTextureMode(dst);
     rlSetBlendFactors(RL_ONE, RL_ZERO, RL_FUNC_ADD);           // replace: the pass covers every pixel

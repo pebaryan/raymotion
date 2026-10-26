@@ -551,16 +551,59 @@ void heatmap(const Ctx& c, const Table& t, const HeatmapStyle& s, float u) {
             if (textWidth(txt, vs) < cw - s.gap - 8) label(c, txt, mid, { 0.5f, 0.5f }, vs, withAlpha(onFill(col), clamp01((k - 0.5f) * 2)));
         }
     if (!s.colorbar) return;
-    const float bx = s.box.x + s.box.width + 36, bw = 26;
-    const int steps = 48;
+    ColorbarStyle cs;
+    cs.colors = colors;
+    cs.textSize = s.textSize * 0.85f;
+    cs.textColor = s.textColor;
+    Ctx faded = c;
+    faded.a *= k0;
+    colorbar(faded, { s.box.x + s.box.width + 36, s.box.y, 26, s.box.height }, Range(lo, hi), cs);
+}
+
+// ------------------------------------------------------------------ keys
+
+void colorbar(const Ctx& c, Rectangle box, Range v, const ColorbarStyle& s, float u) {
+    u = clamp01(u);
+    if (u <= 0 || !(v.max > v.min)) return;
+    const auto colors = s.colors ? s.colors : std::function<Color(float)>(viridis);
+    const bool upright = box.height > box.width;
+    const float k = easeOut(u), len = (upright ? box.height : box.width) * k;
+    const int steps = 64;
     for (int i = 0; i < steps; i++) {
-        const float y0 = s.box.y + s.box.height * (1 - (i + 1.f) / steps);
-        vg::fill(c, vg::Path::rect({ bx, y0, bw, s.box.height / steps + 0.5f }), withAlpha(colors((i + 0.5f) / steps), k0));
+        const float a = len * i / steps, b = len / steps + 0.5f;
+        const Rectangle r = upright ? Rectangle{ box.x, box.y + box.height - a - b, box.width, b }
+                                    : Rectangle{ box.x + a, box.y, b, box.height };
+        vg::fill(c, vg::Path::rect(r), colors((i + 0.5f) / steps * k));
     }
-    const Range r(lo, hi);
-    for (double v : r.ticks()) {
-        const float y = s.box.y + s.box.height * (float)(1 - (v - lo) / (hi - lo));
-        label(c, number(v, decimalsFor(r.tick())), { bx + bw + 12, y }, { 0, 0.5f }, s.textSize * 0.85f, withAlpha(s.textColor, k0));
+    const int dec = s.decimals >= 0 ? s.decimals : decimalsFor(v.tick());
+    const Color tc = withAlpha(s.textColor, clamp01((u - 0.3f) / 0.5f));
+    for (double x : v.ticks()) {
+        const float f = (float)((x - v.min) / (v.max - v.min));
+        if (f > k + 1e-4f) continue;
+        const std::string txt = textTex(number(x, dec) + s.suffix);
+        if (upright) label(c, txt, { box.x + box.width + 12, box.y + box.height * (1 - f) }, { 0, 0.5f }, s.textSize, tc);
+        else label(c, txt, { box.x + box.width * f, box.y + box.height + 8 }, { 0.5f, 0 }, s.textSize, tc);
+    }
+    if (!s.title.empty()) label(c, textTex(s.title), { box.x, box.y - 12 }, { 0, 1 }, s.textSize, tc);
+}
+
+void legend(const Ctx& c, Vector2 at, const std::vector<LegendItem>& items, const LegendStyle& s, float u) {
+    u = clamp01(u);
+    const size_t n = items.size();
+    if (u <= 0 || n == 0) return;
+    Vector2 p = at;
+    for (size_t i = 0; i < n; i++) {
+        const float k = easeOut(u * (1 + 0.5f * n) - 0.5f * i);
+        if (k > 0) {
+            Ctx ci = c;
+            ci.a *= k;
+            const float sw = s.swatch, cy = p.y + std::max(sw, s.textSize) / 2;
+            if (s.round) vg::fill(ci, vg::Path::circle({ p.x + sw / 2, cy }, sw / 2), items[i].color);
+            else vg::fill(ci, vg::Path::rect({ p.x, cy - sw / 2, sw, sw }, sw / 6), items[i].color);
+            label(ci, textTex(items[i].name), { p.x + sw + 10, cy }, { 0, 0.5f }, s.textSize, s.textColor);
+        }
+        if (s.across) p.x += s.swatch + 10 + textWidth(textTex(items[i].name), s.textSize) + s.gap * 2.5f;
+        else p.y += std::max(s.swatch, s.textSize) + s.gap;
     }
 }
 

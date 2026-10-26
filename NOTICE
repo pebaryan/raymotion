@@ -17,5 +17,9 @@ It includes or bundles third-party components under their own licenses:
   (assets/fonts/LatinModernMath-GUST-FONT-LICENSE.txt).
 - Social media icon paths (src/engine/icons.cpp): Simple Icons (https://simpleicons.org),
   CC0 1.0. The logos are trademarks of their respective owners.
+- earcut.hpp (third_party/earcut): ISC License, Copyright (c) 2015, Mapbox
+  (third_party/earcut/LICENSE).
+- Map data (assets/data/geo): Natural Earth 1:110m (https://www.naturalearthdata.com),
+  public domain; built by tools/make_geo_data.py.
 - Sample data (assets/data): crambin (PDB 1CRN) from the RCSB Protein Data Bank and
   caffeine from PubChem, both in the public domain.

@@ -11,7 +11,7 @@
 //     prefab::use(root, 0, 120, "social-row", Json::parse(R"({"brands": ["x", "youtube", "github"]})"));
 //     prefab::use(root, 0, 150, "raymotion-logo", Json::parse(R"({"tagline": "video as code"})"));
 //
-// Brands: x, youtube, github, instagram, tiktok, whatsapp, telegram. The glyphs are the
+// Brands: x, youtube, github, instagram, tiktok, whatsapp, telegram, twitch. The glyphs are the
 // Simple Icons paths (CC0); the logos themselves are trademarks of their owners, so follow
 // each brand's guidelines when you use them.
 #pragma once

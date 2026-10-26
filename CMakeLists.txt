@@ -86,7 +86,13 @@ add_library(rmtn_engine STATIC
   src/engine/textfx.cpp
   src/engine/subtitles.cpp
   src/engine/audioviz.cpp
-  src/engine/icons.cpp)
+  src/engine/icons.cpp
+  src/engine/flags.cpp
+  src/engine/geo.cpp
+  src/engine/city.cpp
+  src/engine/globe.cpp
+  src/engine/geo3d.cpp
+  src/engine/calendar.cpp)
 add_library(raymotion::engine ALIAS rmtn_engine)
 target_include_directories(rmtn_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 # Single-header decoders (stb_image, nanosvg), compiled privately into media.cpp.
@@ -117,6 +123,12 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/audioreactive.cpp
     examples/showcase/captions.cpp
     examples/showcase/icons.cpp
+    examples/showcase/flags.cpp
+    examples/showcase/maps.cpp
+    examples/showcase/cities.cpp
+    examples/showcase/earth.cpp
+    examples/showcase/atmosphere.cpp
+    examples/showcase/map_charts.cpp
     examples/showcase/paths.cpp
     examples/showcase/equations.cpp
     examples/showcase/plots.cpp
@@ -157,6 +169,21 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   add_executable(raymotion_icon_tests tests/icon_tests.cpp)
   target_link_libraries(raymotion_icon_tests PRIVATE rmtn_engine)
   add_test(NAME icons COMMAND raymotion_icon_tests)
+  add_executable(raymotion_geo_tests tests/geo_tests.cpp)
+  target_link_libraries(raymotion_geo_tests PRIVATE rmtn_engine)
+  add_test(NAME geo COMMAND raymotion_geo_tests)
+  add_executable(raymotion_city_tests tests/city_tests.cpp)
+  target_link_libraries(raymotion_city_tests PRIVATE rmtn_engine)
+  add_test(NAME city COMMAND raymotion_city_tests)
+  add_executable(raymotion_globe_tests tests/globe_tests.cpp)
+  target_link_libraries(raymotion_globe_tests PRIVATE rmtn_engine)
+  add_test(NAME globe COMMAND raymotion_globe_tests)
+  add_executable(raymotion_geo3d_tests tests/geo3d_tests.cpp)
+  target_link_libraries(raymotion_geo3d_tests PRIVATE rmtn_engine)
+  add_test(NAME geo3d COMMAND raymotion_geo3d_tests)
+  add_executable(raymotion_calendar_tests tests/calendar_tests.cpp)
+  target_link_libraries(raymotion_calendar_tests PRIVATE rmtn_engine)
+  add_test(NAME calendar COMMAND raymotion_calendar_tests)
   add_executable(raymotion_audioviz_tests tests/audioviz_tests.cpp)
   target_link_libraries(raymotion_audioviz_tests PRIVATE rmtn_engine)
   add_test(NAME audioviz COMMAND raymotion_audioviz_tests)

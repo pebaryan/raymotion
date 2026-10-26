@@ -306,6 +306,26 @@ static void filters() {
     CHECK(luma(GetImageColor(w, 23, 50)) < luma(GetImageColor(w, 50, 50)) - 8);
     UnloadImage(w);
 
+    // Tilt-shift: fine stripes stay crisp on the focus line (a quarter down from the top),
+    // grey out far below it; the layer's alpha is kept.
+    auto stripes = [](const Ctx& c, int) {
+        for (int x = 0; x < 100; x += 2) dr::rect(c, (float)x, 0, 1, 100, WHITE);
+    };
+    for (int ss = 1; ss <= 2; ss++) {
+        Image t = filtered({ Filter::tiltShift(0.25f, 0.08f, 8, 0, 0) }, stripes, BLACK, ss);
+        auto contrast = [&](int y) {
+            int lo = 255, hi = 0;
+            for (int x = 20; x < 80; x++) { int v = GetImageColor(t, x, y).r; lo = std::min(lo, v); hi = std::max(hi, v); }
+            return hi - lo;
+        };
+        CHECK(contrast(25) > 200 && contrast(95) < 40 && contrast(60) < contrast(25));
+        UnloadImage(t);
+    }
+    // Tilted 90 degrees, the sharp band runs down the frame instead.
+    Image tv = filtered({ Filter::tiltShift(0.5f, 0.05f, 8, 90, 0) }, rect(0, 0, 100, 100, WHITE), BLACK);
+    EXPECT_PX(tv, 50, 50, WHITE);
+    UnloadImage(tv);
+
     // Filters chain in order and hold at 2x supersampling (sizes are composition px).
     Image one = filtered({ Filter::posterize(4), Filter::inkEdges(3, RED) }, rect(30, 30, 40, 40, WHITE));
     Image two = filtered({ Filter::posterize(4), Filter::inkEdges(3, RED) }, rect(30, 30, 40, 40, WHITE), BLACK, 2);

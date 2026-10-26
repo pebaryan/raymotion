@@ -256,6 +256,35 @@ struct HeatmapStyle {
 // Rows are the table's categories, columns its series; cells sweep in diagonally.
 void heatmap(const Ctx& c, const Table& t, const HeatmapStyle& s = {}, float u = 1);
 
+// ---- keys
+
+struct ColorbarStyle {
+    std::function<Color(float)> colors = viridis;
+    std::string title;                // above the bar
+    int decimals = -1;                // tick numbers; -1: from the tick step
+    std::string suffix;               // after each number ("%", " t")
+    float textSize = 22;
+    Color textColor{ 220, 224, 232, 255 };
+};
+// A colour scale for v.min..v.max in `box`: upright (low at the bottom) when the box is
+// taller than wide, else across (low at the left), ticks at v's steps. It grows in with u.
+void colorbar(const Ctx& c, Rectangle box, Range v, const ColorbarStyle& s = {}, float u = 1);
+
+struct LegendItem {
+    std::string name;
+    Color color;
+};
+struct LegendStyle {
+    float textSize = 22;
+    float swatch = 18;                // square size
+    float gap = 10;                   // between rows (or items, across)
+    bool across = false;              // in a row instead of a column
+    bool round = false;               // circles instead of squares
+    Color textColor{ 220, 224, 232, 255 };
+};
+// Swatches and names from `at` (top left); items fade in one after another with u.
+void legend(const Ctx& c, Vector2 at, const std::vector<LegendItem>& items, const LegendStyle& s = {}, float u = 1);
+
 // ---- round charts
 
 struct RadarStyle {

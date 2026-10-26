@@ -195,6 +195,8 @@ struct Filter {
         Paper,        // paper grain and fibres darken the content by `strength` (`size` = grain scale)
         InkEdges,     // dark `ink` lines `size` wide where colour or alpha changes by > `threshold`
         Watercolor,   // bleeding edges (`size` px), edge darkening (`strength`), pigment granulation
+        TiltShift,    // a sharp band (`position`, `band`, `angle`), blur up to `size` px beyond it
+                      // (reached `falloff` further out), saturation raised by `strength`: a miniature
     };
     Type type = Type::Posterize;
     int levels = 4;
@@ -206,6 +208,9 @@ struct Filter {
     float granulation = 0.5f;
     Color ink{ 24, 22, 30, 255 };
     Color paper{ 250, 246, 236, 255 };    // halftone: colour between the dots
+    float position = 0.5f;                // tilt-shift: the sharp line, a fraction of the layer's height from the top
+    float band = 0.08f;                   // tilt-shift: half-height of the sharp band (fraction of the height)
+    float falloff = 0.3f;                 // tilt-shift: how much further out the blur is full
 
     static Filter posterize(int levels = 4) { Filter f; f.type = Type::Posterize; f.levels = levels; return f; }
     static Filter halftone(float cell = 8, float angle = 45, bool colored = false) {
@@ -219,6 +224,11 @@ struct Filter {
     }
     static Filter watercolor(float bleed = 6, float edgeDarkening = 0.6f, float granulation = 0.5f) {
         Filter f; f.type = Type::Watercolor; f.size = bleed; f.strength = edgeDarkening; f.granulation = granulation; return f;
+    }
+    static Filter tiltShift(float position = 0.55f, float band = 0.08f, float blur = 14, float angle = 0,
+                            float saturation = 0.25f) {
+        Filter f; f.type = Type::TiltShift; f.position = position; f.band = band; f.size = blur; f.angle = angle;
+        f.strength = saturation; return f;
     }
 };
 

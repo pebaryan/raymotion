@@ -44,12 +44,27 @@ public:
     static std::shared_ptr<Geometry> knot(float radius, float tube, int tubularSegs = 256, int radialSegs = 24,
                                           int p = 2, int q = 3);
     const Mesh& mesh();
+    // Reshapes the mesh: `edit` changes its CPU copy (vertices, normals; same counts) before
+    // the next draw, which re-uploads them. Safe to call from `up` callbacks every frame
+    // (morphs, growing shapes); the latest edit wins.
+    void update(std::function<void(Mesh&)> edit);
 private:
     std::function<Mesh()> make_;
+    std::function<void(Mesh&)> pending_;
     Mesh mesh_{};
     bool loaded_ = false;
 };
 using GeometryPtr = std::shared_ptr<Geometry>;
+
+// A texture made by code and remade as the frames go by (heat maps, clouds, simulations).
+// `make(t)` returns a new image for frame t (the texture takes it over); it is called again
+// every `every` frames, the frames between reusing the last. Keep the size the same from
+// call to call: the GPU texture is then updated in place.
+struct DynamicTexture {
+    std::function<Image(int t)> make;
+    int every = 1;
+};
+using DynamicTexturePtr = std::shared_ptr<DynamicTexture>;
 
 // A model file (glTF/GLB, OBJ, IQM, M3D, VOX) and its skeletal animations, loaded on
 // first use. Throws std::runtime_error from the first draw when the file cannot be read.
@@ -95,6 +110,9 @@ struct Material {
     bool doubleSided = false;
     bool castShadow = true, receiveShadow = true;
     std::string map;                // optional base-colour texture file
+    DynamicTexturePtr dynamicMap;   // or a texture made per frame (wins over `map`); its alpha
+                                    // multiplies opacity: give a see-through overlay opacity
+                                    // just under 1 so it draws with the transparent objects
 
     Shading shading = Shading::Standard;
     struct Toon {
@@ -181,9 +199,58 @@ struct Camera {
     float nearPlane = 0.05f, farPlane = 500;
     // Depth of field: things at focusDistance are sharp; blur grows with
     // aperture * |depth - focus| / depth, up to maxBlur composition pixels. aperture 0 = off.
-    struct DepthOfField { float focusDistance = 5, aperture = 0, maxBlur = 12; } dof;
+    // tilt (degrees, perspective only) tilts the plane of focus about the camera's horizontal
+    // axis, as a tilt-shift lens does: positive leans its top away (more of a receding ground
+    // in focus), negative towards the camera (a thin sharp band: the miniature look).
+    struct DepthOfField { float focusDistance = 5, aperture = 0, maxBlur = 12, tilt = 0; } dof;
     std::function<void(int t, Camera& self)> up;
 };
+
+// ------------------------------------------------------------------ skies
+// A procedural sky: a gradient from the ground through the horizon to the zenith, the sun
+// with its glow and the haze round it, stars, and drifting clouds. It is drawn behind the
+// scene and lights it (as an environment: diffuse from its blur, reflections of it), and
+// fog can take its colours. Remade every frame, so any of it can be animated (Scene::up).
+//
+//     scene->sky = g3d::Sky::at(18.2f);           // dusk, the sun low in the west
+//     scene->sky.sunLight = 0;                    // the sun where light 0 shines from
+//     scene->fogMode = g3d::FogMode::Exponential; scene->fogDensity = 0.03f; scene->fogFromSky = true;
+struct Sky {
+    bool enabled = false;
+    Color zenith{ 52, 104, 190, 255 };      // straight up
+    Color horizon{ 176, 204, 234, 255 };    // at the horizon
+    Color ground{ 72, 70, 66, 255 };        // below the horizon
+    float curve = 0.45f;                    // how quickly the horizon gives way to the zenith (smaller: higher)
+    Vector3 sunDirection{ 0.35f, 0.45f, -0.8f };    // towards the sun (any length)
+    int sunLight = -1;                      // >= 0: take the direction from this light instead
+    Color sunColor{ 255, 246, 226, 255 };
+    float sunSize = 1.2f;                   // angular radius, degrees (0: no disc)
+    float sunGlow = 0.5f;                   // brightness of the glow round the sun
+    Color haze{ 255, 196, 140, 255 };       // the horizon's colour under the sun
+    float hazeAmount = 0.35f;
+    float stars = 0;                        // 0..1: how many show (fading out towards the horizon)
+    float clouds = 0;                       // 0..1: cover
+    Color cloudColor{ 255, 255, 255, 255 }, cloudShade{ 150, 158, 176, 255 };   // sunlit side, underside
+    float cloudScale = 1;                   // larger: smaller clouds
+    Vector2 cloudDrift{ 0.0004f, 0.0001f }; // per frame
+    unsigned seed = 1;
+    int resolution = 1024;                  // width of the sky's equirectangular image (2:1)
+    float lighting = 1;                     // how strongly it lights the scene
+    bool show = true;                       // draw it as the backdrop
+
+    // Presets by the hour of a day (0..24): night, dawn, morning, noon, evening, dusk; the
+    // sun rises in the east (+x) at 6, is highest at noon (to the south, -z) and sets at 18.
+    static Sky day();
+    static Sky dawn();
+    static Sky dusk();
+    static Sky night();
+    static Sky at(float hour);
+    static Sky mix(const Sky& a, const Sky& b, float t);    // colours and amounts; the rest from b at t >= 0.5
+};
+
+// How fog thickens with distance. Exponential fogs use fogDensity (per world unit) and,
+// with fogFalloff > 0, thin out with height above fogHeight (ground fog in the valleys).
+enum class FogMode { Linear, Exponential, Exponential2 };
 
 // ------------------------------------------------------------------ scenes
 struct Scene {
@@ -203,6 +270,11 @@ struct Scene {
     Color background = BLANK;       // BLANK: the 2D content beneath shows through
     Color fogColor = BLACK;
     float fogNear = 0, fogFar = 0;  // linear fog by view distance; fogFar <= fogNear disables
+    FogMode fogMode = FogMode::Linear;
+    float fogDensity = 0;           // exponential fogs; 0 disables
+    float fogHeight = 0, fogFalloff = 0;    // height fog: density * exp(-falloff * (y - fogHeight))
+    bool fogFromSky = false;        // fog takes the sky's (or environment's) colour in each direction
+    Sky sky;                        // a procedural sky (sky.enabled); replaces `environment`
     int shadowMapSize = 1024;       // per atlas tile (shrunk if the atlas would pass 8192)
 
     // Ink lines found in screen space from depth, normals and object boundaries: outer
@@ -239,6 +311,22 @@ std::function<Image()> studioEnvironment(Color top, Color horizon, Color bottom,
 // ctx; empty = the whole composition), composited with ctx opacity. `camera` overrides
 // scene.camera, e.g. several views of one scene. Outside presentFrame it does nothing.
 void render(Scene& scene, int t, const Ctx& c, Rectangle viewport = {}, Camera* camera = nullptr);
+
+// The camera as render() sees it at frame t: `camera` with its `up` applied (to a copy).
+Camera cameraAt(const Camera& camera, int t);
+
+// Where a world point lands, in composition px, through `camera` drawing into `viewport`
+// (the rectangle given to render; pass the composition's full size when that was empty).
+// False when the point is behind the camera. For 2D labels that follow 3D objects (they
+// always face the viewer):
+//     const g3d::Camera cam = g3d::cameraAt(scene->camera, t);
+//     Vector2 at;
+//     if (g3d::project(cam, { 0, 80, 0 }, { 0, 0, 1920, 1080 }, at)) dr::text(..., at, ...);
+bool project(const Camera& camera, Vector3 world, Rectangle viewport, Vector2& out);
+
+// Euler angles for Object3D::rotation (degrees) that turn the object's front (+z) to
+// `forward` and its top (+y) as near to `up` as it can.
+Vector3 lookRotation(Vector3 forward, Vector3 up = { 0, 1, 0 });
 
 // A TNode::fn that renders `scene` (the node's local frame drives the animation).
 inline std::function<void(const Ctx&, int)> draw(ScenePtr scene, Rectangle viewport = {},

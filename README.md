@@ -227,13 +227,24 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
 * Lights: up to 8 directional/point/spot lights with range falloff. Any of them can cast
   PCF shadows; they share one shadow atlas (`shadowMapSize` per tile, a tile per
   directional/spot light and six per point light, 16 tiles), with `shadowBias` in world
-  units on top of an automatic slope bias. Linear fog.
+  units on top of an automatic slope bias.
 * Ambient light is a sky/ground hemisphere, or image-based: `scene->environment` (an
   equirectangular PNG/JPG/HDR) or `environmentGenerator` (e.g. `g3d::studioEnvironment`,
   a gradient with soft light boxes) lights diffuse surfaces from its blurred mips and
   gives reflections that blur with roughness; `showEnvironment` draws it as a skybox.
+* A procedural sky (`scene->sky`): a gradient from zenith to horizon to ground, a sun
+  disc and glow (`sunLight` points it along a light), stars that twinkle, and fbm clouds
+  that drift. It is remade each frame, so all of it can be animated, and it is also the
+  scene's environment, so it lights and reflects. Presets `Sky::day()`, `dawn()`,
+  `dusk()`, `night()`, `Sky::mix(a, b, t)`, and `Sky::at(hour)` for a whole day.
+* Fog: linear (`fogNear`/`fogFar`), or `FogMode::Exponential`/`Exponential2` with
+  `fogDensity`, thinning with height above `fogHeight` by `fogFalloff` (ground fog in a
+  valley). With `fogFromSky` it takes the sky's colour in each direction, so far hills
+  melt into the horizon behind them.
 * Depth of field per camera (`camera.dof`): a golden-angle gather blur from the depth
   buffer, sized in composition pixels so it looks the same at every supersampling level.
+  `dof.tilt` (degrees) tilts the plane of focus like a tilt-shift lens: positive keeps a
+  receding ground sharp, negative leaves a thin sharp band (the miniature look).
 * Object hierarchy with Euler transforms; every object, light and camera has an `up`
   callback driven by the node's local frame.
 * A scene renders offscreen at canvas resolution (so it is supersampled), then
@@ -278,7 +289,9 @@ art->add(0, 300)->fn = g3d::draw(scene);      // 2D drawn in `art` gets the wash
 * **Layer filters** (`Layer::filters`, run in order on the flattened layer): `posterize`
   (brightness steps, hue kept), `halftone` (mono or CMYK dot screens), `paperGrain`,
   `inkEdges` (dark lines where colour or alpha changes) and `watercolor` (bleeding edges,
-  darkened rims and pigment granulation, after Bousseau et al.). Sizes are composition
+  darkened rims and pigment granulation, after Bousseau et al.) and `tiltShift` (a sharp
+  band at `position` and `angle`, blurring and more saturated beyond it: a miniature in
+  2D, for any layer, not just 3D). Sizes are composition
   px and the patterns are fixed to the canvas, so a look holds at any supersampling and
   does not crawl between frames.
 
@@ -446,6 +459,8 @@ parameter `u`:
   `density` (a kernel estimate you can `graph`) and `bin` do the numbers, `histogram` and
   `errorBars` draw them. `heatmap` colours a table's cells with `viridis` or `diverging`
   (or any map) and adds a colour bar.
+* **Keys:** `colorbar` draws a colour scale (upright or across, with ticks and a title)
+  and `legend` a column or row of swatches, for charts of your own (3D ones included).
 * **Business charts:** `bubbles` (area ∝ size), `radar`, KPI `gauge`s with colour zones,
   `funnel`s and `candles` (OHLC).
 * **Hierarchies and flows:** a `Tree` (built in code or parsed from `"Sales/Field, 22"`
@@ -772,12 +787,12 @@ the same name replaces one):
 
 ```cpp
 prefab::use(root, 0, 90, "social-youtube", Json::parse(R"({"handle": "@raymotion"})"))->props.pos = { 960, 540 };
-prefab::use(root, 30, 120, "social-row", Json::parse(R"({"brands": ["x", "github", "tiktok"], "style": "outline"})"));
+prefab::use(root, 30, 120, "social-row", Json::parse(R"({"brands": ["x", "github", "twitch"], "style": "outline"})"));
 prefab::use(root, 0, 150, "raymotion-logo", Json::parse(R"({"tagline": "video as code", "layout": "stacked"})"));
 ```
 
 * `social-x`, `social-youtube`, `social-github`, `social-instagram`, `social-tiktok`,
-  `social-whatsapp` and `social-telegram`: the icon, with an optional `handle` beside it.
+  `social-whatsapp`, `social-telegram` and `social-twitch`: the icon, with an optional `handle` beside it.
   `social-row` shows several, one after another, with a shared handle beneath.
 * Props: `size`; `style` (`badge` in the brand colour, Instagram's gradient included;
   `glyph`, the mark alone in its colour; `mono` and `outline` in `color`); `shape`
@@ -794,6 +809,218 @@ trademarks of their owners, so follow each brand's guidelines when you use them.
 
 `social-icons` shows the logo drawing on, a row of every brand, the four looks and two
 shapes, icons with handles, and a stacked logo end card.
+
+### Country flags
+
+Built-in flag prefabs use lower-case ISO country codes. Each flag is a 3:2 drawing on a
+rounded square badge; set `badge` to `false` for the flag alone.
+
+```cpp
+prefab::use(root, 0, 90, "flag-at", Json::parse(R"({"size": 160, "label": "Austria"})"));
+prefab::use(root, 0, 90, "flag-row", Json::parse(R"({"countries": ["at", "de", "fr", "gb"], "stagger": 5})"));
+// In a drawing function: flags::draw(cx, "jp", {960, 540}, 160);
+```
+
+Available codes: `at`, `be`, `br`, `ca`, `ch`, `cn`, `cz`, `de`, `dk`, `ee`, `fi`,
+`fr`, `gb`, `hu`, `id`, `ie`, `in`, `it`, `jp`, `lu`, `mc`, `nl`, `no`, `pl`, `ro`,
+`ru`, `se`, `ua`, `us`. `flags::countries()` returns the supported codes. Prefabs
+accept `size`, `badge`, `label`, `ink`, `in` (`pop`, `fade`, `none`), `delay` and
+`fps`. `flag-row` also accepts `gap` and `stagger`.
+
+Render the 13-second showcase, including its synth music and timed sound effects, with
+`build/raymotion render flag-showcase`. The video is written to `out/flag-showcase.mp4`.
+
+### Maps
+
+`geo::` reads map data and projects it. Natural Earth's 1:110m countries, land, lakes,
+rivers and cities are bundled (public domain), and GeoJSON or TopoJSON files of your own
+load the same way:
+
+```cpp
+const geo::Layer& world = geo::countries();
+auto map = geo::Projection::equalEarth().fit({ 60, 60, 1800, 960 }, geo::Sphere);
+node->fn = [map](const Ctx& cx, int) {
+    vg::fill(cx, map.outline(), OCEAN);
+    vg::stroke(cx, map.graticule(15), vg::Stroke(GRID, 1));
+    vg::fill(cx, map.path(geo::land().merged()), LAND, vg::FillRule::EvenOdd);
+    vg::stroke(cx, map.lines(geo::countries().merged()), vg::Stroke(BORDER, 1));
+    vg::fill(cx, map.path(geo::countries().get("KEN").geometry), ACCENT, vg::FillRule::EvenOdd);
+};
+```
+
+* Data: `geo::countries()` (177, with name, ISO codes, continent, region, population,
+  GDP and a label point), `land()`, `lakes()`, `rivers()`, `cities()` (243, largest
+  first). `layer.get("KEN")` finds a feature by id, ISO code or name; `filter` and
+  `merged` pick and combine. `geo::load(file)` reads GeoJSON or TopoJSON (`object` picks
+  one TopoJSON object), resolved like media files.
+* Projections: equirectangular, Mercator, Equal Earth, Natural Earth, Robinson,
+  Mollweide, orthographic (a globe), stereographic, azimuthal equidistant and equal-area,
+  gnomonic, and the Albers, Lambert and equidistant conics (`parallels`). `rotate` turns
+  the globe, `fit` frames a geometry (or `geo::Sphere`, the whole world) in a box.
+* `path` gives fillable polygons, cut at the antimeridian or at a globe's horizon and
+  closed along that edge, so fills stay right however the map is turned. `lines` gives
+  strokes, `outline` the map's edge, `graticule` the meridians and parallels, and
+  `project` or `map(lonLat)` single points.
+* `Projection::mix(a, b, t)` moves every point between two projections, so a globe
+  can open out into a flat map.
+* On the sphere: `distance`, `angle`, `interpolate` (along the great circle), `bearing`,
+  `centroid`, `bounds`, `area` and `contains`.
+
+`maps` shows a turning globe, one world morphing through seven projections, Africa on
+an Albers conic with Kenya picked out by its ISO code, and the bundled cities.
+
+### 3D city models
+
+`city::` reads [CityJSON](https://www.cityjson.org) (1.0 to 2.0, and CityJSONSeq
+`.city.jsonl`) and draws it in a `g3d` scene:
+
+```cpp
+const city::Model town = city::load("data/city/town.city.json");
+auto scene = std::make_shared<g3d::Scene>();
+g3d::Object3D* blocks = city::add(*scene, town);    // one child per city object, named by its id
+city::rise(blocks, 0, 2, 24);                      // buildings grow from the ground, middle first
+city::frame(scene->camera, town, 210, 35);         // from the south-south-west, 35 degrees up
+addRoot(c.roots, 0, 300)->fn = g3d::draw(scene);
+```
+
+* `city::Model` has the objects (`id`, `type`, `attributes`, `parents`/`children`, and a
+  geometry per level of detail), `get(id)`, `filter`, `lods()` and `bounds()`. Faces carry
+  their semantic surface (`RoofSurface`, `WallSurface`, `Window`, `TrafficArea`, ...).
+  Geometry templates are expanded; solids, multi-surfaces, lines and points are all read.
+* Coordinates are metres from `model.origin` (the middle of the extent at its lowest
+  point), so big projected coordinates stay precise; `world()` and `local()` convert.
+  There is no reprojection: a model is drawn in its own metres.
+* `city::Look` colours faces by semantic surface, then by object type (roads, water,
+  plants, terrain), with `look.color(object, face)` for your own rules (by an attribute,
+  say), and `look.lod` to pick a level of detail.
+* `city::add` gives one child per object, placed at its base, so `scale.y` grows it from
+  the ground (`city::rise` does that in order of distance). `city::mesh(model)` is one
+  mesh for the whole model, the cheapest to draw. `city::triangles(face)` triangulates a
+  face with holes (mapbox earcut).
+* Not only buildings: roads, water, plants and city furniture (street lamps, benches)
+  are objects too, so `scene->find("avenue-1")` can light up a road like any building.
+* Paths: a line geometry (a route, a tram line, a GPS track) is points in metres.
+  `city::along(path, u, &heading)` is the point at fraction `u` of its length and the
+  direction of travel there, to move a vehicle; `city::trail(scene, path, reveal)` is a
+  ribbon that draws itself on as `reveal(t)` goes from 0 to 1.
+* Labels that follow 3D points: `g3d::project(g3d::cameraAt(scene->camera, t), point,
+  viewport, out)` gives the screen position, for 2D tags and callouts that always face
+  the viewer.
+
+The bundled `data/city/town.city.json` is a made-up town built by
+`tools/make_city_sample.py`: houses, blocks, a two-part tower, roads, a canal, a park,
+trees and street lamps (from geometry templates), and a bus route with its stops (a line
+and points). Real cities: [3D BAG](https://3dbag.nl) (every building in
+the Netherlands) and the [CityJSON datasets page](https://www.cityjson.org/datasets/).
+
+`city-models` raises the town under an orbiting camera, colours it by construction year
+with a legend, puts LoD 1.2 beside LoD 2.2, picks out the tower by its id with a callout
+pinned to its top, lights two streets and their lamps one by one at dusk, and draws the
+bus route on as a bus drives it, stopping at each stop.
+
+### 3D globes
+
+`globe::` puts the Earth in a `g3d` scene, with maps, heat maps, weather and routes laid
+on it:
+
+```cpp
+auto scene = std::make_shared<g3d::Scene>();
+globe::Map map(4096, mkColor(0x1d3557));                      // an equirectangular image, drawn on the CPU
+map.fill(geo::land().merged(), mkColor(0x7fb069)).stroke(geo::countries().merged(), WHITE, 1.5f);
+g3d::Material earth;
+earth.dynamicMap = map.texture();
+scene->add(globe::sphere(), earth);
+globe::route(*scene, geo::cities().get("London").labelPoint(), geo::cities().get("Tokyo").labelPoint(),
+             [](int t) { return t / 90.f; });                 // a flight path drawing itself on
+scene->camera.up = [](int t, g3d::Camera& cam) { globe::look(cam, { 20 + t * 0.2, 30 }, 5); };
+```
+
+* Places: `globe::point(lonLat, radius)` and back with `lonLat(p)`; `north`/`east`
+  tangents; `place(object, lonLat, altitude, heading)` stands a model on the surface;
+  `look(camera, lonLat, distance)` puts the camera above a place.
+* Textures: `globe::sphere()` maps an equirectangular image onto the globe and
+  `globe::patch(box)` a lon/lat box (a sharper close-up, or a regional overlay).
+  `globe::Map` fills, strokes (as wide on the ground everywhere), graticules, discs in km
+  and gradients, handling the antimeridian and the poles.
+* Textures that change: `g3d::Material::dynamicMap` takes a `g3d::DynamicTexture`, an
+  image made per frame (or every N frames) and updated on the GPU in place. A see-through
+  shell a little above the ground (opacity just under 1) lays it over the globe.
+* Heat maps: `globe::Field` sums soft spots (`add(lonLat, radiusKm, weight)`) and
+  `image(scale)` colours them with `globe::heat` (or your palette).
+* Weather: `globe::clouds(width, seconds, weather)` draws procedural cloud cover, carried
+  by trade winds and westerlies, seamless at the antimeridian and the poles, with
+  `Storm`s wound into spirals round a clear eye.
+* Routes: `globe::arc(a, b, u)` lifts a great circle off the ground; `route(...)` draws it
+  on (and off, with a tail); `fly(object, a, b, u)` moves a plane along it, nose forward;
+  `path(...)` does the same along any curve.
+* `g3d::lookRotation(forward, up)` gives `Object3D::rotation` for any heading.
+
+`earth` turns a globe painted from Natural Earth under drifting clouds; flies every leg
+of President Prabowo Subianto's trips abroad since October 2024 out of Jakarta and back
+(from Wikipedia's list), a desk calendar tearing off the days; spreads a simulated outbreak
+from Dubai as a heat map; shows the 2026 fires in Sumatra and Kalimantan close up, their
+haze drifting to Singapore and Sarawak, with the hotspot counts and air-quality readings
+as reported and a month calendar keeping the date; and winds up a simulated typhoon over
+the Philippine Sea. Hotspot positions and the smoke are illustrative.
+
+### Data on 3D maps
+
+`geo3d::` stands data on a globe, on a flat projected map, or on anything between while
+the one unrolls into the other:
+
+```cpp
+auto surface = std::make_shared<geo3d::Surface>(geo::Projection::equalEarth(), geo::LonLat{ 10, 0 });
+g3d::Object3D* world = scene->add();
+geo3d::base(*world, surface, paper);                           // the map image (a Material) on the surface
+geo3d::MarkStyle cols;
+cols.grow = [](int t) { return t / 45.f; };
+geo3d::marks(*world, surface, geo3d::byCountry({ { "CHN", 1398 }, { "IND", 1366 }, { "USA", 328 } }), cols);
+const auto at = [](const char* iso) { return geo::countries().get(iso).labelPoint(); };
+geo3d::flows(*world, surface, { { at("MEX"), at("USA"), 11 }, { at("SYR"), at("TUR"), 3.9 } });
+scene->up = [surface](int t, g3d::Scene&) { surface->morph = std::clamp((t - 120) / 60.f, 0.f, 1.f); };
+```
+
+* `Surface`: a globe (morph 0) and a map from any `geo::Projection` (morph 1), centred on
+  one place, the map touching the globe there; every point and its "up" move in a straight
+  line between the two. `setMap` changes the projection at any time (also a
+  `Projection::mix`).
+* Marks: columns, spikes, bubbles and discs (`Mark`), sized by value, coloured by a
+  `Scale`, growing in one after another, values animated per frame if you like.
+* Areas: `extrude` raises countries as prisms (height 0 gives a flat choropleth in 3D),
+  bending with the globe; `choropleth` paints them on a `globe::Map` instead.
+* Flows: arcs along great circles (or across the map, for ones that would cross its
+  edge), as wide as their value, drawing themselves on.
+* Data by ISO code, id or name (`byCountry`); labels through `geo3d::screen`, which hides
+  places round the back of the globe; keys with `plot::colorbar` and `plot::legend`.
+* `g3d::Geometry::update(edit)` reshapes a mesh from an `up` callback; geo3d's shapes use
+  it to follow the morph.
+
+`map-charts` stands population columns on a turning globe, unrolls it into an Equal Earth
+map with the world's largest migration corridors arcing across it (IOM World Migration
+Report 2024), then lays the map on a table as a tilt-shift miniature of GDP per person.
+
+### Dates and calendars
+
+`cal::` counts days (since 1970-01-01, proleptic Gregorian), formats them, maps frames to
+dates and draws calendars that animate as the days go by:
+
+```cpp
+cal::Clock clock;
+clock.key(0, cal::Date{ 2024, 10, 20 }).key(300, cal::parse("2026-09-13"));  // linear between keys, held outside
+node->fn = [clock](const Ctx& c, int t) {
+    cal::page(c, { 1600, 760, 190, 230 }, clock.day(t));   // a tear-off desk calendar
+    cal::month(c, { 1500, 700, 360, 300 }, clock.day(t));  // a month card, today ringed
+    dr::text(fonts::ui(true), c, cal::format(clock.date(t), "%A %e %B %Y").c_str(), { 80, 80 }, 40, 0, WHITE);
+};
+```
+
+* `days(Date)`, `date(days)`, `weekday` (0 = Monday), `daysInMonth`, `parse("YYYY-MM-DD")`,
+  `monthName`, `weekdayName`, and `format` with `%Y %m %d %e %b %B %a %A %j %%`.
+* A day is a number: the fraction animates. Past `Style::turn` (0.55) the page tears off
+  and flies away, or the ring glides to the next day, or the next month rises in, so the
+  new day is up at the whole number. Key a clock to land at half days to keep it still.
+* `cal::Style` sets paper, ink, accent, header, muted and shadow colours, `weekday` (the
+  weekday under the page's number) and `firstWeekday` (0 = Monday, 6 = Sunday).
 
 ### Engine pieces
 
@@ -812,8 +1039,8 @@ shapes, icons with handles, and a stacked logo end card.
 * `rmtn/transitions.hpp` — `TransitionSeries` with fade, slide and wipe.
 * `rmtn/layout.hpp` — `layout::` rects, rows, columns, grids; `wrapText`, `dr::textBox`.
 * `rmtn/scene3d.hpp` — `g3d::` GPU scenes: geometry, models, materials (physically based
-  or toon/Gooch/hatch), lights, shadows, environments, ink lines, cameras with depth of
-  field, particle emitters.
+  or toon/Gooch/hatch; textures from files or remade per frame), lights, shadows,
+  environments, ink lines, cameras with depth of field, particle emitters.
 * `rmtn/diagram.hpp` — `dg::` graphs from Mermaid, DOT, BPMN, RDF, JSON and Newick;
   layered, force and tree layouts; `Diagram` animations (build, trace, flow, morph, focus).
 * `rmtn/chem.hpp` — `chem::` molecules (SMILES, MOL/SDF, PDB), skeletal formulas, 3D
@@ -881,6 +1108,13 @@ lowerthird             1920x1080 @30fps    6.0s  audio=0   (a name tag with no b
 audio-reactive         1920x1080 @30fps   24.0s  audio=1   (visuals driven by a music track: spectrum, beats, tempo, waveform, levels)
 captions               1920x1080 @30fps   26.1s  audio=1   (narrated by the system voice: scenes timed to phrases, burned-in and karaoke captions, an SRT sidecar)
 social-icons           1920x1080 @30fps   19.5s  audio=0   (the built-in icon prefabs: the raymotion logo, social badges in four looks, handles)
+flag-showcase          1920x1080 @30fps   13.0s  audio=1   (the built-in flag prefabs: 29 country flags, badge or plain, labels, a staggered flag-row)
+maps                   1920x1080 @30fps   24.4s  audio=1   (geo:: maps: a turning globe, seven projections morphing, a conic with a country by ISO code, cities)
+city-models            1920x1080 @30fps   41.5s  audio=1   (CityJSON in 3D: a town rising, coloured by year built, LoD 1.2 beside 2.2, a building by id, streets and lamps at dusk, a bus route)
+earth                  1920x1080 @30fps   65.2s  audio=1   (globe:: and cal:: in 3D: a painted Earth under clouds, Prabowo's trips abroad, an outbreak heat map, the 2026 Indonesian fires and haze, a typhoon)
+atmosphere             1920x1080 @30fps   20.0s  audio=1   (g3d::Sky and fog: a valley from before dawn to after dusk, ground fog burning off, stars, lit windows)
+atmosphere-miniature   1920x1080 @30fps   10.0s  audio=1   (tilt-shift: the valley's hamlet as a miniature, through camera.dof.tilt and as Filter::tiltShift)
+map-charts             1920x1080 @30fps   31.2s  audio=1   (geo3d:: population columns on a globe, the globe unrolling into a map of migration flows, GDP per person as a tilt-shift miniature)
 ```
 
 `raymotion-promo` is the 3.5-minute introduction to the engine
@@ -950,6 +1184,20 @@ and burned-in captions; audio analysis (a tone's band and loudness, interpolatio
 waveform, beats and tempo of click tracks, pulses, `startFrom`, caching by file; no window);
 icons (glyph data, the prefabs and their props errors; badge colours, Instagram's
 gradient, glyph and mono looks, the logo, entrances, determinism);
+maps (the bundled layers and lookups, GeoJSON and TopoJSON parsing and errors, distances,
+areas and containment, projection formulas, fitting, clipping at the antimeridian and the
+horizon measured by area, and mixes; no window);
+city models (the sample town's objects, levels of detail, semantics, parts and templates,
+CityJSON 1.0, CityJSONSeq and errors, triangulation areas, holes and winding, street lamps,
+the route and stops, `along`, trails drawing on and camera projection; a rendered
+town in semantic colours, rising, and framed; set `RMTN_CITYJSON_DIR` to also check every
+file in a folder of real data);
+globes (places, tangents and lookRotation, map fills against the real share of land and
+across the antimeridian and poles, strokes, discs, fields, the heat palette, cloud cover,
+seams, motion and storms, arcs, routes and flying; a rendered globe from two sides, a
+texture remade per frame, and an overlay shell);
+calendars (day counts both ways, leap years, weekdays, parsing and formatting, the frame
+clock; a page and a month card changing as the day turns);
 Here-There layout checks; and a Python CLI suite (exact sizes, draft scaling, stale-frame
 cleanup, a real MP4 render, transparent stills and ProRes/WebM renders with alpha, the
 starter project, props). Tests needing OpenGL carry the `gl`

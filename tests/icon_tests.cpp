@@ -18,7 +18,7 @@ template <class F> static bool throws(F f) {
 }
 
 static void data() {
-    CHECK(icons::brands().size() == 7);
+    CHECK(icons::brands().size() == 8);
     for (const std::string& b : icons::brands()) {
         const vg::Path& g = icons::glyph(b);
         const Rectangle r = g.bounds();
@@ -27,6 +27,7 @@ static void data() {
         CHECK(std::max(r.width, r.height) > 20);            // each mark fills its box
     }
     CHECK(icons::title("youtube") == "YouTube" && icons::title("github") == "GitHub");
+    CHECK(icons::title("twitch") == "Twitch");
     const Color red = icons::brandColor("youtube");
     CHECK(red.r == 255 && red.g == 0 && red.b == 0);
     CHECK(throws([] { icons::glyph("myspace"); }));
@@ -41,11 +42,20 @@ static void prefabs() {
     auto has = [&](const std::string& n) { return std::find(names.begin(), names.end(), n) != names.end(); };
     for (const std::string& b : icons::brands()) CHECK(has("social-" + b));
     CHECK(has("social-row") && has("raymotion-logo"));
+    CHECK(has("social-twitch"));
+    flags::registerPrefabs();
+    CHECK(flags::countries().size() == 29);
+    const auto flagNames = prefab::names();
+    for (const std::string& code : flags::countries())
+        CHECK(std::find(flagNames.begin(), flagNames.end(), "flag-" + code) != flagNames.end());
+    CHECK(std::find(flagNames.begin(), flagNames.end(), "flag-row") != flagNames.end());
+    CHECK(throws([] { flags::title("zz"); }));
     Nodes roots;
     CHECK(throws([&] { prefab::use(roots, 0, 30, "social-x", Json::parse(R"({"in": "wobble"})")); }));
     CHECK(throws([&] { prefab::use(roots, 0, 30, "social-x", Json::parse(R"({"style": "shiny"})")); }));
     CHECK(throws([&] { prefab::use(roots, 0, 30, "social-row", Json::parse(R"({"brands": ["x", "myspace"]})")); }));
     CHECK(throws([&] { prefab::use(roots, 0, 30, "raymotion-logo", Json::parse(R"({"layout": "diagonal"})")); }));
+    CHECK(throws([&] { prefab::use(roots, 0, 30, "flag-row", Json::parse(R"({"countries": ["at", "zz"]})")); }));
 }
 
 // ---------------------------------------------------------------- rendering
@@ -105,6 +115,16 @@ static void drawing() {
     CHECK(isBg(yt.at(20, 20)) && isBg(yt.at(200, 312)));
     UnloadImage(yt.img);
 
+    Frame twitch = render([](const Ctx& cx, int) { icons::draw(cx, "twitch", {200,200}, 200); });
+    CHECK(near(twitch.at(120,120), icons::brandColor("twitch")));
+    CHECK(twitch.count([](Color c) { return near(c, WHITE, 25); }) > 1000);
+    UnloadImage(twitch.img);
+
+    Frame japan = render([](const Ctx& cx, int) { flags::draw(cx, "jp", {200,200}, 200, false); });
+    CHECK(near(japan.at(200,200), mkColor(0xbc002d)));
+    CHECK(near(japan.at(120,160), WHITE));
+    UnloadImage(japan.img);
+
     // Instagram's gradient runs warm at the bottom left to violet-blue at the top right.
     Frame ig = render([](const Ctx& cx, int) { icons::draw(cx, "instagram", { 200, 200 }, 200); });
     const Color low = ig.at(118, 282), high = ig.at(282, 118);
@@ -140,8 +160,16 @@ static void drawing() {
 }
 
 static void entrances() {
+    Frame flag0 = renderPrefab("flag-at", Json(), 0);
+    CHECK(flag0.count(isBg) == 400 * 400);
+    UnloadImage(flag0.img);
+    Frame flag60 = renderPrefab("flag-at", Json(), 60);
+    CHECK(near(flag60.at(200,200), WHITE));
+    CHECK(near(flag60.at(200,175), mkColor(0xed2939)));
+    UnloadImage(flag60.img);
+
     // social-row pops in: nothing at frame 0, every icon by frame 60, the same each time.
-    const Json row = Json::parse(R"({"size": 80, "gap": 20, "handle": "@raymotion"})");
+    const Json row = Json::parse(R"({"brands": ["x", "youtube", "github", "instagram", "tiktok", "whatsapp", "telegram"], "size": 80, "gap": 20, "handle": "@raymotion"})");
     Frame f0 = renderPrefab("social-row", row, 0, 1000, 300);
     CHECK(f0.count(isBg) == 1000 * 300);
     UnloadImage(f0.img);

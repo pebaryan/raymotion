@@ -95,6 +95,11 @@ const Brand BRANDS[] = {
       "1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216"
       ".325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z",
       1, 1, 0.56f },
+    { "twitch", "Twitch", 0x9146FF, false,
+      "M4.285 0 2.143 5.714v15.429h5.714V24l2.857-2.857H15l7.857-7.857V0H4.285z"
+      "m16.429 12.286-4.286 4.286h-4.286l-3.571 3.571v-3.571H4.286V2.143h16.428v10.143z"
+      "M17.143 5.714H15v6.429h2.143V5.714zM11.429 5.714H9.286v6.429h2.143V5.714z",
+      -1, -1, 0.6f },
 };
 
 struct Prepared {
@@ -404,7 +409,7 @@ void registerPrefabs() {
     // A row of icons popping in one after another, with an optional handle beneath.
     prefab::add({
         "social-row",
-        Json::parse(R"({"brands": ["x", "youtube", "github", "instagram", "tiktok", "whatsapp", "telegram"],
+        Json::parse(R"({"brands": ["x", "youtube", "github", "instagram", "tiktok", "whatsapp", "telegram", "twitch"],
                         "size": 120, "gap": 40, "style": "badge", "shape": "rounded", "color": "#ffffff",
                         "stagger": 4, "handle": "", "ink": "#f2f4ff", "in": "pop", "delay": 0, "fps": 30})"),
         [](TNode& n, const Json& p) {

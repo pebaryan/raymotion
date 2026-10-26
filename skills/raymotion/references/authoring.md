@@ -102,7 +102,8 @@ l.mask = [](const Ctx& cx, int t) { dr::circle(cx, { 960, 540 }, 12.f * t, WHITE
 l.maskMode = MaskMode::Luma; l.invertMask = true;
 l.filters = { Filter::watercolor(6), Filter::paperGrain() };
 // Filter::posterize(levels), halftone(cell, angle, colored), paperGrain(strength, scale),
-// inkEdges(width, ink, threshold), watercolor(bleed, edgeDarkening, granulation)
+// inkEdges(width, ink, threshold), watercolor(bleed, edgeDarkening, granulation),
+// tiltShift(position from the top, band half-height, blur px, angle, saturation)
 ```
 
 Each layer costs an offscreen pass; use them for effects, not for every node.
@@ -251,6 +252,10 @@ node->fn = [=](const Ctx& cx, int t) {
 | `contours(cx, contour(axes, f, levels, cell), ContourStyle, u)` | `f(x, y)` | build the `ContourMap` once; `fill`, `labels`, `colors` |
 | `parallel(cx, table, box, ParallelStyle, u)` | rows = categories, axes = series | `colorBy` a dimension, `highlight` one row |
 | `stream(cx, table, ChartStyle, u)` | `Table` | centred, smoothed stacks; names inside the streams |
+
+Keys for charts of your own: `colorbar(cx, box, Range(lo, hi, step), ColorbarStyle{colors,
+title, decimals, suffix}, u)` (upright when the box is taller than wide) and
+`legend(cx, topLeft, { { "name", color } }, LegendStyle{textSize, swatch, gap, across, round}, u)`.
 
 `plot::nice(lo, hi, pad)` rounds a data extent out to whole ticks for your own `Axes`.
 Text labels are plain text: names go through `\text{}`, so `&`, `$`, `%` are fine.
@@ -551,6 +556,26 @@ node->fn = [music](const Ctx& cx, int t) {
 - `aud::analyze(stereo, rate, o)` analyses samples you already have. Analysis is lazy, so
   the file may be written by `c.assets` after the composition is built.
 
+## Country flags (`flags::`, `rmtn/flags.hpp`)
+
+Built-in prefabs like the social icons: `flag-<code>` for one flag, `flag-row` for several,
+each centred on its node's origin. A 3:2 flag on a rounded badge (`badge: false` for the
+flag alone).
+
+```cpp
+prefab::use(root, 0, 90, "flag-at", Json::parse(R"({"size": 160, "label": "Austria"})"));
+prefab::use(root, 0, 90, "flag-row", Json::parse(R"({"countries": ["at", "de", "fr", "gb"], "stagger": 5})"));
+flags::draw(cx, "jp", { 960, 540 }, 160, /*badge*/ false);       // in a drawing function
+```
+
+- Codes (lower-case ISO 3166-1 alpha-2): `at be br ca ch cn cz de dk ee fi fr gb hu id
+  ie in it jp lu mc nl no pl ro ru se ua us`; `flags::countries()` lists them,
+  `flags::title(code)` gives the name. Unknown codes throw.
+- Props: `size`, `badge`, `label` (beside the flag; under the row), `ink`, `in` (`pop` |
+  `fade` | `none`), `delay`, `fps`; `flag-row` adds `countries`, `gap`, `stagger`.
+- `flags::draw(cx, code, centre, width, badge, reveal)` draws one anywhere (on a map,
+  next to a geo3d label).
+
 ## Social icons and the raymotion logo (`icons::`, `rmtn/icons.hpp`)
 
 Built-in prefabs (the CLI registers them before the project's; same-named project
@@ -563,8 +588,8 @@ prefab::use(root, 30, 120, "social-row", Json::parse(R"({"brands": ["x", "github
 prefab::use(root, 0, 150, "raymotion-logo", Json::parse(R"({"tagline": "video as code", "badge": true})"));
 ```
 
-- Brands: `x`, `youtube`, `github`, `instagram`, `tiktok`, `whatsapp`, `telegram`
-  (`social-<brand>` each).
+- Brands: `x`, `youtube`, `github`, `instagram`, `tiktok`, `whatsapp`, `telegram`,
+  `twitch` (`social-<brand>` each).
 - `social-*` and `social-row` props: `size`, `style` (`badge` | `glyph` | `mono` | `outline`),
   `shape` (`rounded` | `circle` | `square`), `color` (mono, outline, dark brands' glyph,
   and the mark on a badge), `handle`, `ink` (its colour), `in` (`pop` | `draw` | `fade`
@@ -578,6 +603,178 @@ prefab::use(root, 0, 150, "raymotion-logo", Json::parse(R"({"tagline": "video as
   badge, spin)`; `icons::glyph(brand)` is the 24 x 24 path (fill it EvenOdd);
   `icons::brandColor`, `icons::title`.
 - The glyphs are Simple Icons paths (CC0); the logos are their owners' trademarks.
+
+## Maps (`geo::`, `rmtn/geo.hpp`)
+
+```cpp
+auto map = geo::Projection::equalEarth().fit({ 60, 120, 1800, 900 }, geo::Sphere);
+node->fn = [map](const Ctx& cx, int t) {
+    vg::fill(cx, map.outline(), OCEAN);
+    vg::fill(cx, map.path(geo::land().merged()), LAND, vg::FillRule::EvenOdd);
+    vg::stroke(cx, map.lines(geo::countries().merged()), vg::Stroke(BORDER, 1));
+};
+auto globe = geo::Projection::orthographic().rotate({ 37, 0 }).fit({ 560, 140, 800, 800 }, geo::Sphere);
+```
+
+- Coordinates are `geo::LonLat{ lon, lat }` in degrees (east, north). `Geometry` holds
+  polygons (outer ring then holes), lines and points; `Feature` has `id`, `properties`
+  (Json), `geometry`, `name()`, `labelPoint()`.
+- Bundled Natural Earth 1:110m: `geo::countries()` (properties `name`, `name_long`,
+  `iso_a2`, `iso_a3`, `continent`, `region`, `subregion`, `pop`, `gdp_md`, `label`),
+  `land()`, `lakes()`, `rivers()`, `cities()` (`name`, `country`, `iso_a2`, `pop`,
+  `capital`; largest first). `get(key)` matches id, ISO code or name (any case; throws
+  when absent), `find` returns nullptr; `filter(pred)`, `merged()`.
+- Own data: `geo::load(file, object = "")` / `geo::parse(text, object)` for GeoJSON
+  (FeatureCollection, Feature or bare geometry) and TopoJSON (quantized or not). Rings are
+  normalised (outer anticlockwise), malformed input throws.
+- Projections: `equirectangular`, `mercator`, `equalEarth`, `naturalEarth`, `robinson`,
+  `mollweide`, `orthographic`, `stereographic`, `azimuthalEquidistant`,
+  `azimuthalEqualArea`, `gnomonic`, `conicEqualArea`, `conicConformal`,
+  `conicEquidistant` (set `parallels(a, b)` and `rotate({ -centreLon, 0 })`). Chain
+  `rotate(centre, roll)`, `scale`, `translate`, `clipAngle`, `precision`, and
+  `fit(box, geometry or layer or geo::Sphere, padding)` last. Empty geometry fits the
+  whole sphere.
+- `path(g)` for fills (always `FillRule::EvenOdd`), `lines(g)` for strokes, `outline()`,
+  `graticule(step, polar)`, `project(p, out)` (false behind a globe), or call the projection, `map(p)` (no clipping).
+  Build a projection per frame to animate it (cheap); cache paths of static maps.
+- `Projection::mix(a, b, t)`: in-between of two (fitted) projections; a globe unfolds
+  smoothly into a flat map.
+- `geo::distance` (km), `angle` (deg), `interpolate(a, b, t)` (great circle),
+  `bearing`, `centroid`, `bounds`, `area` (km^2), `contains`.
+
+## 3D city models (`city::`, `rmtn/city.hpp`)
+
+```cpp
+const city::Model town = city::load("data/city/town.city.json");   // or your .city.json / .city.jsonl
+auto scene = std::make_shared<g3d::Scene>();
+scene->lights.push_back(g3d::Light::directional({ 230, 190, 140 }, WHITE, 1.3f, true));
+scene->lights.back().shadowExtent = 220;                            // metres: cover the model
+g3d::Object3D* group = city::add(*scene, town);                    // children named by object id
+city::rise(group, 0, 2, 24);
+const BoundingBox box = town.bounds();
+scene->camera.up = [box](int t, g3d::Camera& cam) { city::frame(cam, box, 200 + t * 0.2f, 35); };
+addRoot(c.roots, 0, 300)->fn = g3d::draw(scene);
+```
+
+- `city::Model`: `objects` (`id`, `type`, `attributes` Json, `parents`, `children`,
+  `geometry` per LoD), `get(id)` (throws) / `find(id)`, `filter(pred)`, `lods()`,
+  `bounds(lod)`, `origin` (file coordinates of local 0,0,0), `world(p)` / `local(w)`, `crs`.
+- `Object::at(lod)` picks a geometry (empty or missing lod: the most detailed);
+  `bounds`, `height`; `city::base(o)` is the middle of its footprint at ground level.
+- `Geometry`: `faces` (rings, then holes; `kind` = semantic surface type, `semantic` its
+  Json), `lines`, `points`, `lod`, `type`. Solids' shells are flattened into faces.
+- Axes: CityJSON x east, y north, z up (metres); g3d x east, y up, z south.
+  `city::toScene(p)` converts. Large scenes: set the sun's `shadowExtent` to about half
+  the model's width, and put the sun where its shadows fall towards the camera.
+- `city::Look`: colours per semantic surface and object type, `lod`, and
+  `color(object, face)` returning a colour or BLANK (fall back). Colour by attributes there.
+- `city::add(scene or object, model, look, material)` (double-sided by default);
+  `city::mesh(object, look, offset)` / `city::mesh(model, look)` for one mesh;
+  `city::rise(group, delay, stagger, length, from)`; `city::frame(camera, model or
+  box, azimuth (deg clockwise from north), elevation, margin, aspect)`.
+- Per-object effects: find a child by id (`scene->find(id)`) and animate its `material`
+  (`color` multiplies the face colours; `emissive` lights it) or `visible`.
+- `city::triangles(face, &normal)` gives index triples (outer ring then holes, in order).
+- Non-buildings are objects too: `Road`, `WaterBody`, `PlantCover`, `CityFurniture`
+  (`look.furniture`), `GenericCityObject`. Light a road by its id like a building.
+  Non-standard semantic surfaces start with "+" (the sample lamps: "+Pole", "+Lamp").
+- Paths (CityJSON axes, e.g. `o.at()->lines[0]`): `city::length(path)`;
+  `city::along(path, u, &heading)` (heading in degrees clockwise from north; an object
+  whose front is +z faces along with `rotation.y = 180 - heading`);
+  `city::trail(scene or object, path, reveal(t) -> 0..1, TrailStyle{width, thickness,
+  lift, color, unlit})` draws a ribbon on along it.
+- 2D labels on 3D points: `g3d::project(g3d::cameraAt(scene->camera, t), toScene(p),
+  {0, 0, 1920, 1080}, out)` (false when behind the camera); draw after `g3d::draw`.
+
+## 3D globes (`globe::`, `rmtn/globe.hpp`)
+
+```cpp
+auto scene = std::make_shared<g3d::Scene>();
+globe::Map map(4096, mkColor(0x1d3557));                           // equirectangular, 2:1, on the CPU
+map.fill(geo::land().merged(), mkColor(0x7fb069)).stroke(geo::countries().merged(), WHITE, 1.5f);
+g3d::Material earth;
+earth.dynamicMap = map.texture();                                  // made once
+scene->add(globe::sphere(1, 192), earth);
+scene->camera.fov = 30;
+scene->camera.up = [](int t, g3d::Camera& cam) { globe::look(cam, { 20 + t * 0.2, 30 }, 5); };  // ~5 fits fov 30
+```
+
+- Axes: radius 1 globe at the origin, north +y, (0, 0) at +z, 90E at +x.
+  `point(lonLat, r)`, `lonLat(p)`, `north(p)`, `east(p)`, `place(obj, p, altitude, heading)`.
+- `sphere(r, segments)` / `patch(bounds, r, segments)` have equirectangular UVs; pair a
+  patch with `Map(width, bounds)` or `Field(width, bounds)` for a sharp regional layer.
+- `g3d::Material::dynamicMap` = `std::make_shared<g3d::DynamicTexture>()` with
+  `make = [](int t) { return image; }` (the texture takes the Image) and `every` = frames
+  per remake. Keep the size fixed. Overlays: a shell at r 1.004 to 1.02 with
+  `opacity = 0.999f` (drawn after opaque objects, in scene order at equal depth),
+  usually `unlit`. Make `make(t)` depend only on t (renders may start mid-way).
+- `Map`: `fill`, `stroke` (px at the equator), `graticule`, `disc(p, km, color, soft)`,
+  `gradient(north, equator, south)` (under what is there), `over(map)`, `pixel`, `place`,
+  `pixelOf`, `image()`, `texture()`.
+- `Field`: `add(p, radiusKm, weight)`, `at`, `max`, `image(scale, palette)`; `heat(v)`.
+- `clouds(width, seconds, Weather{cover, softness, scale, evolve, opacity, seed, wind,
+  storms})`; `Storm{centre, radiusKm, strength, south}`; `cloud(p, seconds, w)` samples one.
+  2048 wide every 2 frames is fine for a close view; 1024 for a whole globe.
+- Routes: `arc(a, b, u, height)` (height < 0: by distance), `route(scene, a, b, head(t),
+  RouteStyle{height, width, color, unlit, segments}, tail(t))`, `path(parent, curve(u),
+  head, style, tail)`, `fly(obj, a, b, u)` (+z forward, +y up).
+- Labels: `g3d::project(g3d::cameraAt(scene->camera, t), point, {0,0,1920,1080}, out)`;
+  hide those behind the globe: `dot(normalize(p), cam.position - p) > 0`.
+- Glow: draw the atmosphere as 2D rings behind `g3d::draw` (the globe's screen radius is
+  `tan(asin(1/d)) / tan(fov/2) * h/2` for camera distance d).
+- `g3d::lookRotation(forward, up)` gives Euler angles for any orientation.
+
+## Data on 3D maps (`geo3d::`, `rmtn/geo3d.hpp`)
+
+```cpp
+auto surface = std::make_shared<geo3d::Surface>(geo::Projection::equalEarth(), geo::LonLat{ 10, 0 });
+g3d::Object3D* world = scene->add();
+g3d::Material paper;
+paper.dynamicMap = map.texture();                                  // a globe::Map
+geo3d::base(*world, surface, paper);
+geo3d::MarkStyle st;                                               // Column, Spike, Bubble, Disc
+st.grow = [](int t) { return t / 45.f; };
+st.stagger = 2;                                                    // largest first
+geo3d::marks(*world, surface, geo3d::byCountry({ { "IDN", 281 }, { "BRA", 216 } }), st);
+geo3d::extrude(*world, surface, { { "NOR", 75 }, { "KEN", 2 } }, geo3d::ExtrudeStyle{});
+geo3d::flows(*world, surface, { { from, to, 3.5 } }, geo3d::FlowStyle{});
+scene->up = [surface](int t, g3d::Scene&) { surface->morph = std::clamp(t / 90.f, 0.f, 1.f); };
+```
+
+- Frames: globe of `radius` at the origin with `centre` facing +z; the map in the plane
+  z = radius facing +z, north +y, `width` across (default 2*pi*radius), touching the
+  globe at `centre`. Heights are world units along `surface->up(p)`. Shapes are built in
+  the parent's space: turn the parent to lay the map on a table (`rotation = {-90, 0, 0}`).
+- Keep the map's seam (opposite `centre`) in the Pacific: centre longitude about 10.
+- Styles: `size`, `height` (for the largest value), `scale` (`Scale{min, max, colors}`,
+  auto range from the data), `grow(t)`, `stagger`, `value(t, datum)` / `value(t, key)` to
+  animate data; `ExtrudeStyle::height = 0` for flat shapes, `detail` degrees for curvature.
+- `geo3d::choropleth(map, values, scale)` paints countries on a `globe::Map` instead.
+- Labels: `geo3d::screen(g3d::cameraAt(scene->camera, t), *surface, place, height,
+  {0, 0, 1920, 1080}, out)`; false behind the globe. For an untransformed parent.
+- `g3d::Geometry::update([](Mesh& m) { ... })` re-uploads vertices and normals before the
+  next draw: call it from `up` for meshes that change shape.
+
+## Dates and calendars (`cal::`, `rmtn/calendar.hpp`)
+
+```cpp
+cal::Clock clock;                                                   // frames -> days
+clock.key(0, cal::Date{ 2026, 8, 15 }).key(300, cal::parse("2026-09-24"));
+const double day = clock.day(t);                                    // days since 1970-01-01, fractional
+cal::page(c, { 1650, 750, 190, 230 }, day, style);                  // tear-off desk page
+cal::month(c, { 1500, 700, 360, 300 }, day, style);                 // month card, today ringed
+std::string s = cal::format(clock.date(t), "%a %e %b %Y");          // "Sat 5 Sep 2026"
+```
+
+- `days(Date)` / `date(long or double)`, `weekday` (0 = Mon .. 6 = Sun), `daysInMonth`,
+  `parse` (throws `std::runtime_error`), `monthName(m, abbrev)`, `weekdayName(wd, abbrev)`;
+  format tokens `%Y %m %d %e %b %B %a %A %j %%`.
+- The fraction of a day drives the motion: after `Style::turn` (0.55) the page tears off,
+  the ring glides on, or the next month rises in. Key the clock at `day + 0.5` where it
+  should rest; between distant keys the pages race (a time skip).
+- `Clock::key` takes keys in any order; a repeated day holds the date. `Style`: paper, ink,
+  accent, header, muted, shadow, `weekday`, `firstWeekday`.
+- Both calendars draw their own card (paper colour), so they read on any background.
 
 ## Props, prefabs and generated assets
 

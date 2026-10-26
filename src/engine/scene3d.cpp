@@ -5,6 +5,7 @@
 #include <raymath.h>
 #include <rlgl.h>
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <map>
 #include <stdexcept>
@@ -81,6 +82,8 @@ uniform mat4 shadowVP[16]; uniform vec4 shadowRect[16]; uniform vec4 shadowParam
 uniform sampler2D envMap; uniform int hasEnv; uniform int envLinear; uniform float envMaxLod;
 uniform float envIntensity; uniform float envRotation; uniform int skybox;
 uniform vec3 fogColor; uniform float fogNear; uniform float fogFar;
+uniform int fogMode; uniform float fogDensity; uniform float fogHeight; uniform float fogFalloff; uniform int fogSky;
+uniform float backdropScale;
 uniform int shading; uniform float pxScale;
 uniform int toonBands; uniform float toonSoftness; uniform float toonHighlight; uniform float toonHighlightSize;
 uniform vec3 rimColor; uniform float rimWidth;
@@ -126,6 +129,25 @@ vec3 env(vec3 d, float lod) {
     float v = acos(clamp(d.y, -1.0, 1.0)) / PI;
     vec3 c = textureLod(envMap, vec2(u, v), lod).rgb;
     return (envLinear == 1 ? c : pow(c, vec3(2.2))) * envIntensity;
+}
+// ---- fog: linear by distance, or exponential in optical depth (optionally thinning with
+// height above fogHeight: the density integrated along the ray in closed form)
+float fogAmount(vec3 p) {
+    vec3 ray = p - viewPos;
+    float d = length(ray);
+    if (fogMode == 0) return fogFar > fogNear ? clamp((d - fogNear) / (fogFar - fogNear), 0.0, 1.0) : 0.0;
+    if (fogDensity <= 0.0) return 0.0;
+    float od = fogDensity * d;
+    if (fogFalloff > 0.0) {
+        float a = fogFalloff * ray.y;
+        float g = abs(a) > 1e-4 ? (1.0 - exp(-a)) / a : 1.0 - 0.5 * a;
+        od *= exp(-fogFalloff * (viewPos.y - fogHeight)) * g;
+    }
+    return fogMode == 1 ? 1.0 - exp(-od) : 1.0 - exp(-od * od);
+}
+vec3 fogTint(vec3 p) {
+    if (fogSky == 1 && hasEnv == 1) return env(normalize(p - viewPos), max(envMaxLod - 7.0, 0.0)) * backdropScale;
+    return fogColor;
 }
 // Karis' analytic approximation of the split-sum environment BRDF.
 vec3 envBRDF(vec3 spec, float rough, float ndv) {
@@ -228,7 +250,7 @@ vec3 hatch(vec3 albedo, vec3 n) {
 }
 
 void main() {
-    if (skybox == 1) { finalColor = encode(env(normalize(fragPos - viewPos), 0.0), 1.0); return; }
+    if (skybox == 1) { finalColor = encode(env(normalize(fragPos - viewPos), 0.0) * backdropScale, 1.0); return; }
     vec4 base = texture(texture0, fragTexCoord) * colDiffuse * fragColor;
     if (unlit == 1) { finalColor = vec4(base.rgb, base.a * opacity); return; }
     vec3 albedo = pow(base.rgb, vec3(2.2));
@@ -265,10 +287,8 @@ void main() {
         }
     }
     color += emissive;
-    if (fogFar > fogNear) {
-        float f = clamp((length(viewPos - fragPos) - fogNear) / (fogFar - fogNear), 0.0, 1.0);
-        color = mix(color, fogColor, f);
-    }
+    float f = fogAmount(fragPos);
+    if (f > 0.0) color = mix(color, fogTint(fragPos), f);
     finalColor = encode(color, base.a * opacity);
 }
 )";
@@ -321,6 +341,7 @@ in vec2 fragTexCoord; in vec4 fragColor;
 uniform sampler2D texture0; uniform sampler2D depthTex;
 uniform vec2 texel; uniform float zNear; uniform float zFar; uniform int ortho;
 uniform float focus; uniform float aperture; uniform float maxBlur; uniform float radStep;
+uniform float tanTilt; uniform float tanHalfFov; uniform vec2 viewY;   // viewY: the viewport's bottom and height in uv
 out vec4 finalColor;
 float depthAt(vec2 uv) {
     float d = texture(depthTex, uv).r;
@@ -328,16 +349,22 @@ float depthAt(vec2 uv) {
     float z = d * 2.0 - 1.0;
     return 2.0 * zNear * zFar / (zFar + zNear - z * (zFar - zNear));
 }
-float blurSize(float z) { return clamp(aperture * abs(z - focus) / max(z, 1e-4), 0.0, 1.0) * maxBlur; }
+// The distance in focus along the ray through uv: where it meets the tilted focal plane.
+float focusAt(vec2 uv) {
+    if (ortho == 1 || tanTilt == 0.0) return focus;
+    float y = ((uv.y - viewY.x) / viewY.y * 2.0 - 1.0) * tanHalfFov;
+    return focus / max(1.0 - tanTilt * y, 0.05);
+}
+float blurSize(float z, vec2 uv) { float f = focusAt(uv); return clamp(aperture * abs(z - f) / max(z, 1e-4), 0.0, 1.0) * maxBlur; }
 void main() {
-    float cz = depthAt(fragTexCoord), cs = blurSize(cz);
+    float cz = depthAt(fragTexCoord), cs = blurSize(cz, fragTexCoord);
     vec4 sum = texture(texture0, fragTexCoord);
     float tot = 1.0, radius = radStep, ang = 0.0;
     for (int i = 0; i < 512; i++) {
         if (radius >= maxBlur) break;
-        vec2 tc = fragTexCoord + vec2(cos(ang), sin(ang)) * texel * radius;
+        vec2 tc = clamp(fragTexCoord + vec2(cos(ang), sin(ang)) * texel * radius, 0.5 * texel, 1.0 - 0.5 * texel);
         vec4 sc = texture(texture0, tc);
-        float sz = depthAt(tc), ss = blurSize(sz);
+        float sz = depthAt(tc), ss = blurSize(sz, tc);
         if (sz > cz) ss = clamp(ss, 0.0, cs * 2.0);       // sharp things in front stay sharp
         float m = smoothstep(radius - 0.5, radius + 0.5, ss);
         sum += mix(sum / tot, sc, m);
@@ -456,15 +483,81 @@ void main() {
 }
 )";
 
+// The sky, drawn into an equirectangular image (u: azimuth as env() reads it, v: from the
+// zenith at the bottom row of the target, which is texture row 0). Linear colours in,
+// sRGB out, the same encoding as an environment image.
+const char* SKY_FS = R"(#version 330
+out vec4 finalColor;
+uniform vec2 size;
+uniform vec3 zenith; uniform vec3 horizon; uniform vec3 ground; uniform float curve;
+uniform vec3 sunDir; uniform vec3 sunColor; uniform float sunCos; uniform float sunGlow;
+uniform vec3 haze; uniform float hazeAmount;
+uniform float stars; uniform float clouds; uniform vec3 cloudColor; uniform vec3 cloudShade;
+uniform float cloudScale; uniform vec2 cloudOffset; uniform float frame; uniform float seed;
+const float PI = 3.14159265;
+float hash(vec3 p) { p = fract(p * 0.3183099 + vec3(0.71, 0.113, 0.419) + seed * 0.0137); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
+float vnoise(vec2 x) {
+    vec2 i = floor(x), f = fract(x), u = f * f * (3.0 - 2.0 * f);
+    float a = hash(vec3(i, 0.0)), b = hash(vec3(i + vec2(1, 0), 0.0)), c = hash(vec3(i + vec2(0, 1), 0.0)), d = hash(vec3(i + vec2(1, 1), 0.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+float fbm(vec2 x) {
+    float v = 0.0, a = 0.5;
+    for (int i = 0; i < 5; i++) { v += a * vnoise(x); x = x * 2.03 + vec2(17.1, 9.3); a *= 0.5; }
+    return v;
+}
+void main() {
+    vec2 uv = gl_FragCoord.xy / size;
+    float phi = (uv.x - 0.5) * 2.0 * PI, theta = uv.y * PI;
+    vec3 d = vec3(cos(phi) * sin(theta), cos(theta), sin(phi) * sin(theta));
+    vec3 s = normalize(sunDir);
+    float h = d.y, toSun = dot(d, s);
+    // The gradient, and the horizon warmed under the sun (more as the sun gets low).
+    float low = 1.0 - clamp(s.y * 2.5, 0.0, 1.0);
+    float side = pow(max(dot(normalize(vec3(d.x, 0.0, d.z) + 1e-5), normalize(vec3(s.x, 0.0, s.z) + 1e-5)), 0.0), 3.0);
+    vec3 hor = mix(horizon, haze, hazeAmount * side * (0.35 + 0.65 * low));
+    vec3 c = h >= 0.0 ? mix(hor, zenith, pow(h, curve)) : mix(hor, ground, clamp(pow(-h * 6.0, 0.6), 0.0, 1.0));
+    c += haze * hazeAmount * 0.6 * pow(max(toSun, 0.0), 6.0) * pow(1.0 - abs(h), 4.0);
+    // Stars: one per cell of a cube-ish grid on the sphere, twinkling; gone near the horizon.
+    if (stars > 0.0 && h > 0.0) {
+        vec3 g = d * 220.0, cell = floor(g);
+        float r = hash(cell);
+        vec3 at = cell + 0.5 + (vec3(hash(cell + 3.1), hash(cell + 7.7), hash(cell + 1.3)) - 0.5) * 0.7;
+        float dist = length(g - at);
+        float on = step(1.0 - 0.18 * stars, r) * smoothstep(0.32, 0.0, dist);
+        float tw = 0.7 + 0.3 * sin(frame * (0.05 + 0.1 * hash(cell + 9.0)) + r * 40.0);
+        c += vec3(0.9, 0.93, 1.0) * on * tw * stars * smoothstep(0.0, 0.25, h) * (0.4 + 0.6 * hash(cell + 5.0));
+    }
+    // Clouds on a flat layer overhead, lit from the sun's side, thinning to the horizon.
+    if (clouds > 0.0 && h > 0.0) {
+        vec2 q = d.xz / (h + 0.12) * 1.6 * cloudScale + cloudOffset * 60.0;
+        float n = fbm(q);
+        float cov = smoothstep(1.0 - clouds * 0.9 - 0.12, 1.0 - clouds * 0.9 + 0.18, n);
+        float lit = clamp(0.5 + 0.8 * (fbm(q + s.xz * 0.6) - n) * -4.0 + 0.3 * toSun, 0.0, 1.0);
+        vec3 cc = mix(cloudShade, cloudColor, lit) * (0.55 + 0.45 * max(s.y + 0.25, 0.0));
+        cc += sunColor * sunGlow * 0.5 * pow(max(toSun, 0.0), 12.0) * (1.0 - cov * 0.5);
+        c = mix(c, cc, cov * smoothstep(0.0, 0.18, h));
+    }
+    // The sun's glow, then the disc (hidden below the horizon).
+    c += sunColor * sunGlow * (0.25 * pow(max(toSun, 0.0), 48.0) + 0.6 * pow(max(toSun, 0.0), 600.0));
+    if (sunCos < 1.0) c = mix(c, sunColor * 1.4, smoothstep(sunCos - 0.00002, sunCos + 0.00002, toSun) * smoothstep(-0.01, 0.01, h));
+    finalColor = vec4(pow(clamp(c, 0.0, 1.0), vec3(1.0 / 2.2)), 1.0);
+}
+)";
+
+struct SkyLocs { int size, zenith, horizon, ground, curve, sunDir, sunColor, sunCos, sunGlow, haze, hazeAmount, stars,
+                 clouds, cloudColor, cloudShade, cloudScale, cloudOffset, frame, seed; };
+
 struct LitLocs {
     int viewPos, sky, ground, lightCount, lightType, lightPos, lightDir, lightColor, lightRange,
         cosInner, cosOuter, lightShadow, lightBias, roughness, metalness, emissive, unlit, opacity,
         receiveShadow, shadowAtlas, atlasTexel, shadowVP, shadowRect, shadowParams, envMap, hasEnv,
-        envLinear, envMaxLod, envIntensity, envRotation, skybox, fogColor, fogNear, fogFar, skinned, bones,
+        envLinear, envMaxLod, envIntensity, envRotation, skybox, fogColor, fogNear, fogFar, fogMode, fogDensity,
+        fogHeight, fogFalloff, fogSky, backdropScale, skinned, bones,
         shading, pxScale, toonBands, toonSoftness, toonHighlight, toonHighlightSize, rimColor, rimWidth,
         goochWarm, goochCool, hatchInk, hatchSpacing, hatchAngle, hatchWeight;
 };
-struct DofLocs { int depthTex, texel, zNear, zFar, ortho, focus, aperture, maxBlur, radStep; };
+struct DofLocs { int depthTex, texel, zNear, zFar, ortho, focus, aperture, maxBlur, radStep, tanTilt, tanHalfFov, viewY; };
 struct GbufLocs { int objectId, lineStyle, skinned, bones; };
 struct LineLocs { int depthTex, texel, zNear, zFar, ortho, pixelWorld, pxScale, styles, maxRadius, creaseCos,
                   depthThreshold, wobble, wobbleScale, seed; };
@@ -475,8 +568,10 @@ struct DepthTarget { unsigned int fbo = 0, color = 0, depth = 0; int w = 0, h = 
 
 struct Gpu {
     bool ready = false;
-    Shader lit{}, depth{}, dof{}, gbuf{}, line{}, particle{};
+    Shader lit{}, depth{}, dof{}, gbuf{}, line{}, particle{}, sky{};
     LitLocs L{};
+    SkyLocs S{};
+    RenderTexture skyTarget{};          // the procedural sky, remade each frame
     DofLocs D{};
     GbufLocs G{};
     LineLocs N{};
@@ -488,6 +583,9 @@ struct Gpu {
     Mesh skyCube{};
     std::map<std::string, Texture2D> textures;
     std::map<const Scene*, Texture2D> generated;    // environmentGenerator results
+    struct Dynamic { DynamicTexturePtr keep; Texture2D tex{}; long long made = LLONG_MIN; };
+    std::map<const DynamicTexture*, Dynamic> dynamic;   // Material::dynamicMap textures
+    int frame = 0;                                      // the frame being drawn (for dynamic maps)
 };
 Gpu gpu;
 
@@ -505,6 +603,8 @@ void releaseGpu() {
     if (gpu.gbuf.id) UnloadShader(gpu.gbuf);
     if (gpu.line.id) UnloadShader(gpu.line);
     if (gpu.particle.id) UnloadShader(gpu.particle);
+    if (gpu.sky.id) UnloadShader(gpu.sky);
+    if (gpu.skyTarget.id) UnloadRenderTexture(gpu.skyTarget);
     if (gpu.material.maps) {
         gpu.material.maps[MATERIAL_MAP_DIFFUSE].texture = whiteTexture();   // cached textures are freed below
         UnloadMaterial(gpu.material);
@@ -515,6 +615,7 @@ void releaseGpu() {
     if (gpu.skyCube.vertexCount) UnloadMesh(gpu.skyCube);
     for (auto& [path, tex] : gpu.textures) UnloadTexture(tex);
     for (auto& [scene, tex] : gpu.generated) UnloadTexture(tex);
+    for (auto& [src, d] : gpu.dynamic) if (d.tex.id) UnloadTexture(d.tex);
     gpu = Gpu{};
 }
 
@@ -527,8 +628,9 @@ void ensureGpu() {
     gpu.gbuf = LoadShaderFromMemory((head + LIT_VS_BODY).c_str(), GBUF_FS);
     gpu.line = LoadShaderFromMemory(nullptr, LINE_FS);
     gpu.particle = LoadShaderFromMemory(nullptr, PARTICLE_FS);
+    gpu.sky = LoadShaderFromMemory(nullptr, SKY_FS);
     if (!IsShaderValid(gpu.lit) || !IsShaderValid(gpu.depth) || !IsShaderValid(gpu.dof) ||
-        !IsShaderValid(gpu.gbuf) || !IsShaderValid(gpu.line) || !IsShaderValid(gpu.particle))
+        !IsShaderValid(gpu.gbuf) || !IsShaderValid(gpu.line) || !IsShaderValid(gpu.particle) || !IsShaderValid(gpu.sky))
         throw std::runtime_error("g3d: shader compilation failed");
     auto loc = [](const char* name) { return GetShaderLocation(gpu.lit, name); };
     gpu.L = { loc("viewPos"), loc("skyColor"), loc("groundColor"), loc("lightCount"), loc("lightType"),
@@ -537,7 +639,8 @@ void ensureGpu() {
               loc("emissive"), loc("unlit"), loc("opacity"), loc("receiveShadow"), loc("shadowAtlas"),
               loc("atlasTexel"), loc("shadowVP"), loc("shadowRect"), loc("shadowParams"), loc("envMap"),
               loc("hasEnv"), loc("envLinear"), loc("envMaxLod"), loc("envIntensity"), loc("envRotation"),
-              loc("skybox"), loc("fogColor"), loc("fogNear"), loc("fogFar"), loc("skinned"), loc("boneMatrices"),
+              loc("skybox"), loc("fogColor"), loc("fogNear"), loc("fogFar"), loc("fogMode"), loc("fogDensity"),
+              loc("fogHeight"), loc("fogFalloff"), loc("fogSky"), loc("backdropScale"), loc("skinned"), loc("boneMatrices"),
               loc("shading"), loc("pxScale"), loc("toonBands"), loc("toonSoftness"), loc("toonHighlight"),
               loc("toonHighlightSize"), loc("rimColor"), loc("rimWidth"), loc("goochWarm"), loc("goochCool"),
               loc("hatchInk"), loc("hatchSpacing"), loc("hatchAngle"), loc("hatchWeight") };
@@ -549,7 +652,12 @@ void ensureGpu() {
               nloc("wobble"), nloc("wobbleScale"), nloc("seed") };
     auto dloc = [](const char* name) { return GetShaderLocation(gpu.dof, name); };
     gpu.D = { dloc("depthTex"), dloc("texel"), dloc("zNear"), dloc("zFar"), dloc("ortho"), dloc("focus"),
-              dloc("aperture"), dloc("maxBlur"), dloc("radStep") };
+              dloc("aperture"), dloc("maxBlur"), dloc("radStep"), dloc("tanTilt"), dloc("tanHalfFov"), dloc("viewY") };
+    auto sloc = [](const char* name) { return GetShaderLocation(gpu.sky, name); };
+    gpu.S = { sloc("size"), sloc("zenith"), sloc("horizon"), sloc("ground"), sloc("curve"), sloc("sunDir"),
+              sloc("sunColor"), sloc("sunCos"), sloc("sunGlow"), sloc("haze"), sloc("hazeAmount"), sloc("stars"),
+              sloc("clouds"), sloc("cloudColor"), sloc("cloudShade"), sloc("cloudScale"), sloc("cloudOffset"),
+              sloc("frame"), sloc("seed") };
     gpu.depthSkinned = GetShaderLocation(gpu.depth, "skinned");
     gpu.depthBones = GetShaderLocation(gpu.depth, "boneMatrices");
     // Samplers live on fixed units for the whole run.
@@ -627,6 +735,115 @@ Texture2D texture(const std::string& path) {
     prepareTexture(tex);
     gpu.textures[path] = tex;
     return tex;
+}
+
+// A Material::dynamicMap's texture for the current frame, remade when its turn comes.
+Texture2D dynamicTexture(const DynamicTexturePtr& src) {
+    Gpu::Dynamic& d = gpu.dynamic[src.get()];
+    d.keep = src;                                   // the address stays this source's
+    const long long turn = (long long)std::floor((double)gpu.frame / std::max(1, src->every));
+    if (d.made == turn && d.tex.id) return d.tex;
+    d.made = turn;
+    if (!src->make) return d.tex.id ? d.tex : whiteTexture();
+    Image img = src->make(gpu.frame);
+    if (!img.data) return d.tex.id ? d.tex : whiteTexture();
+    ImageFormat(&img, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+    if (d.tex.id && d.tex.width == img.width && d.tex.height == img.height) {
+        UpdateTexture(d.tex, img.data);
+        GenTextureMipmaps(&d.tex);
+    } else {
+        if (d.tex.id) UnloadTexture(d.tex);
+        d.tex = LoadTextureFromImage(img);
+        prepareTexture(d.tex);
+    }
+    UnloadImage(img);
+    return d.tex.id ? d.tex : whiteTexture();
+}
+
+Texture2D mapOf(const g3d::Material& m) {
+    if (m.dynamicMap) return dynamicTexture(m.dynamicMap);
+    return m.map.empty() ? whiteTexture() : texture(m.map);
+}
+
+Vector3 linear3(Color c) {
+    return { std::pow(c.r / 255.f, 2.2f), std::pow(c.g / 255.f, 2.2f), std::pow(c.b / 255.f, 2.2f) };
+}
+
+// Where the sun is: towards it from the origin.
+Vector3 sunOf(const Scene& s) {
+    const Sky& k = s.sky;
+    if (k.sunLight >= 0 && k.sunLight < (int)s.lights.size()) {
+        const Light& l = s.lights[(size_t)k.sunLight];
+        const Vector3 d = l.type == Light::Type::Directional ? Vector3Subtract(l.position, l.target) : l.position;
+        if (Vector3Length(d) > 1e-6f) return Vector3Normalize(d);
+    }
+    return Vector3Length(k.sunDirection) > 1e-6f ? Vector3Normalize(k.sunDirection) : Vector3{ 0, 1, 0 };
+}
+
+// The sky into its equirectangular target, mipmapped for the environment's blur. Called
+// before anything else in the frame; leaves the caller's framebuffer, viewport and matrices.
+Texture2D renderSky(const Scene& s, double frame, unsigned int callerFbo, int fbW, int fbH) {
+    const Sky& k = s.sky;
+    const int w = std::clamp(k.resolution, 32, 4096), h = w / 2;
+    if (gpu.skyTarget.texture.width != w) {
+        if (gpu.skyTarget.id) UnloadRenderTexture(gpu.skyTarget);
+        gpu.skyTarget = LoadRenderTexture(w, h);
+    }
+    rlDrawRenderBatchActive();
+    rlEnableFramebuffer(gpu.skyTarget.id);
+    rlViewport(0, 0, w, h);
+    rlMatrixMode(RL_PROJECTION);
+    rlPushMatrix();
+    rlLoadIdentity();
+    rlOrtho(0, w, h, 0, -1, 1);
+    rlMatrixMode(RL_MODELVIEW);
+    rlPushMatrix();
+    rlLoadIdentity();
+    rlDisableColorBlend();
+    const auto& S = gpu.S;
+    const Vector2 size{ (float)w, (float)h };
+    const Vector3 zen = linear3(k.zenith), hor = linear3(k.horizon), gr = linear3(k.ground), sun = sunOf(s),
+                  sc = linear3(k.sunColor), hz = linear3(k.haze), cc = linear3(k.cloudColor), cs = linear3(k.cloudShade);
+    const float sunCos = k.sunSize > 0 ? std::cos(k.sunSize * DEG2RAD) : 1.f, f = (float)frame, seed = (float)(k.seed % 9973);
+    const Vector2 off{ k.cloudDrift.x * f, k.cloudDrift.y * f };
+    SetShaderValue(gpu.sky, S.size, &size, SHADER_UNIFORM_VEC2);
+    SetShaderValue(gpu.sky, S.zenith, &zen, SHADER_UNIFORM_VEC3);
+    SetShaderValue(gpu.sky, S.horizon, &hor, SHADER_UNIFORM_VEC3);
+    SetShaderValue(gpu.sky, S.ground, &gr, SHADER_UNIFORM_VEC3);
+    SetShaderValue(gpu.sky, S.curve, &k.curve, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(gpu.sky, S.sunDir, &sun, SHADER_UNIFORM_VEC3);
+    SetShaderValue(gpu.sky, S.sunColor, &sc, SHADER_UNIFORM_VEC3);
+    SetShaderValue(gpu.sky, S.sunCos, &sunCos, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(gpu.sky, S.sunGlow, &k.sunGlow, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(gpu.sky, S.haze, &hz, SHADER_UNIFORM_VEC3);
+    SetShaderValue(gpu.sky, S.hazeAmount, &k.hazeAmount, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(gpu.sky, S.stars, &k.stars, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(gpu.sky, S.clouds, &k.clouds, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(gpu.sky, S.cloudColor, &cc, SHADER_UNIFORM_VEC3);
+    SetShaderValue(gpu.sky, S.cloudShade, &cs, SHADER_UNIFORM_VEC3);
+    SetShaderValue(gpu.sky, S.cloudScale, &k.cloudScale, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(gpu.sky, S.cloudOffset, &off, SHADER_UNIFORM_VEC2);
+    SetShaderValue(gpu.sky, S.frame, &f, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(gpu.sky, S.seed, &seed, SHADER_UNIFORM_FLOAT);
+    BeginShaderMode(gpu.sky);
+    DrawRectangle(0, 0, w, h, WHITE);
+    EndShaderMode();
+    rlDrawRenderBatchActive();
+    rlEnableColorBlend();
+    // rlgl keeps one stack for both modes: pop in the reverse order of the pushes.
+    rlMatrixMode(RL_MODELVIEW);
+    rlPopMatrix();
+    rlMatrixMode(RL_PROJECTION);
+    rlPopMatrix();
+    rlMatrixMode(RL_MODELVIEW);
+    rlEnableFramebuffer(callerFbo);
+    rlViewport(0, 0, fbW, fbH);
+    Texture2D tex = gpu.skyTarget.texture;
+    GenTextureMipmaps(&tex);
+    gpu.skyTarget.texture.mipmaps = tex.mipmaps;
+    SetTextureFilter(gpu.skyTarget.texture, TEXTURE_FILTER_TRILINEAR);
+    SetTextureWrap(gpu.skyTarget.texture, TEXTURE_WRAP_REPEAT);
+    return gpu.skyTarget.texture;
 }
 
 Texture2D environmentTexture(const Scene& s) {
@@ -769,7 +986,7 @@ void drawItem(const Item& it, Pass pass) {
     if (o.material.doubleSided) rlDisableBackfaceCulling(); else rlEnableBackfaceCulling();
 
     if (o.geometry) {
-        mat.maps[MATERIAL_MAP_DIFFUSE].texture = o.material.map.empty() ? whiteTexture() : texture(o.material.map);
+        mat.maps[MATERIAL_MAP_DIFFUSE].texture = mapOf(o.material);
         const Color c = o.material.color, k = it.tint;
         mat.maps[MATERIAL_MAP_DIFFUSE].color = { (unsigned char)(c.r * k.r / 255), (unsigned char)(c.g * k.g / 255),
                                                  (unsigned char)(c.b * k.b / 255), c.a };
@@ -790,7 +1007,7 @@ void drawItem(const Item& it, Pass pass) {
             mat.maps[MATERIAL_MAP_DIFFUSE].color = { (unsigned char)(oc.r * tint.r / 255), (unsigned char)(oc.g * tint.g / 255),
                                                      (unsigned char)(oc.b * tint.b / 255), (unsigned char)(oc.a * tint.a / 255) };
         } else {
-            mat.maps[MATERIAL_MAP_DIFFUSE].texture = o.material.map.empty() ? whiteTexture() : texture(o.material.map);
+            mat.maps[MATERIAL_MAP_DIFFUSE].texture = mapOf(o.material);
             mat.maps[MATERIAL_MAP_DIFFUSE].color = o.material.color;
         }
         bool skinned = mesh.boneIndices && mesh.boneWeights && model.boneMatrices && model.skeleton.boneCount > 0;
@@ -933,6 +1150,12 @@ void setSceneUniforms(const Scene& s, const Camera& cam, const Shadows& sh, Text
     SetShaderValue(lit, L.fogColor, &fog, SHADER_UNIFORM_VEC3);
     SetShaderValue(lit, L.fogNear, &s.fogNear, SHADER_UNIFORM_FLOAT);
     SetShaderValue(lit, L.fogFar, &s.fogFar, SHADER_UNIFORM_FLOAT);
+    const int fogMode = (int)s.fogMode, fogSky = s.fogFromSky ? 1 : 0;
+    SetShaderValue(lit, L.fogMode, &fogMode, SHADER_UNIFORM_INT);
+    SetShaderValue(lit, L.fogDensity, &s.fogDensity, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, L.fogHeight, &s.fogHeight, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, L.fogFalloff, &s.fogFalloff, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, L.fogSky, &fogSky, SHADER_UNIFORM_INT);
     if (!sh.tiles.empty()) {
         Matrix vps[MAX_TILES];
         Vector4 rects[MAX_TILES], params[MAX_TILES];
@@ -946,11 +1169,16 @@ void setSceneUniforms(const Scene& s, const Camera& cam, const Shadows& sh, Text
     }
     int hasEnv = envTex.id ? 1 : 0, envLin = hasEnv && isFloatFormat(envTex.format) ? 1 : 0, sky0 = 0;
     float maxLod = hasEnv ? std::floor(std::log2((float)std::max(envTex.width, envTex.height))) : 0;
-    float rot = s.environmentRotation / 360.f;
+    // A sky is in world space (no rotation); it lights by `lighting` but is seen (backdrop,
+    // fog) as it is.
+    float rot = s.sky.enabled ? 0.f : s.environmentRotation / 360.f;
+    const float intensity = s.sky.enabled ? s.sky.lighting : s.environmentIntensity;
+    const float backdrop = s.sky.enabled ? 1.f / std::max(intensity, 1e-4f) : 1.f;
     SetShaderValue(lit, L.hasEnv, &hasEnv, SHADER_UNIFORM_INT);
     SetShaderValue(lit, L.envLinear, &envLin, SHADER_UNIFORM_INT);
     SetShaderValue(lit, L.envMaxLod, &maxLod, SHADER_UNIFORM_FLOAT);
-    SetShaderValue(lit, L.envIntensity, &s.environmentIntensity, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, L.envIntensity, &intensity, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, L.backdropScale, &backdrop, SHADER_UNIFORM_FLOAT);
     SetShaderValue(lit, L.envRotation, &rot, SHADER_UNIFORM_FLOAT);
     SetShaderValue(lit, L.skybox, &sky0, SHADER_UNIFORM_INT);
 }
@@ -980,7 +1208,7 @@ void drawSkybox(const Camera& cam) {
 }
 
 // Blurs `src` by depth into the currently bound target (2D state, composition units).
-void compositeDof(const DepthTarget& src, const Camera& cam, float scale) {
+void compositeDof(const DepthTarget& src, const Camera& cam, float scale, Vector2 viewY) {
     const auto& D = gpu.D;
     const Camera::DepthOfField& d = cam.dof;
     const float maxBlur = std::max(1.f, d.maxBlur * scale);
@@ -995,6 +1223,10 @@ void compositeDof(const DepthTarget& src, const Camera& cam, float scale) {
     SetShaderValue(gpu.dof, D.aperture, &d.aperture, SHADER_UNIFORM_FLOAT);
     SetShaderValue(gpu.dof, D.maxBlur, &maxBlur, SHADER_UNIFORM_FLOAT);
     SetShaderValue(gpu.dof, D.radStep, &radStep, SHADER_UNIFORM_FLOAT);
+    const float tanTilt = std::tan(std::clamp(d.tilt, -80.f, 80.f) * DEG2RAD), tanHalf = std::tan(cam.fov * 0.5f * DEG2RAD);
+    SetShaderValue(gpu.dof, D.tanTilt, &tanTilt, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(gpu.dof, D.tanHalfFov, &tanHalf, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(gpu.dof, D.viewY, &viewY, SHADER_UNIFORM_VEC2);
     bindUnit(DEPTH_SLOT, src.depth);
     // Premultiplied "over" the target (which may already hold the scene background).
     rlSetBlendFactorsSeparate(RL_ONE, RL_ONE_MINUS_SRC_ALPHA, RL_ONE, RL_ONE_MINUS_SRC_ALPHA, RL_FUNC_ADD, RL_FUNC_ADD);
@@ -1102,15 +1334,32 @@ Vector3 direction(Vector3 v, const Matrix& m) {
     return { m.m0 * v.x + m.m4 * v.y + m.m8 * v.z, m.m1 * v.x + m.m5 * v.y + m.m9 * v.z, m.m2 * v.x + m.m6 * v.y + m.m10 * v.z };
 }
 
-Color fogged(const Scene& s, Color c, float dist, bool additive) {
-    if (s.fogFar <= s.fogNear) return c;
-    const float f = std::clamp((dist - s.fogNear) / (s.fogFar - s.fogNear), 0.f, 1.f);
+// The lit shader's fogAmount(), for colours made on the CPU.
+float fogAmount(const Scene& s, Vector3 eye, Vector3 p) {
+    const Vector3 ray = Vector3Subtract(p, eye);
+    const float d = Vector3Length(ray);
+    if (s.fogMode == FogMode::Linear)
+        return s.fogFar > s.fogNear ? std::clamp((d - s.fogNear) / (s.fogFar - s.fogNear), 0.f, 1.f) : 0.f;
+    if (s.fogDensity <= 0) return 0;
+    float od = s.fogDensity * d;
+    if (s.fogFalloff > 0) {
+        const float a = s.fogFalloff * ray.y;
+        const float g = std::fabs(a) > 1e-4f ? (1 - std::exp(-a)) / a : 1 - 0.5f * a;
+        od *= std::exp(-s.fogFalloff * (eye.y - s.fogHeight)) * g;
+    }
+    return s.fogMode == FogMode::Exponential ? 1 - std::exp(-od) : 1 - std::exp(-od * od);
+}
+
+Color fogged(const Scene& s, Color c, Vector3 eye, Vector3 p, bool additive) {
+    const float f = fogAmount(s, eye, p);
+    if (f <= 0) return c;
+    const Color tint = s.fogFromSky && s.sky.enabled ? s.sky.horizon : s.fogColor;
     if (additive) return { c.r, c.g, c.b, (unsigned char)(c.a * (1 - f)) };   // light fades out in fog
     auto lin = [](unsigned char v) { return std::pow(v / 255.f, 2.2f); };
     auto mix = [&](unsigned char a, unsigned char b) {
         return (unsigned char)std::lround(255 * std::pow(lin(a) + (lin(b) - lin(a)) * f, 1 / 2.2f));
     };
-    return { mix(c.r, s.fogColor.r), mix(c.g, s.fogColor.g), mix(c.b, s.fogColor.b), c.a };
+    return { mix(c.r, tint.r), mix(c.g, tint.g), mix(c.b, tint.b), c.a };
 }
 
 void particleQuads(const Scene& s, const Camera& cam, const Emitting& em, const Matrix& view, double t,
@@ -1126,7 +1375,7 @@ void particleQuads(const Scene& s, const Camera& cam, const Emitting& em, const 
         if (col.a == 0 || p.size <= 0) return;
         const Vector3 c = toWorld(p.pos);
         const float h = p.size * unitScale / 2;
-        col = fogged(s, col, Vector3Distance(c, cam.position), e.additive);
+        col = fogged(s, col, cam.position, c, e.additive);
         Quad q{};
         q.color = col;
         q.depth = depthOf(c);
@@ -1238,8 +1487,10 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     std::vector<Item> items;
     std::vector<Emitting> emitters;
     const double ft = frameTime(t);              // particles follow motion-blur subframes
+    gpu.frame = t;
     collect(s.objects, MatrixIdentity(), items, emitters, ft);
-    const Texture2D envTex = environmentTexture(s);
+    const Texture2D envTex = s.sky.enabled ? renderSky(s, ft, target.id, target.texture.width, target.texture.height)
+                                           : environmentTexture(s);
 
     // Background, in 2D before the viewport changes.
     if (s.background.a > 0) {
@@ -1288,7 +1539,7 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     setSceneUniforms(s, cam, shadows, envTex, scale);
     bindUnit(SHADOW_SLOT, shadows.tiles.empty() ? 0 : gpu.atlasTex);
     bindUnit(ENV_SLOT, envTex.id);
-    if (envTex.id && s.showEnvironment) drawSkybox(cam);
+    if (envTex.id && (s.sky.enabled ? s.sky.show : s.showEnvironment)) drawSkybox(cam);
     std::vector<Item> clear;
     for (Item& it : items) {
         if (opacityOf(it) < 1.f) {
@@ -1326,11 +1577,122 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     if (dofTarget) {
         rlEnableFramebuffer(target.id);
         rlScalef(scale, scale, 1.f);                    // the 2D state drawOffscreen bound
-        compositeDof(*dofTarget, cam, scale);
+        compositeDof(*dofTarget, cam, scale, { (float)(fbH - vy - vh) / fbH, (float)vh / fbH });
     }
 }
 
 } // namespace
+
+// ------------------------------------------------------------------ skies
+namespace {
+Color mixColor(Color a, Color b, float t) {
+    auto m = [t](unsigned char x, unsigned char y) { return (unsigned char)std::lround(x + (y - x) * t); };
+    return { m(a.r, b.r), m(a.g, b.g), m(a.b, b.b), m(a.a, b.a) };
+}
+// Towards the sun at an hour: up from the east (+x) at 6, over the south (-z), down in the
+// west at 18; below the horizon at night.
+Vector3 sunAt(float hour) {
+    const float a = (hour - 6) / 12 * PI;
+    return Vector3Normalize({ std::cos(a), std::sin(a) * 0.85f, -0.45f - 0.2f * std::sin(a) });
+}
+} // namespace
+
+Sky Sky::day() {
+    Sky k;
+    k.enabled = true;
+    k.sunDirection = sunAt(12.5f);
+    k.clouds = 0.25f;
+    return k;
+}
+Sky Sky::dawn() {
+    Sky k;
+    k.enabled = true;
+    k.zenith = { 54, 78, 140, 255 };
+    k.horizon = { 236, 176, 150, 255 };
+    k.ground = { 52, 48, 56, 255 };
+    k.curve = 0.6f;
+    k.sunDirection = sunAt(6.6f);
+    k.sunColor = { 255, 214, 170, 255 };
+    k.haze = { 255, 150, 110, 255 };
+    k.hazeAmount = 0.7f;
+    k.sunGlow = 0.8f;
+    k.stars = 0.15f;
+    k.clouds = 0.2f;
+    k.cloudColor = { 255, 206, 186, 255 };
+    k.cloudShade = { 112, 104, 138, 255 };
+    return k;
+}
+Sky Sky::dusk() {
+    Sky k = dawn();
+    k.zenith = { 40, 52, 112, 255 };
+    k.horizon = { 246, 150, 96, 255 };
+    k.haze = { 255, 112, 64, 255 };
+    k.sunDirection = sunAt(17.6f);
+    k.sunColor = { 255, 186, 120, 255 };
+    k.cloudColor = { 255, 170, 130, 255 };
+    k.cloudShade = { 96, 80, 120, 255 };
+    k.stars = 0.25f;
+    return k;
+}
+Sky Sky::night() {
+    Sky k;
+    k.enabled = true;
+    k.zenith = { 6, 10, 26, 255 };
+    k.horizon = { 26, 36, 64, 255 };
+    k.ground = { 10, 10, 14, 255 };
+    k.curve = 0.5f;
+    k.sunDirection = sunAt(0);
+    k.sunSize = 0;
+    k.sunGlow = 0;
+    k.hazeAmount = 0;
+    k.stars = 1;
+    k.clouds = 0.15f;
+    k.cloudColor = { 60, 66, 88, 255 };
+    k.cloudShade = { 18, 22, 34, 255 };
+    k.lighting = 0.6f;
+    return k;
+}
+
+Sky Sky::mix(const Sky& a, const Sky& b, float t) {
+    t = std::clamp(t, 0.f, 1.f);
+    Sky k = t < 0.5f ? a : b;
+    auto f = [t](float x, float y) { return x + (y - x) * t; };
+    k.zenith = mixColor(a.zenith, b.zenith, t);
+    k.horizon = mixColor(a.horizon, b.horizon, t);
+    k.ground = mixColor(a.ground, b.ground, t);
+    k.sunColor = mixColor(a.sunColor, b.sunColor, t);
+    k.haze = mixColor(a.haze, b.haze, t);
+    k.cloudColor = mixColor(a.cloudColor, b.cloudColor, t);
+    k.cloudShade = mixColor(a.cloudShade, b.cloudShade, t);
+    k.curve = f(a.curve, b.curve);
+    k.sunSize = f(a.sunSize, b.sunSize);
+    k.sunGlow = f(a.sunGlow, b.sunGlow);
+    k.hazeAmount = f(a.hazeAmount, b.hazeAmount);
+    k.stars = f(a.stars, b.stars);
+    k.clouds = f(a.clouds, b.clouds);
+    k.cloudScale = f(a.cloudScale, b.cloudScale);
+    k.lighting = f(a.lighting, b.lighting);
+    const Vector3 d = Vector3Lerp(Vector3Normalize(a.sunDirection), Vector3Normalize(b.sunDirection), t);
+    k.sunDirection = Vector3Length(d) > 1e-6f ? d : b.sunDirection;
+    return k;
+}
+
+Sky Sky::at(float hour) {
+    hour = std::fmod(std::fmod(hour, 24.f) + 24.f, 24.f);
+    // Keyframes through the day; the sun follows the hour throughout.
+    struct Key { float hour; Sky sky; };
+    static const Key keys[] = { { 0, night() }, { 5.2f, night() }, { 6.5f, dawn() }, { 9, day() }, { 15.5f, day() },
+                                { 17.8f, dusk() }, { 19.2f, night() }, { 24, night() } };
+    size_t i = 1;
+    while (i + 1 < std::size(keys) && hour > keys[i].hour) i++;
+    const Key& a = keys[i - 1];
+    const Key& b = keys[i];
+    Sky k = mix(a.sky, b.sky, (hour - a.hour) / std::max(1e-3f, b.hour - a.hour));
+    k.sunDirection = sunAt(hour);
+    const float up = sunAt(hour).y;
+    k.sunSize = up > -0.05f ? std::max(k.sunSize, 1.2f) : 0.f;
+    return k;
+}
 
 // ------------------------------------------------------------------ geometry
 Geometry::~Geometry() = default;   // the GPU mesh is freed by shutdownGraphics, not here
@@ -1346,8 +1708,17 @@ const Mesh& Geometry::mesh() {
             if (auto g = self.lock()) { UnloadMesh(g->mesh_); g->mesh_ = Mesh{}; g->loaded_ = false; }
         });
     }
+    if (pending_) {
+        auto edit = std::move(pending_);
+        pending_ = nullptr;
+        edit(mesh_);
+        UpdateMeshBuffer(mesh_, 0, mesh_.vertices, mesh_.vertexCount * 3 * (int)sizeof(float), 0);
+        if (mesh_.normals) UpdateMeshBuffer(mesh_, 2, mesh_.normals, mesh_.vertexCount * 3 * (int)sizeof(float), 0);
+    }
     return mesh_;
 }
+
+void Geometry::update(std::function<void(Mesh&)> edit) { pending_ = std::move(edit); }
 
 std::shared_ptr<Geometry> Geometry::box(float w, float h, float d) {
     return std::make_shared<Geometry>([=] { return GenMeshCube(w, h, d); });
@@ -1581,6 +1952,54 @@ std::function<Image()> studioEnvironment(Color top, Color horizon, Color bottom,
         }
         return img;
     };
+}
+
+Camera cameraAt(const Camera& camera, int t) {
+    Camera c = camera;
+    if (c.up) c.up(t, c);
+    return c;
+}
+
+// MatrixRotateXYZ(a) has columns R(-a) of x, y and z: its third column is
+// (-sin y, cos y sin x, cos y cos x) and its first row (cos z cos y, sin z cos y, -sin y) in
+// the negated angles. Solved for those from the wanted axes.
+Vector3 lookRotation(Vector3 forward, Vector3 up) {
+    const Vector3 Z = Vector3Normalize(forward);
+    Vector3 X = Vector3CrossProduct(up, Z);
+    if (Vector3Length(X) < 1e-6f) X = Vector3CrossProduct(std::fabs(Z.y) < 0.9f ? Vector3{ 0, 1, 0 } : Vector3{ 1, 0, 0 }, Z);
+    X = Vector3Normalize(X);
+    const Vector3 Y = Vector3CrossProduct(Z, X);
+    const float sy = std::clamp(-Z.x, -1.f, 1.f), y = std::asin(sy);
+    float x, z;
+    if (std::fabs(sy) < 0.9999f) {
+        x = std::atan2(Z.y, Z.z);
+        z = std::atan2(Y.x, X.x);
+    } else {                                     // looking along x: only x + z matters
+        z = 0;
+        x = std::atan2(X.y * sy, X.z * sy);
+    }
+    return { -x * RAD2DEG, -y * RAD2DEG, -z * RAD2DEG };
+}
+
+bool project(const Camera& cam, Vector3 p, Rectangle vp, Vector2& out) {
+    if (vp.width <= 0 || vp.height <= 0) return false;
+    // The same view and projection as renderBody.
+    const Matrix view = MatrixLookAt(cam.position, cam.target, safeUp(Vector3Subtract(cam.target, cam.position), cam.upVector));
+    const Vector3 v = Vector3Transform(p, view);   // camera space: looking down -z
+    const double aspect = (double)vp.width / vp.height;
+    double nx, ny;
+    if (cam.orthographic) {
+        const double top = cam.orthoHeight / 2.0;
+        nx = v.x / (top * aspect);
+        ny = v.y / top;
+    } else {
+        if (-v.z <= cam.nearPlane) return false;
+        const double f = 1.0 / std::tan(cam.fov * 0.5 * DEG2RAD);
+        nx = f / aspect * v.x / -v.z;
+        ny = f * v.y / -v.z;
+    }
+    out = { (float)(vp.x + (nx + 1) / 2 * vp.width), (float)(vp.y + (1 - ny) / 2 * vp.height) };
+    return true;
 }
 
 void render(Scene& s, int t, const Ctx& c, Rectangle viewport, Camera* camera) {
