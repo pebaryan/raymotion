@@ -25,3 +25,4 @@
 #include "textfx.hpp"
 #include "subtitles.hpp"
 #include "audioviz.hpp"
+#include "icons.hpp"

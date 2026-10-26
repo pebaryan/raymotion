@@ -19,6 +19,7 @@
 #include "rmtn/timeline.hpp"
 #include "rmtn/draw.hpp"
 #include "rmtn/synth.hpp"
+#include "rmtn/icons.hpp"
 #include "rmtn/preview.hpp"
 #include "rmtn/render.hpp"
 #include "rmtn/frame_stream.hpp"
@@ -608,6 +609,7 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
 int runCli(int argc, const char** argv, const RegisterFn& registerAll){
     // raylib's INFO lines drown the CLI's own output; RAYMOTION_VERBOSE=1 restores them.
     if (!getenv("RAYMOTION_VERBOSE")) SetTraceLogLevel(LOG_WARNING);
+    icons::registerPrefabs();   // built-in prefabs first, so a project's own may replace them
     try { return runMain(argc,argv,registerAll); }
     catch (const std::exception& error){
         fprintf(stderr,"raymotion: %s\n",error.what());

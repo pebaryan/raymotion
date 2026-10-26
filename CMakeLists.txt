@@ -85,7 +85,8 @@ add_library(rmtn_engine STATIC
   src/engine/code.cpp
   src/engine/textfx.cpp
   src/engine/subtitles.cpp
-  src/engine/audioviz.cpp)
+  src/engine/audioviz.cpp
+  src/engine/icons.cpp)
 add_library(raymotion::engine ALIAS rmtn_engine)
 target_include_directories(rmtn_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 # Single-header decoders (stb_image, nanosvg), compiled privately into media.cpp.
@@ -115,6 +116,7 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/particles3d.cpp
     examples/showcase/audioreactive.cpp
     examples/showcase/captions.cpp
+    examples/showcase/icons.cpp
     examples/showcase/paths.cpp
     examples/showcase/equations.cpp
     examples/showcase/plots.cpp
@@ -152,6 +154,9 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   add_executable(raymotion_subtitle_tests tests/subtitle_tests.cpp)
   target_link_libraries(raymotion_subtitle_tests PRIVATE rmtn_engine)
   add_test(NAME subtitles COMMAND raymotion_subtitle_tests)
+  add_executable(raymotion_icon_tests tests/icon_tests.cpp)
+  target_link_libraries(raymotion_icon_tests PRIVATE rmtn_engine)
+  add_test(NAME icons COMMAND raymotion_icon_tests)
   add_executable(raymotion_audioviz_tests tests/audioviz_tests.cpp)
   target_link_libraries(raymotion_audioviz_tests PRIVATE rmtn_engine)
   add_test(NAME audioviz COMMAND raymotion_audioviz_tests)
@@ -234,7 +239,7 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   target_compile_definitions(raymotion_feed_tests PRIVATE RAYMOTION_FEED_STATE=1 RAYMOTION_FEED_RENDER=1)
   add_test(NAME ht_feed COMMAND raymotion_feed_tests)
 
-  set_tests_properties(renderer_regressions layer_compositing scene3d media diagram_rendering path_rendering math_rendering plot_rendering space_rendering code_rendering text_animation motion_blur ht_plain_layout ht_feed PROPERTIES LABELS gl SKIP_RETURN_CODE 77)
+  set_tests_properties(renderer_regressions layer_compositing scene3d media diagram_rendering path_rendering math_rendering plot_rendering space_rendering code_rendering text_animation motion_blur icons ht_plain_layout ht_feed PROPERTIES LABELS gl SKIP_RETURN_CODE 77)
 
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND)

@@ -102,7 +102,7 @@ See the references for everything else:
   views, 3D axes, surfaces, torus/Moebius/Klein, 4D, hyperbolic tilings, spherical
   geometry), the 2D camera (pan, zoom, fly, parallax, shake), code blocks (syntax
   highlighting, typing, line focus, marks, morphs between versions), text animation
-  (staggered reveals, typing, decoding, per-glyph styling, morphs), motion blur, particles (bursts, streams, weather, fire, confetti, custom looks; also in 3D scenes), subtitles and voice-over (SRT/WebVTT captions, scenes timed to phrases, text to speech), audio-reactive visuals (spectrum, beats, tempo, waveform), images, video,
+  (staggered reveals, typing, decoding, per-glyph styling, morphs), motion blur, particles (bursts, streams, weather, fire, confetti, custom looks; also in 3D scenes), subtitles and voice-over (SRT/WebVTT captions, scenes timed to phrases, text to speech), audio-reactive visuals (spectrum, beats, tempo, waveform), social icons and the raymotion logo (built-in prefabs), images, video,
   audio and the procedural synth, props, prefabs, generated assets, deterministic randomness.
 - `references/3d.md`: GPU 3D scenes (geometry, models, materials, lights, shadows,
   environments, cameras, depth of field) and illustration styles (toon, Gooch, hatch,

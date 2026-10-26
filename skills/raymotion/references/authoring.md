@@ -551,6 +551,34 @@ node->fn = [music](const Ctx& cx, int t) {
 - `aud::analyze(stereo, rate, o)` analyses samples you already have. Analysis is lazy, so
   the file may be written by `c.assets` after the composition is built.
 
+## Social icons and the raymotion logo (`icons::`, `rmtn/icons.hpp`)
+
+Built-in prefabs (the CLI registers them before the project's; same-named project
+prefabs replace them). Each one is centred on its node's origin.
+
+```cpp
+TNode* yt = prefab::use(root, 0, 90, "social-youtube", Json::parse(R"({"size": 140, "handle": "@raymotion"})"));
+yt->props.pos = { 960, 540 };
+prefab::use(root, 30, 120, "social-row", Json::parse(R"({"brands": ["x", "github", "tiktok"], "stagger": 5})"));
+prefab::use(root, 0, 150, "raymotion-logo", Json::parse(R"({"tagline": "video as code", "badge": true})"));
+```
+
+- Brands: `x`, `youtube`, `github`, `instagram`, `tiktok`, `whatsapp`, `telegram`
+  (`social-<brand>` each).
+- `social-*` and `social-row` props: `size`, `style` (`badge` | `glyph` | `mono` | `outline`),
+  `shape` (`rounded` | `circle` | `square`), `color` (mono, outline, dark brands' glyph,
+  and the mark on a badge), `handle`, `ink` (its colour), `in` (`pop` | `draw` | `fade`
+  | `none`), `delay`. The row adds `brands`, `gap` and `stagger` (frames).
+- `raymotion-logo` props: `size`, `wordmark`, `tagline`, `layout` (`horizontal` |
+  `stacked`), `badge`, `spin` (deg per frame of the play-head arc), `ink`, `accent`
+  (tagline), `in` (default `draw`), `length` (frames of the draw-on), `delay`.
+- Bad values (an unknown brand, style or entrance) throw when the prefab is applied.
+- Direct drawing: `icons::draw(cx, brand, centre, size, look, reveal)` with
+  `icons::Look{ style, shape, color, corner }`; `icons::logo(cx, centre, size, t, reveal,
+  badge, spin)`; `icons::glyph(brand)` is the 24 x 24 path (fill it EvenOdd);
+  `icons::brandColor`, `icons::title`.
+- The glyphs are Simple Icons paths (CC0); the logos are their owners' trademarks.
+
 ## Props, prefabs and generated assets
 
 ```cpp

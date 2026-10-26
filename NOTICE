@@ -15,5 +15,7 @@ It includes or bundles third-party components under their own licenses:
 - Latin Modern Math font (assets/fonts/latinmodern-math.otf): GUST Font License (LPPL 1.3c),
   Copyright (c) 2012-2014 B. Jackowski, P. Strzelczyk and P. Pianowski (GUST e-foundry)
   (assets/fonts/LatinModernMath-GUST-FONT-LICENSE.txt).
+- Social media icon paths (src/engine/icons.cpp): Simple Icons (https://simpleicons.org),
+  CC0 1.0. The logos are trademarks of their respective owners.
 - Sample data (assets/data): crambin (PDB 1CRN) from the RCSB Protein Data Bank and
   caffeine from PubChem, both in the public domain.

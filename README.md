@@ -765,6 +765,36 @@ fractional values interpolate (motion blur sees in-between values).
 pulsing disc ringed by its spectrum, particle bursts on every beat, spectrum bars, an
 oscilloscope, level meters and the detected tempo.
 
+### Social icons and the logo
+
+Built-in prefabs, registered by the CLI before your project's own (a prefab of yours with
+the same name replaces one):
+
+```cpp
+prefab::use(root, 0, 90, "social-youtube", Json::parse(R"({"handle": "@raymotion"})"))->props.pos = { 960, 540 };
+prefab::use(root, 30, 120, "social-row", Json::parse(R"({"brands": ["x", "github", "tiktok"], "style": "outline"})"));
+prefab::use(root, 0, 150, "raymotion-logo", Json::parse(R"({"tagline": "video as code", "layout": "stacked"})"));
+```
+
+* `social-x`, `social-youtube`, `social-github`, `social-instagram`, `social-tiktok`,
+  `social-whatsapp` and `social-telegram`: the icon, with an optional `handle` beside it.
+  `social-row` shows several, one after another, with a shared handle beneath.
+* Props: `size`; `style` (`badge` in the brand colour, Instagram's gradient included;
+  `glyph`, the mark alone in its colour; `mono` and `outline` in `color`); `shape`
+  (`rounded`, `circle`, `square`); `in` (`pop`, `draw` to write the mark on, `fade`,
+  `none`) and `delay`. `raymotion prefabs` lists every default.
+* `raymotion-logo`: the mark (gradient ring, play triangle, orbiting play-head arc),
+  the wordmark beside it or `stacked` beneath, an optional `tagline` and `badge`. It draws
+  itself on by default.
+* In your own fns: `icons::draw(cx, "github", centre, size, look, reveal)`,
+  `icons::logo(cx, centre, size, t)`, and `icons::glyph(brand)` for the raw path.
+
+The glyphs are [Simple Icons](https://simpleicons.org) paths (CC0). The logos are
+trademarks of their owners, so follow each brand's guidelines when you use them.
+
+`social-icons` shows the logo drawing on, a row of every brand, the four looks and two
+shapes, icons with handles, and a stacked logo end card.
+
 ### Engine pieces
 
 * `rmtn/timeline.hpp` — `Comp`, the node tree (start/duration, `up` animates props,
@@ -850,6 +880,7 @@ sparql                 1920x1080 @30fps  113.0s  audio=1   (a narrated explainer
 lowerthird             1920x1080 @30fps    6.0s  audio=0   (a name tag with no background: render with --alpha for ProRes 4444 or --format webm)
 audio-reactive         1920x1080 @30fps   24.0s  audio=1   (visuals driven by a music track: spectrum, beats, tempo, waveform, levels)
 captions               1920x1080 @30fps   26.1s  audio=1   (narrated by the system voice: scenes timed to phrases, burned-in and karaoke captions, an SRT sidecar)
+social-icons           1920x1080 @30fps   19.5s  audio=0   (the built-in icon prefabs: the raymotion logo, social badges in four looks, handles)
 ```
 
 `raymotion-promo` is the 3.5-minute introduction to the engine
@@ -917,6 +948,8 @@ subtitles (SRT and WebVTT parsing, markup and errors, phrase timing and scene sp
 round trips, text-to-speech scripts through a stand-in engine with caching and failures)
 and burned-in captions; audio analysis (a tone's band and loudness, interpolation, the
 waveform, beats and tempo of click tracks, pulses, `startFrom`, caching by file; no window);
+icons (glyph data, the prefabs and their props errors; badge colours, Instagram's
+gradient, glyph and mono looks, the logo, entrances, determinism);
 Here-There layout checks; and a Python CLI suite (exact sizes, draft scaling, stale-frame
 cleanup, a real MP4 render, transparent stills and ProRes/WebM renders with alpha, the
 starter project, props). Tests needing OpenGL carry the `gl`
