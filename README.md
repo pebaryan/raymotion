@@ -836,6 +836,15 @@ a projected Austria map, a data chart, blurred time jumps, narration with captio
 procedural music and generated sound effects.
 Its historical references are listed in `docs/austria-time-travel-sources.md`.
 
+`build/raymotion render austria-time-travel` travels 5,000 years in 140 seconds: a year
+dial that rolls back from 2026, Ötzi's copper axe in a glacier, Hallstatt by its lake,
+the Roman Danube frontier on a projected map, the 996 Ostarrîchi deed typed on parchment,
+Austria-Hungary extruded from a table map, 66,000 lights for the Austrian Jews murdered in
+the Holocaust, a cloth flag for neutrality and fireworks for the National Day. The narration
+is a voice clone of the author, and the score is synthesised from Strauss's *Blue Danube*
+and Mozart's *Eine kleine Nachtmusik* and *Rondo alla Turca*. Script and sources:
+`docs/austria-time-travel-script.md`.
+
 ### Maps
 
 `geo::` reads map data and projects it. Natural Earth's 1:110m countries, land, lakes,
@@ -1121,6 +1130,7 @@ earth                  1920x1080 @30fps   65.2s  audio=1   (globe:: and cal:: in
 atmosphere             1920x1080 @30fps   20.0s  audio=1   (g3d::Sky and fog: a valley from before dawn to after dusk, ground fog burning off, stars, lit windows)
 atmosphere-miniature   1920x1080 @30fps   10.0s  audio=1   (tilt-shift: the valley's hamlet as a miniature, through camera.dof.tilt and as Filter::tiltShift)
 map-charts             1920x1080 @30fps   31.2s  audio=1   (geo3d:: population columns on a globe, the globe unrolling into a map of migration flows, GDP per person as a tilt-shift miniature)
+austria-time-travel    1920x1080 @30fps  140.0s  audio=1   (Austria through 5,000 years for the National Day: glacier, salt, Rome, Ostarrîchi, empire, neutrality; voice clone and a Strauss/Mozart score)
 ```
 
 `raymotion-promo` is the 3.5-minute introduction to the engine

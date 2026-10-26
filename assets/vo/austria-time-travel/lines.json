@@ -1,0 +1,68 @@
+{
+  "ref": "D:/toolcache/voiceclone/clips/prompt_a.tight.wav",
+  "ref_text": "As a simulation tool, Biffrost is a co simulation",
+  "language": "English",
+  "atempo": 0.93,
+  "lines": [
+    {
+      "file": "s01-dial.wav",
+      "text": "Today is the twenty sixth of October: Austria's National Day. Set the dial back. Five thousand years. Hold on.",
+      "caption": "Today is 26 October: Austria's National Day. Set the dial back. Five thousand years. Hold on."
+    },
+    {
+      "file": "s02-ice.wav",
+      "text": "Around thirty three hundred B C, a man climbs into the Oetztal Alps and never comes down. In nineteen ninety one, hikers find him in the ice, his copper axe still at his side.",
+      "caption": "Around 3300 BC, a man climbs into the Ötztal Alps and never comes down. In 1991, hikers find him in the ice, his copper axe still at his side."
+    },
+    {
+      "file": "s03-salt.wav",
+      "text": "Salt made these mountains rich. Miners were digging above Hallstatt more than three thousand years ago, and the village gave its name to an age of Europe.",
+      "caption": "Salt made these mountains rich. Miners were digging above Hallstatt more than 3,000 years ago, and the village gave its name to an age of Europe."
+    },
+    {
+      "file": "s04-rome.wav",
+      "text": "Then Rome came north. The kingdom of Noricum became a Roman province, and the Danube became the frontier. A legion's camp on its bank was called Vindobona. Today, we call it Vienna.",
+      "caption": "Then Rome came north. The kingdom of Noricum became a Roman province, and the Danube became the frontier. A legion's camp on its bank was called Vindobona. Today, we call it Vienna."
+    },
+    {
+      "file": "s05-name.wav",
+      "text": "In nine ninety six, an emperor's deed grants land by the river Eeps, in a region the people call Ostarrichi. It is the oldest written trace of Austria's name.",
+      "caption": "In 996, an emperor's deed grants land by the river Ybbs, in a region the people call Ostarrîchi. It is the oldest written trace of Austria's name."
+    },
+    {
+      "file": "s06-empire.wav",
+      "text": "The Habsburgs take Austria in the twelve hundreds and hold it for more than six centuries. Vienna survives the Ottoman siege of sixteen eighty three. By nineteen ten, fifty one million people live under the crown of Austria Hungary.",
+      "caption": "The Habsburgs take Austria in the 1200s and hold it for more than six centuries. Vienna survives the Ottoman siege of 1683. By 1910, 51 million people live under the crown of Austria-Hungary."
+    },
+    {
+      "file": "s07-collapse.wav",
+      "text": "Four years of world war break it apart. In November nineteen eighteen, the empire is gone, and a small republic is proclaimed in Vienna.",
+      "caption": "Four years of world war break it apart. In November 1918, the empire is gone, and a small republic is proclaimed in Vienna."
+    },
+    {
+      "file": "s08-dark.wav",
+      "text": "Democracy does not last. In March nineteen thirty eight, Nazi Germany annexes Austria. More than sixty six thousand Austrian Jews are murdered in the Holocaust. Each light is one of them.",
+      "caption": "Democracy does not last. In March 1938, Nazi Germany annexes Austria. More than 66,000 Austrian Jews are murdered in the Holocaust. Each light is one of them."
+    },
+    {
+      "file": "s09-free.wav",
+      "text": "In April nineteen forty five, the Second Republic is declared. Four powers occupy the country for ten years, until the State Treaty of May nineteen fifty five. The last soldiers leave in October.",
+      "caption": "In April 1945, the Second Republic is declared. Four powers occupy the country for ten years, until the State Treaty of May 1955. The last soldiers leave in October."
+    },
+    {
+      "file": "s10-neutral.wav",
+      "text": "On the twenty sixth of October, nineteen fifty five, parliament declares Austria permanently neutral. Ten years later, that day becomes the National Day.",
+      "caption": "On 26 October 1955, parliament declares Austria permanently neutral. Ten years later, that day becomes the National Day."
+    },
+    {
+      "file": "s11-now.wav",
+      "text": "In nineteen ninety five, Austria joins the European Union. A country of four and a half million in eighteen sixty nine is nine point two million today.",
+      "caption": "In 1995, Austria joins the European Union. A country of 4.5 million in 1869 is 9.2 million today."
+    },
+    {
+      "file": "s12-home.wav",
+      "text": "Five thousand years, and we are home. Happy National Day, Austria.",
+      "caption": "Five thousand years, and we are home. Happy National Day, Austria."
+    }
+  ]
+}
