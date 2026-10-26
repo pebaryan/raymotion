@@ -33,7 +33,7 @@ static const char* VS_QUAD = "#version 330\n"
 "uniform mat4 mvp;\n"
 "void main(){ gl_Position=mvp*vec4(vertexPosition,0.0,1.0); uv=vertexTexCoord; }\n";
 
-static const char* FS_GRAIN = "#version 330\nnoperspective in vec2 uv;\n"
+static const char* FS_GRAIN = "#version 330\nin vec2 uv;\n"   // qualifiers must match VS_QUAD's (Mesa refuses to link)
 "layout(location=0) out vec4 f;\n"
 "uniform float gtime; uniform vec2 gres; uniform float vig; uniform int gmode;\n"
 "float h1(vec2 q){ q=fract(q*0.067 + vec2(0.13,0.71)); q+=dot(q,vec2(15.0,7.0)); q*=17.0; return fract(q.x+q.y); }\n"

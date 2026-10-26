@@ -30,6 +30,9 @@
 #define popen _popen
 #define pclose _pclose
 #endif
+#ifndef _WIN32
+#include <csignal>
+#endif
 
 namespace rmtn {
 namespace {
@@ -609,6 +612,11 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
 int runCli(int argc, const char** argv, const RegisterFn& registerAll){
     // raylib's INFO lines drown the CLI's own output; RAYMOTION_VERBOSE=1 restores them.
     if (!getenv("RAYMOTION_VERBOSE")) SetTraceLogLevel(LOG_WARNING);
+#ifndef _WIN32
+    // If ffmpeg quits early (a bad encoder, a full disk), writing to its pipe must fail and
+    // be reported, as on Windows, rather than kill the process with SIGPIPE.
+    std::signal(SIGPIPE, SIG_IGN);
+#endif
     icons::registerPrefabs();   // built-in prefabs first, so a project's own may replace them
     try { return runMain(argc,argv,registerAll); }
     catch (const std::exception& error){

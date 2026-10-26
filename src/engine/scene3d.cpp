@@ -1297,7 +1297,8 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
             clear.push_back(it);
         } else drawItem(it, Pass::Lit);
     }
-    std::sort(clear.begin(), clear.end(), [](const Item& a, const Item& b) { return a.viewDepth > b.viewDepth; });
+    // Stable: at equal depth keep scene order, so coplanar layers do not swap between frames.
+    std::stable_sort(clear.begin(), clear.end(), [](const Item& a, const Item& b) { return a.viewDepth > b.viewDepth; });
     rlDisableDepthMask();
     for (const Item& it : clear) drawItem(it, Pass::Lit);
     rlEnableDepthMask();

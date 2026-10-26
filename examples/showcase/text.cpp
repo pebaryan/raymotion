@@ -138,7 +138,9 @@ void stylingScene(TNode* n, int len) {
                       txt::Text::make("Any glyph can be styled on its own", style(72)) };
     });
     n->add(0, len)->fn = [=](const Ctx& cx, int t) {
-        const auto& [wave, line] = texts();
+        const Texts& tx = texts();   // not a structured binding: lambdas below capture these (C++17)
+        const txt::Text& wave = tx.wave;
+        const txt::Text& line = tx.line;
         const Vector2 mid{ 0.5f, 0.5f };
         txt::Reveal r;
         r.offset = { 0, 60 };

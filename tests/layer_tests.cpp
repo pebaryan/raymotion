@@ -255,7 +255,8 @@ static void filters() {
     std::vector<int> levels;
     for (int x = 0; x < 100; x++) {
         int l = GetImageColor(p, x, 50).r;
-        if (std::find(levels.begin(), levels.end(), l) == levels.end()) levels.push_back(l);
+        // Within 2 is the same step: 2/4 is 127.5 in 8 bits, which drivers round either way.
+        if (std::none_of(levels.begin(), levels.end(), [l](int m) { return std::abs(m - l) <= 2; })) levels.push_back(l);
     }
     CHECK(levels.size() <= 5);                            // 4 steps (+ black where the ramp is 0)
     UnloadImage(p);

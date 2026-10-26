@@ -429,7 +429,8 @@ g3d::Object3D* addCartoon(g3d::Scene& scene, const Protein& p, const CartoonStyl
         i = j;
     }
     const int K = 12;                                       // cross-section points
-    for (auto [f0, f1] : frags) {
+    for (const auto& frag : frags) {
+        const size_t f0 = frag.first, f1 = frag.second;   // captured below, so not a structured binding (C++17)
         const int m = (int)(f1 - f0);
         std::vector<Vector3> P(m), O(m);
         for (int i = 0; i < m; i++) P[i] = Vector3Subtract(p.atoms[p.residues[f0 + i].ca].pos, center);
