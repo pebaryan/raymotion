@@ -2,14 +2,14 @@
 
 [![CI](https://github.com/pebaryan/raymotion/actions/workflows/ci.yml/badge.svg)](https://github.com/pebaryan/raymotion/actions/workflows/ci.yml)
 
-[![raymotion: the introduction video on YouTube](docs/images/raymotion-promo.jpg)](https://youtu.be/tcALbxoO9x0)
+[![raymotion: the introduction video on YouTube](docs/images/raymotion-promo.jpg)](https://youtu.be/YIa2rU2EQJw)
 
 Remotion-style motion graphics / video engine — pure C++17 on **raylib + ffmpeg**, no
 web stack. Compositions are code: a timeline tree of nodes with keyframe/easing tracks
 and transforms, drawn deterministically per frame, supersampled for clean edges, and
 piped straight into ffmpeg.
 
-▶ **[Watch the 3.5-minute introduction on YouTube](https://youtu.be/tcALbxoO9x0)**: how it works,
+▶ **[Watch the 5-minute introduction on YouTube](https://youtu.be/YIa2rU2EQJw)**: how it works,
 the technology underneath, and every feature demonstrated, all rendered by raymotion itself.
 
 It is built for **technical and scientific explainers**: GPU 3D scenes with illustration
@@ -1104,7 +1104,8 @@ here-there-explainer   1280x720  @30fps  108.0s  music=1   (logic explainer)
 here-there-plain       1280x720  @30fps  108.0s  music=0   (plain-language cut, Segoe UI)
 here-there-feed        1080x1350 @30fps   88.0s  music=0   (portrait feed cut, Segoe UI)
 own-your-compute       1920x1080 @30fps   66.0s  audio=1   (story film: GPU 3D, particles, glitch; all assets from code)
-raymotion-promo        1920x1080 @60fps  210.0s  audio=1   (YouTube introduction: how it works, 16 features, credits)
+raymotion-promo        1920x1080 @60fps  314.0s  audio=1   (YouTube introduction: how it works, every feature to v0.8 in 29 chapters, credits)
+raymotion-promo-thumb  1920x1080 @60fps    1.0s  audio=0   (the introduction's YouTube thumbnail: render a still at frame 30)
 npr-styles             1920x1080 @30fps   53.8s  audio=0   (non-photorealistic rendering: eight illustration styles)
 diagrams               1920x1080 @30fps   56.0s  audio=1   (flowcharts, DOT, BPMN, knowledge graphs, trees, molecules, proteins)
 particles              1920x1080 @30fps   29.3s  audio=0   (fireworks, campfire, rain, snow, comet, custom looks, confetti)
@@ -1133,13 +1134,13 @@ map-charts             1920x1080 @30fps   31.2s  audio=1   (geo3d:: population c
 austria-time-travel    1920x1080 @30fps  140.0s  audio=1   (Austria through 5,000 years for the National Day: glacier, salt, Rome, Ostarrîchi, empire, neutrality; voice clone and a Strauss/Mozart score)
 ```
 
-`raymotion-promo` is the 3.5-minute introduction to the engine
-([watch it on YouTube](https://youtu.be/tcALbxoO9x0)), at 60 fps: the
-idea (a video is a function of its frame number), the pipeline from C++ to MP4, the
-timeline tree, then sixteen features demonstrated one by one beside the code that drives
-them, the GitHub repository and the credits. Its score, and the texture, photo, SVG, GIF,
-video clip and OBJ model its media and 3D chapters show, are generated into
-`out/promo-assets-v1/` on first still, preview or render (the GIF and the clip need ffmpeg).
+`raymotion-promo` is the 5-minute introduction to the engine
+([watch it on YouTube](https://youtu.be/YIa2rU2EQJw)), at 60 fps: the idea (a video
+is a function of its frame number), the pipeline from C++ to MP4, the timeline tree, then
+every feature up to v0.8 in 29 chapters (related ones grouped), each demonstrated beside the
+code that drives it, the GitHub repository and the credits. Its score, and the texture,
+photo, SVG, GIF, video clip and OBJ model its media and 3D chapters show, are generated into
+`out/promo-assets-v2/` on first still, preview or render (the GIF and the clip need ffmpeg).
 
 The Here-and-There pieces introduce Pedro Cabalar's treatment of HT and equilibrium
 logic; sources, script and scope notes are in `docs/here-there-explainer.md`, and the

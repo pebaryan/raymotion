@@ -1,16 +1,18 @@
-// promo.cpp -- "raymotion-promo": a 3.5-minute introduction to raymotion for YouTube,
+// promo.cpp -- "raymotion-promo": a 5-minute introduction to raymotion for YouTube,
 // 1920x1080 at 60 fps. It explains the idea (a video is a function of its frame number),
-// the pipeline from C++ to MP4 and the timeline tree, demonstrates sixteen features one
-// by one next to the code that drives them, then points at the GitHub repository and
-// rolls the credits.
+// the pipeline from C++ to MP4 and the timeline tree, demonstrates every feature up to
+// v0.8 (29 chapters, related ones grouped) next to the code that drives them, then points
+// at the GitHub repository and rolls the credits.
 //
-// Like own-your-compute, nothing is read from disk that this file did not make: the score
-// is synthesised, and the texture, photo, SVG logo, GIF, video clip and OBJ model used by
-// the media and 3D chapters are generated into out/promo-assets-v1/ before the first frame is drawn (the
-// GIF and the clip need ffmpeg).
+// Nothing is read from disk that this file did not make, apart from the data bundled with
+// the engine (Natural Earth, the sample town, caffeine): the score is synthesised, and the
+// texture, photo, SVG logo, GIF, video clip and OBJ model used by the media and 3D chapters
+// are generated into out/promo-assets-v2/ before the first frame is drawn (the GIF and the
+// clip need ffmpeg).
 //   raymotion render raymotion-promo
 #include "rmtn/raymotion.hpp"
 #include "procgen.hpp"
+#include <raymath.h>
 #include <cstdio>
 #include <filesystem>
 #include <array>
@@ -28,7 +30,7 @@ using namespace procgen;
 
 constexpr int FPS = 60;
 constexpr int XF = 30;                        // every chapter transition overlaps 30 frames
-const std::string ASSETS = "out/promo-assets-v1";   // bump when a generator changes
+const std::string ASSETS = "out/promo-assets-v2";   // bump when a generator changes
 const std::string REPO = "github.com/pebaryan/raymotion";
 
 const Color BG = mkColor(0x070912), PANEL = mkColor(0x0f1528), PANEL2 = mkColor(0x151d36),
@@ -44,17 +46,28 @@ constexpr float SX = 860, SY = 150, SW = 950, SH = 780;
 // Lengths are in frames from one chapter's start to the next (multiples of a 2 s bar at
 // 120 bpm, so the score's sections land on the cuts).
 struct Chapter { const char* name; int len; };
+// The feature chapters run from the basics of motion, through drawing, text and the
+// timeline, to media and sound, science, 3D and maps, and end on rendering. Their order
+// here is the order of features().
 const Chapter CHAPTERS[] = {
     { "Intro", 600 }, { "The idea", 720 }, { "Under the hood", 960 }, { "The timeline", 720 },
     { "Keyframes & easing", 480 }, { "Springs", 480 }, { "Interpolation", 480 }, { "Vector drawing", 480 },
-    { "Supersampling", 480 }, { "Text & layout", 480 }, { "Layers & blending", 480 }, { "Masks", 480 },
-    { "Transitions", 480 }, { "Sequencing", 480 }, { "Props", 480 }, { "Prefabs", 480 },
-    { "Media", 480 }, { "GPU 3D", 720 }, { "Audio", 480 }, { "Rendering", 480 },
+    { "Vector paths", 480 }, { "Supersampling", 480 }, { "Text & layout", 480 }, { "Text & code", 480 },
+    { "Layers & blending", 480 }, { "Masks", 480 }, { "Transitions", 480 }, { "Sequencing", 480 },
+    { "Camera & motion blur", 480 }, { "Props", 480 }, { "Prefabs", 480 }, { "Media", 480 },
+    { "Audio", 480 }, { "Captions & voice", 480 }, { "Equations", 480 }, { "Plots & charts", 480 },
+    { "Diagrams & molecules", 480 }, { "Spaces", 480 }, { "GPU 3D", 720 }, { "Illustration styles", 480 },
+    { "Sky, fog & tilt-shift", 480 }, { "Particles", 480 }, { "Maps & globes", 480 }, { "3D cities", 480 },
+    { "Rendering", 480 },
     { "Open source", 720 }, { "Credits", 960 },
 };
 constexpr int NCH = (int)(sizeof(CHAPTERS) / sizeof(CHAPTERS[0]));
-constexpr int FIRST_FEATURE = 4, NFEAT = 16;
-constexpr int CH_OPEN = 20, CH_CREDITS = 21;
+constexpr int FIRST_FEATURE = 4, NFEAT = NCH - FIRST_FEATURE - 2;
+constexpr int CH_OPEN = NCH - 2, CH_CREDITS = NCH - 1;
+int chapterNamed(const char* name) {
+    for (int k = 0; k < NCH; k++) if (std::string(CHAPTERS[k].name) == name) return k;
+    throw std::runtime_error(std::string("promo: no chapter ") + name);
+}
 
 int chapterStart(int i) {
     int s = 0;
@@ -420,7 +433,7 @@ void genScore(const std::string& path) {
                 gM{ 43, { 62, 67, 71 }, { 74, 79, 83, 79 } }, dM{ 38, { 62, 66, 69 }, { 74, 78, 81, 78 } },
                 eM{ 40, { 64, 68, 71 }, { 76, 80, 83, 88 } };
     const Chord prog[4] = { em, cM, gM, dM };
-    const double IDEA = sec(1), HOOD = sec(2), TREE = sec(3), FEAT = sec(FIRST_FEATURE), GPU = sec(17),
+    const double IDEA = sec(1), HOOD = sec(2), TREE = sec(3), FEAT = sec(FIRST_FEATURE), GPU = sec(chapterNamed("GPU 3D")),
                  OPEN = sec(CH_OPEN), CRED = sec(CH_CREDITS);
 
     // Intro: an Em9 swell, a bell per letter, a riser into the first cut.
@@ -701,7 +714,7 @@ void sceneHood(TNode* s, int len, int abs0) {
     static const Card CARDS[6] = {
         { "Your code", "C++17 compositions" }, { "Timeline tree", "nodes, tracks, springs" },
         { "raylib + OpenGL", "2D, 3D and shaders" }, { "Canvas", "2x / 4x supersampled" },
-        { "Async readback", "pixel buffers + a writer thread" }, { "ffmpeg", "x264, NVENC, AAC audio" } };
+        { "Async readback", "pixel buffers + a writer thread" }, { "ffmpeg", "x264, NVENC, ProRes, VP9" } };
     const float CW = 230, CH = 196, GAP = 50, X0 = (1920 - (6 * CW + 5 * GAP)) / 2, Y0 = 360;
     auto centerX = [=](int i) { return X0 + i * (CW + GAP) + CW / 2; };
     s->add(0, len)->fn = [=](const Ctx& cx, int t) {
@@ -907,6 +920,18 @@ void featureScene(TNode* s, int len, int abs0, int number, std::shared_ptr<Featu
     stage->up = [](int t, NodeProps& p) { const float k = rise(t, 0, 26); p.opacity = k; p.pos = { SX, SY + 26 * (1 - k) }; };
     stage->isolate().mask = [](const Ctx& cx, int) { dr::roundRect(cx, 0, 0, SW, SH, 20, WHITE); };
     f->stage(stage, len - delay, abs0 + delay);
+}
+
+// A column of labels down the stage's left edge, each sliding in at its frame.
+struct Chip { int at; const char* text; };
+void chips(const Ctx& cx, int t, const std::vector<Chip>& list, Vector2 at = { 24, 40 }) {
+    for (size_t i = 0; i < list.size(); i++) {
+        const float a = rise(t, list[i].at, 20);
+        if (a <= 0) continue;
+        Ctx k = sub(cx, { -20 * (1 - a), 0 });
+        k.a *= a;
+        pill(k, { at.x, at.y + i * 46.f }, list[i].text, mono(), 18, INK, withAlpha(BG, 0.7f));
+    }
 }
 
 // ---------------------------------------------------------------- 01 keyframes & easing
@@ -1423,15 +1448,23 @@ void stagePrefabs(TNode* st, int len, int) {
             };
         },
     });
-    static const char* NAMES[12] = { "Springs", "Easing", "Layers", "Masks", "Layout", "Text",
-                                     "Media", "3D", "Audio", "Props", "Series", "Render" };
-    for (int i = 0; i < 12; i++) {
+    static const char* NAMES[4] = { "Springs", "Layers", "3D", "Audio" };
+    for (int i = 0; i < 4; i++) {
         Json props;
         props.set("label", NAMES[i]);
-        props.set("hue", 160.0 + i * 17);
+        props.set("hue", 160.0 + i * 40);
         props.set("delay", 10 + i * 6);
-        prefab::use(st, 0, len, "promo-badge", std::move(props))->props.pos = { 130 + (i % 4) * 230.f, 130 + (i / 4) * 250.f };
+        prefab::use(st, 0, len, "promo-badge", std::move(props))->props.pos = { 130 + i * 230.f, 120 };
     }
+    // The built-in ones: the creator's links, a row of flags, the logo.
+    prefab::use(st, 0, len, "social-row",
+                Json::parse(R"({"brands": ["github", "x", "youtube"], "handle": "@pebaryan", "size": 92, "gap": 48,
+                                "delay": 90, "fps": 60})"))->props.pos = { SW / 2, 360 };
+    prefab::use(st, 0, len, "flag-row",
+                Json::parse(R"({"countries": ["at", "id", "jp", "de", "gb", "us", "br"], "size": 84, "gap": 30, "delay": 170,
+                                "fps": 60})"))->props.pos = { SW / 2, 560 };
+    prefab::use(st, 0, len, "raymotion-logo", Json::parse(R"({"size": 70, "tagline": "video as code", "delay": 250, "fps": 60})"))
+        ->props.pos = { SW / 2, 700 };
 }
 
 // ---------------------------------------------------------------- 13 media
@@ -1554,25 +1587,20 @@ void stageGpu(TNode* st, int len, int) {
     pip->add(0, len)->fn = [inset](const Ctx& cx, int) { dr::roundRect(cx, inset.x - 4, inset.y - 4, inset.width + 8, inset.height + 8, 10, withAlpha(INK, 0.85f)); };
     pip->add(0, len)->fn = g3d::draw(scene, inset, top);
     st->add(0, len)->fn = [](const Ctx& cx, int t) {
-        struct Chip { int at; const char* text; };
-        static const Chip CHIPS[] = { { 60, "image-based lighting" }, { 130, "PCF shadows from 3 lights" },
-                                      { 200, "rough, metal and textured materials" }, { 240, "a second camera, own viewport" },
-                                      { 380, "depth of field: rack focus" }, { 460, "gem.obj: generated, then loaded" },
-                                      { 540, "linear fog" } };
-        for (int i = 0; i < 7; i++) {
-            const float a = rise(t, CHIPS[i].at, 20);
-            if (a <= 0) continue;
-            Ctx k = sub(cx, { -20 * (1 - a), 0 });
-            k.a *= a;
-            pill(k, { 24, 40 + i * 46.f }, CHIPS[i].text, mono(), 18, INK, withAlpha(BG, 0.7f));
-        }
+        chips(cx, t, { { 60, "image-based lighting" }, { 130, "PCF shadows from 3 lights" },
+                       { 200, "rough, metal and textured materials" }, { 240, "a second camera, own viewport" },
+                       { 380, "depth of field: rack focus" }, { 460, "gem.obj: generated, then loaded" }, { 540, "linear fog" } });
     };
 }
 
 // ---------------------------------------------------------------- 15 audio
 void stageAudio(TNode* st, int len, int abs0) {
     const std::string score = asset("score.wav");
-    st->add(0, len)->fn = [score, abs0](const Ctx& cx, int t) {
+    aud::Options ao;
+    ao.fps = FPS;
+    ao.bands = 40;
+    const aud::AnalysisPtr music = aud::analyze(score, ao);
+    st->add(0, len)->fn = [score, abs0, music](const Ctx& cx, int t) {
         const std::vector<float>& pcm = media::decodeAudio(score, 48000);
         const long frames = (long)(pcm.size() / 2);
         const double now = (abs0 + t) / (double)FPS;
@@ -1593,28 +1621,12 @@ void stageAudio(TNode* st, int len, int abs0) {
         }
         dr::rect(cx, wx + ww / 2 - 1, 34, 2, 136 + 140, AMBER);
         say(cx, mono(), fmt("%.2f s", now), { wx + ww / 2 + 10, 34 }, 16, AMBER);
-        // Spectrum: Goertzel at log-spaced bands over 2048 windowed samples.
-        const long c0 = (long)(now * 48000) - 1024;
-        const int BANDS = 40;
+        // Spectrum and beats from aud::analyze, at the score's own frame.
+        const double f = abs0 + t;
         const float sx = 40, sw = 870, sy = 560, sh = 220 - 30;
-        for (int b = 0; b < BANDS; b++) {
-            const double f = 50 * std::pow(12000.0 / 50, b / (double)(BANDS - 1));
-            const double w = 2 * PI * f / 48000, coef = 2 * std::cos(w);
-            double s1 = 0, s2 = 0;
-            for (int i = 0; i < 2048; i++) {
-                const double win = 0.5 - 0.5 * std::cos(2 * PI * i / 2047);
-                const double x = 0.5 * (sample(c0 + i, 0) + sample(c0 + i, 1)) * win;
-                const double s0 = x + coef * s1 - s2;
-                s2 = s1; s1 = s0;
-            }
-            const double power = s1 * s1 + s2 * s2 - coef * s1 * s2;
-            const float db = (float)(10 * std::log10(power + 1e-9));
-            const float hgt = std::clamp((db + 10) / 60.f, 0.02f, 1.f) * sh;
-            const float bw = sw / BANDS;
-            dr::roundRect(cx, sx + b * bw + 2, sy - hgt, bw - 4, hgt, 3, ColorFromHSV(170 + b * 4.f, 0.6f, 0.95f));
-        }
-        say(cx, mono(), "50 Hz", { sx, sy + 12 }, 15, FAINT);
-        say(cx, mono(), "12 kHz", { sx + sw, sy + 12 }, 15, FAINT, 1, 0);
+        aud::bars(cx, { sx, sy - sh, sw, sh }, music->spectrum(f), TEAL, 0.25f);
+        say(cx, mono(), "30 Hz", { sx, sy + 12 }, 15, FAINT);
+        say(cx, mono(), "16 kHz", { sx + sw, sy + 12 }, 15, FAINT, 1, 0);
         // Levels and the beat.
         for (int ch = 0; ch < 2; ch++) {
             double acc = 0;
@@ -1626,10 +1638,10 @@ void stageAudio(TNode* st, int len, int abs0) {
             dr::roundRect(cx, 64, y, 600, 20, 10, withAlpha(LINE, 0.6f));
             dr::roundRect(cx, 64, y, 600 * k, 20, 10, k > 0.9f ? AMBER : MINT);
         }
-        const float beat = (float)std::fmod(now, 0.5) / 0.5f;
-        dr::circle(cx, { 820, 640 }, 26 + 14 * (1 - beat), withAlpha(ROSE, 0.9f * (1 - beat) + 0.1f));
-        say(cx, mono(), "120 bpm", { 820, 690 }, 16, DIM, 0.5, 0);
-        static const char* OPTS[] = { "startFrom", "endAt", "loop", "playbackRate", "volumeAt(t)" };
+        const float beat = music->pulse(f);
+        dr::circle(cx, { 820, 640 }, 26 + 14 * beat, withAlpha(ROSE, 0.9f * beat + 0.1f));
+        say(cx, mono(), fmt("%.0f bpm", music->bpm()), { 820, 690 }, 16, DIM, 0.5, 0);
+        static const char* OPTS[] = { "loop", "volumeAt(t)", "aud::analyze", "pulse", "spectrum" };
         float x = 40;
         for (const char* o : OPTS) x += pill(cx, { x, 740 }, o, mono(), 17, INK, withAlpha(IRIS, 0.25f)) + 12;
     };
@@ -1679,12 +1691,600 @@ void stageRender(TNode* st, int len, int) {
             dr::roundRect(cx, 200, y, 690, 22, 11, withAlpha(LINE, 0.7f));
             dr::roundRect(cx, 200, y, 690 * k, 22, 11, TEAL);
         }
-        static const char* FLAGS[] = { "--draft", "--ss 4", "--crf 19", "--preset p7", "--png-frames", "--props @file.json" };
+        static const char* FLAGS[] = { "--draft", "--ss 4", "--jobs 4", "--format prores", "--alpha", "--props @p.json" };
         float x = 30;
         for (int i = 0; i < 6; i++) {
             const float a = rise(t, 300 + i * 10, 20);
             x += pill(cx, { x, 740 }, FLAGS[i], mono(), 18, withAlpha(INK, a), withAlpha(IRIS, 0.25f * a)) + 12;
         }
+    };
+}
+
+// ================================================================== features added since 0.1
+// ---------------------------------------------------------------- vector paths
+void stagePaths(TNode* st, int len, int) {
+    const vg::Path curve = vg::Path::smooth({ { 70, 300 }, { 250, 120 }, { 470, 280 }, { 690, 100 }, { 880, 240 } });
+    const vg::Path heart = vg::Path::parse("M 0 95 C -170 -5 -85 -125 0 -50 C 85 -125 170 -5 0 95 Z");
+    const auto m1 = std::make_shared<vg::Morph>(vg::Path::star({ 0, 0 }, 120, 52, 5), vg::Path::circle({ 0, 0 }, 100));
+    const auto m2 = std::make_shared<vg::Morph>(vg::Path::circle({ 0, 0 }, 100), heart);
+    std::vector<Vector2> pts;
+    for (int k = 0; k < 5; k++) {
+        const float a = (float)((-90 + 144 * k) * PI / 180);
+        pts.push_back({ 95 * std::cos(a), 95 * std::sin(a) });
+    }
+    const vg::Path pentagram = vg::Path::polyline(pts, true);
+    st->add(0, len)->fn = [=](const Ctx& cx, int t) {
+        const float u = rise(t, 20, 110);
+        vg::Stroke ants(withAlpha(IRIS, 0.9f), 4);
+        ants.dash = { 18, 14 };
+        ants.dashOffset = -t * 1.5f;
+        Ctx d = cx;
+        d.a *= rise(t, 60, 30);
+        vg::stroke(d, curve.translated({ 0, 90 }), ants);
+        vg::stroke(cx, curve.trim(0, u), vg::Stroke(TEAL, 8));
+        if (u > 0) {
+            const Vector2 p = curve.pointAt(u);
+            glow(cx, p, 34, AMBER, 0.7f);
+            dr::circle(cx, p, 11, AMBER);
+        }
+        // A star becomes a circle becomes a heart.
+        const float a = rise(t, 150, 70), b = rise(t, 290, 70);
+        const vg::Path shape = b > 0 ? m2->at(b) : m1->at(a);
+        Ctx m = sub(cx, { 220, 600 });
+        m.a *= rise(t, 100, 30);
+        vg::fill(m, shape, withAlpha(ROSE, 0.85f));
+        vg::stroke(m, shape, vg::Stroke(INK, 3));
+        say(m, mono(), "vg::Morph", { 0, 150 }, 18, DIM, 0.5, 0);
+        // One self-crossing contour, two fill rules.
+        Ctx k = cx;
+        k.a *= rise(t, 200, 30);
+        vg::fill(sub(k, { 580, 600 }), pentagram, MINT, vg::FillRule::NonZero);
+        vg::fill(sub(k, { 810, 600 }), pentagram, MINT, vg::FillRule::EvenOdd);
+        say(k, mono(), "nonzero", { 580, 750 }, 18, DIM, 0.5, 0);
+        say(k, mono(), "evenodd", { 810, 750 }, 18, DIM, 0.5, 0);
+    };
+}
+
+// ---------------------------------------------------------------- text & code
+void stageTextCode(TNode* st, int len, int) {
+    const auto title = txt::later([] {
+        TextStyle s{ fonts::ui(true), 52 };
+        s.color = INK;
+        return txt::Text::make("Every frame is a function of time", s);
+    });
+    const auto decode = txt::later([] {
+        TextStyle s{ code::font(true), 30 };
+        s.color = TEAL;
+        return txt::Text::make("DECODING THE SIGNAL", s);
+    });
+    const code::Block before = code::Block::parse("function load(url) {\n  return fetch(url).then(r => r.json());\n}", "ts");
+    const code::Block after = code::Block::parse("async function load(url) {\n  const r = await fetch(url);\n  return r.json();\n}", "ts");
+    const auto change = std::make_shared<code::Morph>(before, after);
+    st->add(0, len)->fn = [=](const Ctx& cx, int t) {
+        txt::Reveal r;
+        r.by = txt::Unit::Word;
+        r.order = txt::Order::Center;
+        r.offset = { 0, 40 };
+        r.stagger = 6;
+        r.duration = 22;
+        txt::draw(cx, title(), { 475, 80 }, t - 10, r, { 0.5f, 0 });
+        txt::Reveal sr;
+        sr.stagger = 3;
+        sr.duration = 30;
+        txt::scramble(cx, decode(), { 475 - decode().bounds().width / 2, 200 }, t - 50, sr);
+        code::Style cs;
+        cs.size = 23;
+        cs.title = "load.ts";
+        code::Look look;
+        look.reveal = (t - 110) * 1.6;
+        look.cursor = true;
+        look.t = t;
+        Ctx k = cx;
+        k.a *= rise(t, 100, 20);
+        const Vector2 at{ 60, 320 };
+        if (t < 330) code::draw(k, before, at, cs, look);
+        else code::draw(k, *change, at, cs, rise(t, 340, 70));
+    };
+    st->add(0, len)->fn = [](const Ctx& cx, int t) {
+        chips(cx, t, { { 20, "txt:: reveal by word" }, { 60, "scramble" }, { 120, "code:: typed in" }, { 340, "code::Morph" } },
+              { 24, 620 });
+    };
+}
+
+// ---------------------------------------------------------------- camera & motion blur
+void stageCamera(TNode* st, int len, int) {
+    static constexpr float CW = 2400, CH = 1600;
+    static const Vector2 FRAME{ SW, 600 };
+    cam::Track track;
+    track.start(cam::Shot::fit({ 0, 0, CW, CH }, FRAME))
+        .to(110, cam::Shot::fit({ 140, 1120, 420, 300 }, FRAME))
+        .fly(260, cam::Shot::fit({ 1820, 160, 420, 300 }, FRAME))
+        .to(350, cam::Shot{ { 2030, 410 }, 6, -12 });
+    auto shot = [track](int t) { return track.at(t); };
+    cam::world(st, 0, len, shot, FRAME, 0.45f)->fn = [](const Ctx& cx, int) {
+        for (int i = 0; i < 260; i++)
+            dr::circle(cx, { (float)rnd01(711, i) * 3000 - 300, (float)rnd01(712, i) * 2200 - 300 }, 1.5f + 2.5f * (float)rnd01(713, i),
+                       withAlpha(INK, 0.25f + 0.4f * (float)rnd01(714, i)));
+    };
+    cam::world(st, 0, len, shot, FRAME)->fn = [](const Ctx& cx, int) {
+        dr::roundRect(cx, 0, 0, CW, CH, 40, withAlpha(PANEL2, 0.85f));
+        for (int i = 0; i < 12; i++) {
+            const float x = 140 + (i % 4) * 560.f, y = 160 + (i / 4) * 480.f;
+            const Color c = ColorFromHSV(170 + i * 17.f, 0.55f, 0.95f);
+            dr::roundRect(cx, x, y, 420, 300, 24, withAlpha(c, 0.22f));
+            dr::ring(cx, { x + 330, y + 90 }, 50, 6, c);
+            say(cx, bold(), fmt("%02d", i + 1), { x + 30, y + 30 }, 90, INK);
+        }
+        say(cx, regular(), "zoomed 6x, still sharp", { 2030, 410 }, 13, AMBER, 0.5, 0.5);
+    };
+    // Below: one disc as it is, one with motion blur.
+    st->add(0, len)->fn = [](const Ctx& cx, int) {
+        dr::rect(cx, 0, 600, SW, 180, mkColor(0x0b1020));
+        dr::rect(cx, 0, 600, SW, 2, LINE);
+        say(cx, mono(), "sharp", { 24, 640 }, 17, FAINT, 0, 0.5);
+        say(cx, mono(), "motionBlur = {12, 0.5f}", { 24, 720 }, 17, FAINT, 0, 0.5);
+    };
+    auto x = [](double t) { return 120 + 760 * (0.5f + 0.5f * (float)std::sin(t * 0.09)); };
+    st->add(0, len)->fn = [x](const Ctx& cx, int t) { dr::circle(cx, { x(frameTime(t)), 668 }, 22, TEAL); };
+    TNode* blurred = st->add(0, len);
+    blurred->isolate().motionBlur = { 12, 0.5f };
+    blurred->fn = [x](const Ctx& cx, int t) { dr::circle(cx, { x(frameTime(t)), 748 }, 22, AMBER); };
+}
+
+// ---------------------------------------------------------------- captions & voice-over
+void stageCaptions(TNode* st, int len, int) {
+    sub::Track track;
+    track.cues = { { 0.4, 2.9, "Every scene starts on its phrase.", false },
+                   { 3.0, 5.5, "Captions are burned in, word by word,", false },
+                   { 5.6, 8.0, "and saved as an SRT for the upload.", false } };
+    st->add(0, len)->fn = [track](const Ctx& cx, int t) {
+        const double sec = t / (double)FPS;
+        // The picture: a speaker's waveform.
+        dr::roundRect(cx, 24, 24, SW - 48, 470, 16, mkColor(0x0b1020));
+        const sub::Cue* now = track.at(sec);
+        for (int i = 0; i < 90; i++) {
+            const float e = now ? 0.35f + 0.65f * (float)std::fabs(std::sin(i * 0.7 + t * 0.21) * std::sin(i * 0.13 + t * 0.05)) : 0.05f;
+            const float h = 10 + 150 * e, x = 70 + i * 9.2f;
+            dr::roundRect(cx, x, 230 - h / 2, 5, h, 2.5f, withAlpha(TEAL, 0.35f + 0.6f * e));
+        }
+        // The burned-in captions, karaoke style; sub::draw places them in a 1920 x 1080 frame.
+        sub::Style cs = sub::defaultStyle();
+        cs.text.size = 34;
+        cs.maxWidth = 820;
+        cs.bottom = 1080 - 450;
+        cs.upcoming = withAlpha(DIM, 0.8f);
+        cs.text.color = AMBER;
+        if (now) sub::draw(sub(cx, { SW / 2 - 960, 0 }), *now, sec, cs);
+        // The timeline: three scenes, each lit from its phrase.
+        const float x0 = 40, x1 = SW - 40, y = 560;
+        dr::rect(cx, x0, y + 50, x1 - x0, 2, LINE);
+        for (size_t i = 0; i < track.cues.size(); i++) {
+            const sub::Cue& c = track.cues[i];
+            const float a = x0 + (x1 - x0) * (float)(c.start / 8.2), b = x0 + (x1 - x0) * (float)(c.end / 8.2);
+            const bool on = sec >= c.start;
+            dr::roundRect(cx, a, y, b - a - 6, 40, 8, on ? withAlpha(IRIS, 0.75f) : withAlpha(LINE, 0.6f));
+            say(cx, mono(), fmt("scene %d", (int)i + 1), { a + 12, y + 20 }, 17, on ? INK : FAINT, 0, 0.5);
+        }
+        const float px = x0 + (x1 - x0) * (float)std::min(1.0, sec / 8.2);
+        dr::rect(cx, px - 1, y - 10, 2, 72, AMBER);
+        // And the sidecar, as it is written.
+        const std::string srt = fmt("1\n00:00:00,400 --> 00:00:02,900\n%s", track.cues[0].text.c_str());
+        TextStyle ms{ mono(), 18 };
+        ms.color = withAlpha(DIM, rise(t, 40, 20));
+        dr::textBox(cx, srt, { 40, 640, SW - 80, 120 }, ms);
+    };
+}
+
+// ---------------------------------------------------------------- equations
+void stageEquations(TNode* st, int len, int) {
+    const auto euler = txt::later([] { return math::Formula::tex(R"(\id{lhs}{e^{i\pi}} + 1 = 0)", { 84, INK }); });
+    const auto step = txt::later([] {
+        return math::Transform(math::Formula::tex(R"(ax^2 + bx + c = 0)", { 60, INK }),
+                               math::Formula::tex(R"(x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a})", { 60, INK }));
+    });
+    const auto pyth = txt::later([] { return math::Formula::tex(R"(\id{a}{a^2} + \id{b}{b^2} = \id{c}{c^2})", { 64, INK }); });
+    st->add(0, len)->fn = [=](const Ctx& cx, int t) {
+        math::Look el;
+        el.colors["lhs"] = AMBER;
+        math::write(cx, euler(), { 475, 120 }, { 0.5f, 0.5f }, rise(t, 10, 90), el);
+        Ctx q = cx;
+        q.a *= rise(t, 120, 20);
+        step().draw(q, { 475, 340 }, { 0.5f, 0.5f }, rise(t, 200, 70));
+        // Pythagoras, its parts coloured like the triangle's sides.
+        const float k = rise(t, 300, 40);
+        Ctx p = cx;
+        p.a *= k;
+        const Vector2 A{ 130, 720 }, B{ 400, 720 }, C{ 130, 540 };
+        vg::stroke(p, vg::Path::line(A, B), vg::Stroke(TEAL, 6));
+        vg::stroke(p, vg::Path::line(A, C), vg::Stroke(AMBER, 6));
+        vg::stroke(p, vg::Path::line(C, B), vg::Stroke(ROSE, 6));
+        dr::rect(p, A.x, A.y - 22, 22, 22, withAlpha(INK, 0.5f));
+        math::Look pl;
+        pl.colors["a"] = TEAL;
+        pl.colors["b"] = AMBER;
+        pl.colors["c"] = ROSE;
+        math::draw(p, pyth(), { 680, 640 }, { 0.5f, 0.5f }, pl);
+    };
+}
+
+// ---------------------------------------------------------------- plots & charts
+void stagePlots(TNode* st, int len, int) {
+    const plot::Axes ax({ 60, 40, 830, 290 }, { -6.5, 6.5 }, { -1.5, 1.5 });
+    const vg::Path sine = plot::graph(ax, [](double x) { return std::sin(x); });
+    auto table = [](std::vector<double> a, std::vector<double> b) {
+        plot::Table tb;
+        tb.categories = { "Q1", "Q2", "Q3", "Q4" };
+        plot::Series s1, s2;
+        s1.name = "2025"; s1.values = std::move(a);
+        s2.name = "2026"; s2.values = std::move(b);
+        tb.series = { s1, s2 };
+        return tb;
+    };
+    const plot::Table before = table({ 12, 19, 15, 24 }, { 16, 22, 21, 30 }), after = table({ 12, 19, 15, 24 }, { 21, 18, 27, 36 });
+    plot::Table share;
+    share.categories = { "2D", "3D", "audio", "data" };
+    plot::Series sv;
+    sv.name = "share";
+    sv.values = { 40, 25, 15, 20 };
+    share.series = { sv };
+    st->add(0, len)->fn = [=](const Ctx& cx, int t) {
+        plot::AxesStyle as;
+        as.numberSize = 20;
+        as.labelSize = 26;
+        as.xLabel = "x";
+        as.yLabel = R"(\sin x)";
+        plot::axes(cx, ax, as, rise(t, 10, 40));
+        vg::stroke(cx, sine.trim(0, rise(t, 30, 70)), vg::Stroke(TEAL, 5));
+        // A tangent riding the curve.
+        const float k = rise(t, 100, 30);
+        if (k > 0) {
+            const double x = -5.5 + 11 * rise(t, 100, 330), y = std::sin(x), m = std::cos(x);
+            Ctx c = cx;
+            c.a *= k;
+            vg::stroke(c, vg::Path::line(ax.map(x - 1.2, y - 1.2 * m), ax.map(x + 1.2, y + 1.2 * m)), vg::Stroke(AMBER, 4));
+            dr::circle(c, ax.map(x, y), 9, AMBER);
+        }
+        plot::ChartStyle cs;
+        cs.box = { 80, 430, 440, 290 };
+        cs.textSize = 20;
+        cs.axes.numberSize = 18;
+        cs.y = { 0, 40 };
+        plot::bars(cx, plot::Table::mix(before, after, rise(t, 320, 60)), cs, rise(t, 130, 60));
+        plot::PieStyle ps;
+        ps.inner = 0.55f;
+        ps.textSize = 18;
+        plot::pie(cx, share, { 750, 585 }, 125, ps, rise(t, 190, 60));
+    };
+}
+
+// ---------------------------------------------------------------- diagrams & molecules
+void stageDiagrams(TNode* st, int len, int) {
+    auto d = dg::Diagram::make(dg::mermaid(
+                                   "flowchart LR\n"
+                                   "  idea[Idea] --> code[Write C++]\n"
+                                   "  code --> still[Check a still]\n"
+                                   "  still -->|fix| code\n"
+                                   "  still --> render[Render MP4]\n"
+                                   "  render --> share((Share))\n"),
+                               dg::Theme::dark());
+    d->build(10, 8, 18);
+    d->trace(150, 90, { "idea", "code", "still", "render", "share" });
+    d->flow(260, 140, { "code" }, 3);
+    st->add(0, len)->fn = dg::draw(d, { 20, 20, SW - 40, 340 });
+    chem::Style2D ms;
+    ms.ink = INK;
+    auto mol = chem::Depiction::make(chem::smiles("CN1C=NC2=C1C(=O)N(C(=O)N2C)C"), ms);
+    mol->build(110, 3, 14);
+    mol->highlight(250, 20, chem::find(mol->molecule, "C=O")[0]);
+    st->add(0, len)->fn = chem::draw(mol, { 20, 400, 450, 360 });
+    // The same molecule in 3D, ball and stick.
+    auto scene = std::make_shared<g3d::Scene>();
+    scene->environmentGenerator = g3d::studioEnvironment(mkColor(0x3a4670), mkColor(0x1a2036), mkColor(0x0c0e18), 4);
+    scene->lights.push_back(g3d::Light::directional({ -4, 6, 5 }, WHITE, 1.1f));
+    g3d::Object3D* ball = chem::addMolecule(*scene, mol->molecule);
+    chem::buildIn(ball, 140, 2, 12);
+    scene->camera.fov = 34;
+    scene->camera.up = [](int t, g3d::Camera& cam) {
+        const float a = 0.5f + t * 0.008f;
+        cam.position = { 16 * std::cos(a), 4, 16 * std::sin(a) };
+        cam.target = { 0, 0, 0 };
+    };
+    st->add(0, len)->fn = g3d::draw(scene, { 490, 400, 440, 360 });
+    st->add(0, len)->fn = [](const Ctx& cx, int t) {
+        Ctx k = cx;
+        k.a *= rise(t, 120, 20);
+        say(k, mono(), "caffeine, from SMILES", { 40, 760 }, 17, FAINT, 0, 1);
+        say(k, mono(), "and in 3D", { 510, 760 }, 17, FAINT, 0, 1);
+    };
+}
+
+// ---------------------------------------------------------------- spaces
+void stageSpaces(TNode* st, int len, int) {
+    st->add(0, len)->fn = [](const Ctx& cx, int t) {
+        const float k = rise(t, 50, 80);
+        const space::View v = space::View::mix(space::View::flat({ 475, 420 }, 95),
+                                               space::View::tilted({ 475, 470 }, 90, -32 + 0.05f * t, -62), k);
+        space::Scene s(v);
+        space::axes(s, {}, {}, { 1, 1, k });
+        const float m = rise(t, 170, 90);
+        if (m > 0) {
+            space::MeshStyle ms;
+            ms.colorAt = [](Vector3 p) { return mixC(TEAL, AMBER, std::clamp(p.z * 0.7f + 0.5f, 0.f, 1.f)); };
+            ms.opacity = 0.92f;
+            s.mesh(space::Mesh::graph([m](double x, double y) { return m * 0.9 * std::sin(x) * std::cos(y); }, { -3, 3 }, { -3, 3 }, 26, 26), ms);
+        }
+        const Vector3 tip{ 2, 1.5f, 1.8f * k };
+        s.arrow({ 0, 0, 0 }, tip, ROSE, 5);
+        space::guides(s, tip, withAlpha(DIM, 0.8f));
+        if (m > 0.5f) s.label({ 0, -3.4f, 1.6f }, R"(z = \sin x \cos y)", 32, INK);
+        s.draw(cx);
+    };
+    st->add(0, len)->fn = [](const Ctx& cx, int t) {
+        chips(cx, t, { { 20, "View::flat()" }, { 60, "View::mix -> tilted()" }, { 170, "Mesh::graph(f)" }, { 260, "depth-sorted vector paths" } });
+    };
+}
+
+// ---------------------------------------------------------------- illustration styles
+g3d::ScenePtr illustrated(g3d::Shading shading, Color background, bool wobble) {
+    auto scene = std::make_shared<g3d::Scene>();
+    scene->background = background;
+    scene->ambient = 0.3f;
+    scene->lights.push_back(g3d::Light::directional({ -5, 8, 6 }, WHITE, 1.2f, true));
+    scene->lights.back().shadowExtent = 6;
+    g3d::Material ground{ mixC(background, WHITE, 0.12f) };
+    ground.shading = shading == g3d::Shading::Hatch ? shading : g3d::Shading::Standard;
+    ground.roughness = 0.9f;
+    ground.lineWidth = 0;
+    scene->add(g3d::Geometry::plane(30, 30), ground);
+    auto mat = [shading](Color c) {
+        g3d::Material m{ c };
+        m.shading = shading;
+        m.toon.bands = 2;
+        m.toon.rim = Color{ 255, 255, 255, 110 };
+        return m;
+    };
+    g3d::Object3D* knot = scene->add(g3d::Geometry::knot(0.9f, 0.3f), mat(mkColor(0xff6b5a)));
+    knot->up = [](int t, g3d::Object3D& o) { o.position = { -0.9f, 1.5f, 0 }; o.rotation = { 20, t * 0.9f, 0 }; };
+    g3d::Object3D* ball = scene->add(g3d::Geometry::sphere(0.75f), mat(mkColor(0x47b3da)));
+    ball->position = { 1.6f, 0.75f, 0.6f };
+    g3d::Object3D* box = scene->add(g3d::Geometry::box(1, 1, 1), mat(mkColor(0xffc365)));
+    box->position = { 1.3f, 0.5f, -1.6f };
+    box->rotation = { 0, 30, 0 };
+    scene->lines.enabled = true;
+    scene->lines.width = 2.5f;
+    if (wobble) { scene->lines.wobble = 1.4f; scene->lines.boilEvery = 4; }
+    scene->camera.fov = 36;
+    scene->camera.up = [](int t, g3d::Camera& cam) {
+        const float a = 1.1f + t * 0.003f;
+        cam.position = { 7.5f * std::cos(a), 3.6f, 7.5f * std::sin(a) };
+        cam.target = { 0.2f, 1, 0 };
+    };
+    return scene;
+}
+
+void stageNpr(TNode* st, int len, int) {
+    const Color PAPER = mkColor(0xf3ecd8);
+    struct Q { g3d::Shading shading; Color bg; bool wobble, wash; const char* label; };
+    const Q qs[4] = { { g3d::Shading::Toon, PANEL, false, false, "Toon + ink lines" },
+                      { g3d::Shading::Gooch, PANEL, false, false, "Gooch" },
+                      { g3d::Shading::Hatch, PAPER, true, false, "Hatching" },
+                      { g3d::Shading::Toon, PAPER, true, true, "Watercolour + paper" } };
+    for (int i = 0; i < 4; i++) {
+        const Rectangle r{ (i % 2) * SW / 2, (i / 2) * SH / 2, SW / 2, SH / 2 };
+        TNode* q = st->add(0, len);
+        q->up = [i](int t, NodeProps& p) { p.opacity = rise(t, 10 + i * 40, 25); };
+        if (qs[i].wash) q->isolate().filters = { Filter::watercolor(6), Filter::paperGrain() };
+        q->add(0, len)->fn = g3d::draw(illustrated(qs[i].shading, qs[i].bg, qs[i].wobble), r);
+        const std::string label = qs[i].label;
+        const bool light = qs[i].bg.r > 128;
+        st->add(0, len)->fn = [r, i, label, light](const Ctx& cx, int t) {
+            Ctx k = cx;
+            k.a *= rise(t, 30 + i * 40, 20);
+            pill(k, { r.x + 20, r.y + 34 }, label, mono(), 17, light ? mkColor(0x2a2430) : INK,
+                 light ? withAlpha(WHITE, 0.7f) : withAlpha(BG, 0.7f));
+        };
+    }
+    st->add(0, len)->fn = [](const Ctx& cx, int) {
+        dr::rect(cx, SW / 2 - 1, 0, 2, SH, LINE);
+        dr::rect(cx, 0, SH / 2 - 1, SW, 2, LINE);
+    };
+}
+
+// ---------------------------------------------------------------- sky, fog & tilt-shift
+void stageSky(TNode* st, int len, int) {
+    auto scene = std::make_shared<g3d::Scene>();
+    auto hour = [len](int t) { return 5.2f + 13.6f * t / (float)len; };
+    scene->fogMode = g3d::FogMode::Exponential;
+    scene->fogFromSky = true;
+    scene->fogHeight = 0;
+    scene->up = [hour, len](int t, g3d::Scene& self) {
+        self.sky = g3d::Sky::at(hour(t));
+        self.sky.clouds = 0.35f;
+        self.sky.sunLight = 0;
+        self.fogDensity = 0.045f - 0.03f * rise(t, 60, len * 0.5);   // morning fog burning off
+        self.fogFalloff = 0.35f;
+    };
+    g3d::Light sun = g3d::Light::directional({ 0, 0, 0 }, mkColor(0xffe6c8), 1.4f, true);
+    sun.shadowExtent = 22;
+    sun.up = [hour](int t, g3d::Light& self) {
+        const g3d::Sky k = g3d::Sky::at(hour(t));
+        self.position = Vector3Scale(Vector3Normalize(k.sunDirection), 60);
+        self.target = { 0, 0, 0 };
+        self.intensity = 1.5f * std::clamp(k.sunDirection.y * 3.f, 0.f, 1.f);
+    };
+    scene->lights.push_back(sun);
+    g3d::Material meadow{ mkColor(0x5f8742) };
+    meadow.roughness = 0.95f;
+    scene->add(g3d::Geometry::plane(400, 400), meadow);
+    g3d::Material hill{ mkColor(0x4a6b3a) };
+    hill.roughness = 1;
+    for (int i = 0; i < 9; i++) {
+        const float a = (float)(i * 0.7 + 0.4), r = 70 + 40 * (float)rnd01(801, i);
+        g3d::Object3D* h = scene->add(g3d::Geometry::sphere(1), hill);
+        h->position = { r * std::cos(a) * 1.3f, -14, -std::fabs(r * std::sin(a)) - 40 };
+        const float s = 22 + 16 * (float)rnd01(802, i);
+        h->scale = { s * 1.6f, s, s };
+    }
+    g3d::Material wall{ mkColor(0xeee4d0) }, roof{ mkColor(0xb4513a) }, pine{ mkColor(0x2f5a34) };
+    wall.roughness = roof.roughness = pine.roughness = 0.85f;
+    for (int i = 0; i < 26; i++) {
+        const float x = -11 + 22 * (float)rnd01(803, i), z = -9 + 16 * (float)rnd01(804, i);
+        if (rnd01(805, i) < 0.65) {
+            const float w = 1.4f + (float)rnd01(806, i), h = 1.1f + 0.6f * (float)rnd01(807, i);
+            g3d::Object3D* b = scene->add(g3d::Geometry::box(w, h, w * 0.8f), wall);
+            b->position = { x, h / 2, z };
+            g3d::Object3D* top = scene->add(g3d::Geometry::cone(w * 0.75f, 0.9f, 4), roof);
+            top->position = { x, h + 0.45f, z };
+            top->rotation = { 0, 45, 0 };
+        } else {
+            g3d::Object3D* tr = scene->add(g3d::Geometry::cone(0.6f, 2.4f, 8), pine);
+            tr->position = { x, 1.2f, z };
+        }
+    }
+    scene->camera.fov = 32;
+    scene->camera.up = [](int t, g3d::Camera& cam) {
+        const float a = 0.25f + t * 0.0012f;
+        cam.target = { 0, 2.5f, -6 };
+        cam.position = { 24 * std::sin(a), 5.5f, 24 * std::cos(a) };
+        const float tilt = rise(t, 330, 60);
+        cam.dof = { Vector3Distance(cam.position, cam.target), 2.4f * tilt, 16, -14 * tilt };
+    };
+    st->add(0, len)->fn = g3d::draw(scene, { 0, 0, SW, SH });
+    st->add(0, len)->fn = [hour](const Ctx& cx, int t) {
+        const float h = hour(t);
+        pill(cx, { SW - 24, 40 }, fmt("Sky::at(%02d:%02d)", (int)h, (int)((h - (int)h) * 60)), mono(), 18, INK, withAlpha(BG, 0.7f), 1);
+        chips(cx, t, { { 20, "a procedural sky, lighting the scene" }, { 80, "ground fog: fogFalloff" }, { 150, "fogFromSky" },
+                       { 330, "camera.dof.tilt: a miniature" } });
+    };
+}
+
+// ---------------------------------------------------------------- particles
+void stageParticles(TNode* st, int len, int) {
+    std::vector<fx::Emitter> shells;
+    const Color cols[4][2] = { { AMBER, ROSE }, { TEAL, INK }, { IRIS, ROSE }, { MINT, AMBER } };
+    for (int i = 0; i < 6; i++) {
+        fx::Emitter e = fx::burst(160, { cols[i % 4][0], cols[i % 4][1] });
+        e.burstAt = 20 + i * 62;
+        e.gravity = { 0, 0.03f };
+        e.drag = 0.02f;
+        e.seed = 40 + i;
+        shells.push_back(e);
+    }
+    fx::Emitter fire = fx::fire(90), smoke = fx::smoke(70), snow = fx::snow(SW, SH);
+    snow.from = 120;
+    fx::Emitter comet = fx::sparks(4, TEAL);
+    comet.origin = [](float f) { return Vector2{ -60 + f * 2.4f, 120 + f * 0.35f }; };
+    comet.from = 60;
+    st->add(0, len)->fn = [=](const Ctx& cx, int t) {
+        for (size_t i = 0; i < shells.size(); i++)
+            fx::draw(sub(cx, { 200 + (float)(i * 137 % 560), 150 + (float)(i % 3) * 60 }), shells[i], t);
+        fx::draw(cx, comet, t);
+        Ctx f = sub(cx, { 760, 720 });
+        for (int k = 0; k < 5; k++) dr::roundRect(f, -70 + k * 28.f, -6, 26, 14, 6, mkColor(0x5a3a26));
+        fx::draw(sub(cx, { 760, 600 }), smoke, t);
+        fx::draw(f, fire, t);
+        fx::draw(cx, snow, t);
+    };
+    st->add(0, len)->fn = [](const Ctx& cx, int t) {
+        chips(cx, t, { { 20, "fx::burst: fireworks" }, { 60, "an origin(frame): a comet" }, { 100, "fire, smoke" }, { 120, "snow" },
+                       { 200, "closed form: any frame alone" } }, { 24, 540 });
+    };
+}
+
+// ---------------------------------------------------------------- maps & globes
+void stageMaps(TNode* st, int len, int) {
+    static constexpr int TURN = 230, UNROLL = 130;
+    auto surface = std::make_shared<geo3d::Surface>(geo::Projection::equalEarth(), geo::LonLat{ 10, 0 });
+    auto scene = std::make_shared<g3d::Scene>();
+    scene->ambient = 0.4f;
+    scene->lights.push_back(g3d::Light::directional({ 4, 3, 6 }, WHITE, 1.1f));
+    scene->camera.fov = 30;
+    g3d::Object3D* world = scene->add();
+    globe::Map map(4096, mkColor(0x0d1a33));
+    map.fill(geo::land().merged(), mkColor(0x2a3b5c)).stroke(geo::countries().merged(), mkColor(0x4a5f88), 1.6f);
+    map.graticule(30, withAlpha(mkColor(0x4a5f88), 0.35f), 1);
+    g3d::Material paper;
+    paper.dynamicMap = map.texture();
+    paper.roughness = 0.9f;
+    geo3d::base(*world, surface, paper, 192);
+    geo3d::MarkStyle cols;
+    cols.size = 0.03f;
+    cols.height = 0.6f;
+    cols.scale.colors = [](float t) { return mixC(mkColor(0xffd166), mkColor(0xff5d73), t); };
+    cols.stagger = 3;
+    cols.grow = [](int t) { return rise(t, 30, 60) * fall(t, TURN + 30, 40); };
+    geo3d::marks(*world, surface,
+                 geo3d::byCountry({ { "CHN", 1398 }, { "IND", 1366 }, { "USA", 328 }, { "IDN", 270 }, { "PAK", 216 }, { "BRA", 211 },
+                                    { "NGA", 201 }, { "BGD", 163 }, { "RUS", 144 }, { "MEX", 128 }, { "JPN", 126 }, { "ETH", 112 },
+                                    { "PHL", 108 }, { "EGY", 100 }, { "VNM", 96 }, { "DEU", 83 }, { "TUR", 83 }, { "IRN", 83 } }),
+                 cols);
+    auto at = [](const char* iso) { return geo::countries().get(iso).labelPoint(); };
+    geo3d::FlowStyle fl;
+    fl.height = 0.5f;
+    fl.width = 0.03f;
+    fl.stagger = 6;
+    fl.head = [](int t) { return rise(t, TURN + UNROLL - 20, 70); };
+    geo3d::flows(*world, surface,
+                 { { at("MEX"), at("USA"), 11, BLANK }, { at("SYR"), at("TUR"), 3.9, BLANK }, { at("IND"), at("ARE"), 3.5, BLANK },
+                   { at("CHN"), at("USA"), 2.2, BLANK }, { at("POL"), at("DEU"), 2.1, BLANK }, { at("DZA"), at("FRA"), 1.7, BLANK } },
+                 fl);
+    scene->camera.up = [](int t, g3d::Camera& cam) {
+        const float k = rise(t, 0, TURN), a = (95 - 95 * k) * DEG2RAD, el = (22 - 22 * k) * DEG2RAD;
+        const float m = rise(t, TURN, UNROLL), d = 4.4f + (9.6f - 4.4f) * m;
+        const float tilt = 24 * DEG2RAD * rise(t, TURN + 60, 60);
+        cam.target = { 0, -0.3f * tilt, m };
+        const Vector3 dir{ std::sin(a) * std::cos(el), std::sin(el) - std::sin(tilt), std::cos(a) * std::cos(el) * std::cos(tilt) };
+        cam.position = Vector3Add(cam.target, Vector3Scale(Vector3Normalize(dir), d));
+    };
+    scene->up = [surface](int t, g3d::Scene&) { surface->morph = rise(t, TURN, UNROLL); };
+    st->add(0, len)->fn = g3d::draw(scene, { 0, 0, SW, SH });
+    cal::Clock clock;
+    clock.key(20, cal::Date{ 2026, 10, 1 }).key(len - 40, cal::Date{ 2026, 10, 26 });
+    st->add(0, len)->fn = [clock](const Ctx& cx, int t) {
+        Ctx k = cx;
+        k.a *= rise(t, 20, 20);
+        cal::page(k, { SW - 170, SH - 200, 140, 170 }, clock.day(t));
+        chips(cx, t, { { 20, "geo3d::marks on a globe" }, { TURN, "Surface::morph: the globe unrolls" }, { TURN + UNROLL - 20, "geo3d::flows" },
+                       { 40, "cal::page" } });
+    };
+}
+
+// ---------------------------------------------------------------- 3D cities
+void stageCities(TNode* st, int len, int) {
+    const city::Model town = city::load("data/city/town.city.json");
+    auto isGround = [](const city::Object& o) { return o.type == "LandUse" || o.type == "Road" || o.type == "WaterBody" || o.type == "PlantCover"; };
+    const city::Model standing = town.filter([isGround](const city::Object& o) { return !isGround(o); });
+    const BoundingBox box = town.bounds();
+    city::Look look;
+    look.terrain = mkColor(0x56604a);
+    look.road = mkColor(0x3c4150);
+    look.water = mkColor(0x2f5f8f);
+    look.vegetation = mkColor(0x5d8a4e);
+    auto scene = std::make_shared<g3d::Scene>();
+    scene->sky = g3d::Sky::at(16.8f);
+    scene->sky.sunLight = 0;
+    scene->fogMode = g3d::FogMode::Exponential;
+    scene->fogDensity = 0.0015f;
+    scene->fogFromSky = true;
+    g3d::Light sun = g3d::Light::directional({ 230, 150, 160 }, mkColor(0xffe2c0), 1.3f, true);
+    sun.shadowExtent = 220;
+    sun.shadowBias = 0.15f;
+    scene->lights.push_back(sun);
+    scene->shadowMapSize = 2048;
+    g3d::Material flat;
+    flat.roughness = 0.95f;
+    flat.castShadow = false;
+    scene->add(city::mesh(town.filter(isGround), look), flat);
+    g3d::Material m;
+    m.roughness = 0.8f;
+    city::add(*scene, standing, look, m);
+    city::rise(scene->find("city"), 10, 0.7f, 30);
+    scene->camera.fov = 38;
+    scene->camera.up = [box](int t, g3d::Camera& cam) { city::frame(cam, box, 200 + t * 0.12f, 38 - t * 0.02f, -0.1f); };
+    st->add(0, len)->fn = g3d::draw(scene, { 0, 0, SW, SH });
+    st->add(0, len)->fn = [](const Ctx& cx, int t) {
+        chips(cx, t, { { 20, "city::load: CityJSON 1.0 to 2.0" }, { 60, "city::rise, nearest first" }, { 140, "roofs, walls, roads, water" },
+                       { 220, "every object by its id" } });
     };
 }
 
@@ -1715,17 +2315,18 @@ void sceneOpen(TNode* s, int len, int abs0) {
         const float b = rise(t, 150, 30);
         Ctx k = sub(cx, { 0, 24 * (1 - b) });
         k.a *= b;
-        dr::roundRect(k, 420, 480, 1080, 220, 18, LINE);
-        dr::roundRect(k, 422, 482, 1076, 216, 17, PANEL);
+        dr::roundRect(k, 420, 480, 1080, 276, 18, LINE);
+        dr::roundRect(k, 422, 482, 1076, 272, 17, PANEL);
         static const std::vector<std::string> CMDS = {
             "$ git clone https://github.com/pebaryan/raymotion.git",
             "$ cmake -S raymotion -B build && cmake --build build",
-            "$ build/raymotion preview raymotion-promo" };
+            "$ build/raymotion preview raymotion-promo",
+            "$ npx skills add pebaryan/raymotion   # for coding agents" };
         drawCode(k, CMDS, 470, 516, 28, 56, std::max(0, (t - 170) * 3));
         const float c = rise(t, 380, 30);
         const float sk = pop(t, 380, 160, 10);
-        dr::star(sub(cx, { 600, 820 }, t * 0.5f, sk), { 0, 0 }, 34, 15, 5, -90, AMBER);
-        say(cx, regular(), "Star it, fork it, and make your own videos in C++", { 650, 820 }, 40, withAlpha(INK, c), 0, 0.5);
+        dr::star(sub(cx, { 600, 850 }, t * 0.5f, sk), { 0, 0 }, 34, 15, 5, -90, AMBER);
+        say(cx, regular(), "Star it, fork it, and make your own videos in C++", { 650, 850 }, 40, withAlpha(INK, c), 0, 0.5);
     };
 }
 
@@ -1737,17 +2338,21 @@ void sceneCredits(TNode* s, int len, int abs0) {
         { "", "A film made entirely in code", "" },
         { "Created by", "pebaryan", "" },
         { "Written, animated and scored by", "Claude", "Opus 5.5, Anthropic" },
-        { "Engine", "raymotion", "C++17 on raylib and ffmpeg" },
+        { "Engine", "raymotion 0.8", "C++17 on raylib and ffmpeg" },
         { "Built on", "raylib", "zlib licence" },
         { "Encoding and decoding", "ffmpeg", "" },
-        { "Typeface", "Inter", "SIL Open Font License 1.1" },
+        { "Typefaces", "Inter, JetBrains Mono", "SIL Open Font License 1.1" },
+        { "Math typeface", "Latin Modern Math", "GUST Font License" },
         { "Image and SVG decoding", "stb_image, nanosvg", "" },
-        { "Assets", "Every shape, texture, model and note", "generated by code" },
+        { "Triangulation", "earcut", "ISC licence, Mapbox" },
+        { "Brand icons", "Simple Icons", "CC0" },
+        { "Map data", "Natural Earth", "public domain" },
+        { "Assets", "Every texture, model, town and note", "generated by code" },
         { "Rendered with raymotion", "1920 x 1080, 60 fps", "" },
     };
     s->add(0, len)->fn = [](const Ctx& cx, int t) {
         constexpr int N = (int)(sizeof(ENTRIES) / sizeof(ENTRIES[0]));
-        const float scroll = 3.2f;
+        const float scroll = 4.6f;
         for (int i = 0; i < N; i++) {
             const Entry& e = ENTRIES[i];
             const float y = 1120 + i * 135.f - t * scroll;
@@ -1766,7 +2371,17 @@ void sceneCredits(TNode* s, int len, int abs0) {
         logoMark(sub(c, { 960, 400 }, 0, k), { 0, 0 }, 64, t * 2.f);
         say(c, bold(), "raymotion", { 960, 540 }, 110, INK, 0.5, 0.5);
         say(c, mono(), REPO, { 960, 640 }, 34, TEAL, 0.5, 0.5);
-        say(c, regular(), "Thanks for watching", { 960, 720 }, 30, DIM, 0.5, 0.5);
+        // The creator's links.
+        static const char* LINKS[3][2] = { { "github", "github.com/pebaryan" }, { "x", "x.com/pebaryan" },
+                                           { "youtube", "youtube.com/@pebaryan" } };
+        for (int i = 0; i < 3; i++) {
+            const float x = 960 + (i - 1) * 420.f, r = rise(t, 730 + i * 8, 24);
+            Ctx l = c;
+            l.a *= r;
+            icons::draw(l, LINKS[i][0], { x - 150, 740 }, 44, {}, r);
+            say(l, regular(), LINKS[i][1], { x - 118, 740 }, 26, INK, 0, 0.5);
+        }
+        say(c, regular(), "Thanks for watching", { 960, 830 }, 30, DIM, 0.5, 0.5);
     };
 }
 
@@ -1858,6 +2473,19 @@ std::vector<std::shared_ptr<Feature>> features() {
             "dr::sector(cx, {0, 0}, 115, a0, a1, IRIS);",
             "dr::rectGrad4(cx, x, y, w, h, tl, tr, br, bl);",
             "dr::fillPoly(cx, pts.data(), n, MINT);" }, stageShapes),
+        F("Vector paths", "Bézier paths and SVG path data: draw-on trims, a marker riding the curve, dashes, both fill rules, "
+                          "and morphs between any two shapes.",
+          "paths.cpp", {
+            "vg::Path p = vg::Path::parse(",
+            "    \"M 70 300 C 250 120 470 280 690 100\");",
+            "vg::stroke(cx, p.trim(0, u), {TEAL, 8});",
+            "dr::circle(cx, p.pointAt(u), 11, AMBER);",
+            "",
+            "stroke.dash = {18, 14};",
+            "stroke.dashOffset = -t * 1.5f;",
+            "",
+            "vg::Morph m(star, heart);",
+            "vg::fill(cx, m.at(u), ROSE);" }, stagePaths),
         F("Supersampling", "Frames are drawn at 2x or 4x and box-filtered down by exact halving, so every edge, line and "
                            "glyph is smooth.",
           "quality.cpp", {
@@ -1880,6 +2508,18 @@ std::vector<std::shared_ptr<Feature>> features() {
             "int lines = dr::textBox(cx, text, cols[1], st);",
             "",
             "auto cells = layout::grid(area, 6, 2, 16);" }, stageLayout),
+        F("Text & code", "Text that reveals by letter, word or line, types and decodes; and code blocks in 13 languages that "
+                         "type in and morph between versions.",
+          "text.cpp", {
+            "auto title = txt::Text::make(\"Every frame\", st);",
+            "txt::Reveal r;",
+            "r.by = txt::Unit::Word;",
+            "r.order = txt::Order::Center;",
+            "txt::draw(cx, title, at, t, r);",
+            "",
+            "code::Block a = code::Block::parse(src, \"ts\");",
+            "code::Morph change(a, b);   // diffs once",
+            "code::draw(cx, change, at, style, u);" }, stageTextCode),
         F("Layers & blending", "isolate() renders a subtree offscreen and composites it as one: group opacity without "
                                "seams, plus Add, Multiply and Screen.",
           "layers.cpp", {
@@ -1925,6 +2565,18 @@ std::vector<std::shared_ptr<Feature>> features() {
             "",
             "loop(root->kids, 20, 50, 4)->fn = pulse;",
             "freeze(root->kids, 100, 80, 15)->fn = needle;" }, stageSequencing),
+        F("Camera & motion blur", "A 2D camera glides, flies and turns over a canvas bigger than the frame. Motion blur draws "
+                                  "real in-between moments.",
+          "camera.cpp", {
+            "cam::Track track;",
+            "track.start(cam::Shot::fit(canvas))",
+            "     .to(110, cam::Shot::fit(tile9))",
+            "     .fly(260, cam::Shot::fit(tile4))",
+            "     .to(350, cam::Shot{{2030, 410}, 6, -12});",
+            "cam::world(c.roots, 0, 480, track)->fn = art;",
+            "",
+            "node->isolate().motionBlur = {12, 0.5f};",
+            "// read time as frameTime(t)" }, stageCamera),
         F("Props", "Compositions take JSON props. --props merges over the defaults, and the build step can change "
                    "content, size and length.",
           "card.cpp", {
@@ -1937,18 +2589,17 @@ std::vector<std::shared_ptr<Feature>> features() {
             "    for (const Json& it : p[\"items\"].asArray())",
             "        addPill(c, it.asString());",
             "};" }, stageProps),
-        F("Prefabs", "Prefabs are named, parameterised subtrees. Register one once, then instantiate it anywhere with "
-                     "its own props.",
+        F("Prefabs", "Named, parameterised subtrees: register your own, or use the built-in logo, social icons and 29 "
+                     "country flags.",
           "prefabs.cpp", {
-            "prefab::add({\"promo-badge\", Json::parse(",
-            "    R\"({\"label\": \"\", \"hue\": 190})\"),",
-            "    [](TNode& n, const Json& p) {",
-            "        // n.up: spring in   n.fn: draw",
-            "    }});",
+            "prefab::add({\"promo-badge\", defaults, build});",
+            "prefab::use(stage, 0, len, \"promo-badge\", p);",
             "",
-            "for (int i = 0; i < 12; i++)",
-            "    prefab::use(stage, 0, len, \"promo-badge\",",
-            "                badgeProps(i));" }, stagePrefabs),
+            "prefab::use(root, 0, 240, \"social-row\",",
+            "    Json::parse(R\"({\"brands\": [\"github\", \"x\",",
+            "      \"youtube\"], \"handle\": \"@pebaryan\"})\"));",
+            "prefab::use(root, 0, 240, \"flag-row\", flags);",
+            "prefab::use(root, 0, 240, \"raymotion-logo\");" }, stagePrefabs),
         F("Media", "Images, SVG, animated GIFs and frame-accurate video decode in the background, and their sound "
                    "joins the mix.",
           "media.cpp", {
@@ -1961,6 +2612,76 @@ std::vector<std::shared_ptr<Feature>> features() {
             "media::VideoOptions v;",
             "v.loop = true;",
             "media::video(clip, \"clip.mp4\", box, v);" }, stageMedia),
+        F("Audio", "Clips trim, loop and follow volume curves into the MP4's AAC track, and aud:: turns any track into "
+                   "levels, spectra and beats.",
+          "audio.cpp", {
+            "media::AudioOptions o;",
+            "o.loop = true;",
+            "o.volumeAt = [](int t) { return t / 60.f; };",
+            "media::audio(root, \"score.wav\", o);",
+            "",
+            "auto music = aud::analyze(\"score.wav\", {60});",
+            "float kick = music->pulse(frameTime(t));",
+            "aud::bars(cx, box, music->spectrum(t), TEAL);",
+            "// level, onset, beats(), bpm(), waveform" }, stageAudio),
+        F("Captions & voice", "Load SRT or WebVTT, time scenes to the phrases, burn captions in (karaoke too), "
+                              "or speak a script with any TTS engine.",
+          "captions.cpp", {
+            "sub::Track track = sub::load(\"voice.srt\");",
+            "auto spans = track.spans(",
+            "    {\"Every scene\", \"Captions\"}, c.fps);",
+            "addRoot(c.roots, spans[1].from,",
+            "        spans[1].length)->fn = scene2;",
+            "",
+            "sub::Style s = sub::defaultStyle();",
+            "s.upcoming = GRAY;           // karaoke",
+            "root->fn = sub::captions(track, s);",
+            "tts::Script vo(tts::Voice::system(), lines);" }, stageCaptions),
+        F("Equations", "TeX typeset inside the engine, with no LaTeX install: formulas write themselves on, colour by part, "
+                       "and turn into one another.",
+          "math.cpp", {
+            "auto f = math::Formula::tex(",
+            "    R\"(\\id{lhs}{e^{i\\pi}} + 1 = 0)\", {84});",
+            "math::Look look;",
+            "look.colors[\"lhs\"] = AMBER;",
+            "math::write(cx, f, at, {0.5f, 0.5f}, u, look);",
+            "",
+            "math::Transform step(quadratic, solved);",
+            "step.draw(cx, at, {0.5f, 0.5f}, u);" }, stageEquations),
+        F("Plots & charts", "Axes and graphs that draw on, tangents and fields; bars, lines, pies and 20 more chart kinds "
+                            "that grow in and animate to new data.",
+          "plots.cpp", {
+            "plot::Axes ax(box, {-6.5, 6.5}, {-1.5, 1.5});",
+            "vg::Path sine = plot::graph(ax, sinFn);",
+            "plot::axes(cx, ax, style, u);",
+            "vg::stroke(cx, sine.trim(0, u), stroke);",
+            "",
+            "plot::Table q = plot::Table::csv(\"q.csv\");",
+            "plot::bars(cx, plot::Table::mix(a, b, k), cs);",
+            "plot::pie(cx, share, centre, 125, donut, u);" }, stagePlots),
+        F("Diagrams & molecules", "Mermaid, DOT, BPMN, RDF and Newick laid out and animated; molecules from SMILES, "
+                                  "SDF or PDB in 2D and 3D.",
+          "diagrams.cpp", {
+            "auto d = dg::Diagram::make(",
+            "    dg::load(\"flow.mmd\"), dg::Theme::dark());",
+            "d->build(10, 8, 18);",
+            "d->trace(150, 90, {\"idea\", \"code\", \"share\"});",
+            "node->fn = dg::draw(d, box);",
+            "",
+            "auto mol = chem::Depiction::make(",
+            "    chem::smiles(\"CN1C=NC2=C1C(=O)N(C(=O)N2C)C\"));",
+            "chem::addMolecule(*scene, mol->molecule);" }, stageDiagrams),
+        F("Spaces", "3D as vector paths: a plot opens from flat into 3D, surfaces rise, and there is geometry beyond, "
+                    "from Klein bottles to hyperbolic tilings.",
+          "spaces.cpp", {
+            "space::View v = space::View::mix(",
+            "    space::View::flat(centre, 95),",
+            "    space::View::tilted(centre, 90), k);",
+            "space::Scene s(v);",
+            "space::axes(s, {}, {}, {1, 1, k});",
+            "s.mesh(space::Mesh::graph(f, xr, yr));",
+            "s.arrow({0, 0, 0}, tip, ROSE, 5);",
+            "s.draw(cx);   // depth-sorted" }, stageSpaces),
         F("GPU 3D", "Three.js-style scenes on the timeline: image-based light, up to eight lights with shadows, fog, "
                     "depth of field and model files.",
           "scene3d.cpp", {
@@ -1974,19 +2695,69 @@ std::vector<std::shared_ptr<Feature>> features() {
             "    {6, 8, 6}, {0, 0, 0}, AMBER, 2, 26, true));",
             "scene->camera.dof = {12, 1.15f, 11};",
             "node->fn = g3d::draw(scene);" }, stageGpu),
-        F("Audio", "Clips trim, loop, change speed and follow volume curves, mixed into the MP4's AAC track. This "
-                   "score is synthesised in C++.",
-          "audio.cpp", {
-            "media::AudioOptions o;",
-            "o.startFrom = 2.0;          // seconds",
-            "o.loop = true;",
-            "o.playbackRate = 1.0;",
-            "o.volumeAt = [](int t) {",
-            "    return std::min(1.f, t / 60.f);",
+        F("Illustration styles", "Toon, Gooch and hatched shading, hand-drawn ink lines that boil, and watercolour, halftone "
+                                 "and paper filters on any layer.",
+          "npr.cpp", {
+            "g3d::Material m{CORAL};",
+            "m.shading = g3d::Shading::Toon;",
+            "m.toon.bands = 2;",
+            "",
+            "scene->lines.enabled = true;",
+            "scene->lines.wobble = 1.4f;   // hand-drawn",
+            "",
+            "art->isolate().filters = {",
+            "    Filter::watercolor(6), Filter::paperGrain()};",
+            "art->add(0, len)->fn = g3d::draw(scene);" }, stageNpr),
+        F("Sky, fog & tilt-shift", "A procedural sky for any hour that lights the scene, ground fog that burns off, and a "
+                                   "tilting lens for the miniature look.",
+          "sky.cpp", {
+            "scene->sky = g3d::Sky::at(hour);",
+            "scene->sky.clouds = 0.35f;",
+            "scene->fogMode = g3d::FogMode::Exponential;",
+            "scene->fogDensity = 0.045f;",
+            "scene->fogFalloff = 0.35f;   // ground fog",
+            "scene->fogFromSky = true;",
+            "",
+            "cam.dof = {focus, 2.4f, 16, -14};  // tilt",
+            "// or Filter::tiltShift on any 2D layer" }, stageSky),
+        F("Particles", "Emitters in closed form, so any frame renders alone: fireworks, fire, smoke, snow and your own looks, "
+                       "in 2D or in a 3D scene.",
+          "particles.cpp", {
+            "auto shell = fx::burst(160, {AMBER, ROSE});",
+            "shell.burstAt = 20;",
+            "shell.gravity = {0, 0.03f};",
+            "node->fn = fx::fn(shell);",
+            "",
+            "auto comet = fx::sparks(4, TEAL);",
+            "comet.origin = [](float f) { return path(f); };",
+            "",
+            "// the same emitters in 3D, depth-tested:",
+            "scene->add(fx::fire3d(0.25f));" }, stageParticles),
+        F("Maps & globes", "Natural Earth built in, 14 projections, a 3D Earth, data on a globe that unrolls into a map, "
+                           "and calendars that keep the date.",
+          "maps.cpp", {
+            "auto surface = std::make_shared<geo3d::Surface>(",
+            "    geo::Projection::equalEarth());",
+            "geo3d::base(*world, surface, paper);",
+            "geo3d::marks(*world, surface, geo3d::byCountry(",
+            "    {{\"CHN\", 1398}, {\"IND\", 1366}}), cols);",
+            "geo3d::flows(*world, surface, corridors, fl);",
+            "surface->morph = u;   // globe -> flat map",
+            "",
+            "cal::page(cx, box, clock.day(t));" }, stageMaps),
+        F("3D cities", "CityJSON towns in 3D: buildings that rise, faces coloured by roof, wall and road, levels of detail, "
+                       "and every object animated by its id.",
+          "city.cpp", {
+            "auto town = city::load(\"town.city.json\");",
+            "auto scene = std::make_shared<g3d::Scene>();",
+            "city::add(*scene, town, look);",
+            "city::rise(scene->find(\"city\"), 10, 0.7f, 30);",
+            "scene->camera.up = [](int t, auto& cam) {",
+            "    city::frame(cam, town, 200 + t * 0.12f, 38);",
             "};",
-            "media::audio(root, \"score.wav\", o);" }, stageAudio),
-        F("Rendering", "Preview with sound, export stills or MP4s. Frames stream to ffmpeg on a writer thread, through "
-                       "x264 or the GPU's encoder.",
+            "scene->find(\"tower\")->scale.y = k;" }, stageCities),
+        F("Rendering", "Preview with sound; export stills, MP4, or ProRes and WebM with alpha. Frames stream to ffmpeg, "
+                       "over parallel jobs if you like.",
           "main.cpp", {
             "static void registerComps(Registry& out) {",
             "    Comp c;",
@@ -2002,9 +2773,9 @@ std::vector<std::shared_ptr<Feature>> features() {
 }
 
 Transition transitionInto(int ch) {
-    if (ch == 13) return Transition::wipe(XF, Direction::FromLeft);          // promised by the Transitions chapter
+    if (ch == chapterNamed("Transitions") + 1) return Transition::wipe(XF, Direction::FromLeft);   // promised by the Transitions chapter
     if (ch == 1 || ch == CH_OPEN || ch == CH_CREDITS) return Transition::fade(XF);
-    if (ch == FIRST_FEATURE || ch == 17) return Transition::slide(XF, Direction::FromBottom);
+    if (ch == FIRST_FEATURE || ch == chapterNamed("GPU 3D")) return Transition::slide(XF, Direction::FromBottom);
     return Transition::slide(XF, Direction::FromRight);
 }
 
@@ -2019,6 +2790,7 @@ void buildPromo(Comp& c) {
     }
     TransitionSeries ts(c.roots, (float)c.w, (float)c.h);
     const auto feats = features();
+    if ((int)feats.size() != NFEAT) throw std::runtime_error("promo: features() and CHAPTERS disagree");
     for (int ch = 0; ch < NCH; ch++) {
         if (ch) ts.transition(transitionInto(ch));
         const int len = CHAPTERS[ch].len + (ch + 1 < NCH ? XF : 0);
@@ -2037,6 +2809,66 @@ void buildPromo(Comp& c) {
     media::audio(addRoot(c.roots, 0, c.duration), asset("score.wav"));
 }
 
+
+// ================================================================== the thumbnail
+// build/raymotion still raymotion-promo-thumb --at 30 --png out/raymotion-promo-thumb.png
+void buildThumb(Comp& c) {
+    const int len = c.duration;
+    addRoot(c.roots, 0, len)->fn = [](const Ctx& cx, int) {
+        backdrop(cx, 2400);
+        glow(cx, { 1400, 520 }, 520, TEAL, 0.22f);
+        glow(cx, { 1700, 860 }, 360, IRIS, 0.18f);
+    };
+    // A lit still life in the film's colours.
+    auto scene = std::make_shared<g3d::Scene>();
+    scene->environmentGenerator = g3d::studioEnvironment(mkColor(0x3a4670), mkColor(0x1a2036), mkColor(0x0c0e18), 4);
+    scene->environmentIntensity = 1.1f;
+    scene->lights.push_back(g3d::Light::directional({ -5, 8, 6 }, mkColor(0xdfe6ff), 1.2f, true));
+    scene->lights.back().shadowExtent = 6;
+    scene->lights.push_back(g3d::Light::point({ 2.5f, 0.5f, 2.5f }, ROSE, 2.2f, 9));
+    g3d::Object3D* knot = scene->add(g3d::Geometry::knot(1.15f, 0.36f), { TEAL, 0.2f, 0.65f });
+    knot->position = { 0, 0.2f, 0 };
+    knot->rotation = { 24, 35, 8 };
+    g3d::Object3D* ball = scene->add(g3d::Geometry::sphere(0.62f), { AMBER, 0.15f, 0.85f });
+    ball->position = { 2.1f, -1.2f, 0.8f };
+    g3d::Object3D* ring = scene->add(g3d::Geometry::torus(0.55f, 0.17f), { ROSE, 0.3f, 0.2f });
+    ring->position = { -2.0f, 1.5f, -0.6f };
+    ring->rotation = { 70, 20, 0 };
+    g3d::Object3D* cone = scene->add(g3d::Geometry::cone(0.5f, 1.1f), { IRIS, 0.4f });
+    cone->position = { -1.7f, -1.5f, 1.0f };
+    cone->rotation = { 0, 0, -18 };
+    scene->camera.fov = 34;
+    scene->camera.position = { 0.4f, 0.8f, 9.5f };
+    scene->camera.target = { 0, 0.1f, 0 };
+    addRoot(c.roots, 0, len)->fn = g3d::draw(scene, { 860, 0, 1060, 1080 });
+    // Floating cards: a formula, a chart, the idea in code.
+    const auto euler = txt::later([] { return math::Formula::tex(R"(e^{i\pi} + 1 = 0)", { 60, INK }); });
+    addRoot(c.roots, 0, len)->fn = [euler](const Ctx& cx, int) {
+        auto card = [&](Vector2 at, float rot, float w, float h) {
+            Ctx k = sub(cx, at, rot);
+            dr::roundRect(k, -w / 2 - 2, -h / 2 - 2, w + 4, h + 4, 20, withAlpha(LINE, 0.9f));
+            dr::roundRect(k, -w / 2, -h / 2, w, h, 18, withAlpha(PANEL, 0.92f));
+            return k;
+        };
+        math::draw(card({ 1560, 170 }, -6, 380, 130), euler(), { 0, 0 });
+        Ctx ch = card({ 1690, 900 }, 5, 300, 200);
+        const float vals[5] = { 0.35f, 0.6f, 0.45f, 0.8f, 1.0f };
+        for (int i = 0; i < 5; i++)
+            dr::roundRect(ch, -110 + i * 46.f, 70 - 140 * vals[i], 32, 140 * vals[i], 6, ColorFromHSV(170 + i * 30.f, 0.6f, 0.95f));
+        Ctx cd = card({ 1080, 900 }, -4, 400, 96);
+        say(cd, mono(), "frame(t) \xE2\x86\x92 pixels", { 0, 0 }, 34, TEAL, 0.5, 0.5);
+    };
+    // The words, big enough for a phone.
+    addRoot(c.roots, 0, len)->fn = [](const Ctx& cx, int) {
+        dr::rectGrad4(cx, 0, 0, 1100, 1080, withAlpha(BG, 0.85f), withAlpha(BG, 0), withAlpha(BG, 0), withAlpha(BG, 0.85f));
+        logoMark(cx, { 150, 170 }, 44, 30);
+        say(cx, bold(), "raymotion", { 232, 170 }, 64, INK, 0, 0.5);
+        say(cx, bold(), "Video as", { 100, 350 }, 170, INK, 0, 0.5);
+        say(cx, bold(), "C++ code", { 100, 540 }, 170, TEAL, 0, 0.5);
+        say(cx, bold(), "29 features \xC2\xB7 5 minutes", { 106, 720 }, 62, AMBER, 0, 0.5);
+        say(cx, mono(), "every frame of this video is code  \xC2\xB7  v0.8", { 108, 820 }, 30, DIM, 0, 0.5);
+    };
+}
 } // namespace
 
 void registerPromo(Registry& out) {
@@ -2048,6 +2880,14 @@ void registerPromo(Registry& out) {
     c.assets = [](const Comp&, const Json&) { ensureAssets(); assetsReady = true; };
     c.build = [](Comp& comp, const Json&) { buildPromo(comp); };
     out.push_back(std::move(c));
+
+    Comp th;
+    th.name = "raymotion-promo-thumb";
+    th.w = 1920; th.h = 1080; th.fps = FPS;
+    th.background = BG;
+    th.duration = 60;
+    th.build = [](Comp& comp, const Json&) { buildThumb(comp); };
+    out.push_back(std::move(th));
 }
 
 } // namespace rmtn

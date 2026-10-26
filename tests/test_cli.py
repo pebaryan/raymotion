@@ -75,7 +75,7 @@ class CliTests(unittest.TestCase):
 
     def test_list_generates_no_assets(self):
         listing = self.run_cli("list").stdout
-        self.assertIn("raymotion-promo        1920x1080 @60fps  210.0s  audio=1", listing)
+        self.assertIn("raymotion-promo        1920x1080 @60fps  314.0s  audio=1", listing)
         self.assertIn("own-your-compute       1920x1080 @30fps  66.0s  audio=1", listing)
         self.assertEqual(list(self.cwd.iterdir()), [], "list wrote files")
 
