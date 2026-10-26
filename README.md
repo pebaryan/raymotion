@@ -830,6 +830,12 @@ accept `size`, `badge`, `label`, `ink`, `in` (`pop`, `fade`, `none`), `delay` an
 Render the 13-second showcase, including its synth music and timed sound effects, with
 `build/raymotion render flag-showcase`. The video is written to `out/flag-showcase.mp4`.
 
+`build/raymotion render austria-through-time` creates a National Day history reel with
+a continuous camera journey, a 3D globe and alpine terrain, PBR and toon models,
+a projected Austria map, a data chart, blurred time jumps, narration with captions,
+procedural music and generated sound effects.
+Its historical references are listed in `docs/austria-time-travel-sources.md`.
+
 ### Maps
 
 `geo::` reads map data and projects it. Natural Earth's 1:110m countries, land, lakes,

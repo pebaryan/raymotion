@@ -1,0 +1,44 @@
+1
+00:00:00,267 --> 00:00:03,911
+Austria's story begins long before its national day.
+
+2
+00:00:05,767 --> 00:00:09,187
+Noricum joined Rome around fifteen B C.
+
+3
+00:00:10,767 --> 00:00:14,443
+Ostarrichi appeared in a deed in nine ninety six.
+
+4
+00:00:16,100 --> 00:00:20,082
+Habsburg rule grew into an empire and dual monarchy.
+
+5
+00:00:21,767 --> 00:00:25,421
+Austria proclaimed a republic in nineteen eighteen.
+
+6
+00:00:27,100 --> 00:00:33,376
+Democracy fell. Nazi annexation, the Holocaust, and war followed.
+
+7
+00:00:34,267 --> 00:00:39,556
+The republic returned, then regained sovereignty in nineteen fifty five.
+
+8
+00:00:40,600 --> 00:00:45,629
+On October twenty sixth, Austria adopted permanent neutrality.
+
+9
+00:00:46,767 --> 00:00:51,103
+Austria joined the European Union in nineteen ninety five.
+
+10
+00:00:55,600 --> 00:01:00,921
+Tyrol has five hundred seventy three summits above three thousand metres.
+
+11
+00:01:03,933 --> 00:01:08,068
+This journey was made with raymotion, as video from code.
+

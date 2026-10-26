@@ -124,6 +124,7 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/captions.cpp
     examples/showcase/icons.cpp
     examples/showcase/flags.cpp
+    examples/showcase/austria_journey.cpp
     examples/showcase/maps.cpp
     examples/showcase/cities.cpp
     examples/showcase/earth.cpp
