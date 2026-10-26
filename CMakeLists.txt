@@ -269,6 +269,8 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   add_test(NAME ht_feed COMMAND raymotion_feed_tests)
 
   set_tests_properties(renderer_regressions layer_compositing scene3d media diagram_rendering path_rendering math_rendering plot_rendering space_rendering code_rendering text_animation motion_blur icons ht_plain_layout ht_feed PROPERTIES LABELS gl SKIP_RETURN_CODE 77)
+  # CPU checks first, then GL ones; without a window they exit 77 after the CPU half.
+  set_tests_properties(city globe geo3d calendar PROPERTIES SKIP_RETURN_CODE 77)
 
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND)
