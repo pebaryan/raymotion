@@ -1,0 +1,979 @@
+{
+  "collection": "smartgrid-cityjson-prefabs",
+  "version": 1,
+  "illustrative": true,
+  "prefabs": [
+    {
+      "id": "residential-detached",
+      "file": "residential-detached.city.json",
+      "title": "Detached home",
+      "description": "Pitched-roof single-household illustration.",
+      "referenceBasis": "2020 paper: residential buildings",
+      "boundsMetres": [
+        -6.0,
+        -5.08,
+        0.0,
+        6.0,
+        5.0,
+        9.2
+      ],
+      "cityObjectCount": 4,
+      "objectTypes": {
+        "Building": 1,
+        "BuildingInstallation": 3
+      }
+    },
+    {
+      "id": "residential-terrace",
+      "file": "residential-terrace.city.json",
+      "title": "Terraced homes",
+      "description": "Three attached residential bays with separate entrances.",
+      "referenceBasis": "2020 paper: different residential types",
+      "boundsMetres": [
+        -12.0,
+        -5.08,
+        0.0,
+        12.0,
+        5.0,
+        9.1
+      ],
+      "cityObjectCount": 3,
+      "objectTypes": {
+        "Building": 1,
+        "BuildingInstallation": 2
+      }
+    },
+    {
+      "id": "residential-apartment",
+      "file": "residential-apartment.city.json",
+      "title": "Apartment block",
+      "description": "Four-storey flat-roof residential block.",
+      "referenceBasis": "2020 paper: different residential types; current BIFROST: multi-residential structures",
+      "boundsMetres": [
+        -10.08,
+        -7.08,
+        0.0,
+        10.08,
+        7.0,
+        17.7
+      ],
+      "cityObjectCount": 4,
+      "objectTypes": {
+        "Building": 1,
+        "BuildingInstallation": 3
+      }
+    },
+    {
+      "id": "commercial-office",
+      "file": "commercial-office.city.json",
+      "title": "Office building",
+      "description": "Commercial office block with glazed front and rooftop plant.",
+      "referenceBasis": "2020 paper: commercial profiles",
+      "boundsMetres": [
+        -12.0,
+        -8.12,
+        0.0,
+        12.0,
+        8.0,
+        19.2
+      ],
+      "cityObjectCount": 4,
+      "objectTypes": {
+        "Building": 1,
+        "BuildingInstallation": 3
+      }
+    },
+    {
+      "id": "commercial-office-tower",
+      "file": "commercial-office-tower.city.json",
+      "title": "Office tower",
+      "description": "Ten-storey office tower with a low entrance podium and vertical glazing.",
+      "referenceBasis": "User-requested office-building extension; illustrative, not a Figure 1 structure",
+      "boundsMetres": [
+        -12.0,
+        -10.08,
+        0.0,
+        12.0,
+        7.0,
+        37.2
+      ],
+      "cityObjectCount": 5,
+      "objectTypes": {
+        "Building": 1,
+        "BuildingInstallation": 3,
+        "BuildingPart": 1
+      }
+    },
+    {
+      "id": "city-hall",
+      "file": "city-hall.city.json",
+      "title": "City hall",
+      "description": "Symmetrical civic building with a public entrance and clock tower.",
+      "referenceBasis": "User-requested civic illustration extension; not present in the 2020 paper's Figure 1",
+      "boundsMetres": [
+        -20.0,
+        -9.5,
+        0.0,
+        20.0,
+        7.0,
+        21.1
+      ],
+      "cityObjectCount": 9,
+      "objectTypes": {
+        "Building": 1,
+        "BuildingInstallation": 5,
+        "BuildingPart": 3
+      }
+    },
+    {
+      "id": "exhibition-event-hall",
+      "file": "exhibition-event-hall.city.json",
+      "title": "Exhibition and event hall",
+      "description": "Wide-span hall with a faceted arched roof, glass foyer and multiple public doors.",
+      "referenceBasis": "User-requested exhibition/event illustration extension; not present in the 2020 paper's Figure 1",
+      "boundsMetres": [
+        -23.0,
+        -16.0,
+        0.0,
+        23.0,
+        14.0,
+        14.0
+      ],
+      "cityObjectCount": 4,
+      "objectTypes": {
+        "Building": 1,
+        "BuildingInstallation": 3
+      }
+    },
+    {
+      "id": "commercial-shop",
+      "file": "commercial-shop.city.json",
+      "title": "Neighbourhood shop",
+      "description": "Single-storey storefront with deep awning.",
+      "referenceBasis": "2020 paper: commercial profiles",
+      "boundsMetres": [
+        -9.0,
+        -7.0,
+        0.0,
+        9.0,
+        6.0,
+        7.2
+      ],
+      "cityObjectCount": 3,
+      "objectTypes": {
+        "Building": 1,
+        "BuildingInstallation": 2
+      }
+    },
+    {
+      "id": "industrial-factory-pv",
+      "file": "industrial-factory-pv.city.json",
+      "title": "PV factory",
+      "description": "Wide white factory hall with rooftop photovoltaic array.",
+      "referenceBasis": "2020 paper Figure 1: PV on white factory roof",
+      "boundsMetres": [
+        -17.0,
+        -10.14,
+        0.0,
+        17.0,
+        10.0,
+        10.55
+      ],
+      "cityObjectCount": 3,
+      "objectTypes": {
+        "Building": 1,
+        "BuildingInstallation": 2
+      }
+    },
+    {
+      "id": "industrial-warehouse",
+      "file": "industrial-warehouse.city.json",
+      "title": "Industrial warehouse",
+      "description": "Large low industrial hall with three loading bays.",
+      "referenceBasis": "2020 paper: industrial/commercial profiles",
+      "boundsMetres": [
+        -16.0,
+        -10.1,
+        0.0,
+        16.0,
+        10.0,
+        10.9
+      ],
+      "cityObjectCount": 2,
+      "objectTypes": {
+        "Building": 1,
+        "BuildingInstallation": 1
+      }
+    },
+    {
+      "id": "industrial-assembly-factory",
+      "file": "industrial-assembly-factory.city.json",
+      "title": "Assembly factory",
+      "description": "Broad production hall with roof monitors, loading bays and process exhaust.",
+      "referenceBasis": "User-requested factory extension; original illustrative building",
+      "boundsMetres": [
+        -20.0,
+        -12.12,
+        0.0,
+        20.0,
+        12.0,
+        13.7
+      ],
+      "cityObjectCount": 9,
+      "objectTypes": {
+        "Building": 1,
+        "BuildingInstallation": 8
+      }
+    },
+    {
+      "id": "data-center",
+      "file": "data-center.city.json",
+      "title": "Data center",
+      "description": "Window-light technical building with rooftop cooling units and a service entrance.",
+      "referenceBasis": "User-requested data-center extension; original illustrative building",
+      "boundsMetres": [
+        -18.0,
+        -11.16,
+        0.0,
+        18.0,
+        11.0,
+        12.5
+      ],
+      "cityObjectCount": 11,
+      "objectTypes": {
+        "Building": 1,
+        "BuildingInstallation": 10
+      }
+    },
+    {
+      "id": "power-station-turbine-hall",
+      "file": "power-station-turbine-hall.city.json",
+      "title": "Power station turbine hall",
+      "description": "Large-span generator hall with clerestory, service doors and roof vents.",
+      "referenceBasis": "User-requested power-station building; Siemens Energy turbine-hall category, schematic geometry",
+      "boundsMetres": [
+        -22.0,
+        -11.12,
+        0.0,
+        22.0,
+        11.0,
+        17.0
+      ],
+      "cityObjectCount": 7,
+      "objectTypes": {
+        "Building": 1,
+        "BuildingInstallation": 6
+      }
+    },
+    {
+      "id": "power-station-control-building",
+      "file": "power-station-control-building.city.json",
+      "title": "Power station control building",
+      "description": "Two-storey control and operations building with a glazed front and antenna.",
+      "referenceBasis": "User-requested power-station building; original illustrative geometry",
+      "boundsMetres": [
+        -12.0,
+        -8.5,
+        0.0,
+        12.0,
+        7.0,
+        14.0
+      ],
+      "cityObjectCount": 5,
+      "objectTypes": {
+        "Building": 1,
+        "BuildingInstallation": 4
+      }
+    },
+    {
+      "id": "wind-turbine",
+      "file": "wind-turbine.city.json",
+      "title": "Wind turbine generator",
+      "description": "Tapered tower, nacelle, hub and three visible rotor blades.",
+      "referenceBasis": "User-requested wind generator; Vestas tower/nacelle/hub/blade categories, illustrative scale",
+      "boundsMetres": [
+        -10.686,
+        -2.3,
+        0.0,
+        10.686,
+        3.4,
+        35.25
+      ],
+      "cityObjectCount": 7,
+      "objectTypes": {
+        "CityFurniture": 1,
+        "GenericCityObject": 6
+      }
+    },
+    {
+      "id": "diesel-generator",
+      "file": "diesel-generator.city.json",
+      "title": "Diesel generator set",
+      "description": "Enclosed backup generator with louvres, service panel, radiator and exhaust.",
+      "referenceBasis": "User-requested fossil-fuel generator; Caterpillar enclosure/radiator/exhaust categories, schematic",
+      "boundsMetres": [
+        -6.0,
+        -2.5,
+        0.0,
+        6.0,
+        2.5,
+        6.85
+      ],
+      "cityObjectCount": 6,
+      "objectTypes": {
+        "CityFurniture": 2,
+        "GenericCityObject": 4
+      }
+    },
+    {
+      "id": "gas-turbine-generator",
+      "file": "gas-turbine-generator.city.json",
+      "title": "Gas turbine generator package",
+      "description": "Long skid with filter house, turbine enclosure, generator housing and exhaust stack.",
+      "referenceBasis": "User-requested fossil-fuel generator; Siemens Energy packaged gas-turbine layout, schematic",
+      "boundsMetres": [
+        -10.0,
+        -3.5,
+        0.0,
+        10.0,
+        3.5,
+        10.35
+      ],
+      "cityObjectCount": 7,
+      "objectTypes": {
+        "CityFurniture": 3,
+        "GenericCityObject": 4
+      }
+    },
+    {
+      "id": "hv-transformer",
+      "file": "hv-transformer.city.json",
+      "title": "HV power transformer",
+      "description": "Large transformer tank with radiator banks, top bushings and conservator on a utility pad.",
+      "referenceBasis": "User-requested HV transformer; Siemens Energy tank/cooling categories, illustrative equipment",
+      "boundsMetres": [
+        -8.0,
+        -5.5,
+        0.0,
+        8.0,
+        5.5,
+        8.3
+      ],
+      "cityObjectCount": 24,
+      "objectTypes": {
+        "CityFurniture": 23,
+        "GenericCityObject": 1
+      }
+    },
+    {
+      "id": "ev-charging-pole",
+      "file": "ev-charging-pole.city.json",
+      "title": "EV charging pole",
+      "description": "Freestanding charging post with display, connector and plinth.",
+      "referenceBasis": "2020 paper Figure 1: private/public charging stations",
+      "boundsMetres": [
+        -1.0,
+        -1.0,
+        0.0,
+        1.0,
+        1.0,
+        2.21
+      ],
+      "cityObjectCount": 4,
+      "objectTypes": {
+        "CityFurniture": 3,
+        "GenericCityObject": 1
+      }
+    },
+    {
+      "id": "ev-charging-hub-five-bay",
+      "file": "ev-charging-hub-five-bay.city.json",
+      "title": "Five-bay EV charging hub",
+      "description": "Five separate posts on a marked row of parking bays, with two illustrative cars.",
+      "referenceBasis": "2020 paper §II.B and Figure 1: five charging stations",
+      "boundsMetres": [
+        -19.0,
+        -8.0,
+        0.01,
+        19.0,
+        8.0,
+        2.22
+      ],
+      "cityObjectCount": 24,
+      "objectTypes": {
+        "CityFurniture": 13,
+        "GenericCityObject": 9,
+        "Road": 1,
+        "TransportSquare": 1
+      }
+    },
+    {
+      "id": "e-car",
+      "file": "e-car.city.json",
+      "title": "Electric car",
+      "description": "Compact EV visual cue; no vehicle brand.",
+      "referenceBasis": "2020 paper: residents' e-cars",
+      "boundsMetres": [
+        -2.1,
+        -1.02,
+        0.12,
+        2.1,
+        1.02,
+        1.95
+      ],
+      "cityObjectCount": 6,
+      "objectTypes": {
+        "CityFurniture": 4,
+        "GenericCityObject": 2
+      }
+    },
+    {
+      "id": "distribution-substation",
+      "file": "distribution-substation.city.json",
+      "title": "Distribution substation",
+      "description": "Dark transformer enclosure on its own fenced utility parcel, distinct from the road.",
+      "referenceBasis": "2020 paper §II.B: 630 kVA distribution transformer in Figure 1",
+      "boundsMetres": [
+        -10.0,
+        -8.0,
+        0.01,
+        10.0,
+        8.0,
+        5.92
+      ],
+      "cityObjectCount": 9,
+      "objectTypes": {
+        "Building": 1,
+        "BuildingInstallation": 2,
+        "CityFurniture": 5,
+        "LandUse": 1
+      }
+    },
+    {
+      "id": "lv-distribution-cabinet",
+      "file": "lv-distribution-cabinet.city.json",
+      "title": "LV distribution cabinet",
+      "description": "Street-side low-voltage feeder cabinet on a small pad.",
+      "referenceBasis": "BIFROST power-grid equipment concept",
+      "boundsMetres": [
+        -1.5,
+        -1.1,
+        0.0,
+        1.5,
+        1.1,
+        2.65
+      ],
+      "cityObjectCount": 3,
+      "objectTypes": {
+        "CityFurniture": 2,
+        "GenericCityObject": 1
+      }
+    },
+    {
+      "id": "battery-storage",
+      "file": "battery-storage.city.json",
+      "title": "Battery storage container",
+      "description": "Ventilated modular battery container with adjacent inverter cabinet.",
+      "referenceBasis": "BIFROST smart-energy and storage scenario category",
+      "boundsMetres": [
+        -4.0,
+        -1.86,
+        0.0,
+        4.45,
+        1.8,
+        3.1
+      ],
+      "cityObjectCount": 3,
+      "objectTypes": {
+        "CityFurniture": 1,
+        "GenericCityObject": 2
+      }
+    },
+    {
+      "id": "battery-substation",
+      "file": "battery-substation.city.json",
+      "title": "Battery substation",
+      "description": "Three battery modules, inverter, switchgear and transformer inside a utility parcel.",
+      "referenceBasis": "User-requested smart-grid extension; illustrative, not a Figure 1 structure",
+      "boundsMetres": [
+        -13.0,
+        -9.0,
+        0.01,
+        13.0,
+        9.0,
+        3.52
+      ],
+      "cityObjectCount": 15,
+      "objectTypes": {
+        "CityFurniture": 8,
+        "GenericCityObject": 6,
+        "LandUse": 1
+      }
+    },
+    {
+      "id": "solar-carport",
+      "file": "solar-carport.city.json",
+      "title": "Solar carport",
+      "description": "Four-column parking canopy with a photovoltaic roof plane.",
+      "referenceBasis": "2020 paper: PV-based feeders; BIFROST renewable-energy settlement concepts",
+      "boundsMetres": [
+        -8.0,
+        -4.0,
+        0.0,
+        8.0,
+        4.0,
+        4.62
+      ],
+      "cityObjectCount": 6,
+      "objectTypes": {
+        "Building": 1,
+        "BuildingInstallation": 5
+      }
+    },
+    {
+      "id": "grid-pole",
+      "file": "grid-pole.city.json",
+      "title": "Grid connection pole",
+      "description": "Simple overhead-line support and insulators.",
+      "referenceBasis": "BIFROST power-grid layer; illustrative equipment",
+      "boundsMetres": [
+        -2.4,
+        -0.28,
+        0.0,
+        2.4,
+        0.28,
+        8.05
+      ],
+      "cityObjectCount": 5,
+      "objectTypes": {
+        "CityFurniture": 5
+      }
+    },
+    {
+      "id": "road-straight",
+      "file": "road-straight.city.json",
+      "title": "Road segment",
+      "description": "Straight 24 m street tile with sidewalks and markings.",
+      "referenceBasis": "2020 paper Figure 1: settlement roads; current BIFROST settlement builder",
+      "boundsMetres": [
+        -12.0,
+        -5.5,
+        0.02,
+        12.0,
+        5.5,
+        0.07
+      ],
+      "cityObjectCount": 2,
+      "objectTypes": {
+        "Road": 2
+      }
+    },
+    {
+      "id": "foliage-deciduous-tree",
+      "file": "foliage-deciduous-tree.city.json",
+      "title": "Deciduous tree",
+      "description": "Broad shade tree with a round, lobed crown and visible trunk.",
+      "referenceBasis": "User-requested settlement foliage; original illustrative plant",
+      "boundsMetres": [
+        -4.45,
+        -3.0,
+        0.0,
+        4.4,
+        3.0,
+        9.8
+      ],
+      "cityObjectCount": 4,
+      "objectTypes": {
+        "SolitaryVegetationObject": 4
+      }
+    },
+    {
+      "id": "foliage-conifer-tree",
+      "file": "foliage-conifer-tree.city.json",
+      "title": "Conifer tree",
+      "description": "Narrow evergreen with a trunk and three tapered branch tiers.",
+      "referenceBasis": "User-requested settlement foliage; original illustrative plant",
+      "boundsMetres": [
+        -2.7,
+        -2.7,
+        0.0,
+        2.7,
+        2.7,
+        10.0
+      ],
+      "cityObjectCount": 4,
+      "objectTypes": {
+        "SolitaryVegetationObject": 4
+      }
+    },
+    {
+      "id": "foliage-street-tree",
+      "file": "foliage-street-tree.city.json",
+      "title": "Street tree",
+      "description": "Raised clear trunk, compact crown and square tree pit for sidewalks.",
+      "referenceBasis": "User-requested urban foliage; original illustrative plant",
+      "boundsMetres": [
+        -2.75,
+        -2.5,
+        0.02,
+        2.75,
+        2.5,
+        8.95
+      ],
+      "cityObjectCount": 3,
+      "objectTypes": {
+        "PlantCover": 1,
+        "SolitaryVegetationObject": 2
+      }
+    },
+    {
+      "id": "foliage-orchard-tree",
+      "file": "foliage-orchard-tree.city.json",
+      "title": "Orchard tree",
+      "description": "Low spreading fruit tree with a short trunk and visible fruit accents.",
+      "referenceBasis": "User-requested village foliage; original illustrative plant",
+      "boundsMetres": [
+        -3.3,
+        -2.83,
+        0.0,
+        3.3,
+        2.7,
+        6.28
+      ],
+      "cityObjectCount": 8,
+      "objectTypes": {
+        "SolitaryVegetationObject": 8
+      }
+    },
+    {
+      "id": "foliage-shrub-cluster",
+      "file": "foliage-shrub-cluster.city.json",
+      "title": "Shrub cluster",
+      "description": "Five overlapping low bushes for garden and verge planting.",
+      "referenceBasis": "User-requested settlement foliage; original illustrative plant",
+      "boundsMetres": [
+        -2.85,
+        -1.3,
+        0.075,
+        2.8,
+        1.95,
+        2.09
+      ],
+      "cityObjectCount": 5,
+      "objectTypes": {
+        "SolitaryVegetationObject": 5
+      }
+    },
+    {
+      "id": "foliage-hedge-segment",
+      "file": "foliage-hedge-segment.city.json",
+      "title": "Hedge segment",
+      "description": "Clipped eight-metre hedge with a softly uneven planted top.",
+      "referenceBasis": "User-requested settlement foliage; original illustrative plant",
+      "boundsMetres": [
+        -4.2,
+        -0.75,
+        0.0,
+        4.2,
+        0.75,
+        2.037
+      ],
+      "cityObjectCount": 6,
+      "objectTypes": {
+        "PlantCover": 1,
+        "SolitaryVegetationObject": 5
+      }
+    },
+    {
+      "id": "foliage-grass-patch",
+      "file": "foliage-grass-patch.city.json",
+      "title": "Grass patch",
+      "description": "Four-metre planting tile with visible grass tufts for ground cover.",
+      "referenceBasis": "User-requested settlement foliage; original illustrative plant",
+      "boundsMetres": [
+        -2.0,
+        -2.0,
+        0.01,
+        2.0,
+        2.0,
+        0.38
+      ],
+      "cityObjectCount": 2,
+      "objectTypes": {
+        "PlantCover": 2
+      }
+    },
+    {
+      "id": "foliage-flower-bed",
+      "file": "foliage-flower-bed.city.json",
+      "title": "Flower bed",
+      "description": "Small bordered bed with stems, foliage and colored blossoms.",
+      "referenceBasis": "User-requested settlement foliage; original illustrative plant",
+      "boundsMetres": [
+        -2.5,
+        -1.0,
+        0.0,
+        2.5,
+        1.0,
+        0.891
+      ],
+      "cityObjectCount": 16,
+      "objectTypes": {
+        "CityFurniture": 1,
+        "PlantCover": 1,
+        "SolitaryVegetationObject": 14
+      }
+    },
+    {
+      "id": "foliage-planter-tree",
+      "file": "foliage-planter-tree.city.json",
+      "title": "Planter tree",
+      "description": "Small ornamental tree in a square raised planter for plazas and courtyards.",
+      "referenceBasis": "User-requested urban foliage; original illustrative plant",
+      "boundsMetres": [
+        -1.8,
+        -1.7,
+        0.0,
+        1.8,
+        1.7,
+        5.545
+      ],
+      "cityObjectCount": 4,
+      "objectTypes": {
+        "CityFurniture": 1,
+        "PlantCover": 1,
+        "SolitaryVegetationObject": 2
+      }
+    },
+    {
+      "id": "street-traffic-light",
+      "file": "street-traffic-light.city.json",
+      "title": "Traffic light",
+      "description": "Roadside pole with a three-lamp signal head and small service box.",
+      "referenceBasis": "User-requested public infrastructure; illustrative signal, no jurisdictional claim",
+      "boundsMetres": [
+        -0.43,
+        -0.59,
+        0.0,
+        0.43,
+        0.44,
+        5.2
+      ],
+      "cityObjectCount": 6,
+      "objectTypes": {
+        "CityFurniture": 6
+      }
+    },
+    {
+      "id": "street-light",
+      "file": "street-light.city.json",
+      "title": "Street light",
+      "description": "Tall pole with a cantilevered luminaire over the street.",
+      "referenceBasis": "User-requested public infrastructure; original illustrative lamp",
+      "boundsMetres": [
+        -0.22,
+        -0.235,
+        0.0,
+        3.6,
+        0.31,
+        7.3
+      ],
+      "cityObjectCount": 4,
+      "objectTypes": {
+        "CityFurniture": 4
+      }
+    },
+    {
+      "id": "solar-street-light",
+      "file": "solar-street-light.city.json",
+      "title": "Solar street light",
+      "description": "Street lamp with a dedicated tilted PV panel and pole battery cabinet.",
+      "referenceBasis": "User-requested public infrastructure; original illustrative solar lamp",
+      "boundsMetres": [
+        -1.0,
+        -1.2,
+        0.0,
+        3.6,
+        1.1,
+        8.55
+      ],
+      "cityObjectCount": 6,
+      "objectTypes": {
+        "CityFurniture": 6
+      }
+    },
+    {
+      "id": "traffic-sign-stop",
+      "file": "traffic-sign-stop.city.json",
+      "title": "Stop sign",
+      "description": "Red octagonal sign on a slim roadside post; illustrative without lettering.",
+      "referenceBasis": "User-requested traffic sign; not a jurisdiction-specific regulatory asset",
+      "boundsMetres": [
+        -0.61,
+        -0.19,
+        0.0,
+        0.61,
+        0.1,
+        3.16
+      ],
+      "cityObjectCount": 4,
+      "objectTypes": {
+        "CityFurniture": 4
+      }
+    },
+    {
+      "id": "traffic-sign-warning",
+      "file": "traffic-sign-warning.city.json",
+      "title": "Warning sign",
+      "description": "Triangular amber warning marker with a dark exclamation cue.",
+      "referenceBasis": "User-requested traffic sign; illustrative and jurisdiction-neutral",
+      "boundsMetres": [
+        -0.78,
+        -0.19,
+        0.0,
+        0.78,
+        0.1,
+        3.35
+      ],
+      "cityObjectCount": 4,
+      "objectTypes": {
+        "CityFurniture": 4
+      }
+    },
+    {
+      "id": "traffic-sign-direction",
+      "file": "traffic-sign-direction.city.json",
+      "title": "Direction sign",
+      "description": "Blue wayfinding sign with a simple white arrow on two posts.",
+      "referenceBasis": "User-requested street sign; illustrative without place names",
+      "boundsMetres": [
+        -2.0,
+        -0.34,
+        0.0,
+        2.0,
+        0.1,
+        3.4
+      ],
+      "cityObjectCount": 4,
+      "objectTypes": {
+        "CityFurniture": 4
+      }
+    },
+    {
+      "id": "street-pedestrian-crossing",
+      "file": "street-pedestrian-crossing.city.json",
+      "title": "Pedestrian crossing",
+      "description": "Twelve-metre street tile with zebra markings and sidewalks.",
+      "referenceBasis": "User-requested street markings; illustrative geometry, not a road standard",
+      "boundsMetres": [
+        -6.0,
+        -5.0,
+        0.02,
+        6.0,
+        5.0,
+        0.07
+      ],
+      "cityObjectCount": 2,
+      "objectTypes": {
+        "Road": 2
+      }
+    },
+    {
+      "id": "bus-stop-shelter",
+      "file": "bus-stop-shelter.city.json",
+      "title": "Bus stop shelter",
+      "description": "Three-sided transparent shelter with a roof, seat and stop marker.",
+      "referenceBasis": "User-requested public infrastructure; original illustrative shelter",
+      "boundsMetres": [
+        -3.8,
+        -1.8,
+        0.02,
+        3.8,
+        1.8,
+        3.06
+      ],
+      "cityObjectCount": 12,
+      "objectTypes": {
+        "CityFurniture": 11,
+        "TransportSquare": 1
+      }
+    },
+    {
+      "id": "park-bench",
+      "file": "park-bench.city.json",
+      "title": "Park bench",
+      "description": "Wood-slat seat with a backrest, arms and metal frame.",
+      "referenceBasis": "User-requested public furniture; original illustrative bench",
+      "boundsMetres": [
+        -1.35,
+        -0.42,
+        0.0,
+        1.35,
+        0.46,
+        1.37
+      ],
+      "cityObjectCount": 10,
+      "objectTypes": {
+        "CityFurniture": 10
+      }
+    },
+    {
+      "id": "public-waste-bin",
+      "file": "public-waste-bin.city.json",
+      "title": "Public waste bin",
+      "description": "Freestanding street bin with a dark opening and colored body.",
+      "referenceBasis": "User-requested public furniture; original illustrative bin",
+      "boundsMetres": [
+        -0.42,
+        -0.42,
+        0.0,
+        0.42,
+        0.42,
+        1.17
+      ],
+      "cityObjectCount": 3,
+      "objectTypes": {
+        "CityFurniture": 3
+      }
+    },
+    {
+      "id": "street-bollard",
+      "file": "street-bollard.city.json",
+      "title": "Street bollard",
+      "description": "Short protective post with a reflective band and small base plate.",
+      "referenceBasis": "User-requested public furniture; original illustrative bollard",
+      "boundsMetres": [
+        -0.28,
+        -0.28,
+        0.0,
+        0.28,
+        0.28,
+        1.04
+      ],
+      "cityObjectCount": 3,
+      "objectTypes": {
+        "CityFurniture": 3
+      }
+    },
+    {
+      "id": "bicycle-rack",
+      "file": "bicycle-rack.city.json",
+      "title": "Bicycle rack",
+      "description": "Three inverted-U parking loops on a small paved strip.",
+      "referenceBasis": "User-requested public furniture; original illustrative rack",
+      "boundsMetres": [
+        -2.8,
+        -1.4,
+        0.02,
+        2.8,
+        1.4,
+        1.19
+      ],
+      "cityObjectCount": 10,
+      "objectTypes": {
+        "CityFurniture": 9,
+        "TransportSquare": 1
+      }
+    }
+  ]
+}

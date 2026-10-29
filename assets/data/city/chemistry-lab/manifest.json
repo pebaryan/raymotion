@@ -1,0 +1,241 @@
+{
+  "collection": "chemistry-lab-cityjson-prefabs",
+  "version": 1,
+  "illustrative": true,
+  "prefabs": [
+    {
+      "id": "lab-bench",
+      "file": "lab-bench.city.json",
+      "title": "Laboratory bench",
+      "description": "Free-standing workbench with drawers, sink and service taps.",
+      "referenceBasis": "Original illustrative laboratory equipment; no manufacturer or certified design",
+      "boundsMetres": [
+        -1.4,
+        -0.55,
+        0.0,
+        1.4,
+        0.55,
+        1.27
+      ],
+      "cityObjectCount": 11,
+      "objectTypes": {
+        "CityFurniture": 7,
+        "GenericCityObject": 4
+      }
+    },
+    {
+      "id": "fume-hood",
+      "file": "fume-hood.city.json",
+      "title": "Chemical fume hood",
+      "description": "Ducted hood with a visible sash, work chamber and exhaust collar.",
+      "referenceBasis": "Original illustrative laboratory equipment; no manufacturer or certified design",
+      "boundsMetres": [
+        -1.0,
+        -0.495,
+        0.0,
+        1.0,
+        0.48,
+        2.83
+      ],
+      "cityObjectCount": 8,
+      "objectTypes": {
+        "GenericCityObject": 8
+      }
+    },
+    {
+      "id": "chemical-storage-cabinet",
+      "file": "chemical-storage-cabinet.city.json",
+      "title": "Chemical storage cabinet",
+      "description": "Double-door ventilated storage cabinet with hazard-color doors.",
+      "referenceBasis": "Original illustrative laboratory equipment; no manufacturer or certified design",
+      "boundsMetres": [
+        -0.65,
+        -0.4,
+        0.0,
+        0.65,
+        0.35,
+        1.95
+      ],
+      "cityObjectCount": 6,
+      "objectTypes": {
+        "CityFurniture": 2,
+        "GenericCityObject": 4
+      }
+    },
+    {
+      "id": "analytical-balance",
+      "file": "analytical-balance.city.json",
+      "title": "Analytical balance",
+      "description": "Precision balance with enclosed weighing chamber and display.",
+      "referenceBasis": "Original illustrative laboratory equipment; no manufacturer or certified design",
+      "boundsMetres": [
+        -0.32,
+        -0.29,
+        0.0,
+        0.32,
+        0.27,
+        0.51
+      ],
+      "cityObjectCount": 4,
+      "objectTypes": {
+        "GenericCityObject": 4
+      }
+    },
+    {
+      "id": "hotplate-stirrer",
+      "file": "hotplate-stirrer.city.json",
+      "title": "Hotplate stirrer",
+      "description": "Bench hotplate with control knob and a beaker.",
+      "referenceBasis": "Original illustrative laboratory equipment; no manufacturer or certified design",
+      "boundsMetres": [
+        -0.26,
+        -0.235,
+        0.0,
+        0.26,
+        0.23,
+        0.41
+      ],
+      "cityObjectCount": 5,
+      "objectTypes": {
+        "GenericCityObject": 5
+      }
+    },
+    {
+      "id": "rotary-evaporator",
+      "file": "rotary-evaporator.city.json",
+      "title": "Rotary evaporator",
+      "description": "Stand-mounted evaporation assembly with glass flask and heated bath.",
+      "referenceBasis": "Original illustrative laboratory equipment; no manufacturer or certified design",
+      "boundsMetres": [
+        -0.65,
+        -0.35,
+        0.0,
+        0.65,
+        0.35,
+        1.46
+      ],
+      "cityObjectCount": 8,
+      "objectTypes": {
+        "GenericCityObject": 8
+      }
+    },
+    {
+      "id": "hplc-stack",
+      "file": "hplc-stack.city.json",
+      "title": "HPLC system",
+      "description": "Stacked chromatography modules with solvent bottles and status screens.",
+      "referenceBasis": "Original illustrative laboratory equipment; no manufacturer or certified design",
+      "boundsMetres": [
+        -0.43,
+        -0.341,
+        0.0,
+        0.43,
+        0.32,
+        1.63
+      ],
+      "cityObjectCount": 11,
+      "objectTypes": {
+        "GenericCityObject": 11
+      }
+    },
+    {
+      "id": "bench-centrifuge",
+      "file": "bench-centrifuge.city.json",
+      "title": "Bench centrifuge",
+      "description": "Compact enclosed centrifuge with round lid and control panel.",
+      "referenceBasis": "Original illustrative laboratory equipment; no manufacturer or certified design",
+      "boundsMetres": [
+        -0.43,
+        -0.365,
+        0.0,
+        0.43,
+        0.35,
+        0.475
+      ],
+      "cityObjectCount": 3,
+      "objectTypes": {
+        "GenericCityObject": 3
+      }
+    },
+    {
+      "id": "drying-oven",
+      "file": "drying-oven.city.json",
+      "title": "Laboratory drying oven",
+      "description": "Countertop heated oven with viewing window and vent.",
+      "referenceBasis": "Original illustrative laboratory equipment; no manufacturer or certified design",
+      "boundsMetres": [
+        -0.48,
+        -0.44,
+        0.0,
+        0.48,
+        0.39,
+        1.12
+      ],
+      "cityObjectCount": 4,
+      "objectTypes": {
+        "CityFurniture": 1,
+        "GenericCityObject": 3
+      }
+    },
+    {
+      "id": "jacketed-reactor",
+      "file": "jacketed-reactor.city.json",
+      "title": "Jacketed reactor",
+      "description": "Small pilot reactor with vessel, mixer, ports and support frame.",
+      "referenceBasis": "Original illustrative laboratory equipment; no manufacturer or certified design",
+      "boundsMetres": [
+        -0.44,
+        -0.43,
+        0.0,
+        0.69,
+        0.43,
+        1.98
+      ],
+      "cityObjectCount": 9,
+      "objectTypes": {
+        "CityFurniture": 5,
+        "GenericCityObject": 4
+      }
+    },
+    {
+      "id": "glassware-rack",
+      "file": "glassware-rack.city.json",
+      "title": "Glassware rack",
+      "description": "Two-shelf rack with flasks and reagent bottles.",
+      "referenceBasis": "Original illustrative laboratory equipment; no manufacturer or certified design",
+      "boundsMetres": [
+        -0.8,
+        -0.3,
+        0.0,
+        0.8,
+        0.3,
+        1.55
+      ],
+      "cityObjectCount": 20,
+      "objectTypes": {
+        "CityFurniture": 6,
+        "GenericCityObject": 14
+      }
+    },
+    {
+      "id": "vacuum-pump",
+      "file": "vacuum-pump.city.json",
+      "title": "Vacuum pump",
+      "description": "Bench vacuum pump with motor, pump head and carrying handle.",
+      "referenceBasis": "Original illustrative laboratory equipment; no manufacturer or certified design",
+      "boundsMetres": [
+        -0.42,
+        -0.22,
+        0.0,
+        0.42,
+        0.22,
+        0.61
+      ],
+      "cityObjectCount": 6,
+      "objectTypes": {
+        "CityFurniture": 3,
+        "GenericCityObject": 3
+      }
+    }
+  ]
+}
