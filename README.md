@@ -62,6 +62,18 @@ It covers the authoring API, 3D and illustration styles, diagrams, molecules and
 proteins, and the rules that keep frames deterministic, with a project template in
 `skills/raymotion/templates/`.
 
+Two documents make the difference between a demo and a film: the mandatory
+[authoring standard](skills/raymotion/references/authoring-standard.md) and the
+[quality-control framework](skills/raymotion/references/quality-control.md). Agents fill
+`skills/raymotion/templates/BRIEF.md` before writing code and
+`skills/raymotion/templates/QC-REVIEW.md` before calling a video done. The standard
+requires a one-sentence conceit, a proof object per chapter, a script or cue map, a
+source ledger, a real audio plan, and a verified render; the QC framework gates the work
+and scores authoredness 0–36 plus a mode-aware Craft & Coherence axis 0–18, so craft
+improvements and polished templates are not flattened into one number. The review
+declares a story mode (explainer, narrative, promo or utility) and judges the proof
+objects and house grammar against that mode.
+
 ## Usage
 
 ```

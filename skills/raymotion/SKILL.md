@@ -13,7 +13,27 @@ always looks the same, whether rendered alone or as part of the whole video.
 Repository: https://github.com/pebaryan/raymotion (API docs in its README.md and in the
 comments of `include/rmtn/*.hpp`).
 
+## Before you author (mandatory)
+
+Do not start with code. Read `references/authoring-standard.md` and fill
+`templates/BRIEF.md` first. The brief must state:
+
+- the one-sentence conceit and the audience;
+- one **proof object** (chart, map, artifact, mechanism, count) per chapter;
+- the script or a text-only cue map;
+- the source ledger, or the on-screen "illustrative" labels;
+- the visual system, audio plan and asset plan;
+- the still frames and the thumbnail candidate.
+
+If you cannot fill those, the piece is not ready to build. After the build, run
+`references/quality-control.md` and fill `templates/QC-REVIEW.md` before calling a video
+done. The gates are not optional; "it renders" is not acceptance.
+
 ## Workflow
+
+0. **Author the brief** (before code). Copy `templates/BRIEF.md` to
+   `docs/<slug>-brief.md`, fill it, and review it. The one-sentence conceit, the proof
+   object of each chapter, and the cue map are the contract.
 
 1. **Set up a project** (once). Copy `templates/CMakeLists.txt` and `templates/main.cpp`
    from this skill into an empty folder, then build:
@@ -38,16 +58,27 @@ comments of `include/rmtn/*.hpp`).
    build/myvideo still intro --at 45 --png out/check-045.png
    ```
    Open each PNG and check it: text inside the frame and not overlapping, nothing
-   cut off, elements where the script says they should be at that moment. Fix and
-   repeat. Stills are cheap (well under a second each); full renders are not.
+   cut off, elements where the **proof object** says they should be at that moment.
+   Check `?` glyphs, caption wrapping, chart units and colour meaning. Fix and repeat.
+   Stills are cheap (well under a second each); full renders are not. This is Gate 2 of
+   `references/quality-control.md`.
 
 4. **Render.** `build/myvideo render intro --draft` (half size, fast) to check motion and
-   timing, then `build/myvideo render intro` for the final `out/intro.mp4`. Use
+   timing, then `build/myvideo render intro` for the final `out/intro.mp4`. Watch the
+   draft once **muted** (does the argument still read?) and once with sound (do the cues
+   land?). Then check the final file with `ffprobe`, a full decode, loudness/true peak,
+   and frames extracted from the encoded MP4, not only pre-encode PNGs. Use
    `--png-frames` to get a PNG sequence when ffmpeg is unavailable. For overlays meant
    for an editor (lower thirds, titles, callouts), don't paint a backdrop and render
    with `--alpha`: ProRes 4444 with alpha (`out/intro.mov`) for Premiere, Resolve or
    Final Cut, or `--alpha --format webm` for VP9 with alpha. Check with
    `still --alpha`, which writes an RGBA PNG.
+
+5. **Run the quality gate.** Fill `templates/QC-REVIEW.md` using
+   `references/quality-control.md`. Declare the story mode, then the piece is not done until Authoredness is ≥ 22 and
+   Craft is ≥ 13, with no critical fail and Gates 0–7 passed. Report both scores, the
+   evidence, and the two lowest criteria in your final message. If the piece is a quick internal demo, say so
+   explicitly; do not present it as a finished film.
 
 Other commands: `preview <name>` plays in a live window with sound (needs a desktop),
 `props <name>` prints a composition's default props, `--props '{"title": "Hi"}'` or
@@ -92,6 +123,14 @@ int main(int argc, const char** argv) { return runCli(argc, argv, registerComps)
 
 See the references for everything else:
 
+- `references/authoring-standard.md`: **mandatory pre-flight.** Conceit, proof objects,
+  script/cue map, timing, sound, visual system, assets, required artifacts, anti-patterns
+  and the definition of done. Read before writing code; fill `templates/BRIEF.md`.
+- `references/quality-control.md`: **mandatory review.** Gates, a 12-criterion 0–3
+  authoredness rubric, a 6-criterion 0–3 Craft & Coherence axis, critical fails, dual
+  score bands, review protocol, the three remediation passes
+  that turn a brief-complete demo into an authored/improvised film, and the worksheet
+  `templates/QC-REVIEW.md`.
 - `references/authoring.md`: animation (interpolate, springs, easings, keyframe
   tracks), text and layout, layers (opacity, blend modes, masks, filters), transitions,
   vector paths and SVG (draw-on, fill rules, dashes, morphs), equations (TeX formulas,
@@ -133,3 +172,20 @@ See the references for everything else:
   are written in `c.assets`, which runs only before frames are drawn.
 - **Check what you made.** Always look at stills before claiming a video is done, and
   report what you checked. Render the full video only once the stills look right.
+- **Brief before code.** No composition code until `templates/BRIEF.md` is filled and
+  the one-sentence conceit, per-chapter proof objects, and cue map exist.
+- **Every chapter proves something.** If a beat has no chart, map, artifact, mechanism,
+  count or physical metaphor, cut it or merge it. Captions do not count as proof.
+- **Every number has a source or an illustrative label.** Do not invent precision.
+- **Sound is part of the film.** No generic bed by default. Use voice, a motif score,
+  ducking, SFX on picture beats, and a loudness/peak check. Declare deliberate silence.
+- **One idea per screen, one visual idea per chapter.** A persistent HUD/palette/motif
+  unifies; the same split card repeated does not.
+- **Derive time from content.** Scene starts from `node->start`, voice lengths from the
+  WAVs, picture and score cues from one cue map. Do not maintain three hardcoded clocks.
+- **Run the QC gate.** Fill `templates/QC-REVIEW.md`; report authoredness and craft
+  scores and evidence. "It renders" is not acceptance.
+- **Craft is scored too, in the declared mode.** Scenario coherence, the right proof
+  object (chart/map for an explainer; staging/shot grammar for a narrative; demo/spec/CTA
+  for a promo), text pacing, mode grammar, spec-to-screen fidelity and revision quality.
+  The 36-point authoredness score alone saturates.
