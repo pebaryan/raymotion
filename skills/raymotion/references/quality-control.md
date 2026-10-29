@@ -566,9 +566,15 @@ Result: criteria 13-18 move.
 
 Use these when calibrating scores:
 
+- **Authored:** The Token Tax, an external RotorSubword explainer recorded in
+  `worked-examples.md` §1-2; it documents a visual system, a narration script, a score,
+  an accuracy ledger and a verification log, and has a vertical cut rebuilt for 9:16.
 - **Authored:** `examples/showcase/austria_time_travel.cpp` with
   `docs/austria-time-travel-script.md`; it derives timing from the voice, gives each
   chapter an artifact, and keeps a source ledger.
+- **Authored reels:** `examples/showcase/a1_sein_six_seats.cpp`, `asp_v2.cpp` and
+  `ht_feed_v2.cpp`, each with a filled QC review in `docs/`; judge reels against
+  `reels.md` as well.
 - **Brief-complete:** `examples/kgnesy/main.cpp` — one abstract diagram, claims in
   captions, no voice, no public docs, no verification.
 - **Brief-complete:** `examples/showcase/austria_journey.cpp` — a station template
@@ -592,6 +598,8 @@ so these older examples are not re-scored here.
 | --- | --- | --- |
 | `kgnesy` | 12–16 / Brief-complete | Strong 3D craft and a clear colour system, but one abstract diagram, no voice, claims in captions, no public script/sources/verification. |
 | `austria-journey` | 14–18 / Brief-complete | Good camera path and real map/chart data, but 11 repeated station cards, feature-coverage framing, fixed narration offsets, no encoded-frame/loudness log. |
+| `rotor-subword` (The Token Tax, external) | 29–33 / Authored–Improvised | Ten distinct scenes, data as geometry, typeset equations, VO + score + duck + SFX, accuracy ledger, verification log. Deductions for hardcoded VO ducking and assets not generated in `c.assets`. |
+| `asp-feed` v1 → v2 | 17 → 33 | Same topic and length. v1: a generic card per beat, no proof or source. v2: one map that is the problem and the answer, two answer sets, a constraint that removes one, a source line, a composed score. |
 | `austria-time-travel` | 30–34 / Improvised | One artifact per chapter, timing from measured voice, phrase cues, custom score and ducking, source ledger, thumbnail. Deductions for the monolithic file and duplicated timing constants. |
 
 A reviewer who scores a 510-line station template above a 1,940-line artifact-driven film

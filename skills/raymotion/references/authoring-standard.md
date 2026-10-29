@@ -188,7 +188,8 @@ The default is a real soundtrack: voice, score, ducking, SFX, and a verified mix
 - Silence is allowed only when the brief says why the silence is doing work.
 
 Reference: the cue-driven score, custom strings/flute/wind and speech-span ducking in
-`examples/showcase/austria_time_travel.cpp`.
+`examples/showcase/austria_time_travel.cpp`; the argument-following score and SFX-on-beat
+plan of The Token Tax in `worked-examples.md` §1.
 
 ---
 
@@ -365,11 +366,21 @@ These are not style preferences. Each one is a failure to make the subject visib
 
 ## 12. Benchmarks
 
-Read the good references before starting:
+Read `worked-examples.md` before starting: it records the decisions behind each good
+film and reel, not just the files. For a vertical or feed cut, read `reels.md` too.
 
+The good references:
+
+- The Token Tax (an external RotorSubword explainer, recorded in `worked-examples.md`
+  §1-2) — a research paper turned into one physical metaphor (the token chip), an
+  accuracy ledger with a guard per claim, an honesty chapter, a score that follows the
+  argument, and a 60 s vertical cut rebuilt for the tall frame instead of cropped.
 - `examples/showcase/austria_time_travel.cpp` + `docs/austria-time-travel-script.md` —
   a time-machine conceit, one artifact per chapter, timing derived from the voice, and a
   source ledger.
+- Reels: `a1_sein_six_seats.cpp` (one object, many states), `asp_v2.cpp` (template to
+  proof; compare with its v1 in `docs/asp-feed-v2-qc.md`), `ht_feed_v2.cpp` (proof by
+  removal).
 
 Read the cautionary references to see the difference:
 

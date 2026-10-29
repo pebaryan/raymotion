@@ -15,8 +15,10 @@ comments of `include/rmtn/*.hpp`).
 
 ## Before you author (mandatory)
 
-Do not start with code. Read `references/authoring-standard.md` and fill
-`templates/BRIEF.md` first. The brief must state:
+Do not start with code. Read `references/authoring-standard.md` and
+`references/worked-examples.md`, then fill `templates/BRIEF.md`. For a vertical or feed
+cut (9:16 or 4:5, under ~90 s) also read `references/reels.md` and use its defaults
+(safe zones, type sizes, beat shape, hard cuts). The brief must state:
 
 - the one-sentence conceit and the audience;
 - one **proof object** (chart, map, artifact, mechanism, count) per chapter;
@@ -126,6 +128,12 @@ See the references for everything else:
 - `references/authoring-standard.md`: **mandatory pre-flight.** Conceit, proof objects,
   script/cue map, timing, sound, visual system, assets, required artifacts, anti-patterns
   and the definition of done. Read before writing code; fill `templates/BRIEF.md`.
+- `references/worked-examples.md`: **read before the brief.** The decisions behind good
+  films and reels (conceit, one object, the visible turn, honesty beat, colour and
+  motion rules, sound that follows the argument), plus cautionary examples.
+- `references/reels.md`: **mandatory for vertical/feed cuts.** Defaults for frame,
+  length, safe zones, type sizes and reading rate; the hook/setup/turn/consequence/close
+  beat shape; rebuilding staging for a tall frame; a failure gallery from real reviews.
 - `references/quality-control.md`: **mandatory review.** Gates, a 12-criterion 0–3
   authoredness rubric, a 6-criterion 0–3 Craft & Coherence axis, critical fails, dual
   score bands, review protocol, the three remediation passes

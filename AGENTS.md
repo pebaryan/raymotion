@@ -4,7 +4,10 @@
 
 This is mandatory, not advisory:
 
-1. Read `skills/raymotion/references/authoring-standard.md`.
+1. Read `skills/raymotion/references/authoring-standard.md` and
+   `skills/raymotion/references/worked-examples.md` (the decisions behind good films).
+   For a vertical or feed cut (9:16, 4:5, under ~90 s), also read
+   `skills/raymotion/references/reels.md` and use its defaults.
 2. Copy `skills/raymotion/templates/BRIEF.md` to `docs/<slug>-brief.md` and fill it.
 3. Do not write composition code until the brief has:
    - a one-sentence conceit (not just a topic);
@@ -52,8 +55,14 @@ Run `skills/raymotion/references/quality-control.md` and fill
 
 ## Reference implementations
 
+`skills/raymotion/references/worked-examples.md` explains each of these, plus The Token
+Tax (an external RotorSubword explainer and its 60 s vertical cut, recorded there in full).
+
 - Authored: `examples/showcase/austria_time_travel.cpp` +
   `docs/austria-time-travel-script.md`.
+- Authored reels: `examples/showcase/a1_sein_six_seats.cpp` (one object, many states),
+  `examples/showcase/asp_v2.cpp` (a template rewritten into a proof),
+  `examples/showcase/ht_feed_v2.cpp` (proof by removal), each with brief and QC in `docs/`.
 - Cautionary: `examples/kgnesy/main.cpp` (abstract diagram, claims in captions, no
   voice/docs/verification).
 - Cautionary: `examples/showcase/austria_journey.cpp` (one station template repeated,

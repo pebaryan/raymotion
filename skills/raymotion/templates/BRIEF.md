@@ -31,6 +31,25 @@
 **Rule:** do not apply another mode's proof requirement. A narrative is not failed for
 lacking a chart; an explainer is not failed for lacking a dramatic arc.
 
+## 1c. Reel / feed cut (fill for 9:16 or 4:5; otherwise `n/a`)
+
+See `references/reels.md`. Write a reason next to any default you break.
+
+| | |
+| --- | --- |
+| The one claim | `<the single thing this reel proves>` |
+| The one object | `<the proof object whose state change is the argument>` |
+| Hook line (≤ 6 words) | `<a tension, not a topic>` |
+| Frame 0 | `<what is already moving on the first frame>` |
+| Beat shape | `<hook / setup / turn / consequence / close, with times>` |
+| Safe zones | `<top 180, bottom 300-400, right 140; art zone, caption zone>` |
+| Type | `<hook 96-124, captions 44-56, labels 30-40 px>` |
+| Text | `<karaoke at 2.5 words/s, two lines, one text layer at a time>` |
+| Cuts / camera | `<hard cuts on beats; one camera move per beat>` |
+| Close and loop | `<final state, ≥ 2 s hold, does it lead back to frame 0?>` |
+| Cover | `<frame number; tested at 180x320>` |
+| Long version | `<if this is cut from a longer film: which chapters stay, and why>` |
+
 ## 1. One sentence
 
 > This is a film about **<subject>** that makes the viewer **<feel / understand>**
