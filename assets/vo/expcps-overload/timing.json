@@ -1,0 +1,151 @@
+{
+  "chapters": [
+    {
+      "id": "01-alarm",
+      "duration": 12.898,
+      "cues": [
+        {
+          "text": "A transformer alarm tells an operator something is wrong.",
+          "start": 0.0,
+          "duration": 4.087
+        },
+        {
+          "text": "It does not tell them why.",
+          "start": 4.307,
+          "duration": 2.299
+        },
+        {
+          "text": "In this simulated settlement, the load passes a threshold set for regular operation.",
+          "start": 6.826,
+          "duration": 6.072
+        }
+      ]
+    },
+    {
+      "id": "02-price",
+      "duration": 13.3,
+      "cues": [
+        {
+          "text": "One trail begins outside the grid.",
+          "start": 0.0,
+          "duration": 3.066
+        },
+        {
+          "text": "An energy price drop triggers a flexibility message.",
+          "start": 3.286,
+          "duration": 3.992
+        },
+        {
+          "text": "Two participating homes use more electricity, adding to the transformer load.",
+          "start": 7.498,
+          "duration": 5.802
+        }
+      ]
+    },
+    {
+      "id": "03-rain",
+      "duration": 13.784,
+      "cues": [
+        {
+          "text": "Another trail starts on a roof.",
+          "start": 0.0,
+          "duration": 2.76
+        },
+        {
+          "text": "Rain reduces solar generation.",
+          "start": 2.98,
+          "duration": 2.916
+        },
+        {
+          "text": "With its battery empty, the house draws from the grid.",
+          "start": 6.115,
+          "duration": 4.086
+        },
+        {
+          "text": "Both trails meet at the same transformer.",
+          "start": 10.421,
+          "duration": 3.363
+        }
+      ]
+    },
+    {
+      "id": "04-stitch",
+      "duration": 15.522,
+      "cues": [
+        {
+          "text": "Exp C P S joins these kinds of facts in a knowledge graph.",
+          "start": 0.0,
+          "duration": 4.972
+        },
+        {
+          "text": "Experts provide a general causal rule.",
+          "start": 5.192,
+          "duration": 3.304
+        },
+        {
+          "text": "A topology query checks which real devices are connected, turning that rule into specific links.",
+          "start": 8.716,
+          "duration": 6.806
+        }
+      ]
+    },
+    {
+      "id": "05-walk",
+      "duration": 14.901,
+      "cues": [
+        {
+          "text": "Starting from the alarm, the algorithm walks backward through possible causes.",
+          "start": 0.0,
+          "duration": 5.451
+        },
+        {
+          "text": "It finds earlier events on connected devices and builds an explanation tree.",
+          "start": 5.671,
+          "duration": 5.49
+        },
+        {
+          "text": "The trail can reach beyond the nearest sensor.",
+          "start": 11.38,
+          "duration": 3.52
+        }
+      ]
+    },
+    {
+      "id": "06-result",
+      "duration": 17.313,
+      "cues": [
+        {
+          "text": "The prototype's tree includes flexibility messages from the data grid and events deeper than the immediate cause.",
+          "start": 0.0,
+          "duration": 7.41
+        },
+        {
+          "text": "But the paper says related paths still need grouping.",
+          "start": 7.63,
+          "duration": 4.013
+        },
+        {
+          "text": "This is a demonstrated prototype, not a complete account of every cause.",
+          "start": 11.863,
+          "duration": 5.451
+        }
+      ]
+    },
+    {
+      "id": "07-close",
+      "duration": 11.184,
+      "cues": [
+        {
+          "text": "The useful shift is from an isolated warning to a traceable chain of evidence.",
+          "start": 0.0,
+          "duration": 5.331
+        },
+        {
+          "text": "That is the promise explored in the twenty twenty one Exp C P S paper.",
+          "start": 5.551,
+          "duration": 5.633
+        }
+      ]
+    }
+  ]
+}

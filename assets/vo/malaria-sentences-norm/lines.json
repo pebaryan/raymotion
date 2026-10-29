@@ -1,0 +1,208 @@
+{
+  "lines": [
+    {
+      "scene": 1,
+      "line": 1,
+      "text": "Can a machine learn malaria's chemical signature, and does it still work on data it has never seen?",
+      "file": "s01-1.wav"
+    },
+    {
+      "scene": 2,
+      "line": 1,
+      "text": "Malaria infected an estimated 282 million people in 2024 and killed 610,000.",
+      "file": "s02-1.wav"
+    },
+    {
+      "scene": 2,
+      "line": 2,
+      "text": "Progress has stalled, parasite gene deletions can defeat rapid tests, and funding falls billions short.",
+      "file": "s02-2.wav"
+    },
+    {
+      "scene": 3,
+      "line": 1,
+      "text": "Metabolomics measures the small molecules in blood: amino acids, vitamins, lipids.",
+      "file": "s03-1.wav"
+    },
+    {
+      "scene": 3,
+      "line": 2,
+      "text": "Infection changes the mix, and that chemical fingerprint is a window into what the body is doing.",
+      "file": "s03-2.wav"
+    },
+    {
+      "scene": 4,
+      "line": 1,
+      "text": "Machine learning can search that fingerprint for patterns.",
+      "file": "s04-1.wav"
+    },
+    {
+      "scene": 4,
+      "line": 2,
+      "text": "But with hundreds of molecules and only a few hundred samples, a model can simply memorise what it has seen.",
+      "file": "s04-2.wav"
+    },
+    {
+      "scene": 4,
+      "line": 3,
+      "text": "Memorising isn't learning.",
+      "file": "s04-3.wav"
+    },
+    {
+      "scene": 5,
+      "line": 1,
+      "text": "We used two public serum datasets from children in Burkina Faso: 305 samples, 220 metabolites measured in both.",
+      "file": "s05-1.wav"
+    },
+    {
+      "scene": 5,
+      "line": 2,
+      "text": "Many samples are repeat visits by the same child, so this is not 305 independent people.",
+      "file": "s05-2.wav"
+    },
+    {
+      "scene": 6,
+      "line": 1,
+      "text": "The data is log-scaled, normalised, gap-filled and standardised.",
+      "file": "s06-1.wav"
+    },
+    {
+      "scene": 6,
+      "line": 2,
+      "text": "Even then the two datasets sit on separate islands, a technical gap.",
+      "file": "s06-2.wav"
+    },
+    {
+      "scene": 6,
+      "line": 3,
+      "text": "A statistical correction can merge them in a picture, but we used it only as a diagnostic.",
+      "file": "s06-3.wav"
+    },
+    {
+      "scene": 7,
+      "line": 1,
+      "text": "Two hundred and twenty candidates is too many.",
+      "file": "s07-1.wav"
+    },
+    {
+      "scene": 7,
+      "line": 2,
+      "text": "So two different methods, one linear, one tree-based, each vote.",
+      "file": "s07-2.wav"
+    },
+    {
+      "scene": 7,
+      "line": 3,
+      "text": "Only metabolites both pick survive.",
+      "file": "s07-3.wav"
+    },
+    {
+      "scene": 8,
+      "line": 1,
+      "text": "Here's the honest test.",
+      "file": "s08-1.wav"
+    },
+    {
+      "scene": 8,
+      "line": 2,
+      "text": "Train on one whole dataset, test on the other, which the model has never seen, then swap.",
+      "file": "s08-2.wav"
+    },
+    {
+      "scene": 8,
+      "line": 3,
+      "text": "Cleaning, selection and tuning are learned from the training data alone.",
+      "file": "s08-3.wav"
+    },
+    {
+      "scene": 8,
+      "line": 4,
+      "text": "No peeking.",
+      "file": "s08-4.wav"
+    },
+    {
+      "scene": 9,
+      "line": 1,
+      "text": "While tuning, models scored up to 0.99 AUC, where 0.5 is a coin flip and 1 is perfect.",
+      "file": "s09-1.wav"
+    },
+    {
+      "scene": 9,
+      "line": 2,
+      "text": "On the unseen dataset they landed between 0.50 and 0.70.",
+      "file": "s09-2.wav"
+    },
+    {
+      "scene": 9,
+      "line": 3,
+      "text": "Logistic regression and a heavily tuned XGBoost both averaged about 0.64.",
+      "file": "s09-3.wav"
+    },
+    {
+      "scene": 9,
+      "line": 4,
+      "text": "More tuning didn't close the gap.",
+      "file": "s09-4.wav"
+    },
+    {
+      "scene": 9,
+      "line": 5,
+      "text": "That gap is the finding.",
+      "file": "s09-5.wav"
+    },
+    {
+      "scene": 10,
+      "line": 1,
+      "text": "Fit on all the data, the same selection leaves eleven metabolites.",
+      "file": "s10-1.wav"
+    },
+    {
+      "scene": 10,
+      "line": 2,
+      "text": "The strongest three: phenylalanine, pointing up; sphingosine-1-phosphate and retinol, down.",
+      "file": "s10-2.wav"
+    },
+    {
+      "scene": 10,
+      "line": 3,
+      "text": "Each fits published malaria literature, which makes them worth a biologist's attention, not a discovery.",
+      "file": "s10-3.wav"
+    },
+    {
+      "scene": 11,
+      "line": 1,
+      "text": "An open-source demo takes the eleven values and explains each prediction.",
+      "file": "s11-1.wav"
+    },
+    {
+      "scene": 11,
+      "line": 2,
+      "text": "A research illustration, not a diagnostic.",
+      "file": "s11-2.wav"
+    },
+    {
+      "scene": 12,
+      "line": 1,
+      "text": "So this is a transparent, reusable workflow and a short list for expert review.",
+      "file": "s12-1.wav"
+    },
+    {
+      "scene": 12,
+      "line": 2,
+      "text": "Not a validated panel, not a diagnostic, and not new knowledge about malaria in Indonesia.",
+      "file": "s12-2.wav"
+    },
+    {
+      "scene": 13,
+      "line": 1,
+      "text": "Next: independent cohorts, targeted confirmation, and prospective local studies.",
+      "file": "s13-1.wav"
+    },
+    {
+      "scene": 13,
+      "line": 2,
+      "text": "A modest result, and a method you can trust.",
+      "file": "s13-2.wav"
+    }
+  ]
+}

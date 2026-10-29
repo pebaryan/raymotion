@@ -114,13 +114,22 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/scenes.cpp
     examples/showcase/fx_present.cpp
     examples/showcase/ht_explainer.cpp
+    examples/showcase/ht_explainer_v2.cpp
     examples/showcase/ht_plain.cpp
     examples/showcase/ht_feed.cpp
+    examples/showcase/ht_feed_v2.cpp
+    examples/showcase/malaria_metabolomics.cpp
+    examples/showcase/malaria_metabolomics_v2.cpp
+    examples/showcase/a1_sein_six_seats.cpp
+    examples/showcase/a1_german_reels.cpp
+    examples/showcase/german_cefr_banners.cpp
     examples/showcase/gpu_scene.cpp
     examples/showcase/prefabs.cpp
     examples/showcase/asp.cpp
+    examples/showcase/asp_v2.cpp
     examples/showcase/tokens.cpp
     examples/showcase/own_compute.cpp
+    examples/showcase/own_compute_v2.cpp
     examples/showcase/promo.cpp
     examples/showcase/npr.cpp
     examples/showcase/diagrams.cpp
@@ -135,6 +144,8 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/maps.cpp
     examples/showcase/cities.cpp
     examples/showcase/earth.cpp
+    examples/showcase/trips.cpp
+    examples/showcase/trip_promo.cpp
     examples/showcase/atmosphere.cpp
     examples/showcase/map_charts.cpp
     examples/showcase/paths.cpp
@@ -148,10 +159,24 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/motionblur.cpp
     examples/showcase/sparql.cpp
     examples/showcase/lowerthird.cpp)
+  target_sources(raymotion PRIVATE examples/showcase/expcps_overload.cpp)
+  target_sources(raymotion PRIVATE examples/showcase/three_levels_causality.cpp)
   target_link_libraries(raymotion PRIVATE rmtn_engine)
+
+  add_executable(raymotion_halloween examples/halloween/main.cpp)
+  target_link_libraries(raymotion_halloween PRIVATE rmtn_engine)
+
+  add_executable(raymotion_halloween3d examples/halloween/main3d.cpp)
+  target_link_libraries(raymotion_halloween3d PRIVATE rmtn_engine)
 
   add_executable(raymotion_starter examples/starter/main.cpp)
   target_link_libraries(raymotion_starter PRIVATE rmtn_engine)
+
+  add_executable(raymotion_kgnesy examples/kgnesy/main.cpp)
+  target_link_libraries(raymotion_kgnesy PRIVATE rmtn_engine)
+
+  add_executable(raymotion_reel28 examples/reel28/main.cpp)
+  target_link_libraries(raymotion_reel28 PRIVATE rmtn_engine)
 endif()
 
 # ---------------------------------------------------------------- tests

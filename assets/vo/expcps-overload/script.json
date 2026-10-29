@@ -1,0 +1,42 @@
+{
+  "voice": "Microsoft George",
+  "rate": -1,
+  "pauseSeconds": 0.22,
+  "chapters": [
+    {"id":"01-alarm","sentences":[
+      "A transformer alarm tells an operator something is wrong.",
+      "It does not tell them why.",
+      "In this simulated settlement, the load passes a threshold set for regular operation."
+    ]},
+    {"id":"02-price","sentences":[
+      "One trail begins outside the grid.",
+      "An energy price drop triggers a flexibility message.",
+      "Two participating homes use more electricity, adding to the transformer load."
+    ]},
+    {"id":"03-rain","sentences":[
+      "Another trail starts on a roof.",
+      "Rain reduces solar generation.",
+      "With its battery empty, the house draws from the grid.",
+      "Both trails meet at the same transformer."
+    ]},
+    {"id":"04-stitch","sentences":[
+      "Exp C P S joins these kinds of facts in a knowledge graph.",
+      "Experts provide a general causal rule.",
+      "A topology query checks which real devices are connected, turning that rule into specific links."
+    ]},
+    {"id":"05-walk","sentences":[
+      "Starting from the alarm, the algorithm walks backward through possible causes.",
+      "It finds earlier events on connected devices and builds an explanation tree.",
+      "The trail can reach beyond the nearest sensor."
+    ]},
+    {"id":"06-result","sentences":[
+      "The prototype's tree includes flexibility messages from the data grid and events deeper than the immediate cause.",
+      "But the paper says related paths still need grouping.",
+      "This is a demonstrated prototype, not a complete account of every cause."
+    ]},
+    {"id":"07-close","sentences":[
+      "The useful shift is from an isolated warning to a traceable chain of evidence.",
+      "That is the promise explored in the twenty twenty one Exp C P S paper."
+    ]}
+  ]
+}

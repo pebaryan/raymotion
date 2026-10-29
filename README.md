@@ -1175,7 +1175,13 @@ gpu-3d                 1920x1080 @30fps    8.0s  music=0   (GPU scene: IBL, shad
 here-there-explainer   1280x720  @30fps  108.0s  music=1   (logic explainer)
 here-there-plain       1280x720  @30fps  108.0s  music=0   (plain-language cut, Segoe UI)
 here-there-feed        1080x1350 @30fps   88.0s  music=0   (portrait feed cut, Segoe UI)
+here-there-feed-v2     1080x1350 @30fps   59.8s  audio=1   (4:5 paper-cut feed v2; smoke-only guess, H/T islands, cue-mapped text, thumbnail, SRT)
+malaria-metabolomics   1920x1080 @30fps  191.6s  audio=1   (FRAME-style client preview: cross-dataset malaria ML, Qwen3-TTS voice, SFX, SRT, thumbnail)
+malaria-metabolomics-v2 1920x1080 @30fps 182.2s audio=1 (9-beat 3D/NPR client preview: 3D molecular specimens, Gooch/ink, per-sentence voice, SFX, SRT, thumbnail)
+here-there-explainer-v2 1920x1080 @30fps 107.7s  audio=1  (H/T set-diagram explainer; cue-mapped text, score, thumbnail, SRT)
+asp-feed-v2            1080x1920 @30fps   45.0s  audio=1   (ASP explainer: 2x2 map proof, two answer sets, karaoke captions; text-only)
 own-your-compute       1920x1080 @30fps   66.0s  audio=1   (story film: GPU 3D, particles, glitch; all assets from code)
+own-your-compute-v2    1920x1080 @30fps   94.0s  audio=1   (voiceless v2: karaoke captions, cost chart, Vienna -> US map)
 raymotion-promo        1920x1080 @60fps  314.0s  audio=1   (YouTube introduction: how it works, every feature to v0.8 in 29 chapters, credits)
 raymotion-promo-thumb  1920x1080 @60fps    1.0s  audio=0   (the introduction's YouTube thumbnail: render a still at frame 30)
 npr-styles             1920x1080 @30fps   53.8s  audio=0   (non-photorealistic rendering: eight illustration styles)
@@ -1196,6 +1202,7 @@ lowerthird             1920x1080 @30fps    6.0s  audio=0   (a name tag with no b
 audio-reactive         1920x1080 @30fps   24.0s  audio=1   (visuals driven by a music track: spectrum, beats, tempo, waveform, levels)
 captions               1920x1080 @30fps   26.1s  audio=1   (narrated by the system voice: scenes timed to phrases, burned-in and karaoke captions, an SRT sidecar)
 social-icons           1920x1080 @30fps   19.5s  audio=0   (the built-in icon prefabs: the raymotion logo, social badges in four looks, handles)
+expcps-overload        1920x1080 @30fps  108.5s  audio=1   (2021 ExpCPS paper explainer: two simulated causes, graph reasoning, prototype result and limits)
 flag-showcase          1920x1080 @30fps   13.0s  audio=1   (the built-in flag prefabs: 29 country flags, badge or plain, labels, a staggered flag-row)
 maps                   1920x1080 @30fps   24.4s  audio=1   (geo:: maps: a turning globe, seven projections morphing, a conic with a country by ISO code, cities)
 city-models            1920x1080 @30fps   41.5s  audio=1   (CityJSON in 3D: a town rising, coloured by year built, LoD 1.2 beside 2.2, a building by id, streets and lamps at dusk, a bus route)
@@ -1217,6 +1224,11 @@ photo, SVG, GIF, video clip and OBJ model its media and 3D chapters show, are ge
 The Here-and-There pieces introduce Pedro Cabalar's treatment of HT and equilibrium
 logic; sources, script and scope notes are in `docs/here-there-explainer.md`, and the
 worked examples are checked by the `ht_semantics` test.
+
+`own-your-compute-v2` is the 94 s voiceless preview of the same story rebuilt around a
+script, karaoke captions, a modelled cost chart and a Vienna → US route map; see
+`docs/own-compute-v2-brief.md` and `docs/own-compute-v2-qc.md`. It is the first cut under
+the authoring standard.
 
 `own-your-compute` is a 66 s short about running AI on your own machine, built to show
 the engine off: a fogged server aisle with blinking LEDs, glitch stamps with RGB split and

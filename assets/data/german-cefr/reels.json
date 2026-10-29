@@ -1,0 +1,2115 @@
+{
+  "reels": [
+    {
+      "id": "A1-GRA-01",
+      "level": "A1",
+      "track": "grammar",
+      "title": "Personalpronomen + sein",
+      "hook": "Why is it ich bin but du bist?",
+      "demo": [
+        "ich bin müde",
+        "du bist müde",
+        "er ist müde"
+      ],
+      "exercise": "Complete: Wir ___ hier. (sind)",
+      "takeaway": "",
+      "practice": "fixed answer included",
+      "source": "A1/grammar/01-personalpronomen-sein.md"
+    },
+    {
+      "id": "A1-GRA-02",
+      "level": "A1",
+      "track": "grammar",
+      "title": "haben + regular verb endings",
+      "hook": "One little ending changes who does the action.",
+      "demo": [
+        "ich habe, du hast",
+        "ich lerne, du lernst"
+      ],
+      "exercise": "Conjugate lernen for wir. (lernen)",
+      "takeaway": "",
+      "practice": "fixed answer included",
+      "source": "A1/grammar/02-haben-regular-verb-endings.md"
+    },
+    {
+      "id": "A1-GRA-03",
+      "level": "A1",
+      "track": "grammar",
+      "title": "German word order: V2",
+      "hook": "The verb has a favorite seat: position two!",
+      "demo": [
+        "Ich lerne heute Deutsch. -> Heute lerne ich Deutsch."
+      ],
+      "exercise": "Start with Morgen: Ich arbeite morgen. (Morgen arbeite ich.)",
+      "takeaway": "",
+      "practice": "fixed answer included",
+      "source": "A1/grammar/03-german-word-order-v2.md"
+    },
+    {
+      "id": "A1-GRA-04",
+      "level": "A1",
+      "track": "grammar",
+      "title": "Articles and noun gender",
+      "hook": "Why do Germans say der, die, or das?",
+      "demo": [
+        "der Tisch",
+        "die Lampe",
+        "das Fenster"
+      ],
+      "exercise": "Choose the article for Buch. (das)",
+      "takeaway": "",
+      "practice": "fixed answer included",
+      "source": "A1/grammar/04-articles-and-noun-gender.md"
+    },
+    {
+      "id": "A1-GRA-05",
+      "level": "A1",
+      "track": "grammar",
+      "title": "Nominativ and Akkusativ",
+      "hook": "Why does der Mann become den Mann?",
+      "demo": [
+        "Der Mann sieht den Hund."
+      ],
+      "exercise": "Fill in: Ich sehe ___ Mann. (den)",
+      "takeaway": "",
+      "practice": "fixed answer included",
+      "source": "A1/grammar/05-nominativ-and-akkusativ.md"
+    },
+    {
+      "id": "A1-GRA-06",
+      "level": "A1",
+      "track": "grammar",
+      "title": "Negation: nicht vs. kein",
+      "hook": "Two ways to say not-but when?",
+      "demo": [
+        "Ich habe kein Auto. Ich komme nicht."
+      ],
+      "exercise": "Negate: Ich habe Zeit. (Ich habe keine Zeit.)",
+      "takeaway": "",
+      "practice": "fixed answer included",
+      "source": "A1/grammar/06-negation-nicht-vs-kein.md"
+    },
+    {
+      "id": "A1-GRA-07",
+      "level": "A1",
+      "track": "grammar",
+      "title": "Questions and imperatives",
+      "hook": "Swap one word and suddenly it's a question.",
+      "demo": [
+        "Du kommst. -> Kommst du?",
+        "Wo wohnst du?",
+        "Komm bitte!"
+      ],
+      "exercise": "Turn Du lernst Deutsch into a question. (Lernst du Deutsch?)",
+      "takeaway": "",
+      "practice": "fixed answer included",
+      "source": "A1/grammar/07-questions-and-imperatives.md"
+    },
+    {
+      "id": "A1-GRA-08",
+      "level": "A1",
+      "track": "grammar",
+      "title": "Possessives, plurals, adjectives and prepositions",
+      "hook": "How do you describe things and where they are?",
+      "demo": [
+        "mein Buch",
+        "zwei Bücher",
+        "ein großes Haus"
+      ],
+      "exercise": "Describe two objects using mein or meine.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A1/grammar/08-possessives-plurals-adjectives-and-prepositions.md"
+    },
+    {
+      "id": "A1-SIT-01",
+      "level": "A1",
+      "track": "situations",
+      "title": "Meet someone new",
+      "hook": "A 20-second conversation at a party.",
+      "demo": [
+        "A: Wie heißt du? B: Ich heiße Lara. Und du?"
+      ],
+      "exercise": "Role-play the introduction.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A1/situations/01-meet-someone-new.md"
+    },
+    {
+      "id": "A1-SIT-02",
+      "level": "A1",
+      "track": "situations",
+      "title": "Give personal information",
+      "hook": "Can you answer a basic registration question?",
+      "demo": [
+        "Wie alt bist du? Wo wohnst du? Was machst du beruflich?"
+      ],
+      "exercise": "Answer all three questions.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A1/situations/02-give-personal-information.md"
+    },
+    {
+      "id": "A1-SIT-03",
+      "level": "A1",
+      "track": "situations",
+      "title": "Order at a café",
+      "hook": "You enter a café in Vienna. What do you say?",
+      "demo": [
+        "Ich hätte gern einen Kaffee, bitte."
+      ],
+      "exercise": "Order a drink and ask the price.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A1/situations/03-order-at-a-caf.md"
+    },
+    {
+      "id": "A1-SIT-04",
+      "level": "A1",
+      "track": "situations",
+      "title": "Buy something in a shop",
+      "hook": "Ask for a price without switching to English.",
+      "demo": [
+        "Wie viel kostet das? Das kostet zwölf Euro."
+      ],
+      "exercise": "Ask the price of two items.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A1/situations/04-buy-something-in-a-shop.md"
+    },
+    {
+      "id": "A1-SIT-05",
+      "level": "A1",
+      "track": "situations",
+      "title": "Ask for directions",
+      "hook": "You're lost near the station.",
+      "demo": [
+        "Wo ist der Bahnhof? Geradeaus und dann links."
+      ],
+      "exercise": "Repeat directions to a station.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A1/situations/05-ask-for-directions.md"
+    },
+    {
+      "id": "A1-SIT-06",
+      "level": "A1",
+      "track": "situations",
+      "title": "Describe your home",
+      "hook": "Give a mini tour of your apartment.",
+      "demo": [
+        "Ich wohne in einer Wohnung. Die Küche ist klein."
+      ],
+      "exercise": "Describe two rooms.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A1/situations/06-describe-your-home.md"
+    },
+    {
+      "id": "A1-SIT-07",
+      "level": "A1",
+      "track": "situations",
+      "title": "Arrange a meeting time",
+      "hook": "Make your first appointment in German.",
+      "demo": [
+        "Hast du am Freitag Zeit? Ja, um zehn Uhr."
+      ],
+      "exercise": "Suggest a day and time.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A1/situations/07-arrange-a-meeting-time.md"
+    },
+    {
+      "id": "A1-SIT-08",
+      "level": "A1",
+      "track": "situations",
+      "title": "Understand signs and messages",
+      "hook": "What do these German signs mean?",
+      "demo": [
+        "Eingang",
+        "Ausgang",
+        "geöffnet"
+      ],
+      "exercise": "Match three signs with their meanings.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A1/situations/08-understand-signs-and-messages.md"
+    },
+    {
+      "id": "A1-VOC-01",
+      "level": "A1",
+      "track": "vocabulary",
+      "title": "Greetings and introductions",
+      "hook": "Stop saying only Hallo!",
+      "demo": [
+        "Guten Morgen!",
+        "Wie geht's?",
+        "Ich heiße Anna."
+      ],
+      "exercise": "Introduce yourself in one sentence.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A1/vocabulary/01-greetings-and-introductions.md"
+    },
+    {
+      "id": "A1-VOC-02",
+      "level": "A1",
+      "track": "vocabulary",
+      "title": "Numbers, prices, dates and time",
+      "hook": "Learn to understand 13 and 30 in German.",
+      "demo": [
+        "dreizehn",
+        "dreißig",
+        "Wie viel kostet das?"
+      ],
+      "exercise": "Say a price and a time.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A1/vocabulary/02-numbers-prices-dates-and-time.md"
+    },
+    {
+      "id": "A1-VOC-03",
+      "level": "A1",
+      "track": "vocabulary",
+      "title": "Family and relationships",
+      "hook": "Introduce your family in German.",
+      "demo": [
+        "Das ist meine Schwester. Sie ist 25 Jahre alt."
+      ],
+      "exercise": "Describe one family member.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A1/vocabulary/03-family-and-relationships.md"
+    },
+    {
+      "id": "A1-VOC-04",
+      "level": "A1",
+      "track": "vocabulary",
+      "title": "Countries, languages and professions",
+      "hook": "Say where you're from and what you do.",
+      "demo": [
+        "Ich komme aus Österreich. Ich spreche Deutsch. Ich bin Ingenieurin."
+      ],
+      "exercise": "Say your country and profession.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A1/vocabulary/04-countries-languages-and-professions.md"
+    },
+    {
+      "id": "A1-VOC-05",
+      "level": "A1",
+      "track": "vocabulary",
+      "title": "Food and drinks",
+      "hook": "Your first café vocabulary survival kit.",
+      "demo": [
+        "Wasser",
+        "Kaffee",
+        "Brot"
+      ],
+      "exercise": "Order your usual drink.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A1/vocabulary/05-food-and-drinks.md"
+    },
+    {
+      "id": "A1-VOC-06",
+      "level": "A1",
+      "track": "vocabulary",
+      "title": "Home and everyday objects",
+      "hook": "Name the things around you.",
+      "demo": [
+        "das Zimmer",
+        "der Stuhl",
+        "die Küche"
+      ],
+      "exercise": "Name three objects near you.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A1/vocabulary/06-home-and-everyday-objects.md"
+    },
+    {
+      "id": "A1-VOC-07",
+      "level": "A1",
+      "track": "vocabulary",
+      "title": "Daily routines",
+      "hook": "Eight essential everyday verbs.",
+      "demo": [
+        "aufstehen",
+        "frühstücken",
+        "arbeiten"
+      ],
+      "exercise": "Describe your morning in two sentences.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A1/vocabulary/07-daily-routines.md"
+    },
+    {
+      "id": "A1-VOC-08",
+      "level": "A1",
+      "track": "vocabulary",
+      "title": "Question words and descriptions",
+      "hook": "Learn the questions that unlock conversations.",
+      "demo": [
+        "wer",
+        "was",
+        "wo"
+      ],
+      "exercise": "Ask a question with wo and one with wann.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A1/vocabulary/08-question-words-and-descriptions.md"
+    },
+    {
+      "id": "A2-GRA-01",
+      "level": "A2",
+      "track": "grammar",
+      "title": "Perfekt with haben and sein",
+      "hook": "Why is it ich bin gefahren but ich habe gelernt?",
+      "demo": [
+        "Ich habe gekocht. Ich bin nach Berlin gefahren."
+      ],
+      "exercise": "Choose haben or sein for gehen. (sein)",
+      "takeaway": "",
+      "practice": "fixed answer included",
+      "source": "A2/grammar/01-perfekt-with-haben-and-sein.md"
+    },
+    {
+      "id": "A2-GRA-02",
+      "level": "A2",
+      "track": "grammar",
+      "title": "Präteritum of sein, haben and modals",
+      "hook": "Three past-tense forms you will hear constantly.",
+      "demo": [
+        "ich war",
+        "ich hatte",
+        "ich konnte"
+      ],
+      "exercise": "Change Ich bin krank to past tense. (Ich war krank.)",
+      "takeaway": "",
+      "practice": "fixed answer included",
+      "source": "A2/grammar/02-praeteritum-of-sein-haben-and-modals.md"
+    },
+    {
+      "id": "A2-GRA-03",
+      "level": "A2",
+      "track": "grammar",
+      "title": "Future plans and werden",
+      "hook": "German often uses the present for the future.",
+      "demo": [
+        "Morgen fahre ich nach Graz. Ich werde dich anrufen."
+      ],
+      "exercise": "Describe a plan using werden.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A2/grammar/03-future-plans-and-werden.md"
+    },
+    {
+      "id": "A2-GRA-04",
+      "level": "A2",
+      "track": "grammar",
+      "title": "Modal verbs and separable verbs",
+      "hook": "Two verbs, one German sentence.",
+      "demo": [
+        "Ich muss arbeiten. Ich stehe um sieben Uhr auf."
+      ],
+      "exercise": "Build a sentence with müssen and lernen.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A2/grammar/04-modal-verbs-and-separable-verbs.md"
+    },
+    {
+      "id": "A2-GRA-05",
+      "level": "A2",
+      "track": "grammar",
+      "title": "Dativ and two-way prepositions",
+      "hook": "What's the difference between in die Küche and in der Küche?",
+      "demo": [
+        "Ich gehe in die Küche. Ich bin in der Küche."
+      ],
+      "exercise": "Choose: Ich sitze in ___ Küche. (der)",
+      "takeaway": "",
+      "practice": "fixed answer included",
+      "source": "A2/grammar/05-dativ-and-two-way-prepositions.md"
+    },
+    {
+      "id": "A2-GRA-06",
+      "level": "A2",
+      "track": "grammar",
+      "title": "Comparatives and superlatives",
+      "hook": "Good, better, best-with an irregular twist.",
+      "demo": [
+        "gut",
+        "besser",
+        "am besten"
+      ],
+      "exercise": "Compare two cities.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A2/grammar/06-comparatives-and-superlatives.md"
+    },
+    {
+      "id": "A2-GRA-07",
+      "level": "A2",
+      "track": "grammar",
+      "title": "Reflexive and object pronouns",
+      "hook": "Why is it ich freue mich?",
+      "demo": [
+        "Ich wasche mich. Ich helfe dir. Ich sehe ihn."
+      ],
+      "exercise": "Complete: Ich interessiere ___ für Musik. (mich)",
+      "takeaway": "",
+      "practice": "fixed answer included",
+      "source": "A2/grammar/07-reflexive-and-object-pronouns.md"
+    },
+    {
+      "id": "A2-GRA-08",
+      "level": "A2",
+      "track": "grammar",
+      "title": "Subordinate clauses and basic connectors",
+      "hook": "Why does the verb move to the end?",
+      "demo": [
+        "Ich bleibe zu Hause, weil ich krank bin. Ich weiß, dass er kommt."
+      ],
+      "exercise": "Finish a sentence with weil.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A2/grammar/08-subordinate-clauses-and-basic-connectors.md"
+    },
+    {
+      "id": "A2-SIT-01",
+      "level": "A2",
+      "track": "situations",
+      "title": "Book travel or accommodation",
+      "hook": "Make a simple reservation by phone.",
+      "demo": [
+        "Ich möchte ein Doppelzimmer für zwei Nächte buchen."
+      ],
+      "exercise": "Specify dates and room type.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A2/situations/01-book-travel-or-accommodation.md"
+    },
+    {
+      "id": "A2-SIT-02",
+      "level": "A2",
+      "track": "situations",
+      "title": "Describe a past trip",
+      "hook": "Tell a short story using Perfekt.",
+      "demo": [
+        "Letztes Jahr bin ich nach Salzburg gefahren."
+      ],
+      "exercise": "Describe your last trip in three sentences.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A2/situations/02-describe-a-past-trip.md"
+    },
+    {
+      "id": "A2-SIT-03",
+      "level": "A2",
+      "track": "situations",
+      "title": "Visit a doctor",
+      "hook": "Explain your symptoms and understand basic advice.",
+      "demo": [
+        "Seit gestern habe ich Fieber und Halsschmerzen."
+      ],
+      "exercise": "Explain when symptoms started.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A2/situations/03-visit-a-doctor.md"
+    },
+    {
+      "id": "A2-SIT-04",
+      "level": "A2",
+      "track": "situations",
+      "title": "Invite and respond",
+      "hook": "Invite a friend and decline politely.",
+      "demo": [
+        "Hast du am Samstag Lust auf Kino? Leider kann ich nicht."
+      ],
+      "exercise": "Accept or decline an invitation.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A2/situations/04-invite-and-respond.md"
+    },
+    {
+      "id": "A2-SIT-05",
+      "level": "A2",
+      "track": "situations",
+      "title": "Discuss future plans",
+      "hook": "Talk about what you will do next month.",
+      "demo": [
+        "Nächsten Monat möchte ich einen Kurs machen."
+      ],
+      "exercise": "State two future plans.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A2/situations/05-discuss-future-plans.md"
+    },
+    {
+      "id": "A2-SIT-06",
+      "level": "A2",
+      "track": "situations",
+      "title": "Compare options",
+      "hook": "Which apartment would you choose?",
+      "demo": [
+        "Die erste Wohnung ist billiger, aber die zweite ist größer."
+      ],
+      "exercise": "Compare two apartments.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A2/situations/06-compare-options.md"
+    },
+    {
+      "id": "A2-SIT-07",
+      "level": "A2",
+      "track": "situations",
+      "title": "Make a simple complaint",
+      "hook": "Return a defective product in German.",
+      "demo": [
+        "Das Gerät funktioniert nicht. Kann ich es umtauschen?"
+      ],
+      "exercise": "Explain a product problem.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A2/situations/07-make-a-simple-complaint.md"
+    },
+    {
+      "id": "A2-SIT-08",
+      "level": "A2",
+      "track": "situations",
+      "title": "Write messages and clarify",
+      "hook": "Send a polite message when you don't understand.",
+      "demo": [
+        "Könnten Sie das bitte wiederholen? Ich komme zehn Minuten später."
+      ],
+      "exercise": "Write a short message about being late.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A2/situations/08-write-messages-and-clarify.md"
+    },
+    {
+      "id": "A2-VOC-01",
+      "level": "A2",
+      "track": "vocabulary",
+      "title": "Travel and accommodation",
+      "hook": "Check into a hotel with confidence.",
+      "demo": [
+        "die Buchung",
+        "das Einzelzimmer",
+        "der Reisepass"
+      ],
+      "exercise": "Ask whether breakfast is included.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A2/vocabulary/01-travel-and-accommodation.md"
+    },
+    {
+      "id": "A2-VOC-02",
+      "level": "A2",
+      "track": "vocabulary",
+      "title": "Transport and tickets",
+      "hook": "Master a German train station.",
+      "demo": [
+        "die Fahrkarte",
+        "das Gleis",
+        "umsteigen"
+      ],
+      "exercise": "Ask which platform you need.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A2/vocabulary/02-transport-and-tickets.md"
+    },
+    {
+      "id": "A2-VOC-03",
+      "level": "A2",
+      "track": "vocabulary",
+      "title": "Health and symptoms",
+      "hook": "Explain what hurts without miming.",
+      "demo": [
+        "Ich habe Kopfschmerzen. Mir ist schlecht."
+      ],
+      "exercise": "Tell a doctor about a symptom.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A2/vocabulary/03-health-and-symptoms.md"
+    },
+    {
+      "id": "A2-VOC-04",
+      "level": "A2",
+      "track": "vocabulary",
+      "title": "Clothes, sizes and weather",
+      "hook": "Shop for clothing and comment on the weather.",
+      "demo": [
+        "anprobieren",
+        "passen",
+        "die Größe"
+      ],
+      "exercise": "Ask for a different size.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A2/vocabulary/04-clothes-sizes-and-weather.md"
+    },
+    {
+      "id": "A2-VOC-05",
+      "level": "A2",
+      "track": "vocabulary",
+      "title": "Workplace and education",
+      "hook": "Explain your ordinary responsibilities.",
+      "demo": [
+        "die Besprechung",
+        "der Kollege",
+        "die Ausbildung"
+      ],
+      "exercise": "Describe a typical workday.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A2/vocabulary/05-workplace-and-education.md"
+    },
+    {
+      "id": "A2-VOC-06",
+      "level": "A2",
+      "track": "vocabulary",
+      "title": "Hobbies and social life",
+      "hook": "Talk about what you do after work.",
+      "demo": [
+        "Ich gehe gern wandern. Ich treffe mich mit Freunden."
+      ],
+      "exercise": "Say what you did last weekend.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A2/vocabulary/06-hobbies-and-social-life.md"
+    },
+    {
+      "id": "A2-VOC-07",
+      "level": "A2",
+      "track": "vocabulary",
+      "title": "Household and local services",
+      "hook": "What do you say when something breaks?",
+      "demo": [
+        "Die Heizung funktioniert nicht.",
+        "reparieren",
+        "der Hausmeister"
+      ],
+      "exercise": "Explain one problem at home.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A2/vocabulary/07-household-and-local-services.md"
+    },
+    {
+      "id": "A2-VOC-08",
+      "level": "A2",
+      "track": "vocabulary",
+      "title": "Feelings and common expressions",
+      "hook": "Move beyond gut and schlecht.",
+      "demo": [
+        "enttäuscht",
+        "aufgeregt",
+        "zufrieden"
+      ],
+      "exercise": "Describe how you feel about tomorrow.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "A2/vocabulary/08-feelings-and-common-expressions.md"
+    },
+    {
+      "id": "B1-GRA-01",
+      "level": "B1",
+      "track": "grammar",
+      "title": "Major tenses in connected narratives",
+      "hook": "How do Germans move between past and present?",
+      "demo": [
+        "Früher wohnte ich in Wien. Jetzt arbeite ich in Graz."
+      ],
+      "exercise": "Retell a change in your life.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B1/grammar/01-major-tenses-in-connected-narratives.md"
+    },
+    {
+      "id": "B1-GRA-02",
+      "level": "B1",
+      "track": "grammar",
+      "title": "Perfekt, Präteritum and Plusquamperfekt",
+      "hook": "What happened before something else happened?",
+      "demo": [
+        "Als ich ankam, hatte der Film schon begonnen."
+      ],
+      "exercise": "Say what you had done before dinner.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B1/grammar/02-perfekt-praeteritum-and-plusquamperfekt.md"
+    },
+    {
+      "id": "B1-GRA-03",
+      "level": "B1",
+      "track": "grammar",
+      "title": "Konjunktiv II for polite and unreal situations",
+      "hook": "Why is ich würde so useful?",
+      "demo": [
+        "Wenn ich Zeit hätte, würde ich reisen."
+      ],
+      "exercise": "Finish: Wenn ich mehr Geld hätte, ...",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B1/grammar/03-konjunktiv-ii-for-polite-and-unreal-situations.md"
+    },
+    {
+      "id": "B1-GRA-04",
+      "level": "B1",
+      "track": "grammar",
+      "title": "Relativsätze",
+      "hook": "Combine two simple sentences into one.",
+      "demo": [
+        "Das ist die Frau, die neben mir arbeitet."
+      ],
+      "exercise": "Describe a person using die or der.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B1/grammar/04-relativsaetze.md"
+    },
+    {
+      "id": "B1-GRA-05",
+      "level": "B1",
+      "track": "grammar",
+      "title": "Passiv: werden + Partizip II",
+      "hook": "Focus on the action, not the person.",
+      "demo": [
+        "Der Brief wird geschrieben. Das Haus wurde gebaut."
+      ],
+      "exercise": "Make a passive sentence about a package.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B1/grammar/05-passiv-werden-partizip-ii.md"
+    },
+    {
+      "id": "B1-GRA-06",
+      "level": "B1",
+      "track": "grammar",
+      "title": "Indirect questions and reported information",
+      "hook": "Turn a direct question into polite German.",
+      "demo": [
+        "Wo ist der Bahnhof? -> Wissen Sie, wo der Bahnhof ist?"
+      ],
+      "exercise": "Convert Wann beginnt es? to an indirect question.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B1/grammar/06-indirect-questions-and-reported-information.md"
+    },
+    {
+      "id": "B1-GRA-07",
+      "level": "B1",
+      "track": "grammar",
+      "title": "Infinitive groups and verb complements",
+      "hook": "The secret of um ... zu and zu + infinitive.",
+      "demo": [
+        "Ich lerne Deutsch, um in Österreich zu arbeiten."
+      ],
+      "exercise": "Explain why you are learning German.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B1/grammar/07-infinitive-groups-and-verb-complements.md"
+    },
+    {
+      "id": "B1-GRA-08",
+      "level": "B1",
+      "track": "grammar",
+      "title": "Adjective endings, genitive and connectors",
+      "hook": "Make richer, more accurate German sentences.",
+      "demo": [
+        "mit einem guten Freund",
+        "wegen des Wetters",
+        "obwohl es regnet"
+      ],
+      "exercise": "Finish a sentence with obwohl.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B1/grammar/08-adjective-endings-genitive-and-connectors.md"
+    },
+    {
+      "id": "B1-SIT-01",
+      "level": "B1",
+      "track": "situations",
+      "title": "Tell a coherent story",
+      "hook": "Can you tell a story without losing your listener?",
+      "demo": [
+        "Zuerst ... Danach ... Plötzlich ... Am Ende ..."
+      ],
+      "exercise": "Tell a four-step story.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B1/situations/01-tell-a-coherent-story.md"
+    },
+    {
+      "id": "B1-SIT-02",
+      "level": "B1",
+      "track": "situations",
+      "title": "Explain a problem and solution",
+      "hook": "A project isn't going as planned.",
+      "demo": [
+        "Wir haben ein Problem mit der Lieferung. Deshalb schlage ich vor, ..."
+      ],
+      "exercise": "Propose one solution.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B1/situations/02-explain-a-problem-and-solution.md"
+    },
+    {
+      "id": "B1-SIT-03",
+      "level": "B1",
+      "track": "situations",
+      "title": "Express and justify opinions",
+      "hook": "Stop answering only Ja or Nein.",
+      "demo": [
+        "Ich finde das sinnvoll, weil ... Außerdem ..."
+      ],
+      "exercise": "Give two reasons for an opinion.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B1/situations/03-express-and-justify-opinions.md"
+    },
+    {
+      "id": "B1-SIT-04",
+      "level": "B1",
+      "track": "situations",
+      "title": "Discuss pros and cons",
+      "hook": "Practice a balanced opinion.",
+      "demo": [
+        "Einerseits ist es praktisch, andererseits ist es teuer."
+      ],
+      "exercise": "Compare advantages and disadvantages.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B1/situations/04-discuss-pros-and-cons.md"
+    },
+    {
+      "id": "B1-SIT-05",
+      "level": "B1",
+      "track": "situations",
+      "title": "Handle travel complications",
+      "hook": "You've missed a connecting train.",
+      "demo": [
+        "Ich habe meinen Anschluss verpasst. Welche Verbindung kann ich nehmen?"
+      ],
+      "exercise": "Ask for an alternative route.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B1/situations/05-handle-travel-complications.md"
+    },
+    {
+      "id": "B1-SIT-06",
+      "level": "B1",
+      "track": "situations",
+      "title": "Participate in a meeting",
+      "hook": "Make yourself heard in a German meeting.",
+      "demo": [
+        "Ich würde gern etwas ergänzen. Darf ich kurz etwas fragen?"
+      ],
+      "exercise": "Add a suggestion politely.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B1/situations/06-participate-in-a-meeting.md"
+    },
+    {
+      "id": "B1-SIT-07",
+      "level": "B1",
+      "track": "situations",
+      "title": "Handle a job interview",
+      "hook": "Tell me about yourself-in German.",
+      "demo": [
+        "Ich habe drei Jahre Erfahrung im Bereich ..."
+      ],
+      "exercise": "Describe your skills and experience.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B1/situations/07-handle-a-job-interview.md"
+    },
+    {
+      "id": "B1-SIT-08",
+      "level": "B1",
+      "track": "situations",
+      "title": "Write emails and give presentations",
+      "hook": "Create a clear beginning, middle and end.",
+      "demo": [
+        "Sehr geehrte Damen und Herren ...",
+        "Zunächst ...",
+        "Abschließend ..."
+      ],
+      "exercise": "Deliver a 30-second introduction.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B1/situations/08-write-emails-and-give-presentations.md"
+    },
+    {
+      "id": "B1-VOC-01",
+      "level": "B1",
+      "track": "vocabulary",
+      "title": "Careers and job applications",
+      "hook": "Talk about experience instead of just naming a job.",
+      "demo": [
+        "die Berufserfahrung",
+        "sich bewerben",
+        "verantwortlich für"
+      ],
+      "exercise": "Describe a previous responsibility.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B1/vocabulary/01-careers-and-job-applications.md"
+    },
+    {
+      "id": "B1-VOC-02",
+      "level": "B1",
+      "track": "vocabulary",
+      "title": "Education and learning",
+      "hook": "Discuss learning challenges and progress.",
+      "demo": [
+        "die Voraussetzung",
+        "der Abschluss",
+        "die Fähigkeit"
+      ],
+      "exercise": "Explain a skill you want to improve.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B1/vocabulary/02-education-and-learning.md"
+    },
+    {
+      "id": "B1-VOC-03",
+      "level": "B1",
+      "track": "vocabulary",
+      "title": "News and media",
+      "hook": "Understand the headline of a news report.",
+      "demo": [
+        "der Bericht",
+        "die Quelle",
+        "veröffentlichen"
+      ],
+      "exercise": "Summarize one headline.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B1/vocabulary/03-news-and-media.md"
+    },
+    {
+      "id": "B1-VOC-04",
+      "level": "B1",
+      "track": "vocabulary",
+      "title": "Travel problems and solutions",
+      "hook": "Train cancelled? Here's what you need.",
+      "demo": [
+        "der Ausfall",
+        "die Erstattung",
+        "umbuchen"
+      ],
+      "exercise": "Ask for a replacement connection.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B1/vocabulary/04-travel-problems-and-solutions.md"
+    },
+    {
+      "id": "B1-VOC-05",
+      "level": "B1",
+      "track": "vocabulary",
+      "title": "Goals and decisions",
+      "hook": "Explain the reasons behind a choice.",
+      "demo": [
+        "sich entscheiden für",
+        "das Ziel",
+        "erreichen"
+      ],
+      "exercise": "Explain one personal goal.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B1/vocabulary/05-goals-and-decisions.md"
+    },
+    {
+      "id": "B1-VOC-06",
+      "level": "B1",
+      "track": "vocabulary",
+      "title": "Culture and traditions",
+      "hook": "Describe celebrations and social customs.",
+      "demo": [
+        "der Brauch",
+        "die Feier",
+        "die Tradition"
+      ],
+      "exercise": "Describe a celebration in your country.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B1/vocabulary/06-culture-and-traditions.md"
+    },
+    {
+      "id": "B1-VOC-07",
+      "level": "B1",
+      "track": "vocabulary",
+      "title": "Environment, technology and health",
+      "hook": "Discuss important everyday issues.",
+      "demo": [
+        "die Umweltverschmutzung",
+        "die Datensicherheit",
+        "die Ernährung"
+      ],
+      "exercise": "Explain one environmental problem.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B1/vocabulary/07-environment-technology-and-health.md"
+    },
+    {
+      "id": "B1-VOC-08",
+      "level": "B1",
+      "track": "vocabulary",
+      "title": "Feelings, opinions and collocations",
+      "hook": "Make your opinions sound connected and natural.",
+      "demo": [
+        "Meiner Meinung nach ...",
+        "eine Entscheidung treffen",
+        "Rücksicht nehmen"
+      ],
+      "exercise": "Justify an opinion using two reasons.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B1/vocabulary/08-feelings-opinions-and-collocations.md"
+    },
+    {
+      "id": "B2-GRA-01",
+      "level": "B2",
+      "track": "grammar",
+      "title": "Tense and aspect precision",
+      "hook": "Why does the timeline change which tense sounds natural?",
+      "demo": [
+        "Bis Freitag werde ich den Bericht fertiggestellt haben."
+      ],
+      "exercise": "Express an action completed by a future deadline.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B2/grammar/01-tense-and-aspect-precision.md"
+    },
+    {
+      "id": "B2-GRA-02",
+      "level": "B2",
+      "track": "grammar",
+      "title": "Advanced Konjunktiv II",
+      "hook": "Talk about what could have happened differently.",
+      "demo": [
+        "Wenn ich früher losgefahren wäre, hätte ich den Zug erreicht."
+      ],
+      "exercise": "Rewrite a past regret.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B2/grammar/02-advanced-konjunktiv-ii.md"
+    },
+    {
+      "id": "B2-GRA-03",
+      "level": "B2",
+      "track": "grammar",
+      "title": "Passive alternatives and causatives",
+      "hook": "Three ways to focus on an action rather than its actor.",
+      "demo": [
+        "Der Antrag wird geprüft. Der Antrag lässt sich prüfen."
+      ],
+      "exercise": "Rephrase a passive sentence.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B2/grammar/03-passive-alternatives-and-causatives.md"
+    },
+    {
+      "id": "B2-GRA-04",
+      "level": "B2",
+      "track": "grammar",
+      "title": "Complex relative and participial phrases",
+      "hook": "Compress long descriptions without losing meaning.",
+      "demo": [
+        "Die gestern veröffentlichte Studie zeigt ..."
+      ],
+      "exercise": "Expand a participial phrase into a relative clause.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B2/grammar/04-complex-relative-and-participial-phrases.md"
+    },
+    {
+      "id": "B2-GRA-05",
+      "level": "B2",
+      "track": "grammar",
+      "title": "Reported speech and Konjunktiv I",
+      "hook": "How do news reporters signal indirect information?",
+      "demo": [
+        "Er sagte, er sei krank. Sie erklärte, sie habe keine Zeit."
+      ],
+      "exercise": "Report what a speaker claims.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B2/grammar/05-reported-speech-and-konjunktiv-i.md"
+    },
+    {
+      "id": "B2-GRA-06",
+      "level": "B2",
+      "track": "grammar",
+      "title": "Modal verbs for assumptions",
+      "hook": "What's the difference between muss and müsste?",
+      "demo": [
+        "Er muss zu Hause sein. Er dürfte schon angekommen sein."
+      ],
+      "exercise": "Express a strong and weak assumption.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B2/grammar/06-modal-verbs-for-assumptions.md"
+    },
+    {
+      "id": "B2-GRA-07",
+      "level": "B2",
+      "track": "grammar",
+      "title": "Nominalisierung and complex noun phrases",
+      "hook": "Why does written German use so many nouns?",
+      "demo": [
+        "weil wir prüfen -> aufgrund der Prüfung"
+      ],
+      "exercise": "Turn a verbal idea into a noun phrase.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B2/grammar/07-nominalisierung-and-complex-noun-phrases.md"
+    },
+    {
+      "id": "B2-GRA-08",
+      "level": "B2",
+      "track": "grammar",
+      "title": "Advanced connectors and sentence focus",
+      "hook": "Upgrade your reasoning with dennoch and hingegen.",
+      "demo": [
+        "Obwohl es teuer ist, ... Dennoch ... Im Gegensatz dazu ..."
+      ],
+      "exercise": "Contrast two recommendations.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B2/grammar/08-advanced-connectors-and-sentence-focus.md"
+    },
+    {
+      "id": "B2-SIT-01",
+      "level": "B2",
+      "track": "situations",
+      "title": "Participate in complex meetings",
+      "hook": "Disagree without sounding confrontational.",
+      "demo": [
+        "Ich sehe Ihren Punkt, würde jedoch zu bedenken geben, dass ..."
+      ],
+      "exercise": "Challenge an idea constructively.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B2/situations/01-participate-in-complex-meetings.md"
+    },
+    {
+      "id": "B2-SIT-02",
+      "level": "B2",
+      "track": "situations",
+      "title": "Defend an argument",
+      "hook": "Build a position that stands up to questions.",
+      "demo": [
+        "Meine These lautet ... Ein entscheidender Grund dafür ist ..."
+      ],
+      "exercise": "State and justify a position.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B2/situations/02-defend-an-argument.md"
+    },
+    {
+      "id": "B2-SIT-03",
+      "level": "B2",
+      "track": "situations",
+      "title": "Discuss unfamiliar subjects",
+      "hook": "How to keep talking when vocabulary fails.",
+      "demo": [
+        "Soweit ich das beurteilen kann ... Könnten Sie das näher erläutern?"
+      ],
+      "exercise": "Clarify an unfamiliar topic.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B2/situations/03-discuss-unfamiliar-subjects.md"
+    },
+    {
+      "id": "B2-SIT-04",
+      "level": "B2",
+      "track": "situations",
+      "title": "Negotiate and resolve disagreements",
+      "hook": "Reach agreement despite different priorities.",
+      "demo": [
+        "Wären Sie bereit, ...? Unter dieser Voraussetzung könnten wir ..."
+      ],
+      "exercise": "Suggest a trade-off.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B2/situations/04-negotiate-and-resolve-disagreements.md"
+    },
+    {
+      "id": "B2-SIT-05",
+      "level": "B2",
+      "track": "situations",
+      "title": "Give presentations and answer questions",
+      "hook": "Handle a difficult audience question gracefully.",
+      "demo": [
+        "Vielen Dank für die Frage. Entscheidend ist hierbei ..."
+      ],
+      "exercise": "Respond to a challenging question.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B2/situations/05-give-presentations-and-answer-questions.md"
+    },
+    {
+      "id": "B2-SIT-06",
+      "level": "B2",
+      "track": "situations",
+      "title": "Understand detailed interviews and reports",
+      "hook": "Separate facts from interpretations.",
+      "demo": [
+        "Die Befragten gaben an ... Daraus wurde geschlossen ..."
+      ],
+      "exercise": "Identify evidence versus interpretation.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B2/situations/06-understand-detailed-interviews-and-reports.md"
+    },
+    {
+      "id": "B2-SIT-07",
+      "level": "B2",
+      "track": "situations",
+      "title": "Write reports and proposals",
+      "hook": "Make a recommendation look professional.",
+      "demo": [
+        "Ausgangslage",
+        "Analyse",
+        "Handlungsempfehlung"
+      ],
+      "exercise": "Draft a two-sentence recommendation.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B2/situations/07-write-reports-and-proposals.md"
+    },
+    {
+      "id": "B2-SIT-08",
+      "level": "B2",
+      "track": "situations",
+      "title": "Explain specialized ideas",
+      "hook": "Make a technical idea understandable to non-experts.",
+      "demo": [
+        "Vereinfacht gesagt ... Ein praktisches Beispiel dafür ist ..."
+      ],
+      "exercise": "Explain a complex concept simply.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B2/situations/08-explain-specialized-ideas.md"
+    },
+    {
+      "id": "B2-VOC-01",
+      "level": "B2",
+      "track": "vocabulary",
+      "title": "Ethics and abstract concepts",
+      "hook": "Talk about more than concrete objects.",
+      "demo": [
+        "die Gerechtigkeit",
+        "die Verantwortung",
+        "der Wert"
+      ],
+      "exercise": "Explain what fairness means.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B2/vocabulary/01-ethics-and-abstract-concepts.md"
+    },
+    {
+      "id": "B2-VOC-02",
+      "level": "B2",
+      "track": "vocabulary",
+      "title": "Management and negotiation",
+      "hook": "Learn the language of compromises.",
+      "demo": [
+        "die Verhandlung",
+        "die Zuständigkeit",
+        "der Kompromiss"
+      ],
+      "exercise": "Propose a compromise.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B2/vocabulary/02-management-and-negotiation.md"
+    },
+    {
+      "id": "B2-VOC-03",
+      "level": "B2",
+      "track": "vocabulary",
+      "title": "Technical and scientific explanations",
+      "hook": "Explain your area of expertise precisely.",
+      "demo": [
+        "die Auswertung",
+        "der Nachweis",
+        "die Messung"
+      ],
+      "exercise": "Define a technical term.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B2/vocabulary/03-technical-and-scientific-explanations.md"
+    },
+    {
+      "id": "B2-VOC-04",
+      "level": "B2",
+      "track": "vocabulary",
+      "title": "Society, politics and economics",
+      "hook": "Understand the language of public debate.",
+      "demo": [
+        "die Maßnahme",
+        "die Inflation",
+        "die Reform"
+      ],
+      "exercise": "Summarize a policy argument neutrally.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B2/vocabulary/04-society-politics-and-economics.md"
+    },
+    {
+      "id": "B2-VOC-05",
+      "level": "B2",
+      "track": "vocabulary",
+      "title": "Argumentation and evaluation",
+      "hook": "How to make a claim and support it.",
+      "demo": [
+        "Die Daten deuten darauf hin, dass ... Ein Gegenargument lautet ..."
+      ],
+      "exercise": "Give evidence and a counterargument.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B2/vocabulary/05-argumentation-and-evaluation.md"
+    },
+    {
+      "id": "B2-VOC-06",
+      "level": "B2",
+      "track": "vocabulary",
+      "title": "Idioms and figurative German",
+      "hook": "Why does German say den Nagel auf den Kopf treffen?",
+      "demo": [
+        "Das trifft den Nagel auf den Kopf. Das ist nicht mein Bier."
+      ],
+      "exercise": "Use one idiom in context.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B2/vocabulary/06-idioms-and-figurative-german.md"
+    },
+    {
+      "id": "B2-VOC-07",
+      "level": "B2",
+      "track": "vocabulary",
+      "title": "Precise collocations and synonyms",
+      "hook": "Why isn't every synonym interchangeable?",
+      "demo": [
+        "eine Entscheidung treffen",
+        "einen Antrag stellen",
+        "eine Maßnahme ergreifen"
+      ],
+      "exercise": "Choose the correct verb for Antrag. (stellen)",
+      "takeaway": "",
+      "practice": "fixed answer included",
+      "source": "B2/vocabulary/07-precise-collocations-and-synonyms.md"
+    },
+    {
+      "id": "B2-VOC-08",
+      "level": "B2",
+      "track": "vocabulary",
+      "title": "Register, uncertainty and evidence",
+      "hook": "Sound confident without overclaiming.",
+      "demo": [
+        "vermutlich",
+        "möglicherweise",
+        "meines Erachtens"
+      ],
+      "exercise": "Qualify an uncertain claim.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "B2/vocabulary/08-register-uncertainty-and-evidence.md"
+    },
+    {
+      "id": "C1-GRA-01",
+      "level": "C1",
+      "track": "grammar",
+      "title": "Complex syntax and clause embedding",
+      "hook": "German sentences inside sentences-without losing control.",
+      "demo": [
+        "Die Annahme, dass die Maßnahme, die wir geprüft haben, wirkt, ist umstritten."
+      ],
+      "exercise": "Simplify and reconstruct the sentence.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C1/grammar/01-complex-syntax-and-clause-embedding.md"
+    },
+    {
+      "id": "C1-GRA-02",
+      "level": "C1",
+      "track": "grammar",
+      "title": "Fine distinctions in tense, aspect and modality",
+      "hook": "Express uncertainty and hindsight precisely.",
+      "demo": [
+        "Er dürfte es bereits gewusst haben. Er hätte es wissen müssen."
+      ],
+      "exercise": "Explain the difference in implication.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C1/grammar/02-fine-distinctions-in-tense-aspect-and-modality.md"
+    },
+    {
+      "id": "C1-GRA-03",
+      "level": "C1",
+      "track": "grammar",
+      "title": "Inversion, fronting and emphasis",
+      "hook": "Change what the listener notices first.",
+      "demo": [
+        "Besonders problematisch erscheint mir die Finanzierung."
+      ],
+      "exercise": "Front the most important information.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C1/grammar/03-inversion-fronting-and-emphasis.md"
+    },
+    {
+      "id": "C1-GRA-04",
+      "level": "C1",
+      "track": "grammar",
+      "title": "Advanced counterfactuals and concessions",
+      "hook": "Express criticism without sounding absolute.",
+      "demo": [
+        "Selbst wenn die Kosten geringer wären, ließe sich das kaum rechtfertigen."
+      ],
+      "exercise": "Create a nuanced concession.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C1/grammar/04-advanced-counterfactuals-and-concessions.md"
+    },
+    {
+      "id": "C1-GRA-05",
+      "level": "C1",
+      "track": "grammar",
+      "title": "Ellipsis and information structure",
+      "hook": "Why do elegant German speakers leave some words out?",
+      "demo": [
+        "Je früher, desto besser. Nicht nur heute, sondern auch morgen."
+      ],
+      "exercise": "Complete an elliptical comparison.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C1/grammar/05-ellipsis-and-information-structure.md"
+    },
+    {
+      "id": "C1-GRA-06",
+      "level": "C1",
+      "track": "grammar",
+      "title": "Nominal style versus verbal style",
+      "hook": "Make official German clearer and more concise.",
+      "demo": [
+        "Die Durchführung der Überprüfung -> Wir überprüfen ..."
+      ],
+      "exercise": "Rewrite bureaucratic language plainly.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C1/grammar/06-nominal-style-versus-verbal-style.md"
+    },
+    {
+      "id": "C1-GRA-07",
+      "level": "C1",
+      "track": "grammar",
+      "title": "Cohesion across long texts",
+      "hook": "Make paragraphs connect naturally.",
+      "demo": [
+        "Dies setzt voraus, dass ... Daraus ergibt sich wiederum ..."
+      ],
+      "exercise": "Link two analytical paragraphs.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C1/grammar/07-cohesion-across-long-texts.md"
+    },
+    {
+      "id": "C1-GRA-08",
+      "level": "C1",
+      "track": "grammar",
+      "title": "Register and stylistic precision",
+      "hook": "The same message can sound diplomatic or harsh.",
+      "demo": [
+        "Das ist falsch. -> Diese Einschätzung erscheint mir nicht ganz zutreffend."
+      ],
+      "exercise": "Rewrite a blunt criticism diplomatically.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C1/grammar/08-register-and-stylistic-precision.md"
+    },
+    {
+      "id": "C1-SIT-01",
+      "level": "C1",
+      "track": "situations",
+      "title": "Lead high-stakes meetings",
+      "hook": "Guide a complex discussion toward a decision.",
+      "demo": [
+        "Lassen Sie uns die offenen Punkte priorisieren und die Zuständigkeiten klären."
+      ],
+      "exercise": "Summarize competing priorities.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C1/situations/01-lead-high-stakes-meetings.md"
+    },
+    {
+      "id": "C1-SIT-02",
+      "level": "C1",
+      "track": "situations",
+      "title": "Defend sophisticated arguments",
+      "hook": "Anticipate objections before they arise.",
+      "demo": [
+        "Ein möglicher Einwand wäre ... Dem lässt sich entgegenhalten, dass ..."
+      ],
+      "exercise": "Preempt a counterargument.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C1/situations/02-defend-sophisticated-arguments.md"
+    },
+    {
+      "id": "C1-SIT-03",
+      "level": "C1",
+      "track": "situations",
+      "title": "Interpret implied criticism",
+      "hook": "What does nicht ganz unproblematisch actually imply?",
+      "demo": [
+        "Ihr Vorschlag ist nicht ganz unproblematisch. (A cautious negative evaluation.)"
+      ],
+      "exercise": "Identify the unstated concern.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C1/situations/03-interpret-implied-criticism.md"
+    },
+    {
+      "id": "C1-SIT-04",
+      "level": "C1",
+      "track": "situations",
+      "title": "Write advanced reports and analyses",
+      "hook": "Turn raw findings into a persuasive recommendation.",
+      "demo": [
+        "Die Analyse legt nahe ... Daraus ergibt sich folgender Handlungsbedarf ..."
+      ],
+      "exercise": "Write a two-sentence executive conclusion.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C1/situations/04-write-advanced-reports-and-analyses.md"
+    },
+    {
+      "id": "C1-SIT-05",
+      "level": "C1",
+      "track": "situations",
+      "title": "Adapt to multiple audiences",
+      "hook": "Explain the same result to experts and the public.",
+      "demo": [
+        "Fachlich: Die Varianz steigt. Allgemein: Die Ergebnisse streuen stärker."
+      ],
+      "exercise": "Adapt a technical message.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C1/situations/05-adapt-to-multiple-audiences.md"
+    },
+    {
+      "id": "C1-SIT-06",
+      "level": "C1",
+      "track": "situations",
+      "title": "Synthesize multiple sources",
+      "hook": "Combine findings without copying their wording.",
+      "demo": [
+        "Während Studie A ..., zeigt Untersuchung B hingegen ..."
+      ],
+      "exercise": "Integrate two conflicting findings.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C1/situations/06-synthesize-multiple-sources.md"
+    },
+    {
+      "id": "C1-SIT-07",
+      "level": "C1",
+      "track": "situations",
+      "title": "Handle sensitive conversations",
+      "hook": "Disagree while preserving the relationship.",
+      "demo": [
+        "Ich verstehe Ihre Bedenken. Darf ich eine alternative Perspektive anbieten?"
+      ],
+      "exercise": "Respond to a sensitive disagreement.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C1/situations/07-handle-sensitive-conversations.md"
+    },
+    {
+      "id": "C1-SIT-08",
+      "level": "C1",
+      "track": "situations",
+      "title": "Understand demanding lectures and debate",
+      "hook": "Find the thesis hidden among qualifications.",
+      "demo": [
+        "Zwar ... jedoch ... unter der Voraussetzung, dass ..."
+      ],
+      "exercise": "Summarize the speaker's actual position.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C1/situations/08-understand-demanding-lectures-and-debate.md"
+    },
+    {
+      "id": "C1-VOC-01",
+      "level": "C1",
+      "track": "vocabulary",
+      "title": "Advanced academic vocabulary",
+      "hook": "Understand abstract arguments without oversimplifying.",
+      "demo": [
+        "die Tragweite",
+        "die Prämisse",
+        "die Wechselwirkung"
+      ],
+      "exercise": "Explain a complex claim.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C1/vocabulary/01-advanced-academic-vocabulary.md"
+    },
+    {
+      "id": "C1-VOC-02",
+      "level": "C1",
+      "track": "vocabulary",
+      "title": "Idioms and advanced collocations",
+      "hook": "Sound natural beyond textbook German.",
+      "demo": [
+        "etwas in Betracht ziehen",
+        "zur Sprache bringen",
+        "ins Gewicht fallen"
+      ],
+      "exercise": "Use two collocations correctly.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C1/vocabulary/02-idioms-and-advanced-collocations.md"
+    },
+    {
+      "id": "C1-VOC-03",
+      "level": "C1",
+      "track": "vocabulary",
+      "title": "Nuances between synonyms",
+      "hook": "Why are behaupten, erklären and feststellen different?",
+      "demo": [
+        "Er behauptet ...",
+        "Er stellt fest ...",
+        "Er räumt ein ..."
+      ],
+      "exercise": "Choose the verb matching the speaker's stance.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C1/vocabulary/03-nuances-between-synonyms.md"
+    },
+    {
+      "id": "C1-VOC-04",
+      "level": "C1",
+      "track": "vocabulary",
+      "title": "Connotation and diplomatic language",
+      "hook": "Learn to communicate disagreement subtly.",
+      "demo": [
+        "Das ist durchaus nachvollziehbar, allerdings ..."
+      ],
+      "exercise": "Soften an objection.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C1/vocabulary/04-connotation-and-diplomatic-language.md"
+    },
+    {
+      "id": "C1-VOC-05",
+      "level": "C1",
+      "track": "vocabulary",
+      "title": "Professional and research terminology",
+      "hook": "Explain methods, outcomes and limitations.",
+      "demo": [
+        "die Belastbarkeit",
+        "die Rahmenbedingungen",
+        "die Aussagekraft"
+      ],
+      "exercise": "Describe a limitation of a study.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C1/vocabulary/05-professional-and-research-terminology.md"
+    },
+    {
+      "id": "C1-VOC-06",
+      "level": "C1",
+      "track": "vocabulary",
+      "title": "Persuasion and rhetorical patterns",
+      "hook": "Build a convincing German argument.",
+      "demo": [
+        "Nicht die Frage, ob ..., sondern wie ..., ist entscheidend."
+      ],
+      "exercise": "Construct a contrastive argument.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C1/vocabulary/06-persuasion-and-rhetorical-patterns.md"
+    },
+    {
+      "id": "C1-VOC-07",
+      "level": "C1",
+      "track": "vocabulary",
+      "title": "Metaphors, irony and cultural references",
+      "hook": "Understand when a sentence doesn't mean what it says.",
+      "demo": [
+        "Das ist ja eine schöne Bescherung! (Often ironic.)"
+      ],
+      "exercise": "Explain the speaker's likely intention.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C1/vocabulary/07-metaphors-irony-and-cultural-references.md"
+    },
+    {
+      "id": "C1-VOC-08",
+      "level": "C1",
+      "track": "vocabulary",
+      "title": "Critical evaluation and qualification",
+      "hook": "Question evidence without dismissing it.",
+      "demo": [
+        "Die Ergebnisse sind aufschlussreich, lassen jedoch keine eindeutigen Rückschlüsse zu."
+      ],
+      "exercise": "Evaluate a claim cautiously.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C1/vocabulary/08-critical-evaluation-and-qualification.md"
+    },
+    {
+      "id": "C2-GRA-01",
+      "level": "C2",
+      "track": "grammar",
+      "title": "Mastery of structural variation",
+      "hook": "Express one idea in several grammatically natural forms.",
+      "demo": [
+        "Dass er widerspricht, überrascht mich.",
+        "Sein Widerspruch überrascht mich."
+      ],
+      "exercise": "Create three equivalent sentence structures.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C2/grammar/01-mastery-of-structural-variation.md"
+    },
+    {
+      "id": "C2-GRA-02",
+      "level": "C2",
+      "track": "grammar",
+      "title": "Rhetorical syntax and rhythm",
+      "hook": "Use word order to create emphasis and impact.",
+      "demo": [
+        "Nicht der Aufwand ist das Problem. Das Problem ist die fehlende Klarheit."
+      ],
+      "exercise": "Rewrite an argument for rhetorical impact.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C2/grammar/02-rhetorical-syntax-and-rhythm.md"
+    },
+    {
+      "id": "C2-GRA-03",
+      "level": "C2",
+      "track": "grammar",
+      "title": "Nuanced modality and implication",
+      "hook": "What changes between dürfte, könnte and müsste?",
+      "demo": [
+        "Er dürfte recht haben. Er könnte recht haben. Er müsste recht haben."
+      ],
+      "exercise": "Explain each speaker's degree of confidence.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C2/grammar/03-nuanced-modality-and-implication.md"
+    },
+    {
+      "id": "C2-GRA-04",
+      "level": "C2",
+      "track": "grammar",
+      "title": "Literary and marked constructions",
+      "hook": "Understand sophisticated, less common structures.",
+      "demo": [
+        "Kaum hatte sie begonnen, da wurde sie unterbrochen."
+      ],
+      "exercise": "Rephrase in ordinary prose.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C2/grammar/04-literary-and-marked-constructions.md"
+    },
+    {
+      "id": "C2-GRA-05",
+      "level": "C2",
+      "track": "grammar",
+      "title": "Focus, contrast and information flow",
+      "hook": "Control precisely what sounds new or important.",
+      "demo": [
+        "Nicht die Methode, sondern deren Anwendung steht infrage."
+      ],
+      "exercise": "Change which part is emphasized.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C2/grammar/05-focus-contrast-and-information-flow.md"
+    },
+    {
+      "id": "C2-GRA-06",
+      "level": "C2",
+      "track": "grammar",
+      "title": "Deep clause embedding and precision",
+      "hook": "Untangle complex legal or academic syntax.",
+      "demo": [
+        "Die vom Ausschuss unter Vorbehalt gebilligte Regelung ..."
+      ],
+      "exercise": "Unpack the noun phrase.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C2/grammar/06-deep-clause-embedding-and-precision.md"
+    },
+    {
+      "id": "C2-GRA-07",
+      "level": "C2",
+      "track": "grammar",
+      "title": "Self-monitoring and ambiguity repair",
+      "hook": "One ambiguous sentence, two different meanings.",
+      "demo": [
+        "Ich sah den Mann mit dem Fernglas. (Who has it?)"
+      ],
+      "exercise": "Rewrite both possible meanings.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C2/grammar/07-self-monitoring-and-ambiguity-repair.md"
+    },
+    {
+      "id": "C2-GRA-08",
+      "level": "C2",
+      "track": "grammar",
+      "title": "Genre and stylistic transformation",
+      "hook": "Switch between academic, journalistic and conversational German.",
+      "demo": [
+        "Es ist festzustellen, dass ... -> Auffällig ist ... -> Mir fällt auf ..."
+      ],
+      "exercise": "Rewrite the same idea in three registers.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C2/grammar/08-genre-and-stylistic-transformation.md"
+    },
+    {
+      "id": "C2-SIT-01",
+      "level": "C2",
+      "track": "situations",
+      "title": "Understand fast and demanding speech",
+      "hook": "Follow argument shifts at natural speaking speed.",
+      "demo": [
+        "Was zunächst plausibel erscheint, hält einer näheren Prüfung nicht stand."
+      ],
+      "exercise": "Summarize the argument without simplification.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C2/situations/01-understand-fast-and-demanding-speech.md"
+    },
+    {
+      "id": "C2-SIT-02",
+      "level": "C2",
+      "track": "situations",
+      "title": "Synthesize conflicting sources",
+      "hook": "Make sense of three sources that disagree.",
+      "demo": [
+        "Quelle A betont ..., B widerspricht ..., C differenziert ..."
+      ],
+      "exercise": "Produce a balanced synthesis.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C2/situations/02-synthesize-conflicting-sources.md"
+    },
+    {
+      "id": "C2-SIT-03",
+      "level": "C2",
+      "track": "situations",
+      "title": "Mediate complex disputes",
+      "hook": "Reflect two parties' positions without distorting either.",
+      "demo": [
+        "Wenn ich beide Positionen richtig verstehe, besteht Einigkeit über ..., nicht aber über ..."
+      ],
+      "exercise": "Summarize competing positions neutrally.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C2/situations/03-mediate-complex-disputes.md"
+    },
+    {
+      "id": "C2-SIT-04",
+      "level": "C2",
+      "track": "situations",
+      "title": "Respond to sophisticated challenges",
+      "hook": "Answer an unexpected objection with composure.",
+      "demo": [
+        "Diese Kritik trifft einen wichtigen Punkt, setzt allerdings voraus, dass ..."
+      ],
+      "exercise": "Respond to a hidden assumption.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C2/situations/04-respond-to-sophisticated-challenges.md"
+    },
+    {
+      "id": "C2-SIT-05",
+      "level": "C2",
+      "track": "situations",
+      "title": "Write polished texts across genres",
+      "hook": "Make the same message fit a journal, a speech or an essay.",
+      "demo": [
+        "Wissenschaftlich: Die Befunde legen nahe ...",
+        "Rede: Die Ergebnisse zeigen uns ..."
+      ],
+      "exercise": "Adapt a short paragraph to two genres.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C2/situations/05-write-polished-texts-across-genres.md"
+    },
+    {
+      "id": "C2-SIT-06",
+      "level": "C2",
+      "track": "situations",
+      "title": "Interpret irony and subtext",
+      "hook": "Hear what the speaker means, not just what they say.",
+      "demo": [
+        "Na, das hat ja hervorragend geklappt! (After an obvious failure.)"
+      ],
+      "exercise": "Explain the literal and implied meanings.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C2/situations/06-interpret-irony-and-subtext.md"
+    },
+    {
+      "id": "C2-SIT-07",
+      "level": "C2",
+      "track": "situations",
+      "title": "Express subtle attitudes",
+      "hook": "Show reservation, confidence or mild criticism precisely.",
+      "demo": [
+        "Ich halte das für durchaus denkbar, wenngleich wenig wahrscheinlich."
+      ],
+      "exercise": "Rewrite with stronger certainty.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C2/situations/07-express-subtle-attitudes.md"
+    },
+    {
+      "id": "C2-SIT-08",
+      "level": "C2",
+      "track": "situations",
+      "title": "Switch registers and handle expert interactions",
+      "hook": "Move from a technical meeting to an informal discussion.",
+      "demo": [
+        "Formell: Ich würde dies infrage stellen.",
+        "Informell: Da bin ich skeptisch."
+      ],
+      "exercise": "Explain one objection in three registers.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C2/situations/08-switch-registers-and-handle-expert-interactions.md"
+    },
+    {
+      "id": "C2-VOC-01",
+      "level": "C2",
+      "track": "vocabulary",
+      "title": "Extensive cross-domain vocabulary",
+      "hook": "Use precise words outside your specialty.",
+      "demo": [
+        "die Gemengelage",
+        "die Wechselbeziehung",
+        "die Folgewirkung"
+      ],
+      "exercise": "Explain a complex social phenomenon.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C2/vocabulary/01-extensive-cross-domain-vocabulary.md"
+    },
+    {
+      "id": "C2-VOC-02",
+      "level": "C2",
+      "track": "vocabulary",
+      "title": "Fine connotations and pragmatic force",
+      "hook": "Why are dreist, kühn and mutig not the same?",
+      "demo": [
+        "mutig (brave)",
+        "kühn (bold)",
+        "dreist (brazen)"
+      ],
+      "exercise": "Choose the word for a context.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C2/vocabulary/02-fine-connotations-and-pragmatic-force.md"
+    },
+    {
+      "id": "C2-VOC-03",
+      "level": "C2",
+      "track": "vocabulary",
+      "title": "Idioms, allusions and humor",
+      "hook": "Decode layered, culturally anchored humor.",
+      "demo": [
+        "Das ist des Pudels Kern. (The central point",
+        "a literary allusion.)"
+      ],
+      "exercise": "Explain a cultural allusion.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C2/vocabulary/03-idioms-allusions-and-humor.md"
+    },
+    {
+      "id": "C2-VOC-04",
+      "level": "C2",
+      "track": "vocabulary",
+      "title": "Regional and social language variation",
+      "hook": "Recognize where German sounds different.",
+      "demo": [
+        "Brötchen",
+        "Semmel",
+        "Weckle"
+      ],
+      "exercise": "Identify what a regional word means.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C2/vocabulary/04-regional-and-social-language-variation.md"
+    },
+    {
+      "id": "C2-VOC-05",
+      "level": "C2",
+      "track": "vocabulary",
+      "title": "Specialist terminology and definitions",
+      "hook": "Navigate terms with narrow professional meanings.",
+      "demo": [
+        "die Kausalität",
+        "die Korrelation",
+        "die Validität"
+      ],
+      "exercise": "Explain a specialist distinction.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C2/vocabulary/05-specialist-terminology-and-definitions.md"
+    },
+    {
+      "id": "C2-VOC-06",
+      "level": "C2",
+      "track": "vocabulary",
+      "title": "Literary and rhetorical language",
+      "hook": "Use imagery and metaphor deliberately.",
+      "demo": [
+        "Die Argumentation steht auf tönernen Füßen."
+      ],
+      "exercise": "Interpret the figurative meaning.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C2/vocabulary/06-literary-and-rhetorical-language.md"
+    },
+    {
+      "id": "C2-VOC-07",
+      "level": "C2",
+      "track": "vocabulary",
+      "title": "Near-synonyms and lexical constraints",
+      "hook": "Discover why words that look equivalent aren't.",
+      "demo": [
+        "ein Problem lösen",
+        "eine Frage klären",
+        "einen Konflikt beilegen"
+      ],
+      "exercise": "Match each noun to a natural verb.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C2/vocabulary/07-near-synonyms-and-lexical-constraints.md"
+    },
+    {
+      "id": "C2-VOC-08",
+      "level": "C2",
+      "track": "vocabulary",
+      "title": "Creative, context-sensitive expression",
+      "hook": "Produce vivid language without sounding unnatural.",
+      "demo": [
+        "Was zunächst wie ein Durchbruch wirkte, erwies sich als Sackgasse."
+      ],
+      "exercise": "Reformulate a complicated outcome vividly.",
+      "takeaway": "",
+      "practice": "guided or open response",
+      "source": "C2/vocabulary/08-creative-context-sensitive-expression.md"
+    }
+  ]
+}

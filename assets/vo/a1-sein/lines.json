@@ -1,0 +1,81 @@
+{
+  "ref": "D:/toolcache/voiceclone/clips/prompt_a.tight.wav",
+  "ref_text": "As a simulation tool, Biffrost is a co simulation",
+  "atempo": 0.80,
+  "language_note": "English narrator segments and German form segments use the same cloned voice; German pronunciation must be checked by a native speaker.",
+  "scenes": [
+    {
+      "file": "s01.wav",
+      "chapter": "Two shapes, one verb",
+      "target": 4.8,
+      "segments": [
+        {"file": "s01-01-why.wav", "language": "English", "text": "Why", "pause_after": 0.12},
+        {"file": "s01-02-ich-bin.wav", "language": "German", "text": "ich bin.", "pause_after": 0.12},
+        {"file": "s01-03-but.wav", "language": "English", "text": "but", "pause_after": 0.12},
+        {"file": "s01-04-du-bist.wav", "language": "German", "text": "du bist?", "pause_after": 0.12},
+        {"file": "s01-05-same-verb.wav", "language": "English", "text": "Same verb.", "pause_after": 0.12},
+        {"file": "s01-06-six-seats.wav", "language": "English", "text": "Six seats.", "pause_after": 0.20}
+      ]
+    },
+    {
+      "file": "s02.wav",
+      "chapter": "The table has a name",
+      "target": 4.8,
+      "segments": [
+        {"file": "s02-01-sein.wav", "language": "German", "text": "Sein.", "pause_after": 0.12},
+        {"file": "s02-02-irregular.wav", "language": "English", "text": "is irregular.", "pause_after": 0.12},
+        {"file": "s02-03-seat-by-seat.wav", "language": "English", "text": "Learn it seat by seat.", "pause_after": 0.20}
+      ]
+    },
+    {
+      "file": "s03.wav",
+      "chapter": "Singular side",
+      "target": 10.4,
+      "segments": [
+        {"file": "s03-01-ich-bin.wav", "language": "German", "text": "Ich bin.", "pause_after": 0.12},
+        {"file": "s03-02-i-am.wav", "language": "English", "text": "I am.", "pause_after": 0.12},
+        {"file": "s03-03-du-bist.wav", "language": "German", "text": "Du bist.", "pause_after": 0.12},
+        {"file": "s03-04-you-are.wav", "language": "English", "text": "You are.", "pause_after": 0.12},
+        {"file": "s03-05-er-sie-es-ist.wav", "language": "German", "text": "Er, sie, es ist.", "pause_after": 0.12},
+        {"file": "s03-06-he-she-it-is.wav", "language": "English", "text": "He, she, it is.", "pause_after": 0.20}
+      ]
+    },
+    {
+      "file": "s04.wav",
+      "chapter": "Plural side",
+      "target": 11.2,
+      "segments": [
+        {"file": "s04-01-wir-sind.wav", "language": "German", "text": "Wir sind.", "pause_after": 0.12},
+        {"file": "s04-02-we-are.wav", "language": "English", "text": "We are.", "pause_after": 0.12},
+        {"file": "s04-03-ihr-seid.wav", "language": "German", "text": "Ihr seid.", "pause_after": 0.12},
+        {"file": "s04-04-you-all-are.wav", "language": "English", "text": "You all are.", "pause_after": 0.12},
+        {"file": "s04-05-sie-sind.wav", "language": "German", "text": "Sie sind.", "pause_after": 0.12},
+        {"file": "s04-06-they-formal.wav", "language": "English", "text": "They are, or you are, formal.", "pause_after": 0.12},
+        {"file": "s04-07-sind.wav", "language": "German", "text": "Sind", "pause_after": 0.08},
+        {"file": "s04-08-twice.wav", "language": "English", "text": "appears twice.", "pause_after": 0.20}
+      ]
+    },
+    {
+      "file": "s05.wav",
+      "chapter": "Your turn",
+      "target": 10.8,
+      "segments": [
+        {"file": "s05-01-your-turn.wav", "language": "English", "text": "Your turn.", "pause_after": 0.20},
+        {"file": "s05-02-wir.wav", "language": "German", "text": "Wir", "pause_after": 0.40},
+        {"file": "s05-03-hier.wav", "language": "German", "text": "hier.", "pause_after": 4.00},
+        {"file": "s05-04-sind.wav", "language": "German", "text": "Sind.", "pause_after": 0.20}
+      ]
+    },
+    {
+      "file": "s06.wav",
+      "chapter": "Recap",
+      "target": 3.0,
+      "segments": [
+        {"file": "s06-01-six-seats.wav", "language": "English", "text": "Six seats.", "pause_after": 0.12},
+        {"file": "s06-02-one-verb.wav", "language": "English", "text": "One verb.", "pause_after": 0.12},
+        {"file": "s06-03-learn-the-table.wav", "language": "English", "text": "Learn the table.", "pause_after": 0.20}
+      ]
+    }
+  ]
+}
+

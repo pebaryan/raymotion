@@ -14,7 +14,7 @@ namespace rmtn {
 namespace {
 
 constexpr int XF = 20;
-const std::string SCORE = "out/code-assets-v1/score.wav";
+const std::string SCORE = "out/code-assets-v2/score.wav";
 const Color BG = mkColor(0x14161c), INK = mkColor(0xf4f1ea), MUTED = mkColor(0x8a90a2), SUN = mkColor(0xffd166);
 
 Font bold() { return fonts::ui(true); }
@@ -51,9 +51,14 @@ Vector2 centred(const code::Block& b, const code::Style& s, Vector2 c) {
 
 // ------------------------------------------------------------------ scenes
 
-void typingScene(TNode* n, int len) {
-    backdrop(n, len);
-    const code::Block src = code::Block::parse(R"(
+// Timing shared by the picture and the score (frames from each scene's start).
+constexpr int TYPE_FROM = 20;
+constexpr double TYPE_RATE = 2.6;           // characters per frame
+constexpr int CARD_FROM = 10, CARD_GAP = 14;
+constexpr int FOCUS_FIRST = 30, FOCUS_PER = 44, FOCUS_STEPS = 6, FOUND_STEP = 3;
+constexpr int MORPH_A = 50, MORPH_B = 210, MORPH_DUR = 70;
+
+const char* const TYPED = R"(
 #include "rmtn/raymotion.hpp"
 using namespace rmtn;
 
@@ -66,13 +71,17 @@ void title(Comp& c, const std::string& text) {
     };
     n->fn = [text](const Ctx& cx, int) { say(cx, text); };
 }
-)", "cpp");
+)";
+
+void typingScene(TNode* n, int len) {
+    backdrop(n, len);
+    const code::Block src = code::Block::parse(TYPED, "cpp");
     n->add(0, len)->fn = [src](const Ctx& cx, int t) {
         code::Style st;
         st.title = "title.cpp";
         st.size = 27;
         code::Look look;
-        look.reveal = std::max(0.0, (t - 20) * 2.6);
+        look.reveal = std::max(0.0, (t - TYPE_FROM) * TYPE_RATE);
         look.cursor = true;
         look.t = t;
         code::draw(cx, src, centred(src, st, { 960, 470 }), st, look);
@@ -105,7 +114,7 @@ void languagesScene(TNode* n, int len) {
             const int col = (int)(i % 3), row = (int)(i / 3);
             const Rectangle box = code::bounds(blocks[i], st);
             const Vector2 at{ std::round(330 + col * 630.f - box.width / 2), row == 0 ? 90.f : 480.f };   // tops aligned per row
-            const float start = 10 + 14.f * i, in = ramp(t, start, start + 20, ease::out(ease::cubic));
+            const float start = CARD_FROM + (float)CARD_GAP * i, in = ramp(t, start, start + 20, ease::out(ease::cubic));
             Ctx c2 = cx;
             c2.a *= in;
             c2.o.y += 24 * (1 - in);
@@ -141,7 +150,7 @@ def binary_search(items, target):
         { { 7, 10 }, "otherwise throw away the half it cannot be in", "lo = mid + 1", 8 },
         { { 11, 11 }, "nothing left: it is not there", "-1", 11 },
     };
-    const int per = 44, first = 30;
+    const int per = FOCUS_PER, first = FOCUS_FIRST;
     n->add(0, len)->fn = [src, per, first](const Ctx& cx, int t) {
         code::Style st;
         st.size = 30;
@@ -204,7 +213,7 @@ async function load(url: string): Promise<void> {
 }
 )", "ts");
     const code::Morph m12(v1, v2), m23(v2, v3);
-    const int a = 50, b = 210, dur = 70;
+    const int a = MORPH_A, b = MORPH_B, dur = MORPH_DUR;
     n->add(0, len)->fn = [=](const Ctx& cx, int t) {
         code::Style st;
         st.size = 32;
@@ -223,9 +232,14 @@ async function load(url: string): Promise<void> {
 }
 
 // The score, 110 bpm on Em-C-G-D: a plucky arpeggio like keys being typed, a bell at each
-// chapter.
-void genScore(const std::string& path, double end, const std::vector<double>& chapters) {
+// chapter. Effects follow the picture (`starts`: each scene's first frame): a key click per
+// character typed and a thud per newline; a rising pluck as each language card lands; a
+// whoosh as the focus moves, a pluck as each mark draws, a chord on "found it" and a low
+// note on "nothing left"; a swell into each change, bells while the code rearranges, and a
+// click as it settles.
+void genScore(const std::string& path, double end, const std::vector<double>& chapters, const std::vector<int>& starts) {
     using procgen::Score;
+    auto sec = [&](int scene, double frame) { return (starts[scene] + frame) / 30.0; };
     Score s(end);
     struct Chord { int root; int pad[3]; int arp[4]; };
     const Chord em{ 40, { 59, 64, 67 }, { 71, 76, 79, 76 } }, c{ 48, { 60, 64, 67 }, { 72, 76, 79, 76 } },
@@ -244,6 +258,36 @@ void genScore(const std::string& path, double end, const std::vector<double>& ch
         if (t >= bar * 2) for (int h = 0; h < 8; h++) s.hat(t + h * beat / 2, h % 2 ? 0.07f : 0.04f, h % 2 ? 0.35f : 0.65f);
     }
     for (size_t k = 0; k < chapters.size(); k++) s.bell(chapters[k], 76 + (int)(k % 3) * 3, 0.09f, 0.5f);
+
+    // 1. Typing (the text starts with a newline the block drops).
+    const std::string typed = std::string(TYPED).substr(1);
+    for (size_t k = 0; k < typed.size(); k++) {
+        const double at = sec(0, TYPE_FROM + k / TYPE_RATE);
+        if (typed[k] == '\n') s.hat(at, 0.05f, 0.5f);
+        else if (typed[k] != ' ' && k % 2 == 0) s.tick(at, 0.018f + 0.012f * (float)((k * 7919) % 5) / 4);
+    }
+    // 2. Language cards.
+    const int climb[6] = { 64, 67, 71, 74, 76, 79 };
+    for (int k = 0; k < 6; k++) {
+        s.pluck(sec(1, CARD_FROM + CARD_GAP * k + 4), climb[k] + 12, 0.05f, 0.25f + 0.1f * k, 4);
+        s.tick(sec(1, CARD_FROM + CARD_GAP * k + 4), 0.03f);
+    }
+    // 3. Focus steps.
+    for (int k = 0; k < FOCUS_STEPS; k++) {
+        const int at = FOCUS_FIRST + k * FOCUS_PER;
+        if (k > 0) s.riser(sec(2, at) - 0.25, sec(2, at + 4), 0.03f);
+        s.pluck(sec(2, at + 12), 83, 0.04f, 0.65f, 5);
+        if (k == FOUND_STEP)
+            for (int j = 0; j < 3; j++) s.bell(sec(2, at + 8) + j * 0.07, em.arp[j] + 12, 0.07f, 0.3f + 0.2f * j);
+        if (k == FOCUS_STEPS - 1) s.pluck(sec(2, at + 8), 47, 0.08f, 0.5f, 3);
+    }
+    // 4. Changes.
+    for (int m : { MORPH_A, MORPH_B }) {
+        s.riser(sec(3, m) - 0.5, sec(3, m + 3), 0.04f);
+        for (int j = 0; j < 5; j++) s.bell(sec(3, m + 6 + j * 11), 88 - 2 * j - (j > 2), 0.035f, 0.2f + 0.15f * j);
+        s.tick(sec(3, m + MORPH_DUR), 0.05f);
+        s.pluck(sec(3, m + MORPH_DUR), 76, 0.05f, 0.5f, 4);
+    }
     for (int p : em.pad) { s.pad(stop, 2.4, p, 0.12f, 2000, 0.35f); s.pad(stop, 2.4, p - 12, 0.08f, 1200, 0.65f); }
     s.bass(stop, 2.4, em.root - 12, 0.22f);
     for (int k = 0; k < 4; k++) s.bell(stop + k * 0.4, em.arp[k] + 12, 0.08f, 0.2f + 0.2f * k);
@@ -261,18 +305,21 @@ void registerCode(Registry& out) {
     struct S { int len; void (*make)(TNode*, int); };
     const S scenes[] = { { 230, typingScene }, { 220, languagesScene }, { 330, focusScene }, { 340, changesScene } };
     std::vector<double> chapters;
+    std::vector<int> starts;
     bool first = true;
     for (const S& s : scenes) {
         if (!first) { ts.transition(Transition::fade(XF)); chapters.push_back((ts.end() - XF) / 30.0); }
         first = false;
-        s.make(ts.add(s.len), s.len);
+        TNode* node = ts.add(s.len);
+        starts.push_back(node->start);
+        s.make(node, s.len);
     }
     c.duration = ts.end();
     const double seconds = c.duration / 30.0;
-    c.assets = [seconds, chapters](const Comp&, const Json&) {
+    c.assets = [seconds, chapters, starts](const Comp&, const Json&) {
         if (std::filesystem::exists(SCORE)) return;
         std::filesystem::create_directories(std::filesystem::path(SCORE).parent_path());
-        genScore(SCORE, seconds, chapters);
+        genScore(SCORE, seconds, chapters, starts);
     };
     media::audio(addRoot(c.roots, 0, c.duration), SCORE);
     out.push_back(std::move(c));

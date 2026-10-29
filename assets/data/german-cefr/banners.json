@@ -1,0 +1,292 @@
+{
+  "groups": [
+    {
+      "level": "A1",
+      "track": "Grammatik",
+      "slug": "a1-grammatik",
+      "count": 8,
+      "titles": [
+        "Personalpronomen und sein",
+        "haben und regelmäßige Verbendungen",
+        "Wortstellung: Verb an Position zwei",
+        "Artikel und Genus",
+        "Nominativ und Akkusativ",
+        "Verneinung: nicht oder kein",
+        "Fragen und Imperative",
+        "Possessivartikel, Plural, Adjektive und Präpositionen"
+      ]
+    },
+    {
+      "level": "A1",
+      "track": "Wortschatz",
+      "slug": "a1-wortschatz",
+      "count": 8,
+      "titles": [
+        "Begrüßungen und Vorstellungen",
+        "Zahlen, Preise, Daten und Uhrzeit",
+        "Familie und Beziehungen",
+        "Länder, Sprachen und Berufe",
+        "Essen und Getränke",
+        "Zuhause und Alltagsgegenstände",
+        "Tagesabläufe",
+        "Fragewörter und Beschreibungen"
+      ]
+    },
+    {
+      "level": "A1",
+      "track": "Situationen",
+      "slug": "a1-situationen",
+      "count": 8,
+      "titles": [
+        "Jemanden kennenlernen",
+        "Persönliche Informationen geben",
+        "Im Café bestellen",
+        "Im Laden etwas kaufen",
+        "Nach dem Weg fragen",
+        "Die eigene Wohnung beschreiben",
+        "Einen Termin vereinbaren",
+        "Schilder und Nachrichten verstehen"
+      ]
+    },
+    {
+      "level": "A2",
+      "track": "Grammatik",
+      "slug": "a2-grammatik",
+      "count": 8,
+      "titles": [
+        "Perfekt mit haben und sein",
+        "Präteritum von sein, haben und Modalverben",
+        "Zukunftspläne und werden",
+        "Modalverben und trennbare Verben",
+        "Dativ und Wechselpräpositionen",
+        "Komparativ und Superlativ",
+        "Reflexiv- und Objektpronomen",
+        "Nebensätze und grundlegende Konnektoren"
+      ]
+    },
+    {
+      "level": "A2",
+      "track": "Wortschatz",
+      "slug": "a2-wortschatz",
+      "count": 8,
+      "titles": [
+        "Reisen und Unterkünfte",
+        "Verkehr und Tickets",
+        "Gesundheit und Symptome",
+        "Kleidung, Größen und Wetter",
+        "Arbeitsplatz und Bildung",
+        "Hobbys und Sozialleben",
+        "Haushalt und lokale Dienste",
+        "Gefühle und häufige Ausdrücke"
+      ]
+    },
+    {
+      "level": "A2",
+      "track": "Situationen",
+      "slug": "a2-situationen",
+      "count": 8,
+      "titles": [
+        "Reise oder Unterkunft buchen",
+        "Eine vergangene Reise beschreiben",
+        "Einen Arzt besuchen",
+        "Einladen und antworten",
+        "Zukunftspläne besprechen",
+        "Optionen vergleichen",
+        "Eine einfache Beschwerde formulieren",
+        "Nachrichten schreiben und klären"
+      ]
+    },
+    {
+      "level": "B1",
+      "track": "Grammatik",
+      "slug": "b1-grammatik",
+      "count": 8,
+      "titles": [
+        "Zentrale Zeitformen in zusammenhängenden Erzählungen",
+        "Perfekt, Präteritum und Plusquamperfekt",
+        "Konjunktiv II für Höflichkeit und Irrealität",
+        "Relativsätze",
+        "Passiv: werden + Partizip II",
+        "Indirekte Fragen und berichtete Informationen",
+        "Infinitivgruppen und Verbkomplemente",
+        "Adjektivendungen, Genitiv und Konnektoren"
+      ]
+    },
+    {
+      "level": "B1",
+      "track": "Wortschatz",
+      "slug": "b1-wortschatz",
+      "count": 8,
+      "titles": [
+        "Karriere und Bewerbung",
+        "Bildung und Lernen",
+        "Nachrichten und Medien",
+        "Reiseprobleme und Lösungen",
+        "Ziele und Entscheidungen",
+        "Kultur und Traditionen",
+        "Umwelt, Technik und Gesundheit",
+        "Gefühle, Meinungen und Kollokationen"
+      ]
+    },
+    {
+      "level": "B1",
+      "track": "Situationen",
+      "slug": "b1-situationen",
+      "count": 8,
+      "titles": [
+        "Eine zusammenhängende Geschichte erzählen",
+        "Ein Problem und eine Lösung erklären",
+        "Meinungen äußern und begründen",
+        "Vor- und Nachteile diskutieren",
+        "Reisekomplikationen bewältigen",
+        "An einer Besprechung teilnehmen",
+        "Ein Bewerbungsgespräch führen",
+        "E-Mails schreiben und Präsentationen halten"
+      ]
+    },
+    {
+      "level": "B2",
+      "track": "Grammatik",
+      "slug": "b2-grammatik",
+      "count": 8,
+      "titles": [
+        "Zeit und Aspekt präzise ausdrücken",
+        "Fortgeschrittener Konjunktiv II",
+        "Passivalternativen und Kausativkonstruktionen",
+        "Komplexe Relativ- und Partizipialphrasen",
+        "Indirekte Rede und Konjunktiv I",
+        "Modalverben für Vermutungen",
+        "Nominalisierung und komplexe Nominalphrasen",
+        "Fortgeschrittene Konnektoren und Satzfokus"
+      ]
+    },
+    {
+      "level": "B2",
+      "track": "Wortschatz",
+      "slug": "b2-wortschatz",
+      "count": 8,
+      "titles": [
+        "Ethik und abstrakte Konzepte",
+        "Management und Verhandlung",
+        "Technische und wissenschaftliche Erklärungen",
+        "Gesellschaft, Politik und Wirtschaft",
+        "Argumentation und Bewertung",
+        "Idiome und bildliche Sprache",
+        "Präzise Kollokationen und Synonyme",
+        "Register, Unsicherheit und Evidenz"
+      ]
+    },
+    {
+      "level": "B2",
+      "track": "Situationen",
+      "slug": "b2-situationen",
+      "count": 8,
+      "titles": [
+        "An komplexen Besprechungen teilnehmen",
+        "Ein Argument verteidigen",
+        "Unbekannte Themen diskutieren",
+        "Verhandeln und Meinungsverschiedenheiten lösen",
+        "Präsentationen halten und Fragen beantworten",
+        "Ausführliche Interviews und Berichte verstehen",
+        "Berichte und Vorschläge schreiben",
+        "Fachliche Ideen erklären"
+      ]
+    },
+    {
+      "level": "C1",
+      "track": "Grammatik",
+      "slug": "c1-grammatik",
+      "count": 8,
+      "titles": [
+        "Komplexe Syntax und Nebensatzverschachtelung",
+        "Feine Unterschiede in Zeit, Aspekt und Modalität",
+        "Inversion, Voranstellung und Betonung",
+        "Fortgeschrittene Kontrafaktizität und Konzessionen",
+        "Ellipse und Informationsstruktur",
+        "Nominalstil versus Verbalstil",
+        "Kohäsion in langen Texten",
+        "Register und stilistische Präzision"
+      ]
+    },
+    {
+      "level": "C1",
+      "track": "Wortschatz",
+      "slug": "c1-wortschatz",
+      "count": 8,
+      "titles": [
+        "Fortgeschrittener akademischer Wortschatz",
+        "Idiome und fortgeschrittene Kollokationen",
+        "Nuancen zwischen Synonymen",
+        "Konnotation und diplomatische Sprache",
+        "Fach- und Forschungsterminologie",
+        "Überzeugung und rhetorische Muster",
+        "Metaphern, Ironie und kulturelle Referenzen",
+        "Kritische Bewertung und Einschränkung"
+      ]
+    },
+    {
+      "level": "C1",
+      "track": "Situationen",
+      "slug": "c1-situationen",
+      "count": 8,
+      "titles": [
+        "Hochriskante Besprechungen leiten",
+        "Anspruchsvolle Argumente verteidigen",
+        "Implizite Kritik interpretieren",
+        "Fortgeschrittene Berichte und Analysen schreiben",
+        "Sich an verschiedene Zielgruppen anpassen",
+        "Mehrere Quellen synthetisieren",
+        "Sensible Gespräche führen",
+        "Anspruchsvolle Vorlesungen und Debatten verstehen"
+      ]
+    },
+    {
+      "level": "C2",
+      "track": "Grammatik",
+      "slug": "c2-grammatik",
+      "count": 8,
+      "titles": [
+        "Beherrschung struktureller Variation",
+        "Rhetorische Syntax und Rhythmus",
+        "Nuancierte Modalität und Implikatur",
+        "Literarische und markierte Konstruktionen",
+        "Fokus, Kontrast und Informationsfluss",
+        "Tiefe Nebensatzverschachtelung und Präzision",
+        "Selbstkontrolle und Reparatur von Ambiguität",
+        "Genre- und Stiltransformation"
+      ]
+    },
+    {
+      "level": "C2",
+      "track": "Wortschatz",
+      "slug": "c2-wortschatz",
+      "count": 8,
+      "titles": [
+        "Umfangreicher domänenübergreifender Wortschatz",
+        "Feine Konnotationen und pragmatische Wirkung",
+        "Idiome, Anspielungen und Humor",
+        "Regionale und soziale Sprachvariation",
+        "Fachterminologie und Definitionen",
+        "Literarische und rhetorische Sprache",
+        "Quasi-Synonyme und lexikalische Beschränkungen",
+        "Kreativer, kontextsensibler Ausdruck"
+      ]
+    },
+    {
+      "level": "C2",
+      "track": "Situationen",
+      "slug": "c2-situationen",
+      "count": 8,
+      "titles": [
+        "Schnelles und anspruchsvolles Sprechen verstehen",
+        "Widersprüchliche Quellen zusammenführen",
+        "Komplexe Streitigkeiten vermitteln",
+        "Auf anspruchsvolle Herausforderungen reagieren",
+        "Polierte Texte in verschiedenen Genres schreiben",
+        "Ironie und Subtext interpretieren",
+        "Subtile Haltungen ausdrücken",
+        "Register wechseln und Experteninteraktionen bewältigen"
+      ]
+    }
+  ]
+}
