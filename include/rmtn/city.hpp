@@ -95,6 +95,9 @@ struct Look {
     std::string lod;                        // empty: each object's most detailed geometry
     // Optional: a colour per face (return BLANK to fall back to the rules above).
     std::function<Color(const Object&, const Face&)> color;
+    // Optional: modify each CityObject's lit material before its mesh is added.
+    // Useful for per-part PBR roughness, metalness and opacity encoded in attributes.
+    std::function<void(const Object&, g3d::Material&)> material;
 };
 Color colorOf(const Look& look, const Object& o, const Face& f);
 

@@ -534,7 +534,9 @@ g3d::Object3D* fill(g3d::Object3D* group, const Model& m, const Look& look, cons
         const Geometry* g = o.at(look.lod);
         if (!g || g->faces.empty()) continue;
         const Vector3 at = base(o, look.lod);
-        g3d::Object3D* child = group->add(mesh(o, look, at), material);
+        g3d::Material partMaterial = material;
+        if (look.material) look.material(o, partMaterial);
+        g3d::Object3D* child = group->add(mesh(o, look, at), partMaterial);
         child->name = o.id;
         child->position = toScene(at);
     }

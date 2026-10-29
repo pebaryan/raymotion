@@ -11,9 +11,9 @@
 //     prefab::use(root, 0, 120, "social-row", Json::parse(R"({"brands": ["x", "youtube", "github"]})"));
 //     prefab::use(root, 0, 150, "raymotion-logo", Json::parse(R"({"tagline": "video as code"})"));
 //
-// Brands: x, youtube, github, instagram, tiktok, whatsapp, telegram, twitch. The glyphs are the
-// Simple Icons paths (CC0); the logos themselves are trademarks of their owners, so follow
-// each brand's guidelines when you use them.
+// Brands: x, youtube, github, instagram, tiktok, whatsapp, telegram, twitch, steam,
+// itchdotio, xbox, playstation, nintendoswitch, shopee, tokopedia, amazon, ebay,
+// vinted. Most glyphs use Simple Icons paths; Tokopedia is a compact adaptation.
 #pragma once
 #include <string>
 #include <vector>
@@ -24,6 +24,8 @@ namespace rmtn {
 namespace icons {
 
 const std::vector<std::string>& brands();
+// Programming language badge IDs (use as `language-<id>` prefabs).
+const std::vector<std::string>& languages();
 // The brand's mark in a 24 x 24 box centred on the origin (-12..12); fill it EvenOdd.
 // Throws std::runtime_error for an unknown brand.
 const vg::Path& glyph(const std::string& brand);

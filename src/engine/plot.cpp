@@ -535,10 +535,10 @@ void bars(const Ctx& c, const Table& t, const ChartStyle& s, float u) {
     legend(c, t, s, u);
     const size_t n = t.categories.size(), m = std::max<size_t>(t.series.size(), 1);
     const float slot = s.box.width / std::max<size_t>(n, 1), group = slot * (1 - s.gap);
-    const float lag = 0.12f, dur = 1 / (1 + std::max<size_t>(n, 1) * lag);
     const int dec = s.decimals;
     for (size_t i = 0; i < n; i++) {
-        const float k = easeOut((u - dur * (0.4f + i * lag)) / (dur * 0.9f));
+        const float start = 0.12f * (float)i / std::max<size_t>(n, 1);
+        const float k = easeOut((u - start) / (1.f - start));
         if (k <= 0) continue;
         double pos = 0, neg = 0;
         for (size_t j = 0; j < t.series.size(); j++) {

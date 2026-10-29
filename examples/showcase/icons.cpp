@@ -27,7 +27,69 @@ TNode* place(TNode* parent, int from, int dur, const char* name, const char* pro
 
 } // namespace
 
+static Comp makeBadgeSheet() {
+    Comp c;
+    c.name = "social-badge-sheet";
+    c.w = 2400; c.h = 2200; c.fps = 30; c.duration = 1;
+    c.background = BG;
+
+    TNode* sheet = addRoot(c.roots, 0, 1);
+    const std::vector<std::string> brands = icons::brands();
+    sheet->fn = [count = brands.size()](const Ctx& cx, int) {
+        dr::text(fonts::ui(true), cx, "SOCIAL BADGES", { 130, 112 }, 76, 1, INK, 0, 0.5);
+        const std::string sub = std::to_string(count) + " built-in prefabs";
+        dr::text(fonts::ui(false), cx, sub.c_str(), { 2270, 112 }, 34, 1, DIM, 1, 0.5);
+    };
+    for (size_t i = 0; i < brands.size(); ++i) {
+        const int row = (int)i / 5;
+        const int col = (int)i % 5;
+        const int rowCount = std::min(5, (int)brands.size() - row * 5);
+        const float x = 1200.f + (col - (rowCount - 1) / 2.f) * 440.f;
+        const float y = 425.f + row * 500.f;
+        const std::string brand = brands[i];
+        const std::string label = icons::title(brand);
+        const std::string id = "social-" + brand;
+        sheet->add(0, 1)->fn = [x, y, label, id](const Ctx& cx, int) {
+            dr::roundRect(cx, x - 190, y - 195, 380, 390, 28, PANEL);
+            dr::text(fonts::ui(true), cx, label.c_str(), { x, y + 105 }, 34, 0, INK, 0.5, 0.5);
+            dr::text(fonts::ui(false), cx, id.c_str(), { x, y + 151 }, 25, 0, DIM, 0.5, 0.5);
+        };
+        TNode* badge = prefab::use(sheet, 0, 1, id, Json::parse(R"({"size": 190, "in": "none"})"));
+        badge->props.pos = { x, y - 45 };
+    }
+    return c;
+}
+
+static Comp makeLanguageBadgeSheet() {
+    Comp c;
+    c.name = "programming-language-badge-sheet";
+    c.w = 2400; c.h = 2200; c.fps = 30; c.duration = 1;
+    c.background = BG;
+    TNode* sheet = addRoot(c.roots, 0, 1);
+    const auto& langs = icons::languages();
+    sheet->fn = [count = langs.size()](const Ctx& cx, int) {
+        dr::text(fonts::ui(true), cx, "PROGRAMMING LANGUAGES", { 130, 112 }, 76, 1, INK, 0, 0.5);
+        const std::string sub = std::to_string(count) + " badge prefabs";
+        dr::text(fonts::ui(false), cx, sub.c_str(), { 2270, 112 }, 34, 1, DIM, 1, 0.5);
+    };
+    for (size_t i = 0; i < langs.size(); ++i) {
+        const float x = 275.f + (float)(i % 6) * 370.f;
+        const float y = 480.f + (float)(i / 6) * 620.f;
+        const std::string name = langs[i], title = icons::title(name), id = "language-" + name;
+        sheet->add(0, 1)->fn = [x, y, title, id](const Ctx& cx, int) {
+            dr::roundRect(cx, x - 165, y - 225, 330, 450, 28, PANEL);
+            dr::text(fonts::ui(true), cx, title.c_str(), { x, y + 122 }, 34, 0, INK, 0.5, 0.5);
+            dr::text(fonts::ui(false), cx, id.c_str(), { x, y + 172 }, 24, 0, DIM, 0.5, 0.5);
+        };
+        TNode* badge = prefab::use(sheet, 0, 1, id, Json::parse(R"({"size": 190, "in": "none"})"));
+        badge->props.pos = { x, y - 55 };
+    }
+    return c;
+}
+
 void registerIcons(Registry& out) {
+    out.push_back(makeBadgeSheet());
+    out.push_back(makeLanguageBadgeSheet());
     Comp c;
     c.name = "social-icons";
     c.w = 1920; c.h = 1080; c.fps = 30;

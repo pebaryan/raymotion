@@ -72,6 +72,12 @@ add_library(rmtn_engine STATIC
   src/engine/bpmn.cpp
   src/engine/chem.cpp
   src/engine/chem3d.cpp
+  src/engine/lab3d.cpp
+  src/engine/smartgrid3d.cpp
+  src/engine/interior3d.cpp
+  src/engine/computer3d.cpp
+  src/engine/aircraft3d.cpp
+  src/engine/human3d.cpp
   src/engine/particles.cpp
   src/engine/paths.cpp
   src/engine/math_font.cpp
@@ -227,6 +233,30 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   add_executable(raymotion_prefab_tests tests/prefab_tests.cpp)
   target_link_libraries(raymotion_prefab_tests PRIVATE rmtn_engine)
   add_test(NAME prefab COMMAND raymotion_prefab_tests)
+
+  add_executable(raymotion_lab3d_tests tests/lab3d_tests.cpp)
+  target_link_libraries(raymotion_lab3d_tests PRIVATE rmtn_engine)
+  add_test(NAME lab3d COMMAND raymotion_lab3d_tests)
+
+  add_executable(raymotion_smartgrid3d_tests tests/smartgrid3d_tests.cpp)
+  target_link_libraries(raymotion_smartgrid3d_tests PRIVATE rmtn_engine)
+  add_test(NAME smartgrid3d COMMAND raymotion_smartgrid3d_tests)
+
+  add_executable(raymotion_interior3d_tests tests/interior3d_tests.cpp)
+  target_link_libraries(raymotion_interior3d_tests PRIVATE rmtn_engine)
+  add_test(NAME interior3d COMMAND raymotion_interior3d_tests)
+
+  add_executable(raymotion_computer3d_tests tests/computer3d_tests.cpp)
+  target_link_libraries(raymotion_computer3d_tests PRIVATE rmtn_engine)
+  add_test(NAME computer3d COMMAND raymotion_computer3d_tests)
+
+  add_executable(raymotion_aircraft3d_tests tests/aircraft3d_tests.cpp)
+  target_link_libraries(raymotion_aircraft3d_tests PRIVATE rmtn_engine)
+  add_test(NAME aircraft3d COMMAND raymotion_aircraft3d_tests)
+
+  add_executable(raymotion_human3d_tests tests/human3d_tests.cpp)
+  target_link_libraries(raymotion_human3d_tests PRIVATE rmtn_engine)
+  add_test(NAME human3d COMMAND raymotion_human3d_tests)
 
   add_executable(raymotion_diagram_render_tests tests/diagram_render_tests.cpp)
   target_link_libraries(raymotion_diagram_render_tests PRIVATE rmtn_engine)

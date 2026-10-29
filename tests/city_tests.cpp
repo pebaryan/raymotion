@@ -8,6 +8,7 @@
 // too (real data that is not bundled).
 #include "rmtn/raymotion.hpp"
 #include <raymath.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -377,8 +378,131 @@ static void rendering() {
     UnloadImage(after);
 }
 
+static void smartgridPrefabs() {
+    const char* ids[] = {
+        "residential-detached", "residential-terrace", "residential-apartment",
+        "commercial-office", "commercial-office-tower", "city-hall",
+        "exhibition-event-hall", "commercial-shop", "industrial-factory-pv",
+        "industrial-warehouse", "industrial-assembly-factory", "data-center",
+        "power-station-turbine-hall", "power-station-control-building",
+        "wind-turbine", "diesel-generator", "gas-turbine-generator", "hv-transformer",
+        "ev-charging-pole", "ev-charging-hub-five-bay",
+        "e-car", "distribution-substation", "lv-distribution-cabinet",
+        "battery-storage", "battery-substation", "solar-carport", "grid-pole", "road-straight",
+        "foliage-deciduous-tree", "foliage-conifer-tree", "foliage-street-tree",
+        "foliage-orchard-tree", "foliage-shrub-cluster", "foliage-hedge-segment",
+        "foliage-grass-patch", "foliage-flower-bed", "foliage-planter-tree",
+        "street-traffic-light", "street-light", "solar-street-light",
+        "traffic-sign-stop", "traffic-sign-warning", "traffic-sign-direction",
+        "street-pedestrian-crossing", "bus-stop-shelter", "park-bench",
+        "public-waste-bin", "street-bollard", "bicycle-rack",
+    };
+    for (const char* id : ids) {
+        const city::Model m = city::load(std::string("data/city/smartgrid/") + id + ".city.json");
+        CHECK(m.version == "2.0" && !m.objects.empty());
+        CHECK(m.metadata["illustrative"].asBool());
+        CHECK(checkTriangles(m,id) == 0);
+        const BoundingBox b = m.bounds();
+        CHECK(std::fabs((b.min.x+b.max.x)/2) < 4 && std::fabs((b.min.y+b.max.y)/2) < 4);
+        for (const city::Object& o : m.objects) {
+            CHECK(o.attributes["smartGridRole"].isString());
+            CHECK(o.attributes["paletteRole"].isString());
+            for (const std::string& parent : o.parents) {
+                const city::Object& p = m.get(parent);
+                CHECK(std::find(p.children.begin(),p.children.end(),o.id) != p.children.end());
+            }
+        }
+    }
+    const city::Model hub = city::load("data/city/smartgrid/ev-charging-hub-five-bay.city.json");
+    for (int n=1; n<=5; ++n) CHECK(hub.find("charger-"+std::to_string(n)) != nullptr);
+    const city::Model plant = city::load("data/city/smartgrid/industrial-factory-pv.city.json");
+    CHECK(plant.get("factory-pv").parents == std::vector<std::string>{"factory"});
+    const city::Model station = city::load("data/city/smartgrid/distribution-substation.city.json");
+    CHECK(station.get("transformer").attributes["scenarioRatingKVA"].asNumber() == 630);
+    const city::Model batteryYard = city::load("data/city/smartgrid/battery-substation.city.json");
+    for (int n=1; n<=3; ++n) CHECK(batteryYard.find("battery-module-"+std::to_string(n)) != nullptr);
+    CHECK(batteryYard.find("battery-switchgear") != nullptr);
+    CHECK(batteryYard.find("battery-transformer") != nullptr);
+    const city::Model civic = city::load("data/city/smartgrid/city-hall.city.json");
+    CHECK(civic.get("clock-tower").parents == std::vector<std::string>{"city-hall"});
+    const city::Model hall = city::load("data/city/smartgrid/exhibition-event-hall.city.json");
+    CHECK(hall.find("event-canopy") != nullptr && hall.find("event-doors") != nullptr);
+    const city::Model wind = city::load("data/city/smartgrid/wind-turbine.city.json");
+    for (int n=1; n<=3; ++n) CHECK(wind.find("rotor-blade-"+std::to_string(n)) != nullptr);
+    const city::Model hv = city::load("data/city/smartgrid/hv-transformer.city.json");
+    for (int n=1; n<=3; ++n) CHECK(hv.find("hv-bushing-"+std::to_string(n)) != nullptr);
+    CHECK(hv.find("conservator") != nullptr && hv.find("radiator-1-1") != nullptr);
+    const city::Model data = city::load("data/city/smartgrid/data-center.city.json");
+    CHECK(data.find("roof-cooler-1-1") != nullptr && data.find("cooling-louvres") != nullptr);
+    const city::Model gas = city::load("data/city/smartgrid/gas-turbine-generator.city.json");
+    CHECK(gas.find("air-filter-house") != nullptr && gas.find("exhaust-stack") != nullptr);
+    const city::Model tree = city::load("data/city/smartgrid/foliage-deciduous-tree.city.json");
+    CHECK(tree.find("tree-trunk") != nullptr && tree.find("main-crown") != nullptr);
+    const city::Model conifer = city::load("data/city/smartgrid/foliage-conifer-tree.city.json");
+    for (int n=1; n<=3; ++n) CHECK(conifer.find("branch-tier-"+std::to_string(n)) != nullptr);
+    const city::Model grass = city::load("data/city/smartgrid/foliage-grass-patch.city.json");
+    CHECK(grass.find("grass-ground") != nullptr && grass.find("grass-tufts") != nullptr);
+    const city::Model signal = city::load("data/city/smartgrid/street-traffic-light.city.json");
+    CHECK(signal.find("signal-red") != nullptr && signal.find("signal-amber") != nullptr &&
+          signal.find("signal-green") != nullptr);
+    const city::Model solarLamp = city::load("data/city/smartgrid/solar-street-light.city.json");
+    CHECK(solarLamp.find("street-pv-panel") != nullptr && solarLamp.find("solar-battery") != nullptr);
+    const city::Model crossing = city::load("data/city/smartgrid/street-pedestrian-crossing.city.json");
+    CHECK(crossing.find("zebra-stripes") != nullptr);
+    const city::Model shelter = city::load("data/city/smartgrid/bus-stop-shelter.city.json");
+    CHECK(shelter.find("shelter-roof") != nullptr && shelter.find("shelter-back") != nullptr &&
+          shelter.find("shelter-seat") != nullptr);
+}
+
+static void chemistryPrefabs() {
+    const char* ids[] = {
+        "lab-bench", "fume-hood", "chemical-storage-cabinet", "analytical-balance",
+        "hotplate-stirrer", "rotary-evaporator", "hplc-stack", "bench-centrifuge",
+        "drying-oven", "jacketed-reactor", "glassware-rack", "vacuum-pump",
+    };
+    for (const char* id : ids) {
+        const city::Model m = city::load(std::string("data/city/chemistry-lab/") + id + ".city.json");
+        CHECK(m.version == "2.0" && !m.objects.empty());
+        CHECK(m.metadata["illustrative"].asBool());
+        CHECK(checkTriangles(m,id) == 0);
+        const BoundingBox b = m.bounds();
+        CHECK(std::fabs((b.min.x+b.max.x)/2) < .4 && std::fabs((b.min.y+b.max.y)/2) < .4);
+        CHECK(b.min.z >= 0 && b.max.z > b.min.z);
+        for (const city::Object& o : m.objects) {
+            CHECK(o.attributes["labRole"].isString());
+            CHECK(o.attributes["paletteRole"].isString());
+        }
+    }
+    const city::Model hood = city::load("data/city/chemistry-lab/fume-hood.city.json");
+    CHECK(hood.find("sliding-sash") != nullptr && hood.find("exhaust-collar") != nullptr);
+    const city::Model rotavap = city::load("data/city/chemistry-lab/rotary-evaporator.city.json");
+    CHECK(rotavap.find("evaporation-flask") != nullptr && rotavap.find("condenser") != nullptr);
+    const city::Model hplc = city::load("data/city/chemistry-lab/hplc-stack.city.json");
+    for (int n=0; n<4; ++n) CHECK(hplc.find("screen-"+std::to_string(n)) != nullptr);
+    const city::Model reactor = city::load("data/city/chemistry-lab/jacketed-reactor.city.json");
+    CHECK(reactor.find("reactor-vessel") != nullptr && reactor.find("agitator-motor") != nullptr);
+    city::Look look;
+    look.material = [](const city::Object& object, g3d::Material& material) {
+        if (object.attributes["paletteRole"].asString() == "glass") {
+            material.roughness = .12f;
+            material.metalness = 0;
+            material.opacity = .4f;
+        } else if (object.attributes["paletteRole"].asString() == "metal") {
+            material.roughness = .28f;
+            material.metalness = .9f;
+        }
+    };
+    auto scene = std::make_shared<g3d::Scene>();
+    city::add(*scene, hood, look);
+    CHECK(scene->find("sliding-sash") != nullptr);
+    NEAR(scene->find("sliding-sash")->material.opacity, .4f, 1e-5);
+    NEAR(scene->find("hood-top")->material.metalness, .9f, 1e-5);
+}
+
 int main() {
     town();
+    smartgridPrefabs();
+    chemistryPrefabs();
     formats();
     triangulation();
     external();

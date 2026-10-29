@@ -787,12 +787,18 @@ the same name replaces one):
 
 ```cpp
 prefab::use(root, 0, 90, "social-youtube", Json::parse(R"({"handle": "@raymotion"})"))->props.pos = { 960, 540 };
+prefab::use(root, 0, 90, "social-steam", Json::parse(R"({"size": 180})"))->props.pos = { 960, 540 };
+prefab::use(root, 0, 90, "social-itchdotio", Json::parse(R"({"style": "glyph"})"));
+prefab::use(root, 0, 90, "social-shopee", Json::parse(R"({"size": 180})"));
 prefab::use(root, 30, 120, "social-row", Json::parse(R"({"brands": ["x", "github", "twitch"], "style": "outline"})"));
 prefab::use(root, 0, 150, "raymotion-logo", Json::parse(R"({"tagline": "video as code", "layout": "stacked"})"));
 ```
 
 * `social-x`, `social-youtube`, `social-github`, `social-instagram`, `social-tiktok`,
-  `social-whatsapp`, `social-telegram` and `social-twitch`: the icon, with an optional `handle` beside it.
+  `social-whatsapp`, `social-telegram`, `social-twitch`, `social-steam`, `social-itchdotio`,
+  `social-xbox`, `social-playstation`, `social-nintendoswitch`,
+  `social-shopee`, `social-tokopedia`, `social-amazon`, `social-ebay`
+  and `social-vinted`: the icon, with an optional `handle` beside it.
   `social-row` shows several, one after another, with a shared handle beneath.
 * Props: `size`; `style` (`badge` in the brand colour, Instagram's gradient included;
   `glyph`, the mark alone in its colour; `mono` and `outline` in `color`); `shape`
@@ -804,11 +810,26 @@ prefab::use(root, 0, 150, "raymotion-logo", Json::parse(R"({"tagline": "video as
 * In your own fns: `icons::draw(cx, "github", centre, size, look, reveal)`,
   `icons::logo(cx, centre, size, t)`, and `icons::glyph(brand)` for the raw path.
 
-The glyphs are [Simple Icons](https://simpleicons.org) paths (CC0). The logos are
-trademarks of their owners, so follow each brand's guidelines when you use them.
+Most glyphs are [Simple Icons](https://simpleicons.org) paths. Tokopedia is a compact
+monochrome adaptation. See
+the [marketplace badge notes](docs/marketplace-badges.md).
+The logos are trademarks of their owners, so follow each brand's guidelines when you use them.
 
-`social-icons` shows the logo drawing on, a row of every brand, the four looks and two
+`social-icons` shows the logo drawing on, a row of core brands, the four looks and two
 shapes, icons with handles, and a stacked logo end card.
+
+Programming language badges are registered as `language-python`, `language-javascript`,
+`language-typescript`, `language-c`, `language-cplusplus`, `language-csharp`,
+`language-java`, `language-go`, `language-rust`, `language-ruby`, `language-php`,
+`language-swift`, `language-kotlin`, `language-dart`, `language-r`, `language-lua`,
+`language-haskell`, and `language-julia`. They accept the same `size`, `style`,
+`shape`, `handle`, and entrance props as social badges. Run
+`raymotion still programming-language-badge-sheet --at 0 --png languages.png` for
+a labelled catalogue. The paths and source versions are documented in
+[programming language badges](docs/programming-language-badges.md).
+
+For a labeled PNG of every registered social badge, run
+`raymotion still social-badge-sheet --at 0 --png social-badge-sheet.png`.
 
 ### Country flags
 
@@ -927,6 +948,45 @@ The bundled `data/city/town.city.json` is a made-up town built by
 trees and street lamps (from geometry templates), and a bus route with its stops (a line
 and points). Real cities: [3D BAG](https://3dbag.nl) (every building in
 the Netherlands) and the [CityJSON datasets page](https://www.cityjson.org/datasets/).
+
+The [smart-grid CityJSON prefab collection](docs/smartgrid-cityjson-prefabs.md) provides
+49 independent, locally centred models in `assets/data/city/smartgrid/`, including a
+five-bay EV charging hub, e-car, PV factory, assembly factory, data center, power
+station buildings, wind turbine, fossil-fuel generators, HV transformer and nine
+foliage assets plus traffic lights, street lighting, signs, a bus shelter, a crossing
+and street furniture. These are
+original illustrative assets informed by the 2020 ExpCPS simulation-support paper and
+Siemens' public BIFROST descriptions; they are not BIFROST geometry exports. The
+directory includes a manifest; `tools/build_smartgrid_cityjson_prefabs.py` regenerates
+the files. `smartgrid3d::cityLook()` assigns per-object Standard PBR materials, shown in
+the [raymotion-rendered catalog](docs/images/prefabs/smartgrid-cityjson-pbr-sheet.png).
+
+The [native chemistry laboratory PBR prefabs](docs/lab3d-pbr-prefabs.md) provide
+12 reusable `g3d::Object3D` builders with separate Standard PBR materials for each
+part. Use `lab3d::add(*scene, lab3d::Kind::FumeHood)` to place one in a scene. A
+[CityJSON version](docs/chemistry-cityjson-prefabs.md) of the same equipment set is
+also available in `assets/data/city/chemistry-lab/`.
+
+The [native interior PBR prefabs](docs/interior3d-pbr-prefabs.md)
+provide 36 `g3d::Object3D` builders for hospital, school, office, IT, home and
+restaurant/supermarket scenes. Use
+`interior3d::add(*scene, interior3d::Kind::HospitalBed)` to place one. See the
+[rendered catalog sheet](docs/images/prefabs/interior3d-pbr-prefabs-sheet.png).
+
+The [native computer component PBR prefabs](docs/computer3d-pbr-prefabs.md) add
+12 reusable builders for a CPU, RAM, graphics card, PSU, case, cooling, motherboard
+and storage illustrations. See the [rendered component sheet](docs/images/prefabs/computer3d-pbr-prefabs-sheet.png).
+
+The [native city-scale human PBR prefabs](docs/human3d-pbr-prefabs.md) provide
+12 role figures—residents, commuters, EV drivers, utility workers, healthcare,
+school, retail and transit staff—to place beside the smart-grid CityJSON assets.
+See the [role catalog](docs/images/prefabs/human3d-pbr-prefabs-sheet.png) and
+[city-scale example](docs/images/prefabs/human3d-previews-city-scale-context.png).
+
+The [native PBR airplane prefab](docs/aircraft3d-pbr-prefab.md) provides a
+twin-engine passenger jet with tapered fuselage, swept wings, engines, glazing,
+tail and landing gear. Add it with `aircraft3d::addPassengerJet(*scene)`; see the
+[three-quarter preview](docs/images/prefabs/aircraft3d-previews-passenger-jet-three-quarter.png).
 
 `city-models` raises the town under an orbiting camera, colours it by construction year
 with a legend, puts LoD 1.2 beside LoD 2.2, picks out the tower by its id with a callout

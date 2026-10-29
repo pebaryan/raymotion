@@ -18,6 +18,12 @@ std::string find(const std::string& file);          // full path, or "" if not f
 // Needs an open window (GL context).
 Font load(const std::vector<std::string>& candidates, int baseSize = 96);
 
+// Same, but the atlas also gets every code point in `sampleUtf8`, so a face outside the
+// Latin-1 set (Japanese, Chinese, ...) can be drawn. Only the glyphs the sample uses are
+// rasterised, which keeps the atlas small; pass every string the video will show.
+// Results are cached per (file, size, code point set).
+Font loadFor(const std::vector<std::string>& candidates, const std::string& sampleUtf8, int baseSize = 96);
+
 // The engine's default face: bundled Inter (SIL OFL 1.1), regular or bold.
 Font ui(bool bold = false, int baseSize = 96);
 

@@ -18,7 +18,8 @@ template <class F> static bool throws(F f) {
 }
 
 static void data() {
-    CHECK(icons::brands().size() == 8);
+    CHECK(icons::brands().size() == 18);
+    CHECK(icons::languages().size() == 18);
     for (const std::string& b : icons::brands()) {
         const vg::Path& g = icons::glyph(b);
         const Rectangle r = g.bounds();
@@ -26,8 +27,25 @@ static void data() {
         CHECK(r.x >= -12.01f && r.y >= -12.01f && r.x + r.width <= 12.01f && r.y + r.height <= 12.01f);
         CHECK(std::max(r.width, r.height) > 20);            // each mark fills its box
     }
+    for (const std::string& language : icons::languages()) {
+        const vg::Path& g = icons::glyph(language);
+        const Rectangle r = g.bounds();
+        CHECK(!g.empty());
+        CHECK(r.x >= -12.01f && r.y >= -12.01f && r.x + r.width <= 12.01f && r.y + r.height <= 12.01f);
+        CHECK(std::max(r.width, r.height) > 19);
+    }
     CHECK(icons::title("youtube") == "YouTube" && icons::title("github") == "GitHub");
     CHECK(icons::title("twitch") == "Twitch");
+    CHECK(icons::title("steam") == "Steam");
+    CHECK(icons::title("itchdotio") == "Itch.io");
+    CHECK(icons::title("xbox") == "Xbox");
+    CHECK(icons::title("playstation") == "PlayStation");
+    CHECK(icons::title("nintendoswitch") == "Nintendo Switch");
+    CHECK(icons::title("shopee") == "Shopee");
+    CHECK(icons::title("tokopedia") == "Tokopedia");
+    CHECK(icons::title("amazon") == "Amazon");
+    CHECK(icons::title("ebay") == "eBay");
+    CHECK(icons::title("vinted") == "Vinted");
     const Color red = icons::brandColor("youtube");
     CHECK(red.r == 255 && red.g == 0 && red.b == 0);
     CHECK(throws([] { icons::glyph("myspace"); }));
@@ -41,8 +59,13 @@ static void prefabs() {
     const auto names = prefab::names();
     auto has = [&](const std::string& n) { return std::find(names.begin(), names.end(), n) != names.end(); };
     for (const std::string& b : icons::brands()) CHECK(has("social-" + b));
+    for (const std::string& language : icons::languages()) CHECK(has("language-" + language));
     CHECK(has("social-row") && has("raymotion-logo"));
     CHECK(has("social-twitch"));
+    CHECK(has("social-steam") && has("social-itchdotio") && has("social-xbox"));
+    CHECK(has("social-playstation") && has("social-nintendoswitch"));
+    CHECK(has("social-shopee") && has("social-tokopedia") && has("social-amazon"));
+    CHECK(has("social-ebay") && has("social-vinted"));
     flags::registerPrefabs();
     CHECK(flags::countries().size() == 29);
     const auto flagNames = prefab::names();
@@ -119,6 +142,27 @@ static void drawing() {
     CHECK(near(twitch.at(120,120), icons::brandColor("twitch")));
     CHECK(twitch.count([](Color c) { return near(c, WHITE, 25); }) > 1000);
     UnloadImage(twitch.img);
+
+    // Each new platform prefab renders its brand badge and a visible white glyph.
+    for (const std::string& brand : { "steam", "itchdotio", "xbox", "playstation", "nintendoswitch" }) {
+        Frame f = renderPrefab("social-" + brand, Json::parse(R"({"size": 200, "in": "none"})"), 1);
+        CHECK(near(f.at(120, 120), icons::brandColor(brand)));
+        CHECK(f.count([](Color c) { return near(c, WHITE, 25); }) > 100);
+        UnloadImage(f.img);
+    }
+    for (const std::string& brand : { "shopee", "tokopedia", "amazon", "ebay", "vinted" }) {
+        Frame f = renderPrefab("social-" + brand, Json::parse(R"({"size": 200, "in": "none"})"), 1);
+        CHECK(near(f.at(120,120), icons::brandColor(brand)));
+        CHECK(f.count([](Color c) { return near(c, WHITE, 25); }) > 100);
+        UnloadImage(f.img);
+    }
+    for (const std::string& language : icons::languages()) {
+        Frame f = renderPrefab("language-" + language, Json::parse(R"({"size": 200, "in": "none"})"), 1);
+        CHECK(near(f.at(120, 120), icons::brandColor(language)));
+        const Color ink = language == "javascript" || language == "c" ? mkColor(0x18202b) : WHITE;
+        CHECK(f.count([ink](Color c) { return near(c, ink, 25); }) > 100);
+        UnloadImage(f.img);
+    }
 
     Frame japan = render([](const Ctx& cx, int) { flags::draw(cx, "jp", {200,200}, 200, false); });
     CHECK(near(japan.at(200,200), mkColor(0xbc002d)));
