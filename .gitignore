@@ -13,3 +13,16 @@ third_party/msvc-sdk-libs/
 third_party/vs-libs/
 # Editor/agent session state
 .zcode/
+# Local render scratch: probe stills at the root, draft renders, working notes
+/*.png
+output/
+project/
+tmp/
+__pycache__/
+.hermes/
+# Intermediate voice-over takes (only malaria-sentences-norm is used)
+assets/vo/malaria/
+assets/vo/malaria-clap/
+assets/vo/malaria-clap-norm/
+assets/vo/malaria-norm/
+assets/vo/malaria-sentences/
