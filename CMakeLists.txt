@@ -138,6 +138,7 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/asp.cpp
     examples/showcase/asp_v2.cpp
     examples/showcase/one_walk.cpp
+    examples/showcase/trackway.cpp
     examples/showcase/tokens.cpp
     examples/showcase/own_compute.cpp
     examples/showcase/own_compute_v2.cpp
