@@ -1,0 +1,9 @@
+// Only the composition translation unit is recompiled when it changes.
+#include "rmtn/cli.hpp"
+// Allows the same file to include a standalone main; the runner supplies its own.
+#define main rmtn_cpp_original_main
+#include "@RMTN_SOURCE@"
+#undef main
+int main(int argc, const char** argv) {
+    return rmtn::runCli(argc, argv, @RMTN_ENTRY@);
+}
