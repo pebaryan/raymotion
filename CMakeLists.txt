@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(RAYMOTION_BUILD_EXAMPLES "Build the showcase and starter projects" ${PROJECT_IS_TOP_LEVEL})
+option(RAYMOTION_SCRIPTING "Enable embedded C++-like AngelScript compositions" ON)
 set(RAYMOTION_RAYLIB "auto" CACHE STRING "raylib source: auto, vendored (prebuilt MSVC lib), fetch (build 6.2 from source) or system (find_package)")
 set_property(CACHE RAYMOTION_RAYLIB PROPERTY STRINGS auto vendored fetch system)
 
@@ -55,6 +56,7 @@ endif()
 
 # ---------------------------------------------------------------- engine library
 add_library(rmtn_engine STATIC
+  src/engine/script.cpp
   src/engine/cli.cpp
   src/engine/frame_stream.cpp
   src/engine/fonts.cpp
@@ -106,6 +108,30 @@ target_include_directories(rmtn_engine PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/thir
 target_link_libraries(rmtn_engine PUBLIC raylib)
 # Development fallback for bundled fonts; installed apps ship assets/ beside the executable.
 target_compile_definitions(rmtn_engine PRIVATE RMTN_BUNDLED_ASSETS="${CMAKE_CURRENT_SOURCE_DIR}/assets")
+
+# Runtime scripting uses the same renderer and a language-neutral backend contract.
+if(RAYMOTION_SCRIPTING)
+  include(FetchContent)
+  FetchContent_Declare(angelscript
+    URL https://www.angelcode.com/angelscript/sdk/files/angelscript_2.38.0.zip
+    URL_HASH SHA256=b33b5dbcda10317ef67d628353d83246984ce6fcac102d4dc2aed121eba52e6f
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    SOURCE_SUBDIR angelscript/projects/cmake)
+  FetchContent_MakeAvailable(angelscript)
+  target_sources(rmtn_engine PRIVATE src/engine/script_angelscript.cpp
+    "${angelscript_SOURCE_DIR}/add_on/scriptstdstring/scriptstdstring.cpp"
+    "${angelscript_SOURCE_DIR}/add_on/scriptmath/scriptmath.cpp")
+  target_include_directories(rmtn_engine PRIVATE
+    "${angelscript_SOURCE_DIR}/add_on/scriptstdstring"
+    "${angelscript_SOURCE_DIR}/add_on/scriptmath")
+  target_compile_definitions(rmtn_engine PRIVATE RMTN_ANGELSCRIPT=1)
+  target_link_libraries(rmtn_engine PRIVATE angelscript)
+endif()
+
+# Small runtime host: no showcase compositions need to be compiled to run scripts.
+add_executable(raymotion_script src/script_main.cpp)
+target_link_libraries(raymotion_script PRIVATE rmtn_engine)
+include(cmake/NativeCpp.cmake)
 
 # ---------------------------------------------------------------- example projects
 if(RAYMOTION_BUILD_EXAMPLES)
@@ -182,6 +208,37 @@ endif()
 # ---------------------------------------------------------------- tests
 if(PROJECT_IS_TOP_LEVEL)
   include(CTest)
+endif()
+if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING)
+  add_executable(raymotion_script_tests tests/script_tests.cpp)
+  target_link_libraries(raymotion_script_tests PRIVATE rmtn_engine)
+  add_test(NAME script_backend_contract COMMAND raymotion_script_tests)
+  add_executable(raymotion_cpp_reference examples/starter/main.cpp)
+  target_link_libraries(raymotion_cpp_reference PRIVATE rmtn_engine)
+  find_package(Python3 COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME native_cpp_runtime COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cpp_runtime.py" "$<TARGET_FILE:raymotion_script>"
+      "$<TARGET_FILE:raymotion_cpp_reference>" "${RMTN_CPP_SDK_DIRECTORY}"
+      "$<TARGET_LINKER_FILE:rmtn_engine>")
+    add_test(NAME native_cpp_rendering COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cpp_runtime.py" "$<TARGET_FILE:raymotion_script>"
+      "$<TARGET_FILE:raymotion_cpp_reference>" "${RMTN_CPP_SDK_DIRECTORY}"
+      "$<TARGET_LINKER_FILE:rmtn_engine>" --gl)
+    set_tests_properties(native_cpp_runtime native_cpp_rendering PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE)
+    set_tests_properties(native_cpp_rendering PROPERTIES LABELS gl)
+  endif()
+  if(RAYMOTION_SCRIPTING)
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+      add_test(NAME script_runtime COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_script.py" "$<TARGET_FILE:raymotion_script>")
+      add_test(NAME script_rendering COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_script.py" "$<TARGET_FILE:raymotion_script>" --gl)
+      set_tests_properties(script_runtime PROPERTIES TIMEOUT 120)
+      set_tests_properties(script_rendering PROPERTIES TIMEOUT 180 LABELS gl)
+    endif()
+  endif()
 endif()
 if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   # Pure logic: runs anywhere.

@@ -123,6 +123,28 @@ build/raymotion prefabs                        # list prefabs and their default 
 
 ## Writing a project
 
+### Runtime scripts
+
+Run the same native C++ composition code without rebuilding the application.
+The runtime command compiles and caches the scene against the prebuilt engine:
+
+```sh
+cmake --build build --config Release --target raymotion_script
+build/raymotion_script list --script examples/starter/main.cpp
+build/raymotion_script preview hello --script examples/starter/main.cpp
+build/raymotion_script render hello --script examples/starter/main.cpp
+```
+
+Native `.cpp` files use the full engine API and need the matching C++ toolchain and
+development build. `.as` files use the optional embedded AngelScript backend and a
+smaller C++-like API without a runtime compiler dependency
+(`build/raymotion_script preview hello-script --script examples/scripts/hello.as`). See
+[runtime scripting](docs/scripting.md) for both workflows and the language-neutral
+interface for future Lua, Python or ActionScript backends. Disable AngelScript with
+`-DRAYMOTION_SCRIPTING=OFF`; native C++ remains available.
+
+### Native C++ projects
+
 The engine is the `raymotion::engine` library; a project registers compositions and
 hands them to the CLI. `examples/starter/main.cpp` is a complete one:
 

@@ -1,0 +1,8 @@
+#pragma once
+namespace rmtn::cpp_info {
+constexpr const char* compiler = R"rmtn(@CMAKE_CXX_COMPILER@)rmtn";
+constexpr const char* generator = R"rmtn(@CMAKE_GENERATOR@)rmtn";
+constexpr const char* makeProgram = R"rmtn(@CMAKE_MAKE_PROGRAM@)rmtn";
+constexpr const char* platform = R"rmtn(@CMAKE_GENERATOR_PLATFORM@)rmtn";
+constexpr const char* toolset = R"rmtn(@CMAKE_GENERATOR_TOOLSET@)rmtn";
+}

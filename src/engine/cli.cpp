@@ -1,5 +1,6 @@
 // cli.cpp -- raymotion command line: list | preview | render | still
 #include "rmtn/cli.hpp"
+#include "rmtn/script.hpp"
 #include <raylib.h>
 #include <rlgl.h>
 #include <cstdio>
@@ -16,6 +17,7 @@
 #include <stdexcept>
 #include <chrono>
 #include <thread>
+#include <optional>
 #include "rmtn/timeline.hpp"
 #include "rmtn/draw.hpp"
 #include "rmtn/synth.hpp"
@@ -36,6 +38,7 @@
 #endif
 
 namespace rmtn {
+std::optional<int> runNativeCpp(int argc, const char** argv);
 namespace {
 
 const int AUDIO_RATE = 48000;
@@ -306,6 +309,9 @@ void usage() {
     puts("options: --ffmpeg PATH overrides auto-detected ffmpeg binary");
     puts("         --ss N        supersampling 1, 2 or 4 (default: the composition's)");
     puts("         --props JSON  input props merged over the defaults; @file.json reads a file");
+    puts("         --script PATH load a runtime composition (.as); repeat for multiple files");
+    puts("                       .cpp/.cc/.cxx compile a native scene against the prebuilt engine");
+    puts("         --cpp-entry FUNCTION native registration function (default registerComps)");
 }
 
 int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
@@ -345,6 +351,7 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
         else if (!strcmp(argv[i], "--png") && i+1 < argc) pngArg = argv[++i];
         else if (!strcmp(argv[i], "--ss") && i+1 < argc) ssArg = argv[++i];
         else if (!strcmp(argv[i], "--props") && i+1 < argc) propsArg = argv[++i];
+        else if (!strcmp(argv[i], "--script") && i+1 < argc) ++i; // loaded by runCli; forward to workers
         else if (!strcmp(argv[i], "--draft")) draft = true;
         else if (!strcmp(argv[i], "--mute") || !strcmp(argv[i], "--no-music")) noMusic = true;
         else if (!strcmp(argv[i], "--png-frames")) pngFrames = true;
@@ -620,7 +627,27 @@ int runCli(int argc, const char** argv, const RegisterFn& registerAll){
 #endif
     icons::registerPrefabs();   // built-in prefabs first, so a project's own may replace them
     flags::registerPrefabs();
-    try { return runMain(argc,argv,registerAll); }
+    try {
+        if (auto status = runNativeCpp(argc, argv)) return *status;
+        std::vector<std::string> scripts;
+        std::vector<const char*> args;
+        for (int i = 0; i < argc; ++i) {
+            if (!strcmp(argv[i], "--script")) {
+                if (i + 1 >= argc || !strncmp(argv[i + 1], "--", 2))
+                    throw std::runtime_error("--script requires a file path");
+                scripts.emplace_back(argv[++i]);
+            } else args.push_back(argv[i]);
+        }
+        // Retain script arguments for --jobs worker processes after option normalization.
+        // runMain accepts them as ordinary options and forwards them to children.
+        for (const auto& path : scripts) { args.push_back("--script"); args.push_back(path.c_str()); }
+        const int count = (int)args.size();
+        args.push_back(nullptr);
+        return runMain(count, args.data(), [registerAll, scripts](Registry& registry) {
+            registerAll(registry);
+            for (const auto& path : scripts) script::registerFile(registry, path);
+        });
+    }
     catch (const std::exception& error){
         fprintf(stderr,"raymotion: %s\n",error.what());
         return 2;

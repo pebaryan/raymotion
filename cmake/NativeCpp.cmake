@@ -1,0 +1,30 @@
+# Build-tree SDK for compiling compositions against the already-built engine.
+set(_rmtn_exports rmtn_engine)
+foreach(_dep raylib glfw angelscript)
+  if(TARGET ${_dep})
+    get_target_property(_imported ${_dep} IMPORTED)
+    if(NOT _imported)
+      list(APPEND _rmtn_exports ${_dep})
+    endif()
+  endif()
+endforeach()
+export(TARGETS ${_rmtn_exports} FILE "${CMAKE_CURRENT_BINARY_DIR}/cpp-sdk/Targets.cmake")
+get_target_property(_raylib_imported raylib IMPORTED)
+set(RMTN_CPP_RAYLIB_SETUP "")
+if(_raylib_imported)
+  set(RMTN_CPP_RAYLIB_SETUP "add_library(raylib UNKNOWN IMPORTED)\nset_target_properties(raylib PROPERTIES IMPORTED_LOCATION [==[$<TARGET_FILE:raylib>]==] INTERFACE_INCLUDE_DIRECTORIES [==[$<TARGET_PROPERTY:raylib,INTERFACE_INCLUDE_DIRECTORIES>]==] INTERFACE_LINK_LIBRARIES [==[$<TARGET_PROPERTY:raylib,INTERFACE_LINK_LIBRARIES>]==])")
+endif()
+get_property(RMTN_CPP_COMPILE_OPTIONS DIRECTORY PROPERTY COMPILE_OPTIONS)
+get_property(RMTN_CPP_LINK_OPTIONS DIRECTORY PROPERTY LINK_OPTIONS)
+configure_file("${CMAKE_CURRENT_LIST_DIR}/CppSdk.cmake.in" "${CMAKE_CURRENT_BINARY_DIR}/cpp-sdk/Sdk.in" @ONLY)
+set(RMTN_CPP_SDK_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/cpp-sdk/$<IF:$<BOOL:$<CONFIG>>,$<CONFIG>,Default>")
+file(GENERATE OUTPUT "${RMTN_CPP_SDK_DIRECTORY}/Sdk.cmake"
+  INPUT "${CMAKE_CURRENT_BINARY_DIR}/cpp-sdk/Sdk.in")
+target_sources(rmtn_engine PRIVATE src/engine/cpp_runner.cpp)
+configure_file("${CMAKE_CURRENT_LIST_DIR}/CppInfo.hpp.in" "${CMAKE_CURRENT_BINARY_DIR}/cpp-sdk/CppInfo.hpp" @ONLY)
+target_include_directories(rmtn_engine PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/cpp-sdk")
+target_compile_definitions(rmtn_engine PRIVATE
+  RMTN_CPP_SDK="${RMTN_CPP_SDK_DIRECTORY}/Sdk.cmake"
+  RMTN_CMAKE="${CMAKE_COMMAND}"
+  RMTN_CPP_DRIVER="${CMAKE_CURRENT_SOURCE_DIR}/cmake/RunCpp.cmake")
+target_compile_definitions(rmtn_engine PRIVATE RMTN_CPP_CONFIG="$<CONFIG>")
