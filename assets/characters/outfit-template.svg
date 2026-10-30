@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- rig::Outfit texture layout. Draw over this and load it with rig::Outfit::svg().
+       Each strip wraps one part: across is round the body (front in the middle quarter,
+       the back split at the strip's edges), down is from the part's top to its bottom.
+       Torso 0..320, hips 320..448; arms and legs 448..1024 (shoulder/hip at the top). -->
+  <rect id="torso" x="0" y="0" width="1024" height="320" fill="#d9dee8"/>
+  <rect id="torso-front" x="384" y="0" width="256" height="320" fill="#b9c7e0"/>
+  <rect id="hips" x="0" y="320" width="1024" height="128" fill="#c8ccd6"/>
+  <rect id="hips-front" x="384" y="320" width="256" height="128" fill="#a9b5cc"/>
+  <rect id="arm-L" x="0" y="448" width="256" height="576" fill="#e4e0d4"/>
+  <rect id="arm-R" x="256" y="448" width="256" height="576" fill="#d8d3c4"/>
+  <rect id="leg-L" x="512" y="448" width="256" height="576" fill="#d4dccc"/>
+  <rect id="leg-R" x="768" y="448" width="256" height="576" fill="#c6d0bc"/>
+  <!-- front centre lines of the limbs -->
+  <path id="guides" d="M512 0 V448 M128 448 V1024 M384 448 V1024 M640 448 V1024 M896 448 V1024
+                       M0 760 H1024" stroke="#7f8796" stroke-width="2" stroke-dasharray="10 8" fill="none"/>
+  <path id="seams" d="M0 320 H1024 M0 448 H1024 M256 448 V1024 M512 448 V1024 M768 448 V1024"
+        stroke="#3a4150" stroke-width="3" fill="none"/>
+</svg>

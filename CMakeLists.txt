@@ -78,6 +78,11 @@ add_library(rmtn_engine STATIC
   src/engine/computer3d.cpp
   src/engine/aircraft3d.cpp
   src/engine/human3d.cpp
+  src/engine/rig.cpp
+  src/engine/rig_face.cpp
+  src/engine/rig_parts.cpp
+  src/engine/rig3d.cpp
+  src/engine/rig2d.cpp
   src/engine/particles.cpp
   src/engine/paths.cpp
   src/engine/math_font.cpp
@@ -127,6 +132,7 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/prefabs.cpp
     examples/showcase/asp.cpp
     examples/showcase/asp_v2.cpp
+    examples/showcase/one_walk.cpp
     examples/showcase/tokens.cpp
     examples/showcase/own_compute.cpp
     examples/showcase/own_compute_v2.cpp
@@ -282,6 +288,10 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   add_executable(raymotion_human3d_tests tests/human3d_tests.cpp)
   target_link_libraries(raymotion_human3d_tests PRIVATE rmtn_engine)
   add_test(NAME human3d COMMAND raymotion_human3d_tests)
+
+  add_executable(raymotion_rig_tests tests/rig_tests.cpp)
+  target_link_libraries(raymotion_rig_tests PRIVATE rmtn_engine)
+  add_test(NAME rig COMMAND raymotion_rig_tests)
 
   add_executable(raymotion_diagram_render_tests tests/diagram_render_tests.cpp)
   target_link_libraries(raymotion_diagram_render_tests PRIVATE rmtn_engine)

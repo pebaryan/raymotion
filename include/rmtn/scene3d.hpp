@@ -60,9 +60,18 @@ using GeometryPtr = std::shared_ptr<Geometry>;
 // `make(t)` returns a new image for frame t (the texture takes it over); it is called again
 // every `every` frames, the frames between reusing the last. Keep the size the same from
 // call to call: the GPU texture is then updated in place.
+//
+// Or drawn on the GPU like a small canvas: `draw(c, t)` paints with dr::/vg:: into a
+// transparent width x height texture (c maps texture px; supersampled `supersample`
+// times), so vector faces, logos and labels stay sharp on a mesh. `draw` wins over `make`.
+//     auto face = std::make_shared<g3d::DynamicTexture>();
+//     face->width = face->height = 512;
+//     face->draw = [](const Ctx& c, int t) { vg::fill(c, vg::Path::circle({ 256, 256 }, 200), RED); };
 struct DynamicTexture {
     std::function<Image(int t)> make;
     int every = 1;
+    std::function<void(const Ctx& c, int t)> draw;
+    int width = 512, height = 512, supersample = 2;
 };
 using DynamicTexturePtr = std::shared_ptr<DynamicTexture>;
 

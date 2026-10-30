@@ -26,6 +26,7 @@
 #include "rmtn/media.hpp"
 #include "rmtn/prefab.hpp"
 #include "rmtn/flags.hpp"
+#include "rmtn/rig.hpp"
 
 #ifdef _WIN32
 #define popen _popen
@@ -620,6 +621,7 @@ int runCli(int argc, const char** argv, const RegisterFn& registerAll){
 #endif
     icons::registerPrefabs();   // built-in prefabs first, so a project's own may replace them
     flags::registerPrefabs();
+    rig::registerPrefabs();
     try { return runMain(argc,argv,registerAll); }
     catch (const std::exception& error){
         fprintf(stderr,"raymotion: %s\n",error.what());

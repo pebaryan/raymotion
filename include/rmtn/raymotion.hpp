@@ -21,6 +21,7 @@
 #include "computer3d.hpp"
 #include "aircraft3d.hpp"
 #include "human3d.hpp"
+#include "rig.hpp"
 #include "particles.hpp"
 #include "paths.hpp"
 #include "math.hpp"

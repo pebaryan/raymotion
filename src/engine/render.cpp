@@ -278,6 +278,57 @@ bool drawOffscreen(float alpha, const std::function<void(const RenderTexture&, f
 }
 
 namespace {
+// Straight alpha from the premultiplied colour a transparent target accumulates.
+const char* UNPREMULTIPLY_FS = "#version 330\n"
+"in vec2 fragTexCoord; in vec4 fragColor;\n"
+"uniform sampler2D texture0;\n"
+"out vec4 finalColor;\n"
+"void main(){\n"
+"    vec4 c = texture(texture0, fragTexCoord);\n"
+"    finalColor = c.a > 0.0 ? vec4(c.rgb / c.a, c.a) : vec4(0.0);\n"
+"}\n";
+Shader unpremultiplyShader{};
+} // namespace
+
+void drawToTexture(const RenderTexture& dst, float scale, const std::function<void()>& body) {
+    if (!dst.id) return;
+    if (!unpremultiplyShader.id) {
+        unpremultiplyShader = LoadShaderFromMemory(nullptr, UNPREMULTIPLY_FS);
+        onGraphicsShutdown([] { UnloadShader(unpremultiplyShader); unpremultiplyShader = Shader{}; });
+    }
+    const bool nested = !targets.empty();
+    rlDrawRenderBatchActive();
+    const int w = dst.texture.width, h = dst.texture.height;
+    RenderTexture content = acquire(w, h);
+    targets.push_back({ content, scale });
+    bindTarget(targets.back());
+    ClearBackground(BLANK);
+    body();
+    rlDrawRenderBatchActive();
+    targets.pop_back();
+    // Copy into dst unflipped (so its rows run top-down like an image's) and unpremultiplied.
+    BeginTextureMode(dst);
+    rlDisableBackfaceCulling();
+    ClearBackground(BLANK);
+    rlSetBlendFactors(RL_ONE, RL_ZERO, RL_FUNC_ADD);
+    BeginBlendMode(BLEND_CUSTOM);
+    BeginShaderMode(unpremultiplyShader);
+    DrawTexturePro(content.texture, { 0, 0, (float)w, (float)h }, { 0, 0, (float)w, (float)h }, { 0, 0 }, 0, WHITE);
+    EndShaderMode();
+    EndBlendMode();
+    rlDrawRenderBatchActive();
+    release(content);
+    if (nested) bindTarget(targets.back());
+    else {
+        EndTextureMode();
+        rlEnableBackfaceCulling();
+    }
+    Texture2D tex = dst.texture;
+    GenTextureMipmaps(&tex);
+    SetTextureFilter(tex, TEXTURE_FILTER_TRILINEAR);
+}
+
+namespace {
 // ---- winding fills (vector paths)
 // The coverage pass adds +1 (or -1) per triangle to the red channel of a target cleared to
 // 128, so each pixel ends up holding 128 + its winding number; the shader then keeps the

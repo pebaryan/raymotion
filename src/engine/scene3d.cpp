@@ -583,7 +583,7 @@ struct Gpu {
     Mesh skyCube{};
     std::map<std::string, Texture2D> textures;
     std::map<const Scene*, Texture2D> generated;    // environmentGenerator results
-    struct Dynamic { DynamicTexturePtr keep; Texture2D tex{}; long long made = LLONG_MIN; };
+    struct Dynamic { DynamicTexturePtr keep; Texture2D tex{}; RenderTexture canvas{}; long long made = LLONG_MIN; };
     std::map<const DynamicTexture*, Dynamic> dynamic;   // Material::dynamicMap textures
     int frame = 0;                                      // the frame being drawn (for dynamic maps)
 };
@@ -615,7 +615,10 @@ void releaseGpu() {
     if (gpu.skyCube.vertexCount) UnloadMesh(gpu.skyCube);
     for (auto& [path, tex] : gpu.textures) UnloadTexture(tex);
     for (auto& [scene, tex] : gpu.generated) UnloadTexture(tex);
-    for (auto& [src, d] : gpu.dynamic) if (d.tex.id) UnloadTexture(d.tex);
+    for (auto& [src, d] : gpu.dynamic) {
+        if (d.canvas.id) UnloadRenderTexture(d.canvas);
+        else if (d.tex.id) UnloadTexture(d.tex);
+    }
     gpu = Gpu{};
 }
 
@@ -742,6 +745,7 @@ Texture2D dynamicTexture(const DynamicTexturePtr& src) {
     Gpu::Dynamic& d = gpu.dynamic[src.get()];
     d.keep = src;                                   // the address stays this source's
     const long long turn = (long long)std::floor((double)gpu.frame / std::max(1, src->every));
+    if (src->draw) return d.tex.id ? d.tex : whiteTexture();    // drawn by drawCanvases before the pass
     if (d.made == turn && d.tex.id) return d.tex;
     d.made = turn;
     if (!src->make) return d.tex.id ? d.tex : whiteTexture();
@@ -758,6 +762,37 @@ Texture2D dynamicTexture(const DynamicTexturePtr& src) {
     }
     UnloadImage(img);
     return d.tex.id ? d.tex : whiteTexture();
+}
+
+// Draws the canvas-style dynamic maps (DynamicTexture::draw) of the visible objects for
+// frame t. Runs before the scene's own passes, while the 2D canvas target is still bound.
+void drawCanvas(const DynamicTexturePtr& src, int t) {
+    Gpu::Dynamic& d = gpu.dynamic[src.get()];
+    d.keep = src;
+    const long long turn = (long long)std::floor((double)t / std::max(1, src->every));
+    const int ss = std::clamp(src->supersample, 1, 4);
+    const int w = std::max(1, src->width) * ss, h = std::max(1, src->height) * ss;
+    if (d.canvas.id && (d.canvas.texture.width != w || d.canvas.texture.height != h)) {
+        UnloadRenderTexture(d.canvas);
+        d.canvas = RenderTexture{};
+    }
+    if (d.made == turn && d.canvas.id) return;
+    d.made = turn;
+    if (!d.canvas.id) {
+        d.canvas = LoadRenderTexture(w, h);
+        SetTextureWrap(d.canvas.texture, TEXTURE_WRAP_CLAMP);
+    }
+    drawToTexture(d.canvas, (float)ss, [&] { src->draw(Ctx{ { 0, 0 }, 1, 0, 1 }, t); });
+    d.tex = d.canvas.texture;
+    d.tex.mipmaps = 1 + (int)std::floor(std::log2((float)std::max(w, h)));
+}
+
+void drawCanvases(std::vector<std::unique_ptr<Object3D>>& list, int t) {
+    for (auto& o : list) {
+        if (!o->visible) continue;
+        if (o->material.dynamicMap && o->material.dynamicMap->draw) drawCanvas(o->material.dynamicMap, t);
+        drawCanvases(o->children, t);
+    }
 }
 
 Texture2D mapOf(const g3d::Material& m) {
@@ -2004,10 +2039,15 @@ bool project(const Camera& cam, Vector3 p, Rectangle vp, Vector2& out) {
 
 void render(Scene& s, int t, const Ctx& c, Rectangle viewport, Camera* camera) {
     Camera& cam = camera ? *camera : s.camera;
+    // Draw what 2D work the caller has batched first: creating canvas render textures or
+    // uploading meshes below rebinds the framebuffer, and a later flush would send the
+    // pending vertices to the wrong one.
+    rlDrawRenderBatchActive();
     if (s.up) s.up(t, s);
     if (cam.up) cam.up(t, cam);
     for (Light& l : s.lights) if (l.up) l.up(t, l);
     animate(s.objects, t);
+    if (canvasSize().x > 0) drawCanvases(s.objects, t);
     drawOffscreen(c.a, [&](const RenderTexture& target, float scale) {
         Rectangle vp = viewport;
         if (vp.width <= 0 || vp.height <= 0) vp = { 0, 0, target.texture.width / scale, target.texture.height / scale };

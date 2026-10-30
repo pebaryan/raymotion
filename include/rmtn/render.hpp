@@ -43,6 +43,13 @@ void unpremultiply(unsigned char* rgba, size_t pixels);
 // false without calling `body` when no canvas target is active (outside presentFrame).
 bool drawOffscreen(float alpha, const std::function<void(const RenderTexture& target, float scale)>& body);
 
+// Renders `body` into `dst` as if it were the canvas: `body` draws with dr::/vg:: in units
+// of `dst`'s size divided by `scale` (pass scale 2 with a target twice the size to
+// supersample). `dst` ends up holding straight alpha in image orientation (row 0 at the
+// top, as LoadTextureFromImage would give), mipmapped, so it can texture a mesh like any
+// image. Works inside and outside presentFrame (it needs a GL context).
+void drawToTexture(const RenderTexture& dst, float scale, const std::function<void()>& body);
+
 // Fills by winding number (vector paths): every triangle of `add` counts +1 and every one
 // of `subtract` -1 at the pixels it covers (3 points per triangle, composition coordinates).
 // Pixels whose count is odd (`evenOdd`) or non-zero get `color`, drawn over the current

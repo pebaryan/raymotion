@@ -310,6 +310,54 @@ art->add(0, 300)->fn = g3d::draw(scene);      // 2D drawn in `art` gets the wash
 `npr-styles` shows one still life in eight styles (Standard, Toon, Toon + ink, Gooch,
 Hatching, Watercolour, Comic halftone, Poster) and then six of them side by side.
 
+### Characters
+
+Configurable characters, brick-figure to cartoon, share one skeleton (`rmtn/rig.hpp`).
+Motion lives in the skeleton. Body parts, outfit and face are a `Look` it wears, and
+the same `Character` draws as 3D meshes or as a flat 2D cut-out.
+
+```cpp
+rig::Look look = rig::Look::toon();            // or block(), avatar(), robot()
+look.hair = "hair.bun";                        // parts by key: rig::parts::names()
+look.arms("arm.hose").hands("hand.glove");     // soft, rigid, hose, block, robot...
+look.outfit = rig::Outfit::svg("characters/outfit-sailor.svg");
+look.face = rig::svgFace("characters/face-pip.svg");
+
+auto pip = std::make_shared<rig::Character>(look);
+pip->motion.play(rig::clips::walk(), 0).play(rig::clips::wave(rig::Side::Left), 3, 0.4);
+pip->face.say(1.0, 2.6, "Hi! I'm Pip.").expression(3, "happy", 0.2);
+rig::Look brick = rig::Look::block();
+pip->wear(5.0, brick);                         // swap parts mid-motion, with a pop
+
+rig::add(*scene, pip);                         // 3D: joints, meshes, outfit/face textures
+rig::View2D v; v.yaw = 30; v.origin = {960, 900};
+addRoot(c.roots, 0, 300)->fn = [pip, v](const Ctx& c, int t) { rig::draw(c, *pip, t / 30.0, v); };   // 2D
+```
+
+* **Skeleton and motion**: 16 joints. `Build` sets the proportions (`adult`, `toon`,
+  `block`, `chibi`, `mix`). Clips are pure functions of time: `idle`, `walk`, `run`,
+  `wave`, `point`, `cheer`, `jump`, `sit`, `shrug`, `keys`. `Motion` crossfades them and
+  layers them under masks (`Mask::Upper`, `Lower`, `ArmL`, `Arms`, `Head`...).
+* **Parts**: procedural superellipsoids, cones and tubes, or a glTF model per part
+  (`parts::model`). Register your own with `parts::add`. A part's `locks` pin joints, so a
+  brick figure's elbows and knees stay rigid on the shared clips. Limbs have a
+  `softness` from 0 (straight segments) to 1 (one smooth bend, a rubber hose), which
+  `Character::softness` can animate.
+* **Outfits**: one texture atlas with a strip per torso, hips, arm and leg
+  (`assets/characters/outfit-template.svg` shows the layout). `Outfit::basic` takes colours,
+  `Outfit::svg` takes a drawing on the template, and `over` layers one outfit over another.
+* **Faces**: `simpleFace` is procedural (eyes, brows, mouth). `svgFace` takes an SVG of
+  shapes named by id: `eye-L/R`, `pupil-L/R`, `brow-L/R`, `mouth`, with `-<expression>`
+  variants, `-closed` eyes for blinks and `mouth-A`..`mouth-H` for speech (Preston Blair
+  shapes, as used by Rhubarb Lip Sync). Shapes morph between states. `FaceTrack` plays
+  expressions, gaze, seeded auto-blinks and speech, either from text (an approximate
+  letters-to-shapes guess) or from Rhubarb cues.
+* **Prefab**: `character` (mode `2d`/`3d`, preset, part keys, colours, clip, expression,
+  `say`).
+
+`one-walk-any-body` is a 44 s promo for the module. `raymotion_rig_tests --preview <dir>`
+writes preview sheets of the presets, limbs, hands and feet, swaps, faces and 2D views.
+
 ### Diagrams and structures
 
 Existing diagrams and structures load from their own file formats, lay themselves out
