@@ -82,6 +82,10 @@ add_library(rmtn_engine STATIC
   src/engine/rig_face.cpp
   src/engine/rig_parts.cpp
   src/engine/rig_act.cpp
+  src/engine/rig_creature.cpp
+  src/engine/rig_ape.cpp
+  src/engine/rig_bird.cpp
+  src/engine/rig_chain.cpp
   src/engine/rig3d.cpp
   src/engine/rig2d.cpp
   src/engine/particles.cpp

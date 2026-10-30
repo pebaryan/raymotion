@@ -352,6 +352,40 @@ addRoot(c.roots, 0, 300)->fn = [pip, v](const Ctx& c, int t) { rig::draw(c, *pip
   shapes, as used by Rhubarb Lip Sync). Shapes morph between states. `FaceTrack` plays
   expressions, gaze, seeded auto-blinks and speech, either from text (an approximate
   letters-to-shapes guess) or from Rhubarb cues.
+* **Animals**: `rig::animal("dog" | "cat" | "horse" | "cow" | "giraffe" | "turtle")` builds a
+  four-legged character on its own body plan (`rig::quadruped(QuadSpec)`: a barrel, a
+  two-joint neck, a three-joint tail and four legs). `clips::stand` and
+  `clips::gait(build, Gait::Walk | Trot | Canter | Gallop)` plant the paws with IK while
+  they are down; move the animal by `gaitSpeed` and they hold still; `clips::paddle`
+  swims them (a turtle's flippers, a dog paddling). Animals render in 3D
+  and 2D like any character. Any body plan is a `Skeleton` of named joints on
+  `Build::plan`, and `rig::limb` is the two-bone IK for its legs. Apes (`"chimp"`,
+  `"gorilla"`, `"orangutan"`) are humanoid builds with long arms and short legs: they play
+  every humanoid clip, plus `clips::knuckleWalk` (what `gait` gives them), `clips::hang`
+  from a bar and `clips::brachiate`, swinging hand over hand along bars. Birds and
+  dinosaurs (`"chicken"`, `"duck"`, `"trex"`) stand on two legs (`rig::biped(BipedSpec)`):
+  `gait` walks them (a hen bobs its head, a duck waddles) or runs them, and `rig::wings`
+  folds and spreads a bird's wings. Snakes and fish (`"snake"`, `"fish"`) are a chain of
+  joints (`rig::chain(ChainSpec)`): a snake slithers along a path that stays put on the
+  ground, a fish swims with a wave that grows towards its tail. `clips::fly` and
+  `clips::glide` put a bird in the air.
+* **One character carrying another**: `Character::mount(Mount)` puts a character's root on
+  another's joint for a span of time (easing in and out, hand-offs blending), and `grips`
+  reach its hands and plant its feet on points of the carrier. `rig::saddle(horse)` plus
+  `clips::ride` seats a rider (hips on the back, feet in the stirrups, hands on the reins);
+  the same mount carries a chimp piggyback or a pilot on a titan's palm. Both characters
+  stand on the same node (or share a `View2D`).
+
+  ```cpp
+  rider->motion.play(rig::clips::ride(riderBuild), 0);
+  rider->mount(rig::saddle(horse));          // both added at the same position and turn
+  ```
+
+  ```cpp
+  auto horse = std::make_shared<rig::Character>(rig::animal("horse"));
+  const rig::Build& hb = horse->looks()[0].build;
+  horse->motion.play(rig::clips::stand(hb), 0).play(rig::clips::gait(hb, rig::Gait::Canter), 2);
+  ```
 * **Acting with props and furniture**: two-bone IK (`reach`, `plant`) and `hand`, which
   places a palm, points the fingers and turns the palm. Held props and rides are parts:
   `holdL`/`holdR` (`prop.phone`, `prop.tablet`, `prop.sign`, `prop.shield`, `prop.baton`)
@@ -379,7 +413,10 @@ addRoot(c.roots, 0, 300)->fn = [pip, v](const Ctx& c, int t) { rig::draw(c, *pip
 `one-walk-any-body` is a 56 s promo for the module. `raymotion_rig_tests --preview <dir>`
 writes preview sheets of the presets, limbs, hands and feet, swaps, faces and 2D views,
 plus the props: an office (`3d-office.png`), a street (`3d-street.png`) and 2D
-(`2d-acting.png`).
+(`2d-acting.png`), and the animals (`3d-animals.png`, `2d-animals.png`, and the horse's
+four gaits in `2d-gaits.png`), the apes (`3d-apes.png`, `2d-apes.png`) and the birds (`3d-birds.png`, `3d-trex.png`,
+`2d-birds.png`), the snakes, fish and turtles (`3d-chains.png`, `2d-chains.png`), and carrying
+(`riding.png`, `carried.png`).
 
 ### Diagrams and structures
 

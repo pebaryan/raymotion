@@ -517,6 +517,10 @@ void ensureBuiltins() {
     if (done) return;
     done = true;
     heads(); hair(); torsos(); arms(); hands(); legs(); props();
+    detail::creatureParts(registry());
+    detail::apeParts(registry());
+    detail::birdParts(registry());
+    detail::chainParts(registry());
 }
 } // namespace
 

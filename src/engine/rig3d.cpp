@@ -86,7 +86,7 @@ MeshData superMesh(const Prim& p) {
 // A limb tube for the given joint frames: positions and normals (and, once, uvs/indices).
 // Rings run from joint a to c with hemispherical caps; round each ring the front (the
 // first joint's +z) is at u = 0.5.
-void tubeMesh(const std::array<Matrix, kJoints>& f, const Prim& p, float pop, MeshData& d, bool topology) {
+void tubeMesh(const Frames& f, const Prim& p, float pop, MeshData& d, bool topology) {
     const std::vector<Vector3> pts = tubeCurve(f, p, kTubeBody);
     const int n = (int)pts.size();
     std::vector<Vector3> T(n), N(n), Bn(n);
@@ -177,7 +177,7 @@ g3d::Material materialFor(const Look& l, const Prim& p) {
 struct Built {
     struct Part { g3d::Object3D* obj; int look; std::string slot; Vector3 base; };
     struct Tube { g3d::Object3D* obj; g3d::GeometryPtr geo; Prim prim; int look; std::string slot; };
-    std::array<g3d::Object3D*, kJoints> joints{};
+    std::array<g3d::Object3D*, kMaxJoints> joints{};
     std::vector<Part> parts;
     std::vector<Tube> tubes;
 };
@@ -189,12 +189,14 @@ g3d::Object3D* add(g3d::Object3D& parentNode, CharacterPtr ch, int fps) {
     g3d::Object3D* inner = root->add();
     inner->name = "rig";
     auto built = std::make_shared<Built>();
-    for (int i = 0; i < kJoints; i++) {
+    const Build& build0 = ch->looks()[0].build;
+    for (int i = 0; i < jointCount(build0); i++) {
         const Joint j = (Joint)i;
-        // Floor hangs from the character's origin like Root, so it does not take the pose's offset.
-        g3d::Object3D* node = j == Joint::Root || j == Joint::Floor ? inner->add() : built->joints[(size_t)parent(j)]->add();
-        node->name = std::string("rig:") + name(j);
-        node->position = restOffset(ch->looks()[0].build, j);
+        // Grounded joints (Floor) hang from the character's origin like Root, so they do not
+        // take the pose's offset.
+        g3d::Object3D* node = isGrounded(build0, j) ? inner->add() : built->joints[(size_t)parent(build0, j)]->add();
+        node->name = std::string("rig:") + name(build0, j);
+        node->position = restOffset(build0, j);
         built->joints[(size_t)i] = node;
     }
 
@@ -285,12 +287,13 @@ g3d::Object3D* add(g3d::Object3D& parentNode, CharacterPtr ch, int fps) {
         const double s = (double)t / fps;
         const Pose pose = ch->poseAt(s);
         const Build& build = ch->lookAt(s).build;
-        for (int i = 0; i < kJoints; i++) {
+        for (int i = 0; i < jointCount(build); i++) {
+            if (!built->joints[(size_t)i]) continue;              // a look with a larger plan than the first
             const Joint j = (Joint)i;
             Vector3 off = restOffset(build, j);
             if (j == Joint::Root) off = Vector3Add(off, pose.offset);
             built->joints[(size_t)i]->position = off;
-            built->joints[(size_t)i]->rotation = jointRotation(pose, j);
+            built->joints[(size_t)i]->rotation = jointRotation(build, pose, j);
         }
         std::map<std::string, std::pair<int, float>> active;    // slot -> look index, pop
         auto state = [&](const std::string& slot) {
@@ -304,7 +307,7 @@ g3d::Object3D* add(g3d::Object3D& parentNode, CharacterPtr ch, int fps) {
             part.obj->scale = Vector3Scale(part.base, pop);
         }
         bool solved = false;
-        std::array<Matrix, kJoints> frames{};
+        Frames frames{};
         for (auto& tube : built->tubes) {
             const auto [k, pop] = state(tube.slot);
             tube.obj->visible = tube.look == k && pop > 0.001f;

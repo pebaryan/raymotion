@@ -202,7 +202,7 @@ void draw(const Ctx& c, const Character& ch, double s, const View2D& view) {
                     if (far) col = darker(col, 0.14f);
                     if (bands.empty() || std::memcmp(&bands.back().second, &col, sizeof(Color)) != 0) bands.push_back({ (float)i / K, col });
                 }
-                items.push_back({ depth, [pts, width, bands, ink, lw, c]() {
+                items.push_back({ depth + p.depth2d, [pts, width, bands, ink, lw, c]() {
                     const vg::Path path = vg::Path::polyline(pts);
                     if (lw > 0) vg::stroke(c, path, vg::Stroke(ink.color, width + 2 * lw));
                     for (size_t i = 0; i < bands.size(); i++) {

@@ -42,11 +42,37 @@ enum class Joint : int {
                                              //   ignores the pose's offset (boards, scooters)
     Count
 };
-constexpr int kJoints = (int)Joint::Count;
+constexpr int kJoints = (int)Joint::Count;  // the humanoid's joints
+constexpr int kMaxJoints = 48;               // room in a Pose for any body plan
 enum class Side { Left, Right };
 const char* name(Joint j);
 Joint parent(Joint j);                       // Root's parent is Root
 bool isRight(Joint j);
+
+// A body plan other than the humanoid (quadrupeds, birds, fish...): its joints by name,
+// each hanging from an earlier one. Joint 0 is the root, 1 the hips and 2 the middle of the
+// body (2D sorts by it). Its joints are addressed as Joint values by index: plan["tail-2"].
+struct JointDef {
+    std::string name;
+    int parent = 0;
+    Vector3 rest{ 0, 0, 0 };                 // offset in the parent's frame at rest
+    bool right = false;                      // a right-side joint: its pose's y and z negate
+    bool grounded = false;                   // hangs from the origin and ignores the pose's offset
+};
+struct Skeleton {
+    std::string kind;                        // "quadruped", ...
+    std::vector<JointDef> joints;            // parents before children
+    float height = 1;                        // ground to the top at rest
+    std::string variant;                     // e.g. the species: picks parts that differ
+    std::map<std::string, float> dims;       // measurements the parts and clips read (metres;
+                                             //   Build::scaled scales them)
+    std::map<std::string, float> traits;     // angles, ratios and flags (never scaled)
+    int find(const std::string& name) const; // throws std::runtime_error for unknown names
+    Joint operator[](const std::string& name) const { return (Joint)find(name); }
+    float dim(const std::string& key, float fallback = 0) const;
+    float trait(const std::string& key, float fallback = 0) const;
+};
+using SkeletonPtr = std::shared_ptr<const Skeleton>;
 
 // Proportions. Joint positions follow from these (arms hang at the sides at rest).
 struct Build {
@@ -57,6 +83,7 @@ struct Build {
     float hipWidth = 0.18f;                  // between the hip joints
     float upperArm = 0.27f, forearm = 0.25f, armRadius = 0.055f, hand = 0.09f;
     float thigh = 0.36f, shin = 0.34f, legRadius = 0.07f, foot = 0.20f, ankle = 0.07f;
+    SkeletonPtr plan;                        // another body plan (null: the humanoid above)
 
     static Build adult();                    // ~1.75 m, natural proportions
     static Build toon();                     // big head, short body (the default Look)
@@ -69,6 +96,13 @@ struct Build {
 
 // The joint's position in its parent's frame at rest.
 Vector3 restOffset(const Build& b, Joint j);
+// The skeleton a build uses: its joint count, names, parents and sides.
+int jointCount(const Build& b);
+const char* name(const Build& b, Joint j);
+Joint parent(const Build& b, Joint j);
+bool isRight(const Build& b, Joint j);
+bool isGrounded(const Build& b, Joint j);    // Root and Floor, or a plan's grounded joints
+Joint joint(const Build& b, const std::string& name);   // throws for unknown names
 
 // Joint rotations, Euler XYZ degrees in the parent frame. Right-side joints are mirrored
 // (their y and z negate), so one set of numbers poses either side the same way:
@@ -76,22 +110,25 @@ Vector3 restOffset(const Build& b, Joint j);
 //   elbows: x < 0 bends the forearm forward; knees: x > 0 bends the shin back;
 //   chest/neck/head: x > 0 leans forward, y turns towards the character's left, z tilts.
 struct Pose {
-    std::array<Vector3, kJoints> rot{};
+    std::array<Vector3, kMaxJoints> rot{};
     Vector3 offset{ 0, 0, 0 };               // root translation (bob, jump, sway)
     Vector3& operator[](Joint j) { return rot[(size_t)j]; }
     const Vector3& operator[](Joint j) const { return rot[(size_t)j]; }
     static Pose mix(const Pose& a, const Pose& b, float u);
     Pose operator+(const Pose& o) const;     // layers: rotations and offsets add
     Pose operator*(float k) const;
-    Pose mirrored() const;                   // left and right swapped
+    Pose mirrored() const;                   // left and right swapped (humanoid joints)
 };
 
 // The rotation actually applied at joint j (the right-side mirror resolved).
 Vector3 jointRotation(const Pose& p, Joint j);
+Vector3 jointRotation(const Build& b, const Pose& p, Joint j);
 // Forward kinematics: every joint's frame in character space (raymath row-vector order,
 // as g3d composes objects: local = rotate then translate, world = local * parent).
-std::array<Matrix, kJoints> solve(const Build& b, const Pose& p);
-Vector3 position(const std::array<Matrix, kJoints>& frames, Joint j);
+// Entries past jointCount(b) are unused.
+using Frames = std::array<Matrix, kMaxJoints>;
+Frames solve(const Build& b, const Pose& p);
+Vector3 position(const Frames& frames, Joint j);
 
 // ------------------------------------------------------------------ reaching (IK)
 // Two-bone IK on `side`'s arm: shoulder and elbow turned so the wrist lands on `target`
@@ -111,6 +148,11 @@ Pose hand(const Build& b, Pose p, Side side, Vector3 at, Vector3 fingers, Vector
           Vector3 pole = { 0.5f, -0.4f, -1 });
 // Where `side`'s palm centre is in a pose (character space).
 Vector3 palmAt(const Build& b, const Pose& p, Side side);
+// Two-bone IK on any limb that hangs along its joints' -y at rest (every plan's legs do):
+// `upper` and `mid` turned so `end` lands on `target`, `mid` jutting towards `pole`
+// (character space, not mirrored). `flex` is the sign of mid's x bend: +1 a knee (the
+// lower bone swings back), -1 an elbow (it swings forward).
+Pose limb(const Build& b, Pose p, Joint upper, Joint mid, Joint end, Vector3 target, Vector3 pole, float flex);
 
 // ------------------------------------------------------------------ motion
 using Clip = std::function<Pose(double seconds)>;   // seconds from the clip's start
@@ -380,7 +422,156 @@ struct Look {
 // Every part a look wears, as (slot key, part name), e.g. ("armL", "arm.soft").
 std::vector<std::pair<std::string, std::string>> slots(const Look& look);
 
+// ------------------------------------------------------------------ animals
+// Four-legged animals: a body from the hips ("pelvis") through "spine" to the withers
+// ("chest"); "neck-1", "neck-2", "head"; "tail-1".."tail-3"; and four legs that hang along
+// -y: front "shoulder-L", "elbow-L", "wrist-L" (a horse's knee), "paw-front-L"; hind
+// "hip-L", "knee-L" (the stifle), "hock-L", "paw-hind-L"; the same with -R; and "floor".
+// +z is the animal's front, so its left legs are towards +x. Lengths are metres.
+struct QuadSpec {
+    std::string species = "dog";             // picks the head, tail and coat parts
+    float bodyLength = 0.5f;                 // hips to withers
+    float bodyRadius = 0.14f, rump = 1, chest = 1;   // the barrel; its ends, times bodyRadius
+    float frontUpper = 0.19f, frontLower = 0.2f, frontCannon = 0.11f;   // shoulder to paw
+    float hindUpper = 0.2f, hindLower = 0.2f, hindCannon = 0.1f;        // hip to paw
+    float paw = 0.04f;                       // ground to the paw joint
+    float legRadius = 0.045f;
+    float stance = 0.09f;                    // half the distance between the left and right legs
+    float neckLength = 0.2f, neckRadius = 0.07f, neckPitch = 45;        // degrees above level
+    float headLength = 0.22f, headRadius = 0.085f, headPitch = 10;      // degrees nose-down
+    float tailLength = 0.35f, tailRadius = 0.025f, tailPitch = 20;      // degrees above level
+    bool hooves = false;                     // hooves (Look::shoes) or paws (the coat)
+
+    static QuadSpec dog();
+    static QuadSpec cat();
+    static QuadSpec horse();
+    static QuadSpec cow();
+    static QuadSpec giraffe();
+    static QuadSpec turtle();
+};
+Build quadruped(const QuadSpec& spec);
+
+// Two-legged animals, birds and dinosaurs: the hips ("pelvis") at the middle of the body,
+// "spine" and "chest" ahead of them; "neck-1", "neck-2", "head" and "jaw"; "tail-1".."tail-3";
+// legs "hip-L", "knee-L", "ankle-L" (the backward-bending joint), "foot-L" (where the toes
+// meet, on the ground); "shoulder-L", "elbow-L", "wrist-L", "tip-L" -- wings, which run out
+// sideways at rest (pose them with rig::wings), or arms, which hang; the same with -R; and
+// "floor". +z is the front. Lengths are metres.
+struct BipedSpec {
+    std::string species = "chicken";         // picks the head, tail and leg details
+    float bodyLength = 0.26f, bodyRadius = 0.1f, bodyPitch = 20;          // degrees nose-up
+    float thigh = 0.07f, shank = 0.085f, tarsus = 0.075f;                  // hip to foot
+    float foot = 0.014f, toe = 0.06f;        // ground to the foot joint; the middle toe
+    float legRadius = 0.016f, stance = 0.04f, rake = 15;                  // tarsus degrees off upright
+    float neckLength = 0.1f, neckRadius = 0.032f, neckPitch = 72;
+    float headLength = 0.05f, headRadius = 0.04f, headPitch = 0;          // beak or snout length
+    float tailLength = 0.12f, tailRadius = 0.03f, tailPitch = 50;
+    float upperArm = 0.07f, forearm = 0.08f, hand = 0.1f, armRadius = 0.016f;   // wing or arm bones
+    float chord = 0.13f;                     // wing feathers' depth
+    bool wings = true;
+
+    static BipedSpec chicken();
+    static BipedSpec duck();
+    static BipedSpec trex();
+};
+Build biped(const BipedSpec& spec);
+// Legless animals, snakes and fish: "body-0" (behind the head) through "body-<n-1>" to
+// "tip", each joint one segment behind the last; "head", "jaw" and "tongue" (snakes; turned
+// 180 degrees in y it is stowed); "fin-L", "fin-R" (a fish's pectorals); "floor". Lying or
+// resting on the ground at rest; +z is the front. Lengths are metres.
+struct ChainSpec {
+    std::string species = "snake";           // picks the head and the fins
+    float length = 1.6f;                     // nose to tail tip
+    float radius = 0.035f;                   // the body's widest half-width
+    float depth = 1;                         // its height, times its width (a fish: > 1)
+    int segments = 14;                       // body joints (3..38)
+    float headLength = 0.06f, headRadius = 0.03f;
+    float fin = 0;                           // a fish's tail-fin length
+
+    static ChainSpec snake();
+    static ChainSpec fish();
+};
+Build chain(const ChainSpec& spec);
+
+// A bird's wings: `spread` 0 folded along the body .. 1 open, raised `flap` degrees at the
+// shoulder (negative: the downstroke; the tips lag), swept back by `sweep` (0..1). A biped
+// with arms is returned unchanged.
+Pose wings(const Build& b, Pose p, float spread, float flap = 0, float sweep = 0);
+// A finished animal (build, parts, colours): "dog", "cat", "horse", "cow", "giraffe" or
+// "turtle";
+// "chicken", "duck" or "trex" (two legs, rig::biped); "snake" or "fish" (rig::chain); or an ape -- "chimp", "gorilla", "orangutan" -- which is a humanoid build (long arms, short
+// legs) and plays any humanoid clip as well as those below. Throws for unknown names.
+Look animal(const std::string& species);
+std::vector<std::string> animals();
+
+// Footfall patterns: walk (one foot at a time, three down), trot (diagonal pairs), canter
+// (three beats) and gallop (four beats with a moment in the air).
+enum class Gait { Walk, Trot, Canter, Gallop };
+namespace clips {
+// An animal standing: breathing, the tail swinging, now and then a look round. (A humanoid
+// build -- an ape -- plays idle().)
+Clip stand(const Build& b);
+// A gait in place, paws planted while they are down. `cadence`: strides per second
+// (0 = what an animal of this size naturally picks). Two-legged animals walk (Gait::Walk)
+// or run (any other gait); snakes slither and fish swim, slower (Walk) or faster. A
+// humanoid build knuckle-walks (Gait::Walk only).
+Clip gait(const Build& b, Gait g, float cadence = 0);
+// Humanoid clips for apes (any humanoid build can play them):
+// on all fours, leaning on the knuckles, feet and knuckles planted while down; move the
+// character by gaitSpeed(b, Gait::Walk, cadence).
+Clip knuckleWalk(const Build& b, float cadence = 0);
+// Hanging from a bar `bar` metres up (along x, through z = 0) by both hands, swaying
+// `swing` degrees.
+Clip hang(const Build& b, float bar, float swing = 6);
+// Swinging hand over hand along bars `spacing` apart at height `bar`, in place: move the
+// character forward by 2 * spacing * rate per second (`rate` swings of each arm per
+// second; 0 = a natural pendulum rate, see brachiateRate).
+Clip brachiate(const Build& b, float bar, float spacing, float rate = 0);
+// Sitting astride (a horse, a bike, a branch), the hips at the root's origin so a Mount puts
+// them on the seat; a little sway with the ride. Grips place the hands and feet.
+Clip ride(const Build& b);
+}
+float brachiateRate(const Build& b);
+namespace clips {
+// A bird in the air, in place (move its node along its +z): wingbeats `rate` per second
+// (0 = flapRate), the body level, the legs tucked. glide: wings held out, banking gently.
+Clip fly(const Build& b, float rate = 0);
+Clip glide(const Build& b);
+}
+float flapRate(const Build& b);
+// Ground covered per second by clips::gait (move the animal by this so its paws hold still).
+float gaitSpeed(const Build& b, Gait g, float cadence = 0);
+float gaitCadence(const Build& b, Gait g);   // the natural cadence
+namespace clips {
+// A four-legged animal swimming in place (move its node along +z), legs stroking in
+// diagonal pairs: a turtle's front flippers sweep wide, a dog paddles.
+Clip paddle(const Build& b, float rate = 0);
+}
+
 // ------------------------------------------------------------------ characters
+class Character;
+// One character carried by another -- riding, perched, piggyback, in a hand, in a cockpit.
+// From `from` to `until` seconds its root follows the carrier's `joint`, offset by `at` and
+// turned by `rot` (degrees) in that joint's frame, easing in and out over `blend` seconds;
+// its own clip's root motion still applies on top (in the joint's frame). Then `grips` reach
+// its hands and plant its feet on points of the carrier (`at` in the carrier joint's frame;
+// humanoid riders). Both characters must stand on the same node (3D) or share a View2D
+// (2D): the rider is moved within that space. Overlapping mounts blend in the order added
+// (a hand-off: the next one's `from` before the last one's `until`). No cycles.
+enum class Limb { HandL, HandR, FootL, FootR };
+struct Grip {
+    Limb limb = Limb::HandL;
+    Joint joint = Joint::Root;
+    Vector3 at{ 0, 0, 0 };
+};
+struct Mount {
+    std::weak_ptr<const Character> carrier;
+    Joint joint = Joint::Root;
+    Vector3 at{ 0, 0, 0 }, rot{ 0, 0, 0 };
+    double from = 0, until = 1e30, blend = 0.3;
+    std::vector<Grip> grips;
+};
+
 class Character {
 public:
     explicit Character(Look look = Look::toon());
@@ -400,14 +591,24 @@ public:
     float popAt(const std::string& slot, double seconds) const;
     const std::vector<Look>& looks() const { return looks_; }
     double changeTime(int lookIndex) const { return times_[(size_t)lookIndex]; }
-    // The motion's pose with the worn parts' joint locks applied (rest when motion is empty).
+    // The motion's pose with the worn parts' joint locks applied (rest when motion is empty),
+    // then carried by its mounts.
     Pose poseAt(double seconds) const;
+    Character& mount(Mount m) { mounts_.push_back(std::move(m)); return *this; }
+    const std::vector<Mount>& mounts() const { return mounts_; }
 private:
+    std::vector<Mount> mounts_;
     std::vector<Look> looks_;
     std::vector<double> times_, pops_;
     std::vector<std::map<std::string, std::string>> sigs_;   // per look: slot -> what it shows
 };
 using CharacterPtr = std::shared_ptr<Character>;
+
+// A saddle on a four-legged animal: the rider's hips on its back, feet in stirrups, hands
+// on the reins. Play clips::ride on the rider.
+Mount saddle(std::shared_ptr<const Character> horse, double from = 0, double until = 1e30);
+// Joint j's frame in the character's space at a moment (its look and pose then).
+Matrix frameAt(const Character& ch, double seconds, Joint j);
 
 // The primitives a look puts on its skeleton (every slot, resolved to its part).
 std::vector<Prim> prims(const Look& look);

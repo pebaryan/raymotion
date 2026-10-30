@@ -46,7 +46,7 @@ inline Matrix primMatrix(const Prim& p, float pop) {
 
 // A limb's centreline from joint a through b to c, `n` + 1 points: a polyline at
 // softness 0, the quadratic through b at 1 (it passes b at the same share of its length).
-inline std::vector<Vector3> tubeCurve(const std::array<Matrix, kJoints>& f, const Prim& p, int n) {
+inline std::vector<Vector3> tubeCurve(const Frames& f, const Prim& p, int n) {
     const Vector3 A = position(f, p.a), B = position(f, p.b), C = position(f, p.c);
     const float l1 = Vector3Distance(A, B), l2 = Vector3Distance(B, C);
     const float tau = std::clamp(l1 / std::max(1e-6f, l1 + l2), 0.15f, 0.85f);
@@ -124,6 +124,32 @@ inline ShieldGeom shieldGeom(const Build& b) {
 }
 
 // The slot keys in drawing order.
+// The animal parts (rig_creature.cpp), added to the registry with the built-ins.
+void creatureParts(std::map<std::string, PartDef>& registry);
+// A pose carried by a character's mounts (rig_act.cpp).
+Pose mounted(const Character& ch, double seconds, Pose p);
+// Apes (rig_ape.cpp): their head parts, their looks (false: not an ape) and knuckle-walking.
+void apeParts(std::map<std::string, PartDef>& registry);
+bool apeLook(const std::string& species, Look& look);
+float knuckleCadence(const Build& b);
+float knuckleSpeed(const Build& b, float cadence);
+// Birds and dinosaurs (rig_bird.cpp).
+void birdParts(std::map<std::string, PartDef>& registry);
+bool birdLook(const std::string& species, Look& look);
+bool isBiped(const Build& b);
+float bipedCadence(const Build& b, Gait g);
+float bipedSpeed(const Build& b, Gait g, float cadence);
+Clip bipedStand(const Build& b);
+Clip bipedGait(const Build& b, Gait g, float cadence);
+// Snakes and fish (rig_chain.cpp).
+void chainParts(std::map<std::string, PartDef>& registry);
+bool chainLook(const std::string& species, Look& look);
+bool isChain(const Build& b);
+float chainCadence(const Build& b, Gait g);
+float chainSpeed(const Build& b, Gait g, float cadence);
+Clip chainStand(const Build& b);
+Clip chainGaitClip(const Build& b, Gait g, float cadence);
+
 inline const std::vector<std::string>& slotKeys() {
     static const std::vector<std::string> keys = { "head", "hair", "hat", "torso", "hips", "armL", "armR", "handL", "handR",
                                                    "legL", "legR", "footL", "footR", "extra", "holdL", "holdR",

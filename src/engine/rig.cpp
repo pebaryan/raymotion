@@ -70,6 +70,54 @@ bool isRight(Joint j) {
            j == Joint::HipR || j == Joint::KneeR || j == Joint::AnkleR;
 }
 
+int Skeleton::find(const std::string& n) const {
+    for (size_t i = 0; i < joints.size(); i++)
+        if (joints[i].name == n) return (int)i;
+    throw std::runtime_error("rig: no joint '" + n + "' in the " + kind + " skeleton");
+}
+float Skeleton::dim(const std::string& key, float fallback) const {
+    auto it = dims.find(key);
+    return it == dims.end() ? fallback : it->second;
+}
+float Skeleton::trait(const std::string& key, float fallback) const {
+    auto it = traits.find(key);
+    return it == traits.end() ? fallback : it->second;
+}
+
+namespace {
+const JointDef* planJoint(const Build& b, Joint j) {
+    const int i = (int)j;
+    return b.plan && i >= 0 && i < (int)b.plan->joints.size() ? &b.plan->joints[(size_t)i] : nullptr;
+}
+} // namespace
+int jointCount(const Build& b) { return b.plan ? (int)b.plan->joints.size() : kJoints; }
+const char* name(const Build& b, Joint j) {
+    if (!b.plan) return name(j);
+    const JointDef* d = planJoint(b, j);
+    return d ? d->name.c_str() : "?";
+}
+Joint parent(const Build& b, Joint j) {
+    if (!b.plan) return parent(j);
+    const JointDef* d = planJoint(b, j);
+    return d ? (Joint)d->parent : Joint::Root;
+}
+bool isRight(const Build& b, Joint j) {
+    if (!b.plan) return isRight(j);
+    const JointDef* d = planJoint(b, j);
+    return d && d->right;
+}
+bool isGrounded(const Build& b, Joint j) {
+    if (!b.plan) return j == Joint::Root || j == Joint::Floor;
+    const JointDef* d = planJoint(b, j);
+    return j == Joint::Root || (d && d->grounded);
+}
+Joint joint(const Build& b, const std::string& n) {
+    if (b.plan) return (Joint)b.plan->find(n);
+    for (int i = 0; i < kJoints; i++)
+        if (n == name((Joint)i)) return (Joint)i;
+    throw std::runtime_error("rig: no humanoid joint '" + n + "'");
+}
+
 Build Build::adult() {
     Build b;
     b.head = 0.24f; b.neck = 0.08f; b.torso = { 0.38f, 0.48f, 0.22f }; b.hips = 0.16f; b.hipWidth = 0.19f;
@@ -98,12 +146,19 @@ Build Build::chibi() {
     b.thigh = 0.15f; b.shin = 0.14f; b.legRadius = 0.065f; b.foot = 0.16f; b.ankle = 0.05f;
     return b;
 }
-float Build::height() const { return ankle + shin + thigh + hips / 2 + torso.y + neck + head; }
+float Build::height() const { return plan ? plan->height : ankle + shin + thigh + hips / 2 + torso.y + neck + head; }
 Build Build::scaled(float k) const {
     Build b = *this;
     b.head *= k; b.neck *= k; b.torso = Vector3Scale(torso, k); b.hips *= k; b.hipWidth *= k;
     b.upperArm *= k; b.forearm *= k; b.armRadius *= k; b.hand *= k;
     b.thigh *= k; b.shin *= k; b.legRadius *= k; b.foot *= k; b.ankle *= k;
+    if (plan) {
+        auto s = std::make_shared<Skeleton>(*plan);
+        for (JointDef& d : s->joints) d.rest = Vector3Scale(d.rest, k);
+        for (auto& [key, v] : s->dims) v *= k;
+        s->height *= k;
+        b.plan = s;
+    }
     return b;
 }
 Build Build::mix(const Build& a, const Build& b, float u) {
@@ -115,10 +170,23 @@ Build Build::mix(const Build& a, const Build& b, float u) {
     r.thigh = lerpf(a.thigh, b.thigh, u); r.shin = lerpf(a.shin, b.shin, u);
     r.legRadius = lerpf(a.legRadius, b.legRadius, u); r.foot = lerpf(a.foot, b.foot, u);
     r.ankle = lerpf(a.ankle, b.ankle, u);
+    r.plan = u < 0.5f ? a.plan : b.plan;
+    if (a.plan && b.plan && a.plan != b.plan && a.plan->joints.size() == b.plan->joints.size()) {
+        auto s = std::make_shared<Skeleton>(*a.plan);
+        for (size_t i = 0; i < s->joints.size(); i++) s->joints[i].rest = lerp3(a.plan->joints[i].rest, b.plan->joints[i].rest, u);
+        for (auto& [key, v] : s->dims) v = lerpf(v, b.plan->dim(key, v), u);
+        for (auto& [key, v] : s->traits) v = lerpf(v, b.plan->trait(key, v), u);
+        s->height = lerpf(a.plan->height, b.plan->height, u);
+        r.plan = s;
+    }
     return r;
 }
 
 Vector3 restOffset(const Build& b, Joint j) {
+    if (b.plan) {
+        const JointDef* d = planJoint(b, j);
+        return d ? d->rest : Vector3{ 0, 0, 0 };
+    }
     const float sx = b.torso.x / 2 + b.armRadius * 0.6f, sy = b.torso.y - b.armRadius * 1.2f;
     switch (j) {
     case Joint::Root: return { 0, 0, 0 };
@@ -141,19 +209,19 @@ Vector3 restOffset(const Build& b, Joint j) {
 // ------------------------------------------------------------------ poses
 Pose Pose::mix(const Pose& a, const Pose& b, float u) {
     Pose r;
-    for (int i = 0; i < kJoints; i++) r.rot[(size_t)i] = lerp3(a.rot[(size_t)i], b.rot[(size_t)i], u);
+    for (int i = 0; i < kMaxJoints; i++) r.rot[(size_t)i] = lerp3(a.rot[(size_t)i], b.rot[(size_t)i], u);
     r.offset = lerp3(a.offset, b.offset, u);
     return r;
 }
 Pose Pose::operator+(const Pose& o) const {
     Pose r;
-    for (int i = 0; i < kJoints; i++) r.rot[(size_t)i] = Vector3Add(rot[(size_t)i], o.rot[(size_t)i]);
+    for (int i = 0; i < kMaxJoints; i++) r.rot[(size_t)i] = Vector3Add(rot[(size_t)i], o.rot[(size_t)i]);
     r.offset = Vector3Add(offset, o.offset);
     return r;
 }
 Pose Pose::operator*(float k) const {
     Pose r;
-    for (int i = 0; i < kJoints; i++) r.rot[(size_t)i] = Vector3Scale(rot[(size_t)i], k);
+    for (int i = 0; i < kMaxJoints; i++) r.rot[(size_t)i] = Vector3Scale(rot[(size_t)i], k);
     r.offset = Vector3Scale(offset, k);
     return r;
 }
@@ -175,22 +243,29 @@ Vector3 jointRotation(const Pose& p, Joint j) {
     if (isRight(j)) { r.y = -r.y; r.z = -r.z; }
     return r;
 }
+Vector3 jointRotation(const Build& b, const Pose& p, Joint j) {
+    Vector3 r = p[j];
+    if (isRight(b, j)) { r.y = -r.y; r.z = -r.z; }
+    return r;
+}
 
-std::array<Matrix, kJoints> solve(const Build& b, const Pose& p) {
-    std::array<Matrix, kJoints> w{};
-    for (int i = 0; i < kJoints; i++) {
+Frames solve(const Build& b, const Pose& p) {
+    Frames w{};
+    const int n = jointCount(b);
+    for (int i = 0; i < n; i++) {
         const Joint j = (Joint)i;
         Vector3 off = restOffset(b, j);
         if (j == Joint::Root) off = Vector3Add(off, p.offset);
-        const Matrix local = MatrixMultiply(MatrixRotateXYZ(Vector3Scale(jointRotation(p, j), DEG2RAD)),
+        const Matrix local = MatrixMultiply(MatrixRotateXYZ(Vector3Scale(jointRotation(b, p, j), DEG2RAD)),
                                             MatrixTranslate(off.x, off.y, off.z));
-        // Root and Floor hang from the character's origin; Floor without the pose's offset.
-        w[(size_t)i] = j == Joint::Root || j == Joint::Floor ? local : MatrixMultiply(local, w[(size_t)parent(j)]);
+        // Root and grounded joints (Floor) hang from the character's origin; grounded ones
+        // without the pose's offset.
+        w[(size_t)i] = isGrounded(b, j) ? local : MatrixMultiply(local, w[(size_t)parent(b, j)]);
     }
     return w;
 }
 
-Vector3 position(const std::array<Matrix, kJoints>& f, Joint j) {
+Vector3 position(const Frames& f, Joint j) {
     return Vector3Transform({ 0, 0, 0 }, f[(size_t)j]);
 }
 
@@ -448,8 +523,8 @@ Pose Motion::at(double s) const {
                         smooth01(l.fade > 0 ? (l.to + l.fade - s) / l.fade : (s <= l.to ? 1.0 : 0.0));
         if (w <= 0) continue;
         const Pose q = l.clip(s - l.from);
-        for (int j = 0; j < kJoints; j++)
-            if (masks(l.mask, (Joint)j)) p.rot[(size_t)j] = lerp3(p.rot[(size_t)j], q.rot[(size_t)j], w);
+        for (int j = 0; j < kMaxJoints; j++)         // a plan's own joints: Mask::All only
+            if (j < kJoints ? masks(l.mask, (Joint)j) : l.mask == Mask::All) p.rot[(size_t)j] = lerp3(p.rot[(size_t)j], q.rot[(size_t)j], w);
         if (l.mask == Mask::All) p.offset = lerp3(p.offset, q.offset, w);
     }
     return p;
@@ -915,7 +990,7 @@ Pose Character::poseAt(double s) const {
             }
         }
     }
-    return p;
+    return mounts_.empty() ? p : detail::mounted(*this, s, p);
 }
 
 namespace detail {

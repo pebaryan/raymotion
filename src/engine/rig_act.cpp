@@ -54,14 +54,14 @@ Vector3 unitPerp(Vector3 v, Vector3 n) {
 // Joint j's local rotation set so that, in character space, its axes are x, y, z.
 void setWorld(const Build& b, Pose& p, Joint j, Vector3 x, Vector3 y, Vector3 z) {
     Vector3 px{ 1, 0, 0 }, py{ 0, 1, 0 }, pz{ 0, 0, 1 };
-    if (j != Joint::Root && j != Joint::Floor) {
+    if (!isGrounded(b, j)) {
         const auto f = solve(b, p);
-        const Matrix& P = f[(size_t)parent(j)];
+        const Matrix& P = f[(size_t)parent(b, j)];
         px = axis(P, 0); py = axis(P, 1); pz = axis(P, 2);
     }
     auto local = [&](Vector3 d) { return Vector3{ Vector3DotProduct(px, d), Vector3DotProduct(py, d), Vector3DotProduct(pz, d) }; };
     Vector3 e = eulerOf(basis(local(x), local(y), local(z)));
-    if (isRight(j)) { e.y = -e.y; e.z = -e.z; }
+    if (isRight(b, j)) { e.y = -e.y; e.z = -e.z; }
     p[j] = e;
 }
 
@@ -140,6 +140,10 @@ Pose plant(const Build& b, Pose p, Side side, Vector3 target, Vector3 pole) {
                    mirrorX(pole, side), 1);
 }
 
+Pose limb(const Build& b, Pose p, Joint upper, Joint mid, Joint end, Vector3 target, Vector3 pole, float flex) {
+    return twoBone(b, p, upper, mid, Vector3Length(restOffset(b, mid)), Vector3Length(restOffset(b, end)), target, pole, flex);
+}
+
 Pose orient(const Build& b, Pose p, Joint j, Vector3 up, Vector3 forward) {
     const Vector3 y = Vector3Normalize(up), z = unitPerp(forward, y);
     setWorld(b, p, j, Vector3CrossProduct(y, z), y, z);
@@ -159,8 +163,82 @@ Vector3 palmAt(const Build& b, const Pose& p, Side side) {
     return Vector3Transform({ 0, -b.hand * 0.5f, 0 }, solve(b, p)[(size_t)wristOf(side)]);
 }
 
+// ------------------------------------------------------------------ mounts
+Matrix frameAt(const Character& ch, double s, Joint j) {
+    return solve(ch.lookAt(s).build, ch.poseAt(s))[(size_t)j];
+}
+
+namespace detail {
+Pose mounted(const Character& ch, double s, Pose p) {
+    const Pose own = p;
+    const Build& b = ch.lookAt(s).build;
+    for (const Mount& m : ch.mounts()) {
+        const auto carrier = m.carrier.lock();
+        if (!carrier || s < m.from - m.blend || s > m.until + m.blend) continue;
+        float w = 1;
+        if (m.blend > 0) w = smooth((float)((s - (m.from - m.blend)) / m.blend)) * smooth((float)((m.until + m.blend - s) / m.blend));
+        if (w <= 0) continue;
+        const Build& cb = carrier->lookAt(s).build;
+        const Frames cf = solve(cb, carrier->poseAt(s));
+        // The rider's root: its own root motion, in the mount's frame, in the carrier joint's.
+        const Matrix rootOwn = MatrixMultiply(MatrixRotateXYZ(Vector3Scale(own[Joint::Root], DEG2RAD)), MatrixTranslate(own.offset.x, own.offset.y, own.offset.z));
+        const Matrix attach = MatrixMultiply(MatrixRotateXYZ(Vector3Scale(m.rot, DEG2RAD)), MatrixTranslate(m.at.x, m.at.y, m.at.z));
+        const Matrix M = MatrixMultiply(MatrixMultiply(rootOwn, attach), cf[(size_t)m.joint]);
+        Pose q = own;
+        q[Joint::Root] = eulerOf(M);
+        q.offset = { M.m12, M.m13, M.m14 };
+        if (!b.plan)
+            for (const Grip& g : m.grips) {
+                const Vector3 at = Vector3Transform(g.at, cf[(size_t)g.joint]);
+                switch (g.limb) {
+                case Limb::HandL: q = reach(b, q, Side::Left, at, { 0.5f, -0.6f, -1 }); break;
+                case Limb::HandR: q = reach(b, q, Side::Right, at, { 0.5f, -0.6f, -1 }); break;
+                case Limb::FootL: q = plant(b, q, Side::Left, at, { 0.2f, 0, 1 }); break;
+                case Limb::FootR: q = plant(b, q, Side::Right, at, { 0.2f, 0, 1 }); break;
+                }
+            }
+        p = w >= 1 ? q : Pose::mix(p, q, w);
+    }
+    return p;
+}
+} // namespace detail
+
+Mount saddle(std::shared_ptr<const Character> horse, double from, double until) {
+    const Build& hb = horse->looks()[0].build;
+    if (!hb.plan || hb.plan->kind != "quadruped") throw std::runtime_error("rig::saddle needs a four-legged animal");
+    const Skeleton& k = *hb.plan;
+    const float r = k.dim("bodyRadius"), L = k.dim("bodyLength");
+    Mount m;
+    m.carrier = horse;
+    m.joint = k["spine"];
+    m.at = { 0, r * 1.02f, L * 0.06f };
+    m.from = from; m.until = until;
+    for (Side s : { Side::Left, Side::Right }) {
+        const float x = s == Side::Left ? 1.f : -1.f;
+        m.grips.push_back({ s == Side::Left ? Limb::FootL : Limb::FootR, k["spine"], { x * r * 1.12f, -r * 0.3f, L * 0.12f } });
+        m.grips.push_back({ s == Side::Left ? Limb::HandL : Limb::HandR, k["chest"], { x * r * 0.22f, r * 1.25f, r * 0.15f } });
+    }
+    return m;
+}
+
 // ------------------------------------------------------------------ acting
 namespace clips {
+
+Clip ride(const Build& b) {
+    return [b](double s) {
+        const float t = (float)s;
+        Pose p;
+        p.offset = { 0, -hipHeight(b), 0 };          // the hips at the origin: on the seat
+        p[Joint::Pelvis].x = 4;
+        p[Joint::Chest].x = 6 + 2 * std::sin(TAU * t * 0.5f);
+        p[Joint::Head].x = -6;
+        for (Joint h : { Joint::HipL, Joint::HipR }) p[h] = { -55, 0, 28 };
+        for (Joint k : { Joint::KneeL, Joint::KneeR }) p[k] = { 70, 0, 0 };
+        for (Joint sh : { Joint::ShoulderL, Joint::ShoulderR }) p[sh] = { -30, 0, 8 };
+        for (Joint e : { Joint::ElbowL, Joint::ElbowR }) p[e] = { -50, 0, 0 };
+        return p;
+    };
+}
 
 Clip seated(const Build& b, float seat) {
     return [b, seat](double s) {

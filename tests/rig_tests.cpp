@@ -101,7 +101,11 @@ static void partsAndLocks() {
         for (const std::string& n : rig::parts::names(s))
             for (const rig::Build& b : { rig::Build::toon(), rig::Build::block(), rig::Build::adult() })
                 for (rig::Side side : { rig::Side::Left, rig::Side::Right }) {
-                    const auto v = rig::parts::get(n).make(b, side, 0.5f);
+                    auto v = rig::parts::get(n).make(b, side, 0.5f);
+                    // Animal parts draw nothing on a humanoid; on an animal's build they do.
+                    if (v.empty()) v = rig::parts::get(n).make(rig::quadruped(rig::QuadSpec::dog()), side, 0.5f);
+                    if (v.empty()) v = rig::parts::get(n).make(rig::biped(rig::BipedSpec::chicken()), side, 0.5f);
+                    if (v.empty()) v = rig::parts::get(n).make(rig::chain(rig::ChainSpec::fish()), side, 0.5f);
                     CHECK(!v.empty());
                     for (const rig::Prim& p : v) {
                         CHECK(p.size.x > 0 && p.size.y > 0 && p.size.z > 0);
@@ -752,8 +756,602 @@ static bool render(const std::filesystem::path& dir, bool preview) {
         UnloadImage(a);
     }
     shutdownGraphics();
+    // Animals: walking in 3D, side on, and the same line-up as 2D puppets.
+    {
+        Comp c;
+        c.w = 1600; c.h = 720; c.fps = 30; c.duration = 90; c.background = bg;
+        auto scene = studio(2.4f);
+        scene->camera.position = { 0.2f, 2.0f, 11.0f };
+        scene->camera.target = { 0.2f, 1.55f, 0 };
+        const std::pair<const char*, rig::Gait> cast[] = { { "cat", rig::Gait::Walk }, { "dog", rig::Gait::Trot }, { "horse", rig::Gait::Canter },
+                                                            { "cow", rig::Gait::Walk }, { "giraffe", rig::Gait::Walk } };
+        const float xs[] = { -3.6f, -2.9f, -1.5f, 0.75f, 3.0f };
+        for (int i = 0; i < 5; i++) {
+            auto a = std::make_shared<rig::Character>(rig::animal(cast[i].first));
+            a->motion.play(rig::clips::gait(a->looks()[0].build, cast[i].second), 0);
+            g3d::Object3D* o = rig::add(*scene, a);
+            o->position = { xs[i], 0, 0 };
+            o->rotation.y = 90;
+        }
+        addRoot(c.roots, 0, 90)->fn = g3d::draw(scene);
+        Image a = frame(c, 20), b2 = frame(c, 20);
+        CHECK(std::memcmp(a.data, b2.data, (size_t)a.width * a.height * 4) == 0);
+        if (preview) ExportImage(a, (dir / "3d-animals.png").string().c_str());
+        UnloadImage(a);
+        UnloadImage(b2);
+    }
+    {
+        Comp c;
+        c.w = 1600; c.h = 600; c.fps = 30; c.duration = 90; c.background = { 238, 234, 224, 255 };
+        const char* names[] = { "cat", "dog", "horse", "cow", "giraffe" };
+        const float xs[] = { 110, 300, 600, 980, 1360 }, yaws[] = { 90, 70, 90, 110, 90 };
+        for (int i = 0; i < 5; i++) {
+            auto a = std::make_shared<rig::Character>(rig::animal(names[i]));
+            a->motion.play(i == 2 ? rig::clips::gait(a->looks()[0].build, rig::Gait::Gallop) : rig::clips::stand(a->looks()[0].build), 0);
+            rig::View2D v;
+            v.yaw = yaws[i]; v.scale = 160; v.origin = { xs[i], 540 };
+            addRoot(c.roots, 0, 90)->fn = [a, v](const Ctx& cx, int t) { rig::draw(cx, *a, t / 30.0, v); };
+        }
+        Image a = frame(c, 20);
+        CHECK(differing(a, c.background) > 1600 * 600 / 20);
+        if (preview) ExportImage(a, (dir / "2d-animals.png").string().c_str());
+        UnloadImage(a);
+    }
+    // The horse's four gaits, five moments through one cycle each (rows: walk, trot, canter, gallop).
+    {
+        Comp c;
+        c.w = 1600; c.h = 1200; c.fps = 30; c.duration = 2; c.background = { 238, 234, 224, 255 };
+        const rig::Look horse = rig::animal("horse");
+        const rig::Gait gaits[] = { rig::Gait::Walk, rig::Gait::Trot, rig::Gait::Canter, rig::Gait::Gallop };
+        for (int row = 0; row < 4; row++)
+            for (int col = 0; col < 5; col++) {
+                auto a = std::make_shared<rig::Character>(horse);
+                a->motion.play(rig::clips::gait(horse.build, gaits[row]), 0);
+                const double at = col / 5.0 / rig::gaitCadence(horse.build, gaits[row]);
+                rig::View2D v;
+                v.yaw = 90; v.scale = 105; v.origin = { 160.f + col * 320, 280.f + row * 290 };
+                addRoot(c.roots, 0, 2)->fn = [a, v, at](const Ctx& cx, int) { rig::draw(cx, *a, at, v); };
+            }
+        Image a = frame(c, 0);
+        if (preview) ExportImage(a, (dir / "2d-gaits.png").string().c_str());
+        UnloadImage(a);
+    }
+    // Birds and a dinosaur in 3D: a hen walking, a duck waddling, a hen with its wings
+    // spread, and a T. rex striding (its own camera: it is 12 m long).
+    {
+        Comp c;
+        c.w = 1600; c.h = 720; c.fps = 30; c.duration = 90; c.background = bg;
+        auto scene = studio(0.5f);
+        scene->camera.position = { 0, 0.42f, 2.3f };
+        scene->camera.target = { 0, 0.2f, 0 };
+        const rig::Look hen = rig::animal("chicken"), duck = rig::animal("duck");
+        auto put = [&](const rig::Look& l, rig::Clip clip, Vector3 pos, float yaw) {
+            auto a = std::make_shared<rig::Character>(l);
+            a->motion.play(clip, 0);
+            g3d::Object3D* o = rig::add(*scene, a);
+            o->position = pos;
+            o->rotation.y = yaw;
+        };
+        put(hen, rig::clips::gait(hen.build, rig::Gait::Walk), { -0.75f, 0, 0 }, 90);
+        put(duck, rig::clips::gait(duck.build, rig::Gait::Walk), { -0.05f, 0, 0 }, 60);
+        const rig::Build hb = hen.build, db = duck.build;
+        put(hen, [hb](double s) { return rig::wings(hb, rig::clips::stand(hb)(s), 1, 25); }, { 0.7f, 0, 0 }, 20);
+        put(duck, rig::clips::fly(db), { 0.3f, 0.3f, -0.7f }, 110);
+        put(hen, rig::clips::fly(hb), { -0.45f, 0.3f, -0.7f }, 70);
+        addRoot(c.roots, 0, 90)->fn = g3d::draw(scene);
+        Image a = frame(c, 20);
+        CHECK(differing(a, bg) > 1600 * 720 / 30);
+        if (preview) ExportImage(a, (dir / "3d-birds.png").string().c_str());
+        UnloadImage(a);
+    }
+    {
+        Comp c;
+        c.w = 1600; c.h = 720; c.fps = 30; c.duration = 90; c.background = bg;
+        auto scene = studio(5.f);
+        scene->camera.position = { 0, 3.5f, 22 };
+        scene->camera.target = { 0, 2.6f, 0 };
+        auto a = std::make_shared<rig::Character>(rig::animal("trex"));
+        const rig::Build rb = a->looks()[0].build;
+        a->motion.play(rig::clips::gait(rb, rig::Gait::Walk), 0);
+        g3d::Object3D* o = rig::add(*scene, a);
+        o->position = { -1.5f, 0, 0 };
+        o->rotation.y = 75;
+        addRoot(c.roots, 0, 90)->fn = g3d::draw(scene);
+        Image img = frame(c, 20);
+        if (preview) ExportImage(img, (dir / "3d-trex.png").string().c_str());
+        UnloadImage(img);
+    }
+    // Birds in 2D: a hen's walk through one cycle (the head holding still, then thrusting),
+    // a duck waddling, a T. rex striding and roaring.
+    {
+        Comp c;
+        c.w = 1600; c.h = 900; c.fps = 30; c.duration = 2; c.background = { 238, 234, 224, 255 };
+        const rig::Look hen = rig::animal("chicken"), duck = rig::animal("duck"), rex = rig::animal("trex");
+        const float cad = rig::gaitCadence(hen.build, rig::Gait::Walk);
+        auto cell = [&](const rig::Look& l, rig::Clip clip, double at, Vector2 origin, float scale, float yaw) {
+            auto a = std::make_shared<rig::Character>(l);
+            a->motion.play(clip, 0);
+            rig::View2D v;
+            v.yaw = yaw; v.scale = scale; v.origin = origin;
+            addRoot(c.roots, 0, 2)->fn = [a, v, at](const Ctx& cx, int) { rig::draw(cx, *a, at, v); };
+        };
+        for (int col = 0; col < 5; col++)
+            cell(hen, rig::clips::gait(hen.build, rig::Gait::Walk), col / 5.0 / cad, { 160.f + col * 320, 380 }, 520, 90);
+        cell(duck, rig::clips::gait(duck.build, rig::Gait::Walk), 0.2, { 130, 820 }, 560, 90);
+        cell(duck, rig::clips::gait(duck.build, rig::Gait::Walk), 0.35, { 360, 820 }, 560, 20);
+        cell(hen, rig::clips::gait(hen.build, rig::Gait::Gallop), 0.1, { 590, 820 }, 520, 90);
+        cell(rex, rig::clips::gait(rex.build, rig::Gait::Walk), 0.3, { 930, 860 }, 30, 90);
+        cell(rex, rig::clips::stand(rex.build), 3.5, { 1340, 860 }, 30, 60);
+        Image a = frame(c, 0);
+        if (preview) ExportImage(a, (dir / "2d-birds.png").string().c_str());
+        UnloadImage(a);
+    }
+    // Snakes and fish in 3D, from above and the side.
+    {
+        Comp c;
+        c.w = 1600; c.h = 720; c.fps = 30; c.duration = 90; c.background = bg;
+        auto scene = studio(0.6f);
+        scene->camera.position = { 0, 1.5f, 1.9f };
+        scene->camera.target = { 0, 0.05f, 0 };
+        auto put = [&](const char* sp, rig::Gait g, bool walk, Vector3 pos, float yaw) {
+            auto a = std::make_shared<rig::Character>(rig::animal(sp));
+            const rig::Build cb = a->looks()[0].build;
+            a->motion.play(walk ? rig::clips::gait(cb, g) : rig::clips::stand(cb), 0);
+            g3d::Object3D* o = rig::add(*scene, a);
+            o->position = pos;
+            o->rotation.y = yaw;
+        };
+        put("snake", rig::Gait::Walk, true, { -0.55f, 0, 0.1f }, 90);
+        put("snake", rig::Gait::Walk, false, { -0.3f, 0, -0.35f }, -30);
+        put("fish", rig::Gait::Walk, true, { 0.55f, 0.12f, 0.15f }, 90);
+        put("fish", rig::Gait::Gallop, true, { 0.6f, 0.3f, -0.3f }, 60);
+        put("turtle", rig::Gait::Walk, true, { 0.05f, 0, 0.3f }, 70);
+        auto sw = std::make_shared<rig::Character>(rig::animal("turtle"));
+        sw->motion.play(rig::clips::paddle(sw->looks()[0].build), 0);
+        g3d::Object3D* so = rig::add(*scene, sw);
+        so->position = { 0.05f, 0.3f, -0.45f };
+        so->rotation.y = 120;
+        addRoot(c.roots, 0, 90)->fn = g3d::draw(scene);
+        Image a = frame(c, 25);
+        CHECK(differing(a, bg) > 1600 * 720 / 40);
+        if (preview) ExportImage(a, (dir / "3d-chains.png").string().c_str());
+        UnloadImage(a);
+    }
+    {
+        Comp c;
+        c.w = 1600; c.h = 600; c.fps = 30; c.duration = 2; c.background = { 238, 234, 224, 255 };
+        const rig::Look snake = rig::animal("snake"), fish = rig::animal("fish");
+        for (int col = 0; col < 4; col++) {
+            auto a = std::make_shared<rig::Character>(col < 2 ? snake : fish);
+            const rig::Build cb = a->looks()[0].build;
+            a->motion.play(col == 1 ? rig::clips::stand(cb) : rig::clips::gait(cb, rig::Gait::Walk), 0);
+            rig::View2D v;
+            v.yaw = 90; v.pitch = col < 2 ? 70 : 0; v.scale = col < 2 ? 380 : 700;
+            v.origin = { 220.f + col * 390, col < 2 ? 330.f : 400.f };
+            const double at = 0.4 + col * 0.3;
+            addRoot(c.roots, 0, 2)->fn = [a, v, at](const Ctx& cx, int) { rig::draw(cx, *a, at, v); };
+        }
+        Image a = frame(c, 0);
+        if (preview) ExportImage(a, (dir / "2d-chains.png").string().c_str());
+        UnloadImage(a);
+    }
+    // Riding: a rider on a cantering horse, in 3D and as a 2D puppet.
+    {
+        Comp c;
+        c.w = 1600; c.h = 720; c.fps = 30; c.duration = 90; c.background = bg;
+        auto scene = studio(2.4f);
+        scene->camera.position = { 0, 1.7f, 7.5f };
+        scene->camera.target = { 0, 1.3f, 0 };
+        auto horse = std::make_shared<rig::Character>(rig::animal("horse"));
+        const rig::Build hb = horse->looks()[0].build;
+        horse->motion.play(rig::clips::gait(hb, rig::Gait::Canter), 0);
+        rig::Look rl = rig::Look::toon();
+        rl.build = rig::Build::adult();
+        rl.outfit = rig::Outfit::basic({ 180, 40, 50, 255 }, { 236, 230, 214, 255 }, rl.skin, 1, 1);
+        rl.feet("foot.boot");
+        auto rider = std::make_shared<rig::Character>(rl);
+        rider->motion.play(rig::clips::ride(rl.build), 0);
+        rider->mount(rig::saddle(horse));
+        for (auto ch : { horse, rider }) {
+            g3d::Object3D* o = rig::add(*scene, ch);
+            o->position = { -1.4f, 0, 0 };
+            o->rotation.y = 70;
+        }
+        addRoot(c.roots, 0, 90)->fn = g3d::draw(scene);
+        for (auto ch : { horse, rider }) {
+            rig::View2D v;
+            v.yaw = 90; v.scale = 150; v.origin = { 1250, 640 };
+            addRoot(c.roots, 0, 90)->fn = [ch, v](const Ctx& cx, int t) { rig::draw(cx, *ch, t / 30.0, v); };
+        }
+        Image a = frame(c, 20);
+        if (preview) ExportImage(a, (dir / "riding.png").string().c_str());
+        UnloadImage(a);
+    }
+    // Carried: a chimp piggyback on a walking person (hands on the shoulders, feet hooked at
+    // the hips), and a pilot standing on a titan's raised palm.
+    {
+        Comp c;
+        c.w = 1600; c.h = 720; c.fps = 30; c.duration = 90; c.background = bg;
+        auto scene = studio(3.f);
+        scene->camera.position = { 0, 3.6f, 16 };
+        scene->camera.target = { 0, 2.9f, 0 };
+        rig::Look hl = rig::Look::toon();
+        hl.build = rig::Build::adult();
+        auto human = std::make_shared<rig::Character>(hl);
+        human->motion.play(rig::clips::walk(0.9f), 0);
+        const rig::Look cl = rig::animal("chimp");
+        auto chimp = std::make_shared<rig::Character>(cl);
+        chimp->motion.play(rig::clips::ride(cl.build), 0);
+        const rig::Build& h = hl.build;
+        rig::Mount back;
+        back.carrier = human;
+        back.joint = rig::Joint::Chest;
+        back.at = { 0, -h.torso.y * 0.35f, -h.torso.z * 0.5f - cl.build.torso.z * 0.55f };
+        back.grips = { { rig::Limb::HandL, rig::Joint::ShoulderL, { 0, 0.04f, -0.02f } }, { rig::Limb::HandR, rig::Joint::ShoulderR, { 0, 0.04f, -0.02f } },
+                       { rig::Limb::FootL, rig::Joint::Pelvis, { h.hipWidth * 0.75f, -0.02f, h.torso.z * 0.25f } },
+                       { rig::Limb::FootR, rig::Joint::Pelvis, { -h.hipWidth * 0.75f, -0.02f, h.torso.z * 0.25f } } };
+        chimp->mount(back);
+        for (auto ch : { human, chimp }) {
+            g3d::Object3D* o = rig::add(*scene, ch);
+            o->position = { -2.2f, 0, 0 };
+            o->rotation.y = 150;
+        }
+        // The titan: a robot three and a half times life size, its right palm held up
+        // before its chest; the pilot rides the palm.
+        rig::Look tl = rig::Look::robot();
+        tl.build = rig::Build::adult().scaled(3.5f);
+        auto titan = std::make_shared<rig::Character>(tl);
+        const rig::Build tb = tl.build;
+        titan->motion.play([tb](double s) {
+            rig::Pose p = rig::clips::idle(0.5f)(s);
+            return rig::hand(tb, p, rig::Side::Right, { -0.35f * 3.5f, 1.15f * 3.5f, 0.45f * 3.5f }, { -0.3f, 0, 1 }, { 0, 1, 0 });
+        }, 0);
+        auto pilot = std::make_shared<rig::Character>(rig::Look::toon());
+        pilot->motion.play(rig::clips::idle(), 0);
+        rig::Mount palm;
+        palm.carrier = titan;
+        palm.joint = rig::Joint::WristR;
+        palm.at = { 0.04f * 3.5f, -tb.hand * 0.55f, 0 };
+        palm.rot = { 0, 0, -90 };                 // stand on the palm: the pilot's up along its normal
+        pilot->mount(palm);
+        for (auto ch : { titan, pilot }) {
+            g3d::Object3D* o = rig::add(*scene, ch);
+            o->position = { 2.2f, 0, -1.5f };
+            o->rotation.y = -25;
+        }
+        addRoot(c.roots, 0, 90)->fn = g3d::draw(scene);
+        Image a = frame(c, 20);
+        CHECK(differing(a, bg) > 1600 * 720 / 20);
+        if (preview) ExportImage(a, (dir / "carried.png").string().c_str());
+        UnloadImage(a);
+    }
+    // Apes in 3D: knuckle-walking, hanging from a bar, swinging along bars.
+    {
+        Comp c;
+        c.w = 1600; c.h = 720; c.fps = 30; c.duration = 90; c.background = bg;
+        auto scene = studio(2.4f);
+        scene->camera.position = { 0, 1.8f, 9.5f };
+        scene->camera.target = { 0, 1.25f, 0 };
+        g3d::Material steel;
+        steel.color = { 120, 124, 132, 255 };
+        steel.metalness = 0.8f;
+        steel.roughness = 0.35f;
+        const double at = 20 / 30.0;
+        // A bar across the character's path: along its x, at height y and its z (character space).
+        auto bar = [&](Vector3 pos, float yaw, float y, float z) {
+            g3d::Object3D* o = scene->add(g3d::Geometry::box(0.9f, 0.045f, 0.045f), steel);
+            o->position = { pos.x + std::sin(yaw * DEG2RAD) * z, y, pos.z + std::cos(yaw * DEG2RAD) * z };
+            o->rotation.y = yaw;
+        };
+        const rig::Look chimp = rig::animal("chimp"), gorilla = rig::animal("gorilla"), orang = rig::animal("orangutan");
+        auto put = [&](const rig::Look& l, rig::Clip clip, Vector3 pos, float yaw) {
+            auto a = std::make_shared<rig::Character>(l);
+            a->motion.play(clip, 0);
+            g3d::Object3D* o = rig::add(*scene, a);
+            o->position = pos;
+            o->rotation.y = yaw;
+        };
+        put(chimp, rig::clips::knuckleWalk(chimp.build), { -3.2f, 0, 0 }, 90);
+        put(gorilla, rig::clips::knuckleWalk(gorilla.build), { -1.3f, 0, 0 }, 70);
+        put(orang, rig::clips::hang(orang.build, 2.3f), { 1.0f, 0, 0 }, 35);
+        bar({ 1.0f, 0, 0 }, 35, 2.3f, 0);
+        const float d = 0.8f, u = (float)std::fmod(at * 2 * rig::brachiateRate(chimp.build), 1.0);
+        put(chimp, rig::clips::brachiate(chimp.build, 2.4f, d), { 3.1f, 0, 0 }, 70);
+        for (int k = -1; k <= 2; k++) bar({ 3.1f, 0, 0 }, 70, 2.4f, d / 2 - d * u + k * d);
+        addRoot(c.roots, 0, 90)->fn = g3d::draw(scene);
+        Image a = frame(c, 20);
+        CHECK(differing(a, bg) > 1600 * 720 / 20);
+        if (preview) ExportImage(a, (dir / "3d-apes.png").string().c_str());
+        UnloadImage(a);
+    }
+    // Apes in 2D: a chimp's knuckle-walk through one cycle, and an orangutan swinging bar to bar.
+    {
+        Comp c;
+        c.w = 1600; c.h = 760; c.fps = 30; c.duration = 2; c.background = { 238, 234, 224, 255 };
+        const rig::Look chimp = rig::animal("chimp"), orang = rig::animal("orangutan");
+        const float cad = rig::gaitCadence(chimp.build, rig::Gait::Walk);
+        for (int col = 0; col < 5; col++) {
+            auto a = std::make_shared<rig::Character>(chimp);
+            a->motion.play(rig::clips::knuckleWalk(chimp.build), 0);
+            const double at = col / 5.0 / cad;
+            rig::View2D v;
+            v.yaw = 90; v.scale = 230; v.origin = { 160.f + col * 320, 330 };
+            addRoot(c.roots, 0, 2)->fn = [a, v, at](const Ctx& cx, int) { rig::draw(cx, *a, at, v); };
+        }
+        const float d = 0.8f, bar = 2.3f, rate = rig::brachiateRate(orang.build);
+        for (int col = 0; col < 5; col++) {
+            auto a = std::make_shared<rig::Character>(orang);
+            a->motion.play(rig::clips::brachiate(orang.build, bar, d), 0);
+            const double at = col / 4.0 / (2 * rate);   // one swing, start to end
+            const float u = (float)std::fmod(at * 2 * rate, 1.0) + (col == 4 ? 1.f : 0.f);
+            rig::View2D v;
+            v.yaw = 90; v.scale = 110; v.origin = { 160.f + col * 320, 730 };
+            addRoot(c.roots, 0, 2)->fn = [a, v, at, u, d, bar](const Ctx& cx, int) {
+                for (int k = -1; k <= 2; k++) {
+                    const float z = d / 2 - d * u + k * d;
+                    DrawCircleV({ v.origin.x - z * v.scale, v.origin.y - bar * v.scale }, 5, { 90, 94, 104, 255 });
+                }
+                rig::draw(cx, *a, at, v);
+            };
+        }
+        Image a = frame(c, 0);
+        if (preview) ExportImage(a, (dir / "2d-apes.png").string().c_str());
+        UnloadImage(a);
+    }
     CloseWindow();
     return true;
+}
+
+
+// Four-legged animals: a plan of their own, paws planted while down, every species built.
+static void animals() {
+    const rig::Build dog = rig::quadruped(rig::QuadSpec::dog());
+    CHECK(rig::jointCount(dog) == 27);
+    CHECK((int)rig::joint(dog, "paw-hind-R") == dog.plan->find("paw-hind-R"));
+    for (int i = 1; i < rig::jointCount(dog); i++) CHECK((int)rig::parent(dog, (rig::Joint)i) < i);
+    CHECK(rig::isRight(dog, rig::joint(dog, "knee-R")) && !rig::isRight(dog, rig::joint(dog, "knee-L")));
+    CHECK(rig::isGrounded(dog, rig::joint(dog, "floor")));
+    // At rest the legs are straight and the paws stand at paw height.
+    const auto rest = rig::solve(dog, rig::Pose{});
+    for (const char* n : { "paw-front-L", "paw-hind-R" })
+        CHECK(near(rig::position(rest, rig::joint(dog, n)).y, dog.plan->dim("paw"), 1e-4f));
+    // Scaling scales lengths, not angles.
+    const rig::Build big = dog.scaled(2);
+    CHECK(near(big.plan->dim("bodyLength"), 2 * dog.plan->dim("bodyLength")));
+    CHECK(near(big.plan->trait("neckPitch"), dog.plan->trait("neckPitch")));
+    CHECK(near(big.height(), 2 * dog.height(), 1e-4f));
+    // Humanoid joints are unchanged by the bigger Pose.
+    CHECK(rig::jointCount(rig::Build::toon()) == rig::kJoints);
+
+    // Gaits: a paw that is down stays at paw height and moves back at the gait's speed (so
+    // moving the animal by gaitSpeed leaves it still on the ground).
+    for (const std::string& sp : rig::animals()) {
+        const rig::Look look = rig::animal(sp);
+        const rig::Build& b = look.build;
+        CHECK(!rig::prims(look).empty());
+        if (!b.plan || b.plan->kind != "quadruped") continue;   // apes() and birds() below
+        const rig::Joint lh = rig::joint(b, "paw-hind-L");
+        for (rig::Gait g : { rig::Gait::Walk, rig::Gait::Trot, rig::Gait::Canter, rig::Gait::Gallop }) {
+            const rig::Clip clip = rig::clips::gait(b, g);
+            const float c = rig::gaitCadence(b, g), v = rig::gaitSpeed(b, g);
+            // Check the left hind paw early in its stance: it lands at the start of the cycle,
+            // or halfway through in a trot.
+            const double land = g == rig::Gait::Trot ? 0.5 : 0, t0 = (land + 0.04) / c, t1 = (land + 0.2) / c;
+            const Vector3 a = rig::position(rig::solve(b, clip(t0)), lh), z = rig::position(rig::solve(b, clip(t1)), lh);
+            const float paw = b.plan->dim("paw"), L = b.plan->dim("hindLength");
+            CHECK(near(a.y, paw, 0.01f * L) && near(z.y, paw, 0.01f * L));
+            CHECK(near((a.z - z.z) / (float)(t1 - t0), v, 0.04f * v));
+        }
+        const rig::Pose st = rig::clips::stand(b)(1.3);
+        CHECK(near(rig::position(rig::solve(b, st), rig::joint(b, "paw-front-R")).y, b.plan->dim("paw"), 0.01f * b.plan->dim("frontLength")));
+    }
+    bool threw = false;
+    try { rig::clips::gait(rig::Build::toon(), rig::Gait::Trot); } catch (const std::exception&) { threw = true; }
+    CHECK(threw);
+}
+
+// Birds and dinosaurs: two legs, feet planted while down; wings fold and spread.
+static void birds() {
+    const rig::Build hen = rig::biped(rig::BipedSpec::chicken());
+    for (int i = 1; i < rig::jointCount(hen); i++) CHECK((int)rig::parent(hen, (rig::Joint)i) < i);
+    CHECK(rig::isRight(hen, rig::joint(hen, "ankle-R")) && !rig::isRight(hen, rig::joint(hen, "tip-L")));
+    const auto rest = rig::solve(hen, rig::Pose{});
+    CHECK(near(rig::position(rest, rig::joint(hen, "foot-L")).y, hen.plan->dim("foot"), 1e-4f));
+    for (const char* sp : { "chicken", "duck", "trex" }) {
+        const rig::Look look = rig::animal(sp);
+        const rig::Build& b = look.build;
+        CHECK(b.plan && b.plan->kind == "biped" && !rig::prims(look).empty());
+        const float foot = b.plan->dim("foot"), L = b.plan->dim("legLength");
+        const rig::Joint lf = rig::joint(b, "foot-L");
+        for (rig::Gait g : { rig::Gait::Walk, rig::Gait::Gallop }) {
+            const rig::Clip clip = rig::clips::gait(b, g);
+            const float c = rig::gaitCadence(b, g), v = rig::gaitSpeed(b, g);
+            const double t0 = 0.03 / c, t1 = 0.25 / c;
+            const Vector3 a = rig::position(rig::solve(b, clip(t0)), lf), z = rig::position(rig::solve(b, clip(t1)), lf);
+            CHECK(near(a.y, foot, 0.01f * L) && near(z.y, foot, 0.01f * L));
+            CHECK(near((a.z - z.z) / (float)(t1 - t0), v, 0.04f * v));
+        }
+        const rig::Pose st = rig::clips::stand(b)(2.1);
+        CHECK(near(rig::position(rig::solve(b, st), rig::joint(b, "foot-R")).y, foot, 0.01f * L));
+    }
+    // Folded, a wing tip stays by the body; spread, it is a wingspan out, level and mirrored.
+    const rig::Joint tipL = rig::joint(hen, "tip-L"), tipR = rig::joint(hen, "tip-R"), sh = rig::joint(hen, "shoulder-L");
+    const float span = hen.plan->dim("upperArm") + hen.plan->dim("forearm") + hen.plan->dim("hand");
+    const auto folded = rig::solve(hen, rig::wings(hen, rig::Pose{}, 0));
+    CHECK(std::fabs(rig::position(folded, tipL).x) < hen.plan->dim("bodyRadius") * 1.3f);
+    const auto open = rig::solve(hen, rig::wings(hen, rig::Pose{}, 1));
+    const Vector3 l = rig::position(open, tipL), r = rig::position(open, tipR), s0 = rig::position(open, sh);
+    CHECK(l.x - s0.x > span * 0.9f && near(l.y, s0.y, span * 0.15f));
+    CHECK(near3(l, { -r.x, r.y, r.z }, 1e-3f));
+    const auto up = rig::solve(hen, rig::wings(hen, rig::Pose{}, 1, 40));
+    CHECK(rig::position(up, tipL).y > l.y + span * 0.4f);
+    const rig::Build rex = rig::biped(rig::BipedSpec::trex());
+    CHECK(near3(rig::wings(rex, rig::Pose{}, 1, 30)[rig::joint(rex, "shoulder-L")], { 0, 0, 0 }));
+    // Flying: the wing tips beat up and down once per wingbeat, symmetric; the feet are off
+    // the ground (folded up under the body); a T. rex cannot.
+    const float rate = rig::flapRate(hen);
+    const rig::Clip fl = rig::clips::fly(hen);
+    float hi = -1e9f, lo = 1e9f;
+    for (int i = 0; i < 12; i++) {
+        const auto f = rig::solve(hen, fl(i / (12 * rate)));
+        const Vector3 a = rig::position(f, tipL), b2 = rig::position(f, tipR);
+        CHECK(near3(a, { -b2.x, b2.y, b2.z }, 1e-3f));
+        hi = std::max(hi, a.y);
+        lo = std::min(lo, a.y);
+        CHECK(rig::position(f, rig::joint(hen, "foot-L")).y > hen.plan->dim("foot") * 3);
+    }
+    CHECK(hi - lo > span);
+    CHECK(near3(rig::position(rig::solve(hen, fl(0.1)), tipL), rig::position(rig::solve(hen, fl(0.1 + 1 / rate)), tipL), 1e-3f));
+    CHECK(throws([&] { rig::clips::fly(rex); }));
+    CHECK(!rig::clips::glide(rig::animal("duck").build)(1.0).rot.empty());
+}
+
+// Two characters: one carried by another. A rider on a cantering horse keeps its hips on
+// the saddle and its hands and feet on the reins and stirrups; a hand-off moves a pilot
+// from one carrier joint to another without a jump.
+static void mounts() {
+    auto horse = std::make_shared<rig::Character>(rig::animal("horse"));
+    const rig::Build hb = horse->looks()[0].build;
+    horse->motion.play(rig::clips::gait(hb, rig::Gait::Canter), 0);
+    rig::Look riderLook = rig::Look::toon();
+    riderLook.build = rig::Build::adult();
+    auto rider = std::make_shared<rig::Character>(riderLook);
+    rider->motion.play(rig::clips::ride(riderLook.build), 0);
+    const rig::Mount m = rig::saddle(horse);
+    rider->mount(m);
+    for (double t : { 0.0, 0.37, 1.21 }) {
+        const auto rf = rig::solve(riderLook.build, rider->poseAt(t));
+        const Vector3 seat = Vector3Transform(m.at, rig::frameAt(*horse, t, m.joint));
+        CHECK(near3(rig::position(rf, rig::Joint::Pelvis), seat, 0.02f));
+        for (const rig::Grip& g : m.grips) {
+            const Vector3 target = Vector3Transform(g.at, rig::frameAt(*horse, t, g.joint));
+            const rig::Joint end = g.limb == rig::Limb::HandL ? rig::Joint::WristL : g.limb == rig::Limb::HandR ? rig::Joint::WristR
+                                 : g.limb == rig::Limb::FootL ? rig::Joint::AnkleL : rig::Joint::AnkleR;
+            CHECK(Vector3Distance(rig::position(rf, end), target) < 0.06f);
+        }
+    }
+    // A hand-off between two mounts on the same carrier blends smoothly.
+    auto pilot = std::make_shared<rig::Character>(rig::Look::toon());
+    rig::Mount a, b;
+    a.carrier = horse; a.joint = rig::joint(hb, "neck-2"); a.until = 2;
+    b.carrier = horse; b.joint = rig::joint(hb, "pelvis"); b.from = 1.8;
+    pilot->mount(a).mount(b);
+    Vector3 last{};
+    float jump = 0;
+    for (int i = 0; i <= 60; i++) {
+        const double t = 1.4 + i * 0.02;
+        const Vector3 at = rig::position(rig::solve(pilot->looks()[0].build, pilot->poseAt(t)), rig::Joint::Root);
+        if (i) jump = std::max(jump, Vector3Distance(at, last));
+        last = at;
+    }
+    CHECK(jump < 0.2f);                          // 1.2 m over the 0.3 s blend, never in one step
+    CHECK(throws([&] { rig::saddle(rider); }));
+}
+
+// Turtles: a quadruped species with a shell, that walks and paddles.
+static void turtles() {
+    const rig::Look t = rig::animal("turtle");
+    CHECK(t.build.plan && t.build.plan->variant == "turtle" && t.extra == "shell.turtle");
+    CHECK(!rig::parts::get("shell.turtle").make(t.build, rig::Side::Left, 0).empty());
+    const rig::Clip pd = rig::clips::paddle(t.build);
+    const rig::Joint sh = rig::joint(t.build, "shoulder-L");
+    float lo = 1e9f, hi = -1e9f;
+    for (int i = 0; i < 16; i++) {
+        const float x = pd(i * 0.1)[sh].x;
+        lo = std::min(lo, x);
+        hi = std::max(hi, x);
+    }
+    CHECK(hi - lo > 60);                         // the flipper strokes
+    CHECK(rig::clips::paddle(rig::animal("dog").build)(0.3)[rig::joint(rig::animal("dog").build, "hip-L")].x != 0);
+    CHECK(throws([] { rig::clips::paddle(rig::Build::toon()); }));
+}
+
+// Snakes and fish: a chain of joints laid along a wave.
+static void chains() {
+    const rig::Build snake = rig::chain(rig::ChainSpec::snake());
+    const int n = (int)snake.plan->trait("segments");
+    CHECK(rig::jointCount(snake) == n + 8);
+    for (int i = 1; i < rig::jointCount(snake); i++) CHECK((int)rig::parent(snake, (rig::Joint)i) < i);
+    CHECK(throws([] { rig::chain(rig::ChainSpec{ "snake", 1, 0.03f, 1, 60 }); }));
+    // At rest the body lies straight along z, nose to tail one length.
+    const auto rest = rig::solve(snake, rig::Pose{});
+    const Vector3 nose = rig::position(rest, rig::joint(snake, "body-0")), tip = rig::position(rest, rig::joint(snake, "tip"));
+    CHECK(near(nose.z - tip.z + snake.plan->dim("headLength"), 1.6f, 1e-3f) && near(nose.y, snake.plan->dim("radius"), 1e-4f));
+    // Slithering: the body follows a path that stands still on the ground -- a point of the
+    // body at a given ground position moves sideways only as the snake slides past it, so a
+    // joint's sideways offset recurs one wavelength later at the next joint along.
+    const rig::Clip sl = rig::clips::gait(snake, rig::Gait::Walk);
+    const float v = rig::gaitSpeed(snake, rig::Gait::Walk), seg = snake.plan->dim("segment");
+    const double dt = seg / v;
+    for (double t : { 0.3, 1.1 }) {
+        const Vector3 a = rig::position(rig::solve(snake, sl(t)), rig::joint(snake, "body-3"));
+        const Vector3 b = rig::position(rig::solve(snake, sl(t + dt)), rig::joint(snake, "body-4"));
+        CHECK(near(a.x, b.x, 0.01f));                       // the same ground point, a segment later
+        // Every segment keeps its length.
+        const auto f = rig::solve(snake, sl(t));
+        CHECK(near(Vector3Distance(rig::position(f, rig::joint(snake, "body-5")), rig::position(f, rig::joint(snake, "body-6"))), seg, 1e-4f));
+    }
+    // A fish swims with a wave that grows to the tail: the tail swings far more than the head.
+    const rig::Build fish = rig::animal("fish").build;
+    const rig::Clip sw = rig::clips::gait(fish, rig::Gait::Walk);
+    float head = 0, tail = 0;
+    for (int i = 0; i < 20; i++) {
+        const auto f = rig::solve(fish, sw(i * 0.05));
+        head = std::max(head, std::fabs(rig::position(f, rig::joint(fish, "head")).x));
+        tail = std::max(tail, std::fabs(rig::position(f, rig::joint(fish, "tip")).x));
+    }
+    CHECK(tail > 3 * head && tail > 0.01f);
+    CHECK(rig::gaitSpeed(fish, rig::Gait::Gallop) > rig::gaitSpeed(fish, rig::Gait::Walk));
+    for (const char* sp : { "snake", "fish" }) {
+        const rig::Look l = rig::animal(sp);
+        CHECK(!rig::prims(l).empty());
+        CHECK(rig::clips::stand(l.build)(1.0)[rig::joint(l.build, "body-2")].y != 0);
+    }
+}
+
+// Apes: humanoid builds that knuckle-walk, hang and swing along bars.
+static void apes() {
+    for (const char* sp : { "chimp", "gorilla", "orangutan" }) {
+        const rig::Look look = rig::animal(sp);
+        const rig::Build& b = look.build;
+        CHECK(!b.plan && rig::jointCount(b) == rig::kJoints);
+        CHECK(b.upperArm + b.forearm > b.thigh + b.shin);
+        CHECK(!rig::prims(look).empty());
+        // Knuckle-walking: a foot and a hand down early in their stance stay put on the floor
+        // while the character moves at gaitSpeed.
+        const rig::Clip kw = rig::clips::gait(b, rig::Gait::Walk);
+        const float c = rig::gaitCadence(b, rig::Gait::Walk), v = rig::gaitSpeed(b, rig::Gait::Walk);
+        const double f0 = 0.05 / c, f1 = 0.3 / c, h0 = 0.3 / c, h1 = 0.55 / c;
+        const Vector3 fa = rig::position(rig::solve(b, kw(f0)), rig::Joint::AnkleL), fz = rig::position(rig::solve(b, kw(f1)), rig::Joint::AnkleL);
+        CHECK(near(fa.y, b.ankle, 0.01f) && near(fz.y, b.ankle, 0.01f));
+        CHECK(near((fa.z - fz.z) / (float)(f1 - f0), v, 0.05f * v));
+        const Vector3 ha = rig::palmAt(b, kw(h0), rig::Side::Left), hz = rig::palmAt(b, kw(h1), rig::Side::Left);
+        CHECK(near(ha.y, b.hand * 0.5f, 0.02f) && near(hz.y, b.hand * 0.5f, 0.02f));
+        CHECK(near((ha.z - hz.z) / (float)(h1 - h0), v, 0.08f * v));
+        // Hanging: both palms on the bar, whatever the sway.
+        for (double t : { 0.0, 0.7, 1.9 }) {
+            const rig::Pose p = rig::clips::hang(b, 2.2f)(t);
+            const Vector3 l = rig::palmAt(b, p, rig::Side::Left), r = rig::palmAt(b, p, rig::Side::Right);
+            CHECK(near((l.y + r.y) / 2, 2.2f, 0.01f) && near(l.z + r.z, 0, 0.02f));
+            CHECK(near(l.y, r.y, 0.02f));
+        }
+        // Brachiating: the holding palm is on its bar, which slides back at the travel speed;
+        // the pose is continuous where the hands trade.
+        const float d = 0.9f, rate = rig::brachiateRate(b);
+        const rig::Clip br = rig::clips::brachiate(b, 2.6f, d);
+        for (double u : { 0.1, 0.5, 0.9 }) {
+            const double t = u / (2 * rate);
+            const Vector3 g = rig::palmAt(b, br(t), rig::Side::Left);
+            CHECK(near(g.y, 2.6f, 0.03f) && near(g.z, d / 2 - d * (float)u, 0.03f));
+        }
+        const double swap = 1 / (2 * rate);
+        const rig::Pose before = br(swap - 1e-4), after = br(swap + 1e-4);
+        CHECK(near3(before.offset, after.offset, 0.01f));
+        for (rig::Side sd : { rig::Side::Left, rig::Side::Right })
+            CHECK(near3(rig::palmAt(b, before, sd), rig::palmAt(b, after, sd), 0.03f));
+    }
+    // Apes stand like people.
+    CHECK(near3(rig::clips::stand(rig::animal("chimp").build)(0.5)[rig::Joint::Chest], rig::clips::idle()(0.5)[rig::Joint::Chest]));
 }
 
 int main(int argc, char** argv) try {
@@ -766,6 +1364,12 @@ int main(int argc, char** argv) try {
     swaps();
     prefabs();
     acting();
+    animals();
+    apes();
+    birds();
+    chains();
+    turtles();
+    mounts();
     const bool preview = argc == 3 && std::string(argv[1]) == "--preview";
     if (!(argc == 2 && std::string(argv[1]) == "--no-gl")) CHECK(render(preview ? argv[2] : "", preview));
     if (failures) std::fprintf(stderr, "%d failure(s)\n", failures);
