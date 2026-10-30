@@ -3,7 +3,7 @@
 | | |
 | --- | --- |
 | Composition | `one-walk-any-body` (+ `one-walk-any-body-thumb`) |
-| Commit / build | uncommitted working tree on `ceb4b18`; `build/raymotion.exe` 10:20:48 (2026-10-30) |
+| Commit / build | uncommitted working tree on `52a4d20`; `build/raymotion.exe` 12:55:27 (2026-10-30) |
 | Reviewer | Claude (author self-review); owner review pending |
 | Date | 2026-10-30 |
 | Review stage | final (author); owner draft viewing outstanding |
@@ -31,7 +31,7 @@ Reviewer's restatement after viewing the stills and encoded frames:
 | 2 Stills | pass | every chapter at start/middle/end plus every transition (`tmp/ow/s*.png`, `tmp/ow/f*.png`); the issues found are listed in §10 and fixed |
 | 2b Staged reveal & narration sync | pass | ledger §5b; each scene starts sparse (skeleton only; empty tray; figures enter one at a time; strip after 0.9 s; 2D before 3D; line-up before title); exe newer than every source |
 | 3 Draft (muted + sound) | **conditional** | the author can't watch in real time: muted review was done from encoded frames and the sound from the cue code and loudness. **The owner must watch once muted and once with sound** |
-| 4 Final technical QA | pass | §7: ffprobe, full decode, -16.6 LUFS / -1.5 dBTP, frames from the MP4, deterministic stills and score |
+| 4 Final technical QA | pass | §7: ffprobe, full decode, -16.2 LUFS / -1.3 dBTP, frames from the MP4, deterministic stills and score |
 | 5 Authored test | pass | §5 |
 | 6 Craft & coherence | pass | craft 15/18 (§3) |
 | 7 Release packaging | pass | logo prefab, repo URL as CTA, API line, SRT, thumbnail comp |
@@ -105,8 +105,9 @@ Reviewer's restatement after viewing the stills and encoded frames:
 | 03 Rigid or soft | `tmp/ow/sc3.png` (f420, f470, f574), `f640.png` | figures enter 0.3/1.2/2.1 s; labels follow; dial at 3.0 s; sweep 3.6–7.0 | revise → yes | dial moved off the middle head to top right |
 | 04 A face from vectors | `tmp/ow/sc4.png` (f700, f780, f906) | close-up; strip at 0.9 s; chip lights with the mouth during 3.2–5.1; expression label at 5.6 s | revise → yes | Pip face box lowered so the brows clear the fringe |
 | 05 Flat or deep | `tmp/ow/sc5.png` (f945, f1115, f1150), `fix.png` | 2D first, 3D at 0.9 s; dial at 2.0 s; turn 2.3–5.0; stripes land on both at 5.8 | revise → yes | engine fix (2D fills lost when a 3D scene renders after them); 2D outfit bands; floor removed so both halves share the paper |
-| 06 End card | `tmp/ow/sc6.png` (f1190, f1230), `s1310.png` | line-up idles then cheers (staggered); title 0.7 s; API line 1.6 s; logo + repo URL | revise → yes | full-frame render (no viewport edge); logo inked for paper; CTA added |
-| transitions | `tmp/ow/mp4_a.png`, `mp4_b.png` (f129, f420, f665, f940, f1185) | 10-frame dissolves; no caption overlap after the caption windows were tightened | revise → yes | caption windows end before each crossfade |
+| 06 Hands on things | `tmp/ow/sc6-acting.png` (f1230, f1290, f1440, f1520), `tmp/ch6/f1365.png` | office set and typist from the first frame; headline 0.27 s; rings + palm dots 1.0 s, the dots sit in the rings and bob per keystroke; colleague with phone 2.4 s, label coral then ink; truck 5.0–6.2 s; placard 6.1, shield 7.0, skater 7.9 (rolls in), scooter 8.8, one at a time, each label coral on arrival | revise ×6 → yes | the PC tower hid the keyboard and the typist was in profile: the office now turns 210° so the tower is on the far side and the typist faces the camera three-quarters; the camera came down to 1.95 m; the keyboard label moved off the arms to the left with a leader line; the phone colleague was cropped or over the headline in four placements, then placed from the camera's projection at the right edge; the placard overlapped the headline: the street camera's target rose and the line-up moved right, clear of the colleague; the skater starts further right so its label clears the shield's. Owner feedback: the office heads were too small. The chapter's adults keep adult limbs (so the furniture fits) but take a 0.37 m head, near toon size; both cameras pulled back to make room, and the colleague now leaves at 5.0 s with their label, so the street opens on the four entrances only |
+| 07 End card | `tmp/ow/sc6.png` (f1190, f1230), `s1310.png`, `tmp/ch6/f1600.png`, `f1638.png` | line-up idles then cheers (staggered); title 0.7 s; API line 1.6 s; logo + repo URL | revise → yes | full-frame render (no viewport edge); logo inked for paper; CTA added |
+| transitions | `tmp/ow/mp4_a.png`, `mp4_b.png` (f129, f420, f665, f940, f1185), `tmp/ow/f1185.png`, `f1535.png` | 10-frame dissolves; no caption overlap after the caption windows were tightened; 1535 dissolves the street into the line-up, labels fading with it | revise → yes | caption windows end before each crossfade |
 
 ## 5c. Cue-sync audit
 
@@ -119,12 +120,14 @@ Text-only: the anchor is the caption onset.
 | 03 | "three materials" | 3.3 | softness dial 3.0 | 0.30 | pass |
 | 04 | "Hi! I'm Pip." | 3.2 | mouth moves 3.2; chips light per shape | 0 (the mouth is the speaker) | pass |
 | 05 | "drawn flat or in depth" | 2.27 | yaw dial 2.0 | 0.27 | pass |
+| 06a | "find the keys" (≈1.4 s at 2.5 words/s) | 1.4 | rings + palm dots 1.0 | 0.40 | pass |
+| 06b | "Phones, placards…" (caption onset) | 5.4 | truck 5.0 | 0.40 | pass; the four figures then enter in the order the line names them |
 
 ## 6. Packaging (Gate 7)
 
 - [x] title / credits: chapter kickers, end-card title
-- [x] thumbnail candidate: `one-walk-any-body-thumb` → `out/one-walk-any-body-thumb.png`
-- [x] SRT: `out/one-walk-any-body.srt` (8 cues, same table as the screen)
+- [x] thumbnail candidate: `one-walk-any-body-thumb` → `out/one-walk-any-body-thumb.png` (tagline adds "props"; the line-up moved right so the tagline clears it; checked at 320×180)
+- [x] SRT: `out/one-walk-any-body.srt` (10 cues, same table as the screen)
 - [x] logo / wordmark and CTA: `raymotion-logo` prefab + `github.com/pebaryan/raymotion`
 - [x] repo link (no social handles in the house kit for docs films)
 - [x] clean-machine `list` and asset behaviour
@@ -135,16 +138,16 @@ Text-only: the anchor is the caption onset.
 | --- | --- | --- | --- |
 | Width × height | 1920×1080 | 1920×1080 | pass |
 | Frame rate | 30 | 30/1 | pass |
-| Frame count | 1315 | 1315 | pass |
-| Duration | 43.83 s | 43.833 s | pass |
+| Frame count | 1665 | 1665 | pass |
+| Duration | 55.50 s | 55.499 s | pass |
 | Full decode | no errors | `ffmpeg -v error -f null` clean | pass |
-| Integrated loudness | -16 LUFS ±1 | -16.6 LUFS (LRA 7.3) | pass |
-| True peak | ≤ -1 dBTP | -1.5 dBTP | pass |
+| Integrated loudness | -16 LUFS ±1 | -16.2 LUFS (LRA 5.2); the first pass with chapter 6 measured -17.2, so the score's saturation drive went 2.0 → 2.4 and its peak target 0.70 → 0.68 | pass |
+| True peak | ≤ -1 dBTP | -1.3 dBTP | pass |
 | Voice sync at chapter starts | n/a (no voice) | — | n/a |
-| Encoded-frame check | frames match stills | 12 frames from the MP4 at starts/mids/ends/transitions | pass |
-| Still vs render determinism | identical | two stills of f1060 md5-identical; still vs encoded PSNR 40.4 / 40.6 dB (f300 / f1060) | pass |
-| Source vs executable freshness | exe newer | exe 10:20:48, newest source 10:20:44 | pass |
-| Final render after last edit | yes | MP4 10:21:14 | pass |
+| Encoded-frame check | frames match stills | 12 frames from the MP4 at starts/mids/ends/transitions; chapter 6 and the end card: exact frames 1230/1290/1440/1520/1535/1600–1664 (`tmp/ow/mp4_c.png`, `tmp/ch6/enc/`) | pass |
+| Still vs render determinism | identical | two stills of f1060 md5-identical; still vs encoded PSNR 40.4 / 40.6 dB (f300 / f1060), 39.4 dB (f1520, after the head change); `score.wav` regenerated md5-identical (7928eb8b…) | pass |
+| Source vs executable freshness | exe newer | exe 12:55:27, newest source 12:55:23 | pass |
+| Final render after last edit | yes | MP4 12:56:21, thumbnail 12:55:46 | pass |
 | Reviewed scene present in final | yes | encoded frames match the approved stills | pass |
 | SRT present | yes | yes | pass |
 | Thumbnail present | yes | yes | pass |
@@ -194,13 +197,26 @@ Reviewer signature: Claude (author) — 2026-10-30
     - The hair was missing. Caps of hair sorted behind the head, so only a rim showed.
       They now sort just over the skull, with a 2D hairline (`Prim::from2d`) that rises
       to the brow as the head faces the viewer. The face is its own item above the cap.
+      Third round: that hairline read as a hard straight edge, so it now arches. It is
+      highest over the brow and falls to the cap's 3D edge at the temples. The arch is
+      spliced into the cap's convex outline, which on its own can't follow the inward curve.
     - The chest drew a skin band in front of the neck. It came from the torso texture's
       skin "collar dip" (in `Outfit::basic` and `outfit-sailor.svg`), which the 2D row
       bands picked up. It is now a collar band in the garment's own colour.
     - Re-checked on stills f760/f960/f1050/f1115 and on frames from the re-rendered MP4.
       45/45 tests pass; the film is still -16.6 LUFS / -1.5 dBTP, 1315 frames, and
       decodes clean.
+  - Chapter 6, "Hands on things" (owner request: put the acting feature in the film).
+    Brief updated first (chapter row, reveal map, claims, metaphor map, cue map, stills).
+    The film is now 55.5 s, seven chapters. The rings are drawn from the workstation
+    prefab's keyboard geometry and the dots from `rig::palmAt`, so the proof is not
+    staged. Labels are read from each figure's `Look` slots. Six framing rounds on
+    stills (see §5b), then a seventh after owner feedback (bigger heads). Lesson: place figures by projecting through the scene camera, not
+    by eye; a 34° lens from 2 m up makes standing figures read high.
+    45/45 tests pass (run ctest with both `TEMP` and `TMP` pointed at a writable folder,
+    or the media test aborts).
 - What should be extracted into the engine or tools: a caption table → screen + SRT
-  helper (every film re-implements it); the dial widget.
+  helper (every film re-implements it); the dial widget; a helper that solves the
+  ground position for a point on screen.
 - What should never be copied into another film: the hard-coded `PIP_BOX`, which is
   specific to this face SVG and this hair.

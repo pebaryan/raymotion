@@ -68,6 +68,57 @@ std::vector<Vector2> clipHalf(const std::vector<Vector2>& poly, Vector2 o, Vecto
     return out;
 }
 
+// A cap of hair's outline: its convex hull with the stretch of hairline that runs inside
+// the hull (over the brow, where the hairline arches up) put back in. `rim` is the hairline
+// as a closed loop, `front` its point over the brow; `top` picks the hull's arc over the crown.
+std::vector<Vector2> withHairline(const std::vector<Vector2>& outline, const std::vector<Vector2>& rim, size_t front,
+                                  Vector2 top) {
+    const size_t n = outline.size(), Q = rim.size();
+    if (n < 3 || Q < 3) return outline;
+    // The hull edge nearest a point, and how far it is.
+    auto nearest = [&](Vector2 p, float* dist) {
+        size_t best = 0;
+        float bd = 1e30f;
+        for (size_t i = 0; i < n; i++) {
+            const Vector2 a = outline[i], b = outline[(i + 1) % n], ab = Vector2Subtract(b, a);
+            const float t = std::clamp(Vector2DotProduct(Vector2Subtract(p, a), ab) / std::max(1e-9f, Vector2DotProduct(ab, ab)), 0.f, 1.f);
+            const float d = Vector2Distance(p, Vector2Add(a, Vector2Scale(ab, t)));
+            if (d < bd) { bd = d; best = i; }
+        }
+        if (dist) *dist = bd;
+        return best;
+    };
+    auto onHull = [&](size_t i) { float d; nearest(rim[i % Q], &d); return d < 0.75f; };
+    if (onHull(front)) return outline;
+    size_t a = front, b = front, steps = 0;
+    while (!onHull(a + Q - 1) && ++steps < Q) a = (a + Q - 1) % Q;
+    while (!onHull(b + 1) && ++steps < Q) b = (b + 1) % Q;
+    if (steps >= Q) return outline;
+    a = (a + Q - 1) % Q;
+    b = (b + 1) % Q;
+    const size_t ea = nearest(rim[a], nullptr), eb = nearest(rim[b], nullptr);
+    size_t t = 0;
+    for (size_t i = 1; i < n; i++)
+        if (Vector2Distance(outline[i], top) < Vector2Distance(outline[t], top)) t = i;
+    // From b back round to a, the way that passes over the crown.
+    std::vector<Vector2> forward, backward;
+    bool crownForward = false;
+    for (size_t k = 0, cnt = ea == eb ? n : (ea + n - eb) % n; k < cnt; k++) {
+        const size_t i = (eb + 1 + k) % n;
+        forward.push_back(outline[i]);
+        crownForward |= i == t;
+    }
+    for (size_t k = 0, cnt = (eb + n - ea) % n; k < cnt; k++) backward.push_back(outline[(eb + n - k) % n]);
+    std::vector<Vector2> out;
+    for (size_t i = a;; i = (i + 1) % Q) {
+        out.push_back(rim[i]);
+        if (i == b) break;
+    }
+    const auto& arc = crownForward ? forward : backward;
+    out.insert(out.end(), arc.begin(), arc.end());
+    return out;
+}
+
 // A face turned away from the viewer narrows but keeps its height. Faces fit their box
 // with uniform scale, so the face is drawn at its unturned size into this canvas, then
 // placed as a quad squashed across. Drawn and placed one face at a time (drawToTexture
@@ -83,17 +134,23 @@ const RenderTexture& faceCanvas() {
     return rt;
 }
 
-void drawTurnedFace(const Ctx& c, const FacePtr& f, const FaceState& st, Vector2 at, float angle, float w, float h,
-                    float squash) {
-    // The canvas box keeps the face box's aspect, so the face fits it exactly as it would on screen.
+// Something painted into a w x h box at full size, then placed centred on `at`, turned by
+// `angle` and narrowed across by `squash` (faces, the text on placards).
+void drawSquashed(const Ctx& c, const std::function<void(Rectangle)>& paint, Vector2 at, float angle, float w, float h,
+                  float squash) {
+    // The canvas box keeps the box's aspect, so the drawing fits it exactly as it would on screen.
     const float k = kFaceCanvas / std::max(w, h);
     const Rectangle box{ 0, 0, w * k, h * k };
-    drawToTexture(faceCanvas(), 1, [&] { f->draw(Ctx{}, box, st); });
+    drawToTexture(faceCanvas(), 1, [&] { paint(box); });
     const Vector2 p = mapP(c, at);
     const float dw = w * squash * c.s, dh = h * c.s;
     const unsigned char a = (unsigned char)std::lround(255 * std::clamp(c.a, 0.f, 1.f));
     DrawTexturePro(faceCanvas().texture, box, { p.x, p.y, dw, dh }, { dw / 2, dh / 2 }, c.rot + angle,
                    Color{ 255, 255, 255, a });
+}
+void drawTurnedFace(const Ctx& c, const FacePtr& f, const FaceState& st, Vector2 at, float angle, float w, float h,
+                    float squash) {
+    drawSquashed(c, [&](Rectangle box) { f->draw(Ctx{}, box, st); }, at, angle, w, h, squash);
 }
 
 struct Item {
@@ -173,7 +230,7 @@ void draw(const Ctx& c, const Character& ch, double s, const View2D& view) {
                 } });
                 continue;
             }
-            std::vector<Vector2> pts;
+            std::vector<Vector2> pts, rim;      // rim: a cap of hair's hairline, one point per longitude
             if (p.kind == Prim::Kind::Cone) {
                 pts.push_back(project(view, Vector3Transform({ 0, p.size.y / 2, 0 }, M)));
                 for (int i = 0; i < 16; i++) {
@@ -181,22 +238,32 @@ void draw(const Ctx& c, const Character& ch, double s, const View2D& view) {
                     pts.push_back(project(view, Vector3Transform({ std::cos(a) * p.size.x / 2, -p.size.y / 2, std::sin(a) * p.size.z / 2 }, M)));
                 }
             } else {
-                float l0 = latFrom(p);
                 const float l1 = latTo(p);
+                // A cap of hair: as it faces the viewer its hairline rises towards `from2d` over
+                // the brow and falls back to `from` at the temples, so it arches.
+                float facing = 0;
                 if (p.from2d >= -1) {
                     const Vector3 front = Vector3Subtract(viewSpace(view, Vector3Transform({ 0, 0, 1 }, M)), viewSpace(view, centre));
-                    const float facing = std::max(0.f, front.z / std::max(1e-6f, Vector3Length(front)));
-                    Prim raised = p;
-                    raised.from = p.from + (p.from2d - p.from) * facing;
-                    l0 = latFrom(raised);
+                    facing = std::max(0.f, front.z / std::max(1e-6f, Vector3Length(front)));
                 }
-                for (int r = 0; r <= 10; r++)
-                    for (int q = 0; q < 24; q++)
-                        pts.push_back(project(view, Vector3Transform(superPoint(p, l0 + (l1 - l0) * r / 10, 2 * PI * q / 24), M)));
+                const int Q = facing > 0 ? 48 : 24;
+                for (int q = 0; q < Q; q++) {
+                    const float lon = 2 * PI * q / Q;
+                    Prim raised = p;
+                    raised.from = p.from + (p.from2d - p.from) * std::sqrt(facing) * std::pow(std::max(0.f, std::sin(lon)), 2.5f);
+                    const float l0 = latFrom(raised);
+                    for (int r = 0; r <= 10; r++) {
+                        pts.push_back(project(view, Vector3Transform(superPoint(p, l0 + (l1 - l0) * r / 10, lon), M)));
+                        if (r == 0 && facing > 0) rim.push_back(pts.back());
+                    }
+                }
             }
             Color col = paintColor(look, p);
             if (far) col = darker(col, 0.14f);
-            const auto outline = hull(pts);
+            auto outline = hull(pts);
+            if (!rim.empty())
+                outline = withHairline(outline, rim, rim.size() / 4,
+                                       project(view, Vector3Transform({ 0, p.size.y / 2, 0 }, M)));
             // Outfit parts: the texture's rows as bands across the part (stripes stay stripes).
             std::vector<std::pair<std::vector<Vector2>, Color>> bands;
             if (p.paint == Paint::Outfit && look.outfit.sample && p.kind == Prim::Kind::Super && outline.size() >= 3) {
@@ -247,7 +314,27 @@ void draw(const Ctx& c, const Character& ch, double s, const View2D& view) {
                     };
                 }
             }
-            items.push_back({ depth, [outline, col, bands, ink, lw, c]() {
+            // A label's text across whichever face of the card is towards the viewer.
+            std::function<void()> label;
+            if (p.paint == Paint::Label && !p.label.empty() && p.kind == Prim::Kind::Super) {
+                const Vector3 nz = Vector3Subtract(viewSpace(view, Vector3Transform({ 0, 0, 1 }, M)), viewSpace(view, centre));
+                const float facing = nz.z / std::max(1e-6f, Vector3Length(nz));
+                if (std::fabs(facing) > 0.15f) {
+                    const float zf = (facing > 0 ? 0.5f : -0.5f) * p.size.z;
+                    const Vector2 at = project(view, Vector3Transform({ 0, 0, zf }, M));
+                    const Vector2 ex = Vector2Subtract(project(view, Vector3Transform({ p.size.x / 2, 0, zf }, M)), at);
+                    const Vector2 ey = Vector2Subtract(project(view, Vector3Transform({ 0, p.size.y / 2, zf }, M)), at);
+                    const float angle = std::atan2(ey.x, -ey.y) * RAD2DEG;
+                    const float w = 2 * Vector2Length(ex), h = 2 * Vector2Length(ey);
+                    const std::string text = p.label;
+                    const Color bg = p.color;
+                    if (w > 2 && h > 2)
+                        label = [text, bg, at, angle, w, h, c]() {
+                            drawSquashed(c, [&](Rectangle box) { drawLabel(Ctx{}, box, text, bg, false); }, at, angle, w, h, 1);
+                        };
+                }
+            }
+            items.push_back({ depth, [outline, col, bands, ink, lw, label, c]() {
                 const vg::Path path = vg::Path::polyline(outline, true);
                 if (bands.empty()) {
                     vg::Style st = vg::Style::filled(col);
@@ -257,6 +344,7 @@ void draw(const Ctx& c, const Character& ch, double s, const View2D& view) {
                     for (const auto& [band, bc] : bands) vg::fill(c, vg::Path::polyline(band, true), bc);
                     if (lw > 0) vg::stroke(c, path, ink);
                 }
+                if (label) label();
             } });
             // The face is its own item, just over a cap of hair: in 3D the brow pokes through
             // the cap's front, which one flat outline of the cap cannot show. Fringes and hats
@@ -294,6 +382,7 @@ void registerPrefabs() {
         auto part = [&](const char* key, std::string& field) { if (p.has(key)) field = p.str(key, field); };
         part("head", look.head); part("hair", look.hair); part("hat", look.hat); part("torso", look.torso);
         part("hips", look.hips); part("extra", look.extra);
+        part("holdL", look.holdL); part("holdR", look.holdR); part("ride", look.ride); part("sign", look.sign);
         part("armL", look.armL); part("armR", look.armR); part("handL", look.handL); part("handR", look.handR);
         part("legL", look.legL); part("legR", look.legR); part("footL", look.footL); part("footR", look.footR);
         if (p.has("arms")) look.arms(p.str("arms", ""));

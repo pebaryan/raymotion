@@ -251,6 +251,127 @@ static void prefabs() {
 }
 
 // ------------------------------------------------------------------ GL
+// Reaching and acting: IK lands hands and feet where asked, on either side; the clips
+// put hands on keyboards, bars and poles, and feet on the floor, decks and boards.
+static void acting() {
+    using rig::Joint;
+    using rig::Side;
+    for (const rig::Build& b : { rig::Build::adult(), rig::Build::toon(), rig::Build::block() }) {
+        const float arm = b.upperArm + b.forearm;
+        for (Side sd : { Side::Left, Side::Right }) {
+            const Joint wrist = sd == Side::Left ? Joint::WristL : Joint::WristR;
+            const Joint elbow = sd == Side::Left ? Joint::ElbowL : Joint::ElbowR;
+            const Joint shoulder = sd == Side::Left ? Joint::ShoulderL : Joint::ShoulderR;
+            const float sx = sd == Side::Left ? 1.f : -1.f;
+            for (int i = 0; i < 24; i++) {
+                const Vector3 S = rig::position(rig::solve(b, rig::Pose{}), shoulder);
+                // Targets all round the shoulder, within reach.
+                const Vector3 dir = Vector3Normalize({ (float)rrange(3, i, -1, 1), (float)rrange(5, i, -1, 1), (float)rrange(7, i, -0.3, 1) });
+                const Vector3 target = Vector3Add(S, Vector3Scale(dir, arm * (float)rrange(11, i, 0.3, 0.95)));
+                const rig::Pose p = rig::reach(b, rig::Pose{}, sd, target);
+                const auto f = rig::solve(b, p);
+                CHECK(Vector3Distance(rig::position(f, wrist), target) < 2e-3f);
+                // The elbow bends forward-only (x < 0) and juts out towards the pole's side.
+                CHECK(p[elbow].x <= 0);
+                const Vector3 mid = Vector3Lerp(S, target, 0.5f), e = rig::position(f, elbow);
+                CHECK(Vector3DotProduct(Vector3Subtract(e, mid), { sx * 0.5f, -0.4f, -1 }) > -1e-3f);
+            }
+            // Out of reach: the arm points straight at the target.
+            const Vector3 S = rig::position(rig::solve(b, rig::Pose{}), shoulder);
+            const Vector3 far = Vector3Add(S, { sx * 3, 1, 2 });
+            const auto f = rig::solve(b, rig::reach(b, rig::Pose{}, sd, far));
+            const Vector3 w = rig::position(f, wrist);
+            CHECK(near(Vector3Distance(S, w), arm, 2e-3f));
+            CHECK(Vector3DotProduct(Vector3Normalize(Vector3Subtract(w, S)), Vector3Normalize(Vector3Subtract(far, S))) > 0.999f);
+            // Legs: the ankle lands, the knee bends back-only (x > 0).
+            const Vector3 foot{ sx * 0.15f, b.ankle + 0.1f, 0.2f };
+            const rig::Pose q = rig::plant(b, rig::Pose{}, sd, foot);
+            CHECK(Vector3Distance(rig::position(rig::solve(b, q), sd == Side::Left ? Joint::AnkleL : Joint::AnkleR), foot) < 2e-3f);
+            CHECK(q[sd == Side::Left ? Joint::KneeL : Joint::KneeR].x >= 0);
+            // A hand: palm centre on the spot, fingers and palm facing as asked.
+            const Vector3 at{ sx * 0.2f, b.height() * 0.55f, 0.3f };
+            const rig::Pose h = rig::hand(b, rig::Pose{}, sd, at, { 0, 0.3f, 1 }, { -sx, 0, 0 });
+            const auto fh = rig::solve(b, h);
+            CHECK(Vector3Distance(rig::palmAt(b, h, sd), at) < 2e-3f);
+            const Matrix& W = fh[(size_t)wrist];
+            const Vector3 o = Vector3Transform({ 0, 0, 0 }, W);
+            const Vector3 fingers = Vector3Subtract(Vector3Transform({ 0, -1, 0 }, W), o);
+            const Vector3 palm = Vector3Subtract(Vector3Transform({ -sx, 0, 0 }, W), o);
+            CHECK(Vector3DotProduct(fingers, Vector3Normalize({ 0, 0.3f, 1 })) > 0.999f);
+            CHECK(Vector3DotProduct(palm, { -sx, 0, 0 }) > 0.95f);
+        }
+        // orient: a joint's axes where asked, whatever its parents do.
+        rig::Pose bent;
+        bent[Joint::Chest] = { 20, 30, -10 };
+        bent[Joint::Neck] = { -15, 10, 5 };
+        const rig::Pose o = rig::orient(b, bent, Joint::Head, { 0, 0, 1 }, { 0, -1, 0 });
+        const Matrix& H = rig::solve(b, o)[(size_t)Joint::Head];
+        const Vector3 hc = Vector3Transform({ 0, 0, 0 }, H);
+        CHECK(near3(Vector3Subtract(Vector3Transform({ 0, 1, 0 }, H), hc), { 0, 0, 1 }, 1e-3f));
+        CHECK(near3(Vector3Subtract(Vector3Transform({ 0, 0, 1 }, H), hc), { 0, -1, 0 }, 1e-3f));
+
+        // Floor stays on the ground when the body bobs.
+        rig::Pose bob;
+        bob.offset = { 0, -0.2f, 0.1f };
+        CHECK(near3(rig::position(rig::solve(b, bob), Joint::Floor), { 0, 0, 0 }));
+
+        // Seated: the hips just over the seat; feet planted when the shins reach the floor.
+        const float lowSeat = b.shin + b.ankle - b.legRadius - 0.05f, highSeat = 0.62f;
+        for (float seat : { lowSeat, highSeat }) {
+            const auto f = rig::solve(b, rig::clips::seated(b, seat)(1.0));
+            CHECK(near(rig::position(f, Joint::HipL).y, seat + b.legRadius * 0.9f, 0.01f));
+            if (seat == lowSeat) CHECK(near(rig::position(f, Joint::AnkleL).y, b.ankle, 2e-3f));
+        }
+        // Typing: palms over the keyboard.
+        const Vector3 keys{ 0, highSeat + 0.22f, 0.32f };
+        for (double t : { 0.0, 0.7, 1.9 }) {
+            const rig::Pose p = rig::clips::typing(b, highSeat, keys)(t);
+            for (Side sd : { Side::Left, Side::Right })
+                CHECK(Vector3Distance(rig::palmAt(b, p, sd), keys) < b.torso.x * 0.3f + b.hand + 0.06f);
+        }
+        // Scooter: the left foot on the deck, hands on the bar, at every phase of a kick.
+        const auto sg = rig::detail::scooterGeom(b);
+        for (double t : { 0.0, 0.3, 0.6, 1.2 }) {
+            const rig::Pose p = rig::clips::scooter(b)(t);
+            const auto f = rig::solve(b, p);
+            CHECK(near(rig::position(f, Joint::AnkleL).y, sg.top + b.ankle, 3e-3f));
+            for (Side sd : { Side::Left, Side::Right })
+                CHECK(std::fabs(rig::palmAt(b, p, sd).y - (sg.barY + b.hand * 0.3f)) < 0.02f);
+        }
+        // Skateboard: the front foot stays on the board through a push; the back foot touches
+        // the ground mid-push and is back on the board after it.
+        const auto bg = rig::detail::boardGeom(b);
+        const rig::Clip sk = rig::clips::skate(b, 2.4f);
+        CHECK(near(rig::position(rig::solve(b, sk(0.6)), Joint::AnkleL).y, bg.top + b.ankle, 3e-3f));
+        CHECK(near(rig::position(rig::solve(b, sk(0.6)), Joint::AnkleR).y, b.ankle, 3e-3f));
+        CHECK(near(rig::position(rig::solve(b, sk(2.0)), Joint::AnkleR).y, bg.top + b.ankle, 3e-3f));
+        // Placard: the card clears the head.
+        const auto g = rig::detail::signGeom(b);
+        CHECK(g.hand + g.pole - g.grip - g.height > b.height());
+    }
+    // Props and rides are parts like any other; labels take the look's sign.
+    for (const char* name : { "prop.phone", "prop.tablet", "prop.sign", "prop.shield", "prop.baton" })
+        CHECK(rig::parts::has(name) && rig::parts::get(name).slot == rig::Slot::Hold);
+    for (const char* name : { "ride.skateboard", "ride.scooter" })
+        CHECK(rig::parts::has(name) && rig::parts::get(name).slot == rig::Slot::Ride);
+    CHECK(rig::parts::has("hat.police") && rig::parts::has("hat.riot"));
+    rig::Look l;
+    l.holdR = "prop.sign";
+    l.sign = "NO TO\nCARS";
+    bool labelled = false;
+    for (const rig::Prim& p : rig::prims(l, "holdR"))
+        if (p.paint == rig::Paint::Label) labelled = p.label == "NO TO\nCARS";
+    CHECK(labelled);
+    l.ride = "ride.scooter";
+    for (const rig::Prim& p : rig::prims(l, "ride")) CHECK(p.joint == Joint::Floor);
+    // A sign change is a swap (the label is part of what the slot shows).
+    auto ch = std::make_shared<rig::Character>(l);
+    rig::Look l2 = l;
+    l2.sign = "YES";
+    ch->wear(1.0, l2);
+    CHECK(ch->lookIndex("holdR", 1.5) == 1);
+}
+
 static Image frame(Comp& c, int t) {
     Canvas canvas;
     canvas.load(c.w, c.h, 1);
@@ -417,6 +538,136 @@ static bool render(const std::filesystem::path& dir, bool preview) {
         UnloadImage(a);
     }
 
+    // Acting with furniture and props: an office (typing at a desk, a phone, a tablet) and a
+    // street (a placard, a riot line, a skateboard, a scooter), in 3D and as 2D cut-outs.
+    {
+        Comp c;
+        c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90; c.background = bg;
+        auto scene = studio(1.8f);
+        scene->camera.position = { 1.6f, 2.0f, 4.6f };
+        scene->camera.target = { 0.2f, 0.85f, 0 };
+        const rig::Build adult = rig::Build::adult();
+        // The desk, a workstation on it, a chair pulled up to it.
+        interior3d::add(*scene, interior3d::Kind::OfficeDesk)->position = { -0.6f, 0, -0.35f };
+        interior3d::add(*scene, interior3d::Kind::Workstation)->position = { -0.6f, 0.7825f, -0.42f };
+        // The chair turned to face the desk (its front is +z).
+        g3d::Object3D* chair = interior3d::add(*scene, interior3d::Kind::ErgonomicChair);
+        chair->position = { -0.46f, 0, 0.3f };
+        chair->rotation.y = 180;
+        rig::Look worker = rig::Look::toon();
+        worker.build = adult;
+        worker.outfit = rig::Outfit::basic({ 230, 120, 70, 255 }, { 50, 60, 100, 255 }, worker.skin, 0.9f, 1);
+        auto typist = std::make_shared<rig::Character>(worker);
+        // The seat top is 0.61 m up. The keyboard (workstation-local 0.14, 0.035, 0.32) in the
+        // typist's space: it sits where the chair is, turned to face -z.
+        const Vector3 kw{ -0.6f + 0.14f, 0.7825f + 0.035f, -0.42f + 0.32f };
+        const Vector3 seat{ -0.46f, 0, 0.3f };
+        typist->motion.play(rig::clips::typing(adult, 0.61f, { -(kw.x - seat.x), kw.y, -(kw.z - seat.z) }), 0);
+        g3d::Object3D* t = rig::add(*scene, typist);
+        t->position = seat;
+        t->rotation.y = 180;
+        rig::Look caller = worker;
+        caller.outfit = rig::Outfit::basic({ 80, 150, 120, 255 }, { 40, 40, 50, 255 }, caller.skin, 0.4f, 1);
+        caller.hair = "hair.bob";
+        caller.holdR = "prop.phone";
+        auto phone = std::make_shared<rig::Character>(caller);
+        phone->motion.play(rig::clips::texting(adult), 0);
+        g3d::Object3D* ph = rig::add(*scene, phone);
+        ph->position = { 0.75f, 0, 0.2f };
+        ph->rotation.y = -20;
+        rig::Look reader = rig::Look::toon();
+        reader.holdL = "prop.tablet";
+        auto tab = std::make_shared<rig::Character>(reader);
+        tab->motion.play(rig::clips::tablet(reader.build), 0);
+        g3d::Object3D* tb = rig::add(*scene, tab);
+        tb->position = { 1.55f, 0, -0.2f };
+        tb->rotation.y = -35;
+        addRoot(c.roots, 0, 90)->fn = g3d::draw(scene);
+        Image a = frame(c, 45), b2 = frame(c, 45);
+        CHECK(std::memcmp(a.data, b2.data, (size_t)a.width * a.height * 4) == 0);
+        if (preview) ExportImage(a, (dir / "3d-office.png").string().c_str());
+        UnloadImage(a);
+        UnloadImage(b2);
+    }
+    {
+        Comp c;
+        c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90; c.background = bg;
+        auto scene = studio(1.8f);
+        scene->camera.position = { 0.4f, 1.9f, 6.4f };
+        scene->camera.target = { 0.4f, 0.95f, 0 };
+        const rig::Build adult = rig::Build::adult();
+        rig::Look marcher = rig::Look::toon();
+        marcher.build = adult;
+        marcher.holdR = "prop.sign";
+        marcher.sign = "MORE\nBIKE LANES";
+        marcher.outfit = rig::Outfit::basic({ 240, 196, 60, 255 }, { 60, 70, 90, 255 }, marcher.skin, 0.45f, 1);
+        auto m = std::make_shared<rig::Character>(marcher);
+        m->motion.play(rig::clips::protest(adult), 0);
+        rig::add(*scene, m)->position = { -1.7f, 0, 0 };
+        rig::Look cop = rig::Look::toon();
+        cop.build = adult;
+        cop.hat = "hat.riot";
+        cop.hair = "";
+        cop.holdL = "prop.shield";
+        cop.holdR = "prop.baton";
+        cop.sign = "POLICE";
+        cop.dark = { 30, 36, 52, 255 };
+        cop.outfit = rig::Outfit::basic({ 36, 44, 64, 255 }, { 30, 34, 46, 255 }, cop.skin, 1, 1);
+        auto po = std::make_shared<rig::Character>(cop);
+        po->motion.play(rig::clips::shieldLine(adult), 0);
+        rig::add(*scene, po)->position = { -0.4f, 0, 0 };
+        rig::Look skater = rig::Look::toon();
+        skater.ride = "ride.skateboard";
+        skater.hat = "hat.beanie";
+        auto sk = std::make_shared<rig::Character>(skater);
+        sk->motion.play(rig::clips::skate(skater.build), 0);
+        rig::add(*scene, sk)->position = { 1.0f, 0, 0.2f };
+        rig::Look rider = rig::Look::toon();
+        rider.ride = "ride.scooter";
+        rider.hair = "hair.ponytail";
+        auto sc = std::make_shared<rig::Character>(rider);
+        sc->motion.play(rig::clips::scooter(rider.build), 0);
+        g3d::Object3D* s3 = rig::add(*scene, sc);
+        s3->position = { 2.3f, 0, 0 };
+        s3->rotation.y = -60;
+        addRoot(c.roots, 0, 90)->fn = g3d::draw(scene);
+        Image a = frame(c, 20);
+        if (preview) ExportImage(a, (dir / "3d-street.png").string().c_str());
+        UnloadImage(a);
+    }
+    {
+        Comp c;
+        c.w = 1600; c.h = 600; c.fps = 30; c.duration = 90; c.background = { 238, 234, 224, 255 };
+        struct Act { rig::Look look; rig::Clip clip; float yaw; };
+        std::vector<Act> acts;
+        rig::Look a1 = rig::Look::toon(); a1.holdR = "prop.phone";
+        acts.push_back({ a1, rig::clips::texting(a1.build), 20 });
+        rig::Look a2 = rig::Look::toon(); a2.holdL = "prop.tablet"; a2.hair = "hair.bob";
+        acts.push_back({ a2, rig::clips::tablet(a2.build), -20 });
+        rig::Look a3 = rig::Look::toon(); a3.holdR = "prop.sign"; a3.sign = "CLIMATE\nNOW";
+        acts.push_back({ a3, rig::clips::protest(a3.build), 10 });
+        rig::Look a4 = rig::Look::toon(); a4.hat = "hat.riot"; a4.hair = ""; a4.holdL = "prop.shield"; a4.holdR = "prop.baton";
+        a4.sign = "POLICE"; a4.outfit = rig::Outfit::basic({ 36, 44, 64, 255 }, { 30, 34, 46, 255 }, a4.skin, 1, 1);
+        acts.push_back({ a4, rig::clips::shieldLine(a4.build), 25 });
+        rig::Look a5 = rig::Look::toon(); a5.ride = "ride.skateboard"; a5.hat = "hat.beanie";
+        acts.push_back({ a5, rig::clips::skate(a5.build), 0 });
+        rig::Look a6 = rig::Look::toon(); a6.ride = "ride.scooter";
+        acts.push_back({ a6, rig::clips::scooter(a6.build), 70 });
+        float x = 130;
+        for (const Act& act : acts) {
+            auto ch = std::make_shared<rig::Character>(act.look);
+            ch->motion.play(act.clip, 0);
+            rig::View2D v;
+            v.yaw = act.yaw; v.scale = 250; v.origin = { x, 540 };
+            addRoot(c.roots, 0, 90)->fn = [ch, v](const Ctx& cx, int t) { rig::draw(cx, *ch, t / 30.0, v); };
+            x += 268;
+        }
+        Image a = frame(c, 20);
+        CHECK(differing(a, c.background) > 1600 * 600 / 16);
+        if (preview) ExportImage(a, (dir / "2d-acting.png").string().c_str());
+        UnloadImage(a);
+    }
+
     // 2D: a line-up of puppets at several yaws.
     {
         Comp c;
@@ -514,6 +765,7 @@ int main(int argc, char** argv) try {
     outfits();
     swaps();
     prefabs();
+    acting();
     const bool preview = argc == 3 && std::string(argv[1]) == "--preview";
     if (!(argc == 2 && std::string(argv[1]) == "--no-gl")) CHECK(render(preview ? argv[2] : "", preview));
     if (failures) std::fprintf(stderr, "%d failure(s)\n", failures);

@@ -334,7 +334,7 @@ rig::View2D v; v.yaw = 30; v.origin = {960, 900};
 addRoot(c.roots, 0, 300)->fn = [pip, v](const Ctx& c, int t) { rig::draw(c, *pip, t / 30.0, v); };   // 2D
 ```
 
-* **Skeleton and motion**: 16 joints. `Build` sets the proportions (`adult`, `toon`,
+* **Skeleton and motion**: 16 joints, plus a `Floor` joint for things that stay on the ground. `Build` sets the proportions (`adult`, `toon`,
   `block`, `chibi`, `mix`). Clips are pure functions of time: `idle`, `walk`, `run`,
   `wave`, `point`, `cheer`, `jump`, `sit`, `shrug`, `keys`. `Motion` crossfades them and
   layers them under masks (`Mask::Upper`, `Lower`, `ArmL`, `Arms`, `Head`...).
@@ -352,11 +352,34 @@ addRoot(c.roots, 0, 300)->fn = [pip, v](const Ctx& c, int t) { rig::draw(c, *pip
   shapes, as used by Rhubarb Lip Sync). Shapes morph between states. `FaceTrack` plays
   expressions, gaze, seeded auto-blinks and speech, either from text (an approximate
   letters-to-shapes guess) or from Rhubarb cues.
-* **Prefab**: `character` (mode `2d`/`3d`, preset, part keys, colours, clip, expression,
-  `say`).
+* **Acting with props and furniture**: two-bone IK (`reach`, `plant`) and `hand`, which
+  places a palm, points the fingers and turns the palm. Held props and rides are parts:
+  `holdL`/`holdR` (`prop.phone`, `prop.tablet`, `prop.sign`, `prop.shield`, `prop.baton`)
+  and `ride` (`ride.skateboard`, `ride.scooter`). They are sized to the body, so any build
+  can use them. `Look::sign` is the text on placards and shields, drawn in both 2D and 3D.
+  The clips `seated`, `typing`, `texting`, `calling`, `tablet`, `protest`, `shieldLine`,
+  `skate` and `scooter` work with the `interior3d` furniture, which is real size: an
+  adult build fits the office chair and desk, and a toon perches on them. `hat.police`
+  and `hat.riot` dress the police.
 
-`one-walk-any-body` is a 44 s promo for the module. `raymotion_rig_tests --preview <dir>`
-writes preview sheets of the presets, limbs, hands and feet, swaps, faces and 2D views.
+  ```cpp
+  rig::Look cop = rig::Look::toon();
+  cop.build = rig::Build::adult();
+  cop.hat = "hat.riot"; cop.holdL = "prop.shield"; cop.holdR = "prop.baton"; cop.sign = "POLICE";
+  auto p = std::make_shared<rig::Character>(cop);
+  p->motion.play(rig::clips::shieldLine(cop.build), 0);
+  // At a desk: the character's root on the floor under the chair's seat, facing the desk;
+  // the keyboard given in the character's space.
+  auto typist = std::make_shared<rig::Character>(cop);
+  typist->motion.play(rig::clips::typing(cop.build, 0.61f /* seat top */, { 0, 0.82f, 0.40f }), 0);
+  ```
+* **Prefab**: `character` (mode `2d`/`3d`, preset, part keys including `holdL`, `holdR`,
+  `ride` and `sign`, colours, clip, expression, `say`).
+
+`one-walk-any-body` is a 56 s promo for the module. `raymotion_rig_tests --preview <dir>`
+writes preview sheets of the presets, limbs, hands and feet, swaps, faces and 2D views,
+plus the props: an office (`3d-office.png`), a street (`3d-street.png`) and 2D
+(`2d-acting.png`).
 
 ### Diagrams and structures
 

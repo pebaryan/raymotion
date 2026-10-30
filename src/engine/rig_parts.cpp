@@ -1,5 +1,5 @@
 // rig:: parts -- the built-in part catalog and the registry.
-#include "rmtn/rig.hpp"
+#include "rig_internal.hpp"
 #include <raymath.h>
 #include <algorithm>
 #include <cmath>
@@ -190,6 +190,23 @@ void hair() {
         return std::vector<Prim>{
             super("mast", Joint::Head, { 0, h * 1.08f, 0 }, { h * 0.05f, h * 0.36f, h * 0.05f }, 0.2f, 1, Paint::Metal),
             super("bulb", Joint::Head, { 0, h * 1.28f, 0 }, { h * 0.14f, h * 0.14f, h * 0.14f }, 1, 1, Paint::Accent) };
+    });
+    def("hat.police", Slot::Hat, [](const Build& b, Side, float) {
+        const float h = b.head;
+        const Color black{ 26, 26, 32, 255 };
+        return std::vector<Prim>{
+            inFront(super("crown", Joint::Head, { 0, h * 0.9f, -h * 0.03f }, { h * 1.08f, h * 0.3f, h * 1.08f }, 0.45f, 1, Paint::Dark)),
+            inFront(fixed(super("band", Joint::Head, { 0, h * 0.77f, -h * 0.02f }, { h * 0.98f, h * 0.12f, h * 0.98f }, 0.2f, 1, Paint::Fixed), black)),
+            fixed(rotated(super("visor", Joint::Head, { 0, h * 0.74f, h * 0.44f }, { h * 0.66f, h * 0.04f, h * 0.32f }, 0.5f, 1, Paint::Fixed), { 14, 0, 0 }), black),
+            fixed(super("badge", Joint::Head, { 0, h * 0.9f, h * 0.53f }, { h * 0.13f, h * 0.15f, h * 0.04f }, 0.6f, 0.6f, Paint::Fixed), { 232, 192, 72, 255 }) };
+    });
+    def("hat.riot", Slot::Hat, [](const Build& b, Side, float) {
+        const float h = b.head;
+        Prim visor = fixed(super("visor", Joint::Head, { 0, h * 0.5f, h * 0.5f }, { h * 1.0f, h * 0.56f, h * 0.14f }, 0.7f, 0.7f, Paint::Fixed), { 170, 205, 235, 80 });
+        visor.depth2d = 0.25f;
+        return std::vector<Prim>{
+            inFront(dome("helmet", Joint::Head, { 0, h * 0.6f, -h * 0.03f }, { h * 1.14f, h * 0.96f, h * 1.12f }, 0.12f, Paint::Dark)),
+            visor };
     });
 }
 
@@ -413,11 +430,93 @@ void legs() {
     });
 }
 
+// ---- held props (in the wrist's frame: the palm's centre at (0, -hand/2, 0), the palm
+// facing -x on the left hand and +x on the right, the thumb towards +z) and rides (on the
+// Floor joint). Sizes follow the body (detail::propScale), so every build can use them.
+Prim cylinderAlong(Prim p, Vector3 rot) { p.squareV = 0.12f; p.squareH = 1; p.rot = rot; return p; }
+float palmSide(Side s) { return s == Side::Left ? -1.f : 1.f; }
+void props() {
+    using namespace detail;
+    def("prop.phone", Slot::Hold, [](const Build& b, Side s, float) {
+        const float h = b.hand, k = propScale(b), t = 0.009f * k, pn = palmSide(s);
+        return std::vector<Prim>{
+            super("phone", J(s, Joint::WristL), { pn * (h * 0.31f + t / 2), -h * 0.55f, 0 }, { t, 0.15f * k, 0.072f * k }, 0.15f, 0.2f, Paint::Dark),
+            fixed(super("screen", J(s, Joint::WristL), { pn * (h * 0.31f + t + 0.001f * k), -h * 0.55f, 0 }, { 0.002f * k, 0.13f * k, 0.062f * k }, 0.1f, 0.2f, Paint::Fixed), { 96, 196, 236, 255 }) };
+    });
+    def("prop.tablet", Slot::Hold, [](const Build& b, Side s, float) {
+        const float h = b.hand, k = propScale(b), t = 0.011f * k, pn = palmSide(s);
+        const float y = -h * 0.5f - 0.06f * k;
+        return std::vector<Prim>{
+            super("tablet", J(s, Joint::WristL), { pn * (h * 0.31f + t / 2), y, 0 }, { t, 0.25f * k, 0.18f * k }, 0.12f, 0.12f, Paint::Dark),
+            fixed(super("screen", J(s, Joint::WristL), { pn * (h * 0.31f + t + 0.001f * k), y, 0 }, { 0.002f * k, 0.225f * k, 0.155f * k }, 0.1f, 0.1f, Paint::Fixed), { 120, 205, 225, 255 }) };
+    });
+    def("prop.sign", Slot::Hold, [](const Build& b, Side s, float) {
+        // A pole through the fist (the thumb runs along it) and a card at its top, facing the
+        // way the fingers point.
+        const SignGeom g = signGeom(b);
+        const float h = b.hand, k = propScale(b), x = palmSide(s) * h * 0.3f, t = 0.014f * k;
+        Prim card = super("card", J(s, Joint::WristL), { x, -h * 0.5f - (g.radius + t / 2 + 0.003f * k), g.pole - g.grip - g.height / 2 + 0.02f * k },
+                          { g.width, g.height, t }, 0.1f, 0.1f, Paint::Label);
+        card.color = { 247, 243, 232, 255 };
+        card.rot = { 90, 0, 0 };
+        card.depth2d = 0.03f;                           // in 2D, over its own pole
+        return std::vector<Prim>{
+            fixed(cylinderAlong(super("pole", J(s, Joint::WristL), { x, -h * 0.5f, g.pole / 2 - g.grip }, { g.radius * 2, g.pole, g.radius * 2 }, 1, 1, Paint::Fixed), { 90, 0, 0 }), { 176, 132, 84, 255 }),
+            card };
+    });
+    def("prop.shield", Slot::Hold, [](const Build& b, Side s, float) {
+        const ShieldGeom g = shieldGeom(b);
+        const float h = b.hand, k = propScale(b), x = palmSide(s) * h * 0.3f, t = 0.016f * k;
+        Prim shield = super("shield", J(s, Joint::WristL), { x - sgn(s) * 0.05f * k, -h * 0.5f - (0.04f * k + t / 2), g.height / 2 - g.below },
+                            { g.width, g.height, t }, 0.08f, 0.08f, Paint::Label);
+        shield.color = { 120, 140, 160, 110 };          // smoked polycarbonate
+        shield.rot = { 90, 0, 0 };
+        shield.depth2d = 0.15f;                         // in 2D, in front of the arm that holds it
+        return std::vector<Prim>{
+            super("handle", J(s, Joint::WristL), { x, -h * 0.5f - 0.02f * k, 0 }, { 0.025f * k, 0.03f * k, 0.15f * k }, 0.3f, 0.3f, Paint::Dark),
+            shield };
+    });
+    def("prop.baton", Slot::Hold, [](const Build& b, Side s, float) {
+        const float h = b.hand, k = propScale(b), len = 0.62f * k;
+        return std::vector<Prim>{
+            cylinderAlong(super("baton", J(s, Joint::WristL), { palmSide(s) * h * 0.3f, -h * 0.5f, len / 2 - 0.1f * k }, { 0.034f * k, len, 0.034f * k }, 1, 1, Paint::Dark), { 90, 0, 0 }) };
+    });
+
+    def("ride.skateboard", Slot::Ride, [](const Build& b, Side, float) {
+        const BoardGeom g = boardGeom(b);
+        const float k = propScale(b), L = g.length, W = g.width;
+        std::vector<Prim> v{
+            super("deck", Joint::Floor, { 0, g.top - 0.008f * k, 0 }, { L, 0.016f * k, W }, 0.3f, 0.35f, Paint::Accent),
+            super("grip-tape", Joint::Floor, { 0, g.top + 0.0005f * k, 0 }, { L * 0.92f, 0.003f * k, W * 0.88f }, 0.2f, 0.35f, Paint::Dark) };
+        for (float sx : { -1.f, 1.f }) {
+            v.push_back(super("truck", Joint::Floor, { sx * 0.3f * L, (g.top - 0.016f * k + g.wheel * 1.6f) / 2, 0 }, { 0.05f * k, 0.035f * k, W * 0.8f }, 0.4f, 0.4f, Paint::Metal));
+            for (float sz : { -1.f, 1.f })
+                v.push_back(fixed(cylinderAlong(super("wheel", Joint::Floor, { sx * 0.3f * L, g.wheel, sz * (W * 0.5f - 0.012f * k) }, { g.wheel * 2, 0.022f * k, g.wheel * 2 }, 1, 1, Paint::Fixed), { 90, 0, 0 }), { 240, 232, 210, 255 }));
+        }
+        return v;
+    });
+    def("ride.scooter", Slot::Ride, [](const Build& b, Side, float) {
+        const ScooterGeom g = scooterGeom(b);
+        const float k = propScale(b), w = g.wheel;
+        const Color tyre{ 52, 52, 58, 255 };
+        std::vector<Prim> v{
+            super("deck", Joint::Floor, { 0, g.top - 0.015f * k, -0.02f * k }, { g.width, 0.03f * k, g.length }, 0.3f, 0.3f, Paint::Dark),
+            fixed(cylinderAlong(super("wheel", Joint::Floor, { 0, w, -g.length / 2 - w * 0.3f }, { w * 2, 0.03f * k, w * 2 }, 1, 1, Paint::Fixed), { 0, 0, 90 }), tyre),
+            fixed(cylinderAlong(super("wheel", Joint::Floor, { 0, w, g.barZ + 0.01f * k }, { w * 2, 0.03f * k, w * 2 }, 1, 1, Paint::Fixed), { 0, 0, 90 }), tyre),
+            super("neck", Joint::Floor, { 0, g.top, g.length / 2 }, { g.width * 0.8f, 0.04f * k, 0.09f * k }, 0.3f, 0.3f, Paint::Accent),
+            cylinderAlong(super("stem", Joint::Floor, { 0, (w + g.barY) / 2, g.barZ }, { 0.034f * k, g.barY - w, 0.034f * k }, 1, 1, Paint::Metal), { 0, 0, 0 }),
+            cylinderAlong(super("bar", Joint::Floor, { 0, g.barY, g.barZ }, { 0.028f * k, g.barW, 0.028f * k }, 1, 1, Paint::Metal), { 0, 0, 90 }) };
+        for (float sx : { -1.f, 1.f })
+            v.push_back(cylinderAlong(super("grip", Joint::Floor, { sx * (g.barW / 2 - 0.05f * k), g.barY, g.barZ }, { 0.036f * k, 0.1f * k, 0.036f * k }, 1, 1, Paint::Dark), { 0, 0, 90 }));
+        return v;
+    });
+}
+
 void ensureBuiltins() {
     static bool done = false;
     if (done) return;
     done = true;
-    heads(); hair(); torsos(); arms(); hands(); legs();
+    heads(); hair(); torsos(); arms(); hands(); legs(); props();
 }
 } // namespace
 
@@ -470,7 +569,10 @@ std::vector<Prim> prims(const Look& l, const std::string& slot) {
         if (key != slot) continue;
         if (part.empty()) return {};
         const Side side = key.back() == 'R' ? Side::Right : Side::Left;
-        return parts::get(part).make(l.build, side, std::clamp(l.softness, 0.f, 1.f));
+        auto v = parts::get(part).make(l.build, side, std::clamp(l.softness, 0.f, 1.f));
+        for (Prim& p : v)
+            if (p.paint == Paint::Label && p.label.empty()) p.label = l.sign;
+        return v;
     }
     return {};
 }

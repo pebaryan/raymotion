@@ -38,6 +38,8 @@ enum class Joint : int {
     Root, Pelvis, Chest, Neck, Head,
     ShoulderL, ElbowL, WristL, ShoulderR, ElbowR, WristR,
     HipL, KneeL, AnkleL, HipR, KneeR, AnkleR,
+    Floor,                                   // the ground under the feet: a child of Root that
+                                             //   ignores the pose's offset (boards, scooters)
     Count
 };
 constexpr int kJoints = (int)Joint::Count;
@@ -91,6 +93,25 @@ Vector3 jointRotation(const Pose& p, Joint j);
 std::array<Matrix, kJoints> solve(const Build& b, const Pose& p);
 Vector3 position(const std::array<Matrix, kJoints>& frames, Joint j);
 
+// ------------------------------------------------------------------ reaching (IK)
+// Two-bone IK on `side`'s arm: shoulder and elbow turned so the wrist lands on `target`
+// (character space; out of reach, the arm points at it, straight). The elbow bends
+// towards `pole`, a direction given for the left arm (the right arm mirrors it).
+Pose reach(const Build& b, Pose p, Side side, Vector3 target, Vector3 pole = { 0.5f, -0.4f, -1 });
+// The same for a leg: hip and knee turned so the ankle lands on `target`.
+Pose plant(const Build& b, Pose p, Side side, Vector3 target, Vector3 pole = { 0, 0, 1 });
+// Joint j's rotation chosen so its frame's +y points along `up` and its +z towards
+// `forward` (character space).
+Pose orient(const Build& b, Pose p, Joint j, Vector3 up, Vector3 forward);
+// A hand placed: the palm's centre on `at`, the fingers pointing along `fingers`, the palm
+// facing `palm` (character space). Held props sit in the palm, so this is how a pose
+// holds a phone up (palm behind it) or closes a fist round a pole (fingers forward, palm
+// towards the pole, thumb along it).
+Pose hand(const Build& b, Pose p, Side side, Vector3 at, Vector3 fingers, Vector3 palm,
+          Vector3 pole = { 0.5f, -0.4f, -1 });
+// Where `side`'s palm centre is in a pose (character space).
+Vector3 palmAt(const Build& b, const Pose& p, Side side);
+
 // ------------------------------------------------------------------ motion
 using Clip = std::function<Pose(double seconds)>;   // seconds from the clip's start
 
@@ -106,6 +127,31 @@ Clip cheer();                                // both arms up, bouncing
 Clip jump(float period = 1.2f);              // crouch, leap, land, repeating
 Clip sit(float drop = 0.3f);                 // `drop`: how far the hips sink (about the thigh length)
 Clip shrug();
+
+// ---- with furniture and props. Targets are in character space: place the character's
+// root where the action happens (for a chair, the floor under the seat's centre) and give
+// the rest relative to it. Furniture is real size, so a short build perches on a tall seat.
+// Seated on a seat whose top is `seat` above the floor: thighs along it, feet planted when
+// the shins reach the floor, hanging (and swinging a little) when they don't.
+Clip seated(const Build& b, float seat);
+// Seated, typing on a keyboard whose centre is at `keys`, head bowed to a screen behind it.
+Clip typing(const Build& b, float seat, Vector3 keys, float rate = 1);
+// A phone (prop.phone) in the `side` hand: thumbing it at chest height, or held to the ear.
+Clip texting(const Build& b, Side side = Side::Right);
+Clip calling(const Build& b, Side side = Side::Right);
+// A tablet (prop.tablet) resting in the left hand, the right tapping it.
+Clip tablet(const Build& b);
+// A placard (prop.sign) held up on its pole in both hands, pumped `beat` times a second.
+Clip protest(const Build& b, float beat = 1);
+// A riot line: a shield (prop.shield) braced in the left hand, a baton (prop.baton) in the
+// right, knees bent; `advance`: stepping in place behind the shield.
+Clip shieldLine(const Build& b, bool advance = false);
+// On a skateboard (ride.skateboard, lying along the character's x): rolling towards +x,
+// the right foot pushing off every `period` seconds (0 = cruising).
+Clip skate(const Build& b, float period = 2.4f);
+// On a kick scooter (ride.scooter, along +z): the left foot on the deck, the right kicking
+// every `period` seconds (0 = both feet on the deck).
+Clip scooter(const Build& b, float period = 1.6f);
 // Keyframed poses at times (seconds), eased between (smoothstep); held after the last,
 // or looping over the last key's time when `loop`.
 Clip keys(std::vector<std::pair<double, Pose>> keys, bool loop = false);
@@ -243,11 +289,12 @@ struct Outfit {
 };
 
 // ------------------------------------------------------------------ parts
-enum class Slot { Head, Hair, Hat, Torso, Hips, Arm, Hand, Leg, Foot, Extra };
+enum class Slot { Head, Hair, Hat, Torso, Hips, Arm, Hand, Leg, Foot, Extra, Hold, Ride };
 const char* name(Slot s);
 
-// Where a primitive takes its colour from.
-enum class Paint { Skin, Hair, Shoes, Accent, Metal, Dark, Outfit, Face, Fixed };
+// Where a primitive takes its colour from. Label: `color`, with the look's `sign` text
+// (or the prim's own `label`) across its front, readable from the back too.
+enum class Paint { Skin, Hair, Shoes, Accent, Metal, Dark, Outfit, Face, Fixed, Label };
 
 // A shape attached to a joint. Super: a superellipsoid (squareV/squareH 1 = round, small
 // = boxy; cylinder = squareV small, squareH 1) tapered to `taper` times its width at the
@@ -271,6 +318,7 @@ struct Prim {
     Vector2 flat{ 0.3f, 0.3f };              // Model: the svg's width and height in 2D
     float roughness = -1;                    // -1: from the Look's finish
     float depth2d = 0;                       // 2D: added to the depth it is sorted by (metres)
+    std::string label;                       // Paint::Label text ("" = the look's `sign`)
     float from2d = -2;                       // 2D: where `from` rises to as the part's +z faces
                                              //   the viewer (a cap of hair's hairline; < -1: off)
 };
@@ -306,6 +354,10 @@ struct Look {
                 hips = "hips.round", extra;
     std::string armL = "arm.soft", armR = "arm.soft", handL = "hand.mitten", handR = "hand.mitten",
                 legL = "leg.soft", legR = "leg.soft", footL = "foot.shoe", footR = "foot.shoe";
+    // Held in each hand (prop.phone, prop.tablet, prop.sign, prop.shield, ...) and ridden
+    // (ride.skateboard, ride.scooter). Pose the hands with rig::hand() or the clips below.
+    std::string holdL, holdR, ride;
+    std::string sign;                        // text on Paint::Label parts (placards, shields)
     float softness = 0.8f;                   // soft limbs: 0 angular .. 1 rubber hose
     Color skin{ 222, 170, 130, 255 }, hairColor{ 60, 42, 34, 255 }, shoes{ 50, 50, 58, 255 },
           accent{ 240, 190, 60, 255 }, metal{ 170, 178, 188, 255 }, dark{ 44, 44, 52, 255 };

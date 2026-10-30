@@ -8,10 +8,10 @@ Status: `draft` (agent-reviewed; awaiting the owner's approval).
 | Story mode | `promo` |
 | Owner / agent | pebaryan / Claude |
 | Status | `draft` |
-| Runtime target | 43.8 s (1315 frames) |
+| Runtime target | 55.5 s (1665 frames) |
 | Platform / aspect | 1920x1080, 30 fps; README / docs / social feed |
 | Voice | none: the film autoplays muted in docs and feeds; the captions are the script, and the face chapter "speaks" with mouth shapes |
-| Audience | people who make motion graphics in code and have used a character rig at most once; afterwards they can say "motion lives in the skeleton, the body is clothing, and the face is an SVG" |
+| Audience | people who make motion graphics in code and have used a character rig at most once; afterwards they can say "motion lives in the skeleton, the body is clothing, the face is an SVG, and props are parts the hands find" |
 | Source material | the `rig::` module (`include/rmtn/rig.hpp`), `assets/characters/*.svg` |
 
 ## 1b. Mode contract
@@ -20,7 +20,7 @@ Status: `draft` (agent-reviewed; awaiting the owner's approval).
 | --- | --- |
 | Mode | promo |
 | Goal | make one idea desirable: a character whose body, material and face are data, on one unchanging motion |
-| Proof object | the demo itself: a joint overlay that stays on the body while every part swaps; a softness dial; a mouth-shape strip; one character drawn twice |
+| Proof object | the demo itself: a joint overlay that stays on the body while every part swaps; a softness dial; a mouth-shape strip; one character drawn twice; palm dots landing in target rings set by the furniture |
 | Required evidence | claim ledger (every claim is a property of the code, shown happening) |
 | Text | one headline per chapter, one caption line at ~2.5 words/s, a tagline and the API names on the end card |
 | House grammar | raymotion brand: warm paper ground, ink type, teal accent, logo prefab on the end card |
@@ -38,8 +38,8 @@ Status: `draft` (agent-reviewed; awaiting the owner's approval).
 
 ## 2. One-line argument
 
-> The walk lives in the skeleton; heads, limbs, materials, faces and even 2D-or-3D are
-> clothes it wears.
+> The walk lives in the skeleton; heads, limbs, materials, faces, props and even
+> 2D-or-3D are clothes it wears.
 
 ## 3. Chapters
 
@@ -50,7 +50,8 @@ Status: `draft` (agent-reviewed; awaiting the owner's approval).
 | 3 | 415-670 (13.8-22.3) | Rigid or soft | `RIGID OR SOFT` / "Same elbow, three materials." | three figures enter one at a time, each waving the same wave: rigid segments, soft, rubber hose; a dial at top right (clear of the three heads) sweeps the middle figure's softness 0 to 1 and its arm melts from angular to hose | the softness dial driving the middle arm | riser under the dial sweep; a bell when it lands |
 | 4 | 660-945 (22.0-31.5) | A face from vectors | `A FACE FROM VECTORS` / "The face is an SVG of named shapes." then "Hi! I'm Pip." | close on the head; a strip of the SVG's mouth shapes A-H; as Pip "says" the line the active chip lights; then happy, surprised, wink | the mouth-shape strip lighting in sync with the mouth | tiny blips on mouth changes; a bell on the wink |
 | 5 | 935-1190 (31.2-39.7) | Flat or deep | `FLAT OR DEEP` / "One character, drawn flat or in depth." | split frame: the same Character as a 2D cut-out and as 3D meshes; one yaw dial turns both; the outfit swaps to stripes on both at once | one yaw dial driving two renderings; one outfit change landing on both | whoosh on the turn; pluck on the outfit swap |
-| 6 | 1180-1315 (39.3-43.8) | End card | `ONE RIG. ANY BODY.` / `rig::Character · rig::Look · rig::parts` | the four bodies from chapter 2 stand in a row and cheer; title, API line, logo | the line-up: four bodies, one clip | impact, bell arpeggio, resolve |
+| 6 | 1180-1540 (39.3-51.3) | Hands on things | `HANDS ON THINGS` / "The hands find the keys by themselves." then "Phones, placards, shields and boards are parts too." | an office corner built from the `interior3d` desk, workstation and chair: a typist types, two teal target rings at the keyboard with the teal palm dots inside them; a colleague with a phone enters (and leaves as the camera moves); one camera truck to a street where a placard, a riot shield, a skateboard (rolling in) and a scooter enter one at a time, each labelled with the part names it wears | target rings at the keyboard (from the furniture's geometry) holding the palm dots (from the pose); the part labels read from each figure's `Look` | soft key clicks from the typing clip's own keystroke table; a riser on the truck; a rising pluck per entrance |
+| 7 | 1530-1665 (51.0-55.5) | End card | `ONE RIG. ANY BODY.` / `rig::Character · rig::Look · rig::parts` | the four bodies from chapter 2 stand in a row and cheer; title, API line, logo | the line-up: four bodies, one clip | impact, bell arpeggio, resolve |
 
 ### 3b. Reveal map
 
@@ -83,9 +84,18 @@ scene's frame 8). Each visual leads its phrase by 0.27 s (8 frames).
 | 5 | 3D figure + label | — | 0.90 | 1.20 | to end |
 | 5 | yaw dial; both turn | "drawn flat or in depth" | 2.00 | 2.27 | turn 2.3-5.0 |
 | 5 | outfit swap on both | — | 5.80 | 6.15 | to end |
-| 6 | line-up | first frame | 0.00 | 0.30 | to end |
-| 6 | title | — | 0.70 | 1.00 | to end |
-| 6 | API line + logo | — | 1.60 | 1.90 | to end |
+| 6 | office set + typist typing | first frame | 0.00 | 0.30 | to end of beat A |
+| 6 | headline `HANDS ON THINGS` | — | 0.27 | 0.60 | to end |
+| 6 | target rings + palm dots | "find the keys" | 1.00 | 1.30 | 3.6 |
+| 6 | colleague with phone + label | — | 2.40 | 2.75 | 2.3 |
+| 6 | camera truck to the street | "Phones, placards" | 5.00 | 6.20 | — |
+| 6 | placard bearer + label | "placards" | 6.10 | 6.45 | 0.9 |
+| 6 | riot officer + label | "shields" | 7.00 | 7.35 | 0.9 |
+| 6 | skater rolls in + label | "boards" | 7.90 | 8.25 | 0.9 |
+| 6 | scooter rider + label | "parts too" | 8.80 | 9.15 | to end |
+| 7 | line-up | first frame | 0.00 | 0.30 | to end |
+| 7 | title | — | 0.70 | 1.00 | to end |
+| 7 | API line + logo | — | 1.60 | 1.90 | to end |
 
 ## 4. Script
 
@@ -100,7 +110,9 @@ Voice: none (see header). The captions are the complete script.
 | 4a | The face is an SVG of named shapes. | 8 | 0.27-3.0 |
 | 4b | Hi! I'm Pip. | 3 | 3.2-8.85 (spoken by the mouth 3.2-5.1) |
 | 5 | One character, drawn flat or in depth. | 7 | 0.27-7.85 |
-| 6 | One rig. Any body. | 4 | title card |
+| 6a | The hands find the keys by themselves. | 7 | 0.27-4.6 |
+| 6b | Phones, placards, shields and boards are parts too. | 8 | 5.4-11.35 |
+| 7 | One rig. Any body. | 4 | title card |
 
 Every window closes (with its 8-frame fade) before its scene's 10-frame crossfade begins, so
 two captions never share the screen.
@@ -120,6 +132,8 @@ numbers about the world.
 | the face is an SVG of named shapes | the strip draws the actual `mouth-A..H` shapes from `assets/characters/face-pip.svg` | `svgFace`, `FaceTrack::say` |
 | one character renders flat or in 3D | both halves read the same `Character` object | `rig::draw`, `rig::add` |
 | the mouth shapes for "Hi! I'm Pip." | the letter-to-shape guess, labelled on screen as "letters to shapes (approx.)" | `rig::visemes` |
+| the hands find the keys by themselves | the rings are drawn at the keyboard's position taken from the workstation prefab's geometry; the palm dots are projected from the solved pose; they coincide while the typist types | `clips::typing` (two-bone IK via `rig::hand`), `rig::palmAt` |
+| props and rides are parts | each label is read from the figure's `Look` slots (`holdL`, `holdR`, `ride`) at render time, not typed | `rig::slots`, `Slot::Hold`, `Slot::Ride` |
 
 ## 6. Visual system
 
@@ -130,8 +144,8 @@ numbers about the world.
 | CJK | n/a |
 | Margins / safe area | 96 px sides, 72 px top; caption baseline at y 1010 |
 | Caption box | none: one ink line centred at y 1010, max one line |
-| HUD / persistent frame | kicker `CHARACTERS` top-left with a chapter count `01 / 06` and a 2 px progress line; the teal phase ring wherever the walk runs |
-| Motion grammar | entrances 10-14 frames, spring or ease-out cubic; parts pop with a back-out over 0.35 s; fades between chapters (10 frames); no camera move except chapter 4's slow push-in; no idle motion except the characters' own clips |
+| HUD / persistent frame | kicker `CHARACTERS` top-left with a chapter count `01 / 07` and a 2 px progress line; the teal phase ring wherever the walk runs |
+| Motion grammar | entrances 10-14 frames, spring or ease-out cubic; parts pop with a back-out over 0.35 s; fades between chapters (10 frames); no camera move except chapter 4's slow push-in and chapter 6's one truck from the office to the street; no idle motion except the characters' own clips |
 | Motif | teal joint dots: the skeleton is visible whenever a claim depends on it |
 | Charts / maps | dials only: a ring with a teal/amber arc and a value label |
 | Text performance | one caption line at a time, ~2.5 words/s, no karaoke box or glow |
@@ -146,6 +160,8 @@ numbers about the world.
 | rigid vs soft | dial | 0 = sharp elbow, 1 = rubber hose | the needle and the middle arm move together |
 | words to mouth shapes | chip strip of mouth shapes | chip = one SVG shape, lit = in use | chips light in the order the mouth uses them |
 | 2D and 3D are one character | one yaw dial between two halves | dial angle = both characters' facing | both halves turn with the needle |
+| hands find their targets | teal target ring + teal palm dot | ring = a point taken from the furniture; dot = the palm from the pose | the dots bob with each keystroke and never leave the rings |
+| props are parts | the chapter-2 card grammar, under each figure | label = the part names in its hold/ride slots; coral = just arrived | each label turns coral as its figure pops in, then ink |
 
 ## 7. Audio plan
 
@@ -167,6 +183,9 @@ numbers about the world.
 | swap times | chapter 2 local 0.6 + 0.9/1.2 s steps | parts tray flips, plucks | one `SWAPS` table |
 | softness sweep | 0 at local 3.6 s, 1 at 7.0 s | dial needle, middle arm, riser | one function |
 | speech | "Hi! I'm Pip." over local 3.2-5.1 s | mouth chips, blips, caption | `FaceTrack::say` cues |
+| keystrokes | 7 slots/s per hand, a slot struck when its seeded draw > 0.3 | key clicks, the hands' dips | `clips::typing` seeds 71/73, mirrored in `genScore` |
+| entrances | chapter 6 local 2.4, 6.1, 7.0, 7.9, 8.8 s | pops, labels, plucks | one `ACTS` table |
+| skater's roll | 0.9 m, easing out, from local 7.9 s | the board's position | one function `rollAt()` |
 
 ## 8. Asset plan
 
@@ -195,7 +214,10 @@ renders with the procedural face and plain outfit.
 | 660 + 168 / 204 / 240 | happy / surprised / wink | bells | `FACE_KEYS` |
 | 935 + 69 → 935 + 150 | yaw turn | riser/whoosh | `yawAt()` |
 | 935 + 174 | outfit swap on both | pluck | `OUTFIT_AT` |
-| 1180 + 21 | title lands | impact + bells | end card |
+| 1180 + 0 → 1180 + 150 | typing | soft clicks on struck slots | `clips::typing` keystroke table |
+| 1180 + 150 → 1180 + 186 | camera truck | riser | `truckAt()` |
+| 1180 + 72 / 183 / 210 / 237 / 264 | phone / placard / shield / skateboard / scooter enter | plucks G4 C5 E5 G5 C6 | `ACTS` |
+| 1530 + 21 | title lands | impact + bells | end card |
 
 ## 10. Still frames to review
 
@@ -212,9 +234,13 @@ renders with the procedural face and plain outfit.
 | 900 | 4 | wink |
 | 1010 | 5 | both halves turned to the same angle |
 | 1150 | 5 | stripes on both |
-| 1290 | 6 | line-up, title, API line, logo |
+| 1230 | 6 | typist typing; both palm dots inside their rings; headline in |
+| 1290 | 6 | colleague with phone in; label coral then ink |
+| 1440 | 6 | street: placard and shield in; labels readable; no figure overlaps another |
+| 1520 | 6 | all four street figures; skater on its board, mid-roll |
+| 1640 | 7 | line-up, title, API line, logo |
 
-Plus one still from the middle of every transition (frames 130, 420, 665, 940, 1185) and
+Plus one still from the middle of every transition (frames 130, 420, 665, 940, 1185, 1535) and
 encoded frames from the final MP4.
 
 ## 10b. Scene review ledger
@@ -236,7 +262,11 @@ Kept in `docs/one-walk-any-body-qc.md`.
 
 - **Risks:** a 2D/3D mismatch in chapter 5 (the 2D puppet uses projected primitives, not
   the meshes); the letter-to-shape lip sync is approximate (labelled).
-- **Non-goals:** Lottie faces (phase two of the module), cloth simulation, IK.
+- **Risks (chapter 6):** furniture is real size, so the chapter's adults use adult limbs
+  with a toon-sized head (0.37 m), to match the rest of the cast;
+  the 3D furniture has no 2D drawing, so this chapter is 3D only.
+- **Non-goals:** Lottie faces (phase two of the module), cloth simulation, full-body IK
+  (two-bone limbs only).
 - **Out of scope:** a voice; it would compete with the mouth-shape demonstration.
 
 ## 13. Approval

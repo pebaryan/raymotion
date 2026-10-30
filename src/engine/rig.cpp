@@ -1,5 +1,7 @@
 // rig:: core -- skeleton, poses, clips, motion, face timing, outfits, looks, characters.
 #include "rmtn/rig.hpp"
+#include "rmtn/draw.hpp"
+#include "rmtn/fonts.hpp"
 #include "rmtn/media.hpp"
 #include "rig_internal.hpp"
 #include <raymath.h>
@@ -40,7 +42,7 @@ const char* name(Joint j) {
     static const char* names[kJoints] = {
         "root", "pelvis", "chest", "neck", "head",
         "shoulder-L", "elbow-L", "wrist-L", "shoulder-R", "elbow-R", "wrist-R",
-        "hip-L", "knee-L", "ankle-L", "hip-R", "knee-R", "ankle-R" };
+        "hip-L", "knee-L", "ankle-L", "hip-R", "knee-R", "ankle-R", "floor" };
     const int i = (int)j;
     return i >= 0 && i < kJoints ? names[i] : "?";
 }
@@ -182,7 +184,8 @@ std::array<Matrix, kJoints> solve(const Build& b, const Pose& p) {
         if (j == Joint::Root) off = Vector3Add(off, p.offset);
         const Matrix local = MatrixMultiply(MatrixRotateXYZ(Vector3Scale(jointRotation(p, j), DEG2RAD)),
                                             MatrixTranslate(off.x, off.y, off.z));
-        w[(size_t)i] = j == Joint::Root ? local : MatrixMultiply(local, w[(size_t)parent(j)]);
+        // Root and Floor hang from the character's origin; Floor without the pose's offset.
+        w[(size_t)i] = j == Joint::Root || j == Joint::Floor ? local : MatrixMultiply(local, w[(size_t)parent(j)]);
     }
     return w;
 }
@@ -403,7 +406,8 @@ bool masks(Mask m, Joint j) {
     case Mask::All: return true;
     case Mask::Upper: return armL || armR || head || j == Joint::Chest;
     case Mask::Lower: return j == Joint::Root || j == Joint::Pelvis || j == Joint::HipL || j == Joint::KneeL ||
-                             j == Joint::AnkleL || j == Joint::HipR || j == Joint::KneeR || j == Joint::AnkleR;
+                             j == Joint::AnkleL || j == Joint::HipR || j == Joint::KneeR || j == Joint::AnkleR ||
+                             j == Joint::Floor;
     case Mask::ArmL: return armL;
     case Mask::ArmR: return armR;
     case Mask::Arms: return armL || armR;
@@ -709,6 +713,8 @@ const char* name(Slot s) {
     case Slot::Leg: return "leg";
     case Slot::Foot: return "foot";
     case Slot::Extra: return "extra";
+    case Slot::Hold: return "hold";
+    case Slot::Ride: return "ride";
     }
     return "?";
 }
@@ -777,7 +783,26 @@ std::vector<std::pair<std::string, std::string>> slots(const Look& l) {
     return { { "head", l.head }, { "hair", l.hair }, { "hat", l.hat }, { "torso", l.torso }, { "hips", l.hips },
              { "armL", l.armL }, { "armR", l.armR }, { "handL", l.handL }, { "handR", l.handR },
              { "legL", l.legL }, { "legR", l.legR }, { "footL", l.footL }, { "footR", l.footR },
-             { "extra", l.extra } };
+             { "extra", l.extra }, { "holdL", l.holdL }, { "holdR", l.holdR }, { "ride", l.ride } };
+}
+
+void detail::drawLabel(const Ctx& c, Rectangle box, const std::string& text, Color bg, bool fill) {
+    if (fill && bg.a > 0) vg::fill(c, vg::Path::rect(box), bg);
+    if (text.empty()) return;
+    std::vector<std::string> lines;
+    std::stringstream in(text);
+    for (std::string line; std::getline(in, line);) lines.push_back(line);
+    const Font font = fonts::ui(true);
+    float widest = 1;
+    for (const auto& l : lines) widest = std::max(widest, dr::measure(font, l.c_str(), 100, 2).x);
+    const float n = (float)lines.size();
+    const float size = std::min(box.height * 0.74f / n, 100 * box.width * 0.86f / widest);
+    const float lum = 0.2126f * bg.r + 0.7152f * bg.g + 0.0722f * bg.b;
+    const Color ink = lum > 150 && bg.a > 160 ? Color{ 30, 28, 36, 255 } : Color{ 252, 252, 248, 255 };
+    for (size_t i = 0; i < lines.size(); i++) {
+        const float y = box.y + box.height / 2 + (i - (n - 1) / 2) * size * 1.08f;
+        dr::text(font, c, lines[i].c_str(), { box.x + box.width / 2, y }, size, size * 0.02f, ink, 0.5, 0.5);
+    }
 }
 
 // ------------------------------------------------------------------ characters
@@ -794,7 +819,7 @@ std::string signature(const Look& l, const std::string& slot) {
     for (const Prim& p : prims(l, slot)) {
         o << (int)p.kind << p.name << (int)p.joint << ':' << p.at.x << ',' << p.at.y << ',' << p.at.z << ','
           << p.size.x << ',' << p.size.y << ',' << p.size.z << ',' << p.squareV << ',' << p.squareH << ','
-          << p.softness << ',' << (int)p.paint << ',' << p.model << ';';
+          << p.softness << ',' << (int)p.paint << ',' << p.model << ',' << p.label << ';';
         Color c{};
         switch (p.paint) {
         case Paint::Skin: c = l.skin; break;
@@ -803,7 +828,7 @@ std::string signature(const Look& l, const std::string& slot) {
         case Paint::Accent: c = l.accent; break;
         case Paint::Metal: c = l.metal; break;
         case Paint::Dark: c = l.dark; break;
-        case Paint::Fixed: c = p.color; break;
+        case Paint::Fixed: case Paint::Label: c = p.color; break;
         case Paint::Outfit: o << "outfit" << l.outfit.id; break;
         case Paint::Face: c = l.skin; o << "face" << (const void*)l.face.get() << l.faceBox.x << l.faceBox.y; break;
         }
@@ -867,7 +892,7 @@ Pose Character::poseAt(double s) const {
     Pose p = motion.at(s);
     // Each limb's locks come from the look whose part is showing in that slot.
     for (const char* slot : { "armL", "armR", "handL", "handR", "legL", "legR", "footL", "footR", "torso", "hips",
-                              "head", "hair", "hat", "extra" }) {
+                              "head", "hair", "hat", "extra", "holdL", "holdR", "ride" }) {
         const Look& l = looks_[(size_t)lookIndex(slot, s)];
         for (const auto& [key, part] : slots(l)) {
             if (key != slot || part.empty()) continue;

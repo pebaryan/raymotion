@@ -1,7 +1,8 @@
-// one_walk.cpp -- "one-walk-any-body": a 44 s promo for configurable characters (rig::).
+// one_walk.cpp -- "one-walk-any-body": a 56 s promo for configurable characters (rig::).
 // One walk cycle runs unbroken while every part of the body is swapped out from under it;
-// then the same elbow in three materials, a face that is an SVG of named shapes, and one
-// character drawn flat and in depth. Text-only: the captions are the script.
+// then the same elbow in three materials, a face that is an SVG of named shapes, one
+// character drawn flat and in depth, and hands that find keyboards, phones, placards,
+// shields and boards. Text-only: the captions are the script.
 //
 //   raymotion render one-walk-any-body
 //   raymotion still  one-walk-any-body --at 300 --png out/one-walk-300.png
@@ -21,8 +22,8 @@ namespace rmtn {
 namespace {
 
 constexpr float W = 1920.f, H = 1080.f;
-constexpr int FPS = 30, XF = 10, SCENES = 6;
-constexpr int DUR[SCENES] = { 135, 300, 255, 285, 255, 135 };
+constexpr int FPS = 30, XF = 10, SCENES = 7;
+constexpr int DUR[SCENES] = { 135, 300, 255, 285, 255, 360, 135 };
 
 constexpr int total() {
     int t = 0;
@@ -49,7 +50,8 @@ const Color PAPER = mkColor(0xf3efe6), INK = mkColor(0x1f1d2b), DIM = mkColor(0x
             CARD = mkColor(0xfbf9f4), RULE = mkColor(0xd9d3c6),
             FLOOR = mkColor(0xd4d0c8), FLOOR_LINE = mkColor(0xbfb5a2);
 
-const char* const KICKERS[SCENES] = { "ONE WALK", "ANY BODY", "RIGID OR SOFT", "A FACE FROM VECTORS", "FLAT OR DEEP", "" };
+const char* const KICKERS[SCENES] = { "ONE WALK", "ANY BODY", "RIGID OR SOFT", "A FACE FROM VECTORS", "FLAT OR DEEP",
+                                      "HANDS ON THINGS", "" };
 
 // The script (brief §4): scene, window in the scene's local seconds, text. Each line is
 // gone (with its 8-frame fade) before its scene's crossfade starts.
@@ -62,6 +64,8 @@ const Caption CAPTIONS[] = {
     { 3, 0.27, 3.0, "The face is an SVG of named shapes." },
     { 3, 3.2, 8.85, "Hi! I'm Pip." },
     { 4, 0.27, 7.85, "One character, drawn flat or in depth." },
+    { 5, 0.27, 4.6, "The hands find the keys by themselves." },
+    { 5, 5.4, 11.35, "Phones, placards, shields and boards are parts too." },
 };
 
 // Chapter 2's swaps, in its local seconds (brief §3b / §9): the tray card that flips.
@@ -83,6 +87,17 @@ float yawAt(double s) {
     return (float)interpolate(s, { 2.3, 5.0 }, { 0.0, 62.0 }, clamped(ease::inOut(ease::cubic)));
 }
 constexpr double OUTFIT_AT = 5.8;
+// Chapter 6: the camera's one truck (office to street), the entrances, the skater's roll.
+float truckAt(double s) {
+    return (float)interpolate(s, { 5.0, 6.2 }, { 0.0, 1.0 }, clamped(ease::inOut(ease::cubic)));
+}
+constexpr double PHONE_AT = 2.4, RINGS_AT = 1.0;
+constexpr double ACTS[4] = { 6.1, 7.0, 7.9, 8.8 };      // placard, shield, skateboard, scooter
+constexpr double TYPE_RATE = 1, TYPING_END = 5.0;        // clips::typing rate; clicks until the truck
+float rollAt(double s) {                                  // the skater coasting in (metres along x)
+    const double u = std::max(0.0, s - ACTS[2]);
+    return (float)(0.9 * (1 - std::exp(-u / 1.2)));
+}
 
 // ------------------------------------------------------------------ small helpers
 float easeIn(double t, double at, double dur = 12) {
@@ -229,7 +244,7 @@ void skeleton(const Ctx& cx, const Walker& w, int t, float alpha) {
     Vector2 top;
     g3d::project(cam, Vector3Transform({ 0, b.head * 0.5f, 0 }, f[(size_t)rig::Joint::Head]), vp, top);
     dr::ring(m, top, 34, 6, TEAL);
-    for (int i = 1; i < rig::kJoints; i++) {
+    for (int i = 1; i < (int)rig::Joint::Floor; i++) {        // Floor is the ground, not a body joint
         dr::circle(m, p[(size_t)i], 9, TEAL);
         dr::circle(m, p[(size_t)i], 4.5f, CARD);
     }
@@ -461,7 +476,167 @@ void twinScene(const Ctx& cx, const Twin& w, int t) {
     }
 }
 
-// ------------------------------------------------------------------ chapter 6: the line-up
+// ------------------------------------------------------------------ chapter 6: hands on things
+struct Acting {
+    std::shared_ptr<g3d::Scene> scene;
+    rig::CharacterPtr typist;
+    Vector3 keys;                               // the keyboard's centre (world), from the prefab
+    Matrix typistToWorld = MatrixIdentity();
+    struct Figure { rig::CharacterPtr ch; double at; std::function<Vector3(double)> where; };
+    std::vector<Figure> figures;                // the phone, then the street, in entrance order
+};
+
+// The office corner in its own frame, with the typist at the origin facing -z: the desk,
+// the workstation on it and the chair are interior3d prefabs at real size.
+constexpr float OFFICE_YAW = 210;          // the typist three-quarters to the camera, the tower on the far side
+const Vector3 OFFICE{ -2.1f, 0, -0.1f };
+const Vector3 WORKSTATION{ -0.14f, 0.7825f, -0.72f };   // on the desk's top (0.7825 m)
+const Vector3 KEYBOARD_IN_WORKSTATION{ 0.14f, 0.035f, 0.32f };
+constexpr float SEAT = 0.61f;                            // the ergonomic chair's seat top
+
+Acting makeActing() {
+    Acting a;
+    a.scene = stage(FLOOR, 4.0f);
+    // Adult limbs, so the real-size furniture fits, with a toon-sized head so the figures
+    // read as the same cast as the rest of the film.
+    rig::Build adult = rig::Build::adult();
+    adult.head = 0.37f;
+    g3d::Object3D* office = a.scene->add();
+    office->position = OFFICE;
+    office->rotation.y = OFFICE_YAW;
+    interior3d::add(*office, interior3d::Kind::OfficeDesk)->position = { -0.14f, 0, -0.65f };
+    interior3d::add(*office, interior3d::Kind::Workstation)->position = WORKSTATION;
+    interior3d::add(*office, interior3d::Kind::ErgonomicChair)->rotation.y = 180;
+    // The keyboard, in the typist's space (turned 180 with the chair) and in the world.
+    const Vector3 kb = Vector3Add(WORKSTATION, KEYBOARD_IN_WORKSTATION);
+    const Vector3 keysLocal{ -kb.x, kb.y, -kb.z };
+    a.typistToWorld = MatrixMultiply(MatrixRotateY((OFFICE_YAW + 180) * DEG2RAD), MatrixTranslate(OFFICE.x, OFFICE.y, OFFICE.z));
+    a.keys = Vector3Transform(keysLocal, a.typistToWorld);
+
+    rig::Look pip = rig::Look::toon();
+    pip.build = adult;
+    pip.face = pipFace();
+    pip.faceBox = PIP_BOX;
+    pip.hair = "hair.ponytail";
+    pip.hairColor = { 120, 64, 38, 255 };
+    pip.outfit = sailor(pip);
+    a.typist = std::make_shared<rig::Character>(pip);
+    a.typist->motion.play(rig::clips::typing(adult, SEAT, keysLocal, (float)TYPE_RATE), 0);
+    a.typist->face.expression(0, "happy", 0);
+    g3d::Object3D* t = rig::add(*office, a.typist, FPS);
+    t->rotation.y = 180;
+
+    auto figure = [&](rig::Look l, rig::Clip clip, double at, std::function<Vector3(double)> where, float yaw,
+                      double until = 1e9) {
+        auto ch = std::make_shared<rig::Character>(l);
+        ch->motion.play(std::move(clip), 0);
+        ch->face.expression(0, "happy", 0);
+        g3d::Object3D* root = rig::add(*a.scene, ch, FPS);
+        root->up = [at, where, yaw, until](int t, g3d::Object3D& o) {
+            const float k = spr(t, at * FPS) * (1 - easeIn(t, until * FPS, 8));
+            o.position = where(t / (double)FPS);
+            o.rotation = { 0, yaw, 0 };
+            o.scale = { k, k, k };
+            o.visible = k > 0.001f;
+        };
+        a.figures.push_back({ ch, at, where });
+    };
+    // The colleague with a phone, beside the desk; leaves with the office as the camera moves.
+    rig::Look caller = rig::Look::toon();
+    caller.build = adult;
+    caller.hair = "hair.bob";
+    caller.hairColor = { 40, 34, 40, 255 };
+    caller.outfit = rig::Outfit::basic({ 80, 150, 120, 255 }, { 52, 52, 64, 255 }, caller.skin, 0.4f, 1);
+    caller.holdR = "prop.phone";
+    figure(caller, rig::clips::texting(adult), PHONE_AT, [](double) { return Vector3{ -0.2f, 0, 0.7f }; }, -45, TYPING_END);
+
+    // The street, one figure at a time.
+    rig::Look marcher = rig::Look::toon();
+    marcher.build = adult;
+    marcher.holdR = "prop.sign";
+    marcher.sign = "MORE\nBIKE LANES";
+    marcher.hair = "hair.spiky";
+    marcher.outfit = rig::Outfit::basic({ 240, 168, 48, 255 }, { 60, 70, 90, 255 }, marcher.skin, 0.45f, 1);
+    figure(marcher, rig::clips::protest(adult), ACTS[0], [](double) { return Vector3{ 1.4f, 0, 0 }; }, 12);
+    rig::Look cop = rig::Look::toon();
+    cop.build = adult;
+    cop.hat = "hat.riot";
+    cop.hair = "";
+    cop.holdL = "prop.shield";
+    cop.holdR = "prop.baton";
+    cop.sign = "POLICE";
+    cop.dark = { 30, 36, 52, 255 };
+    cop.outfit = rig::Outfit::basic({ 36, 44, 64, 255 }, { 30, 34, 46, 255 }, cop.skin, 1, 1);
+    figure(cop, rig::clips::shieldLine(adult), ACTS[1], [](double) { return Vector3{ 2.55f, 0, -0.1f }; }, -8);
+    rig::Look skater = rig::Look::toon();
+    skater.ride = "ride.skateboard";
+    skater.hat = "hat.beanie";
+    skater.accent = { 232, 85, 63, 255 };
+    skater.outfit = rig::Outfit::basic({ 70, 120, 190, 255 }, { 52, 66, 104, 255 }, skater.skin, 0.45f, 1);
+    figure(skater, rig::clips::skate(skater.build, 0), ACTS[2], [](double s) { return Vector3{ 3.15f + rollAt(s), 0, 0.25f }; }, 0);
+    rig::Look rider = rig::Look::toon();
+    rider.ride = "ride.scooter";
+    rider.hair = "hair.bun";
+    rider.hairColor = { 40, 34, 40, 255 };
+    rider.outfit = rig::Outfit::basic({ 120, 160, 90, 255 }, { 52, 66, 104, 255 }, rider.skin, 0.45f, 1);
+    figure(rider, rig::clips::scooter(rider.build), ACTS[3], [](double) { return Vector3{ 5.25f, 0, 0 }; }, -62);
+
+    a.scene->camera.fov = 34;
+    a.scene->camera.up = [](int t, g3d::Camera& c) {
+        const float u = truckAt(t / (double)FPS);
+        c.position = Vector3Lerp({ -3.52f, 2.18f, 4.77f }, { 2.55f, 1.8f, 7.0f }, u);
+        c.target = Vector3Lerp({ -2.2f, 0.8f, -0.45f }, { 2.55f, 1.3f, 0 }, u);
+    };
+    return a;
+}
+
+// The parts a figure holds and rides, read from its look.
+std::string heldParts(const rig::Character& ch) {
+    std::string out;
+    for (const auto& [key, name] : rig::slots(ch.looks()[0]))
+        if ((key == "holdL" || key == "holdR" || key == "ride") && !name.empty()) out += (out.empty() ? "" : " + ") + name;
+    return out;
+}
+
+void actingOverlay(const Ctx& cx, const Acting& a, int t) {
+    const double s = t / (double)FPS;
+    const g3d::Camera cam = g3d::cameraAt(a.scene->camera, t);
+    const Rectangle vp{ 0, 0, W, H };
+    // Beat A: the keyboard's home positions (from the prefab) and the palms (from the pose).
+    const float kr = easeIn(t, RINGS_AT * FPS) * (1 - easeIn(t, (TYPING_END - 0.4) * FPS, 10));
+    if (kr > 0.01f) {
+        const Ctx m = faded(cx, kr);
+        const rig::Build& b = a.typist->lookAt(s).build;
+        const rig::Pose pose = a.typist->poseAt(s);
+        const float spread = b.torso.x * 0.3f;
+        for (rig::Side sd : { rig::Side::Left, rig::Side::Right }) {
+            const float sx = sd == rig::Side::Left ? 1.f : -1.f;
+            const Vector3 home = Vector3Transform({ sx * spread, a.keys.y, 0 }, MatrixIdentity());
+            Vector2 ring, palm;
+            const Vector3 keysLocal = Vector3Transform(a.keys, MatrixInvert(a.typistToWorld));
+            g3d::project(cam, Vector3Transform({ keysLocal.x + home.x, keysLocal.y, keysLocal.z }, a.typistToWorld), vp, ring);
+            g3d::project(cam, Vector3Transform(rig::palmAt(b, pose, sd), a.typistToWorld), vp, palm);
+            dr::ring(m, ring, 30, 5, TEAL);
+            dr::circle(m, palm, 9, TEAL);
+            dr::circle(m, palm, 4.5f, CARD);
+        }
+        Vector2 at;
+        g3d::project(cam, a.keys, vp, at);
+        dr::strokeSeg(m, { at.x - 340, at.y + 10 }, { at.x - 70, at.y + 10 }, 2, INK);
+        text(m, "keyboard position, from the workstation prefab", { at.x - 352, at.y + 10 }, 22, INK, 1, 0.5f);
+    }
+    // Labels under each figure: coral as it arrives, then ink.
+    for (const Acting::Figure& f : a.figures) {
+        const float k = easeIn(t, f.at * FPS + 6) * (f.at < TYPING_END ? 1 - easeIn(t, TYPING_END * FPS - 6, 10) : 1.f);
+        if (k <= 0.01f) continue;
+        Vector2 at;
+        g3d::project(cam, f.where(s), vp, at);
+        const bool fresh = s - f.at < 0.9;
+        text(faded(cx, k), heldParts(*f.ch), { at.x, f.at < TYPING_END ? at.y + 45 : 920 }, 24, fresh ? CORAL : INK, 0.5f, 0.5f, true);
+    }
+}
+
+// ------------------------------------------------------------------ chapter 7: the line-up
 std::shared_ptr<g3d::Scene> makeLineup() {
     auto scene = stage(FLOOR, 4.0f);
     const rig::Look looks[4] = { rig::Look::toon(), rig::Look::block(), rig::Look::avatar(), rig::Look::robot() };
@@ -534,15 +709,26 @@ void genScore(const std::string& path, const std::array<int, SCENES>& st, const 
     // The turn and the outfit change.
     s.riser(at(4, 2.3), at(4, 5.0), 0.1f);
     s.pluck(at(4, OUTFIT_AT), 79, 0.08f, 0.5f, 5);
+    // Hands on things: a soft click on every keystroke the typing clip strikes (its own seeded
+    // table: slot n of a hand is struck when rnd01(seed, n) > 0.3; the key lands as the dip
+    // ends), the truck, and a rising pluck per entrance.
+    for (int hand = 0; hand < 2; hand++)
+        for (int n = 0; (n + 1 - 0.5 * hand) / (7 * TYPE_RATE) < TYPING_END; n++)
+            if (rnd01(hand == 0 ? 71 : 73, (unsigned long long)n) > 0.3)
+                s.tick(at(5, (n + 1 - 0.5 * hand) / (7 * TYPE_RATE)), 0.014f);
+    s.riser(at(5, 5.0), at(5, 6.2), 0.08f);
+    s.pluck(at(5, PHONE_AT), 67, 0.07f, 0.45f, 5);
+    const int entrance[4] = { 72, 76, 79, 84 };
+    for (int i = 0; i < 4; i++) s.pluck(at(5, ACTS[i]), entrance[i], 0.08f, 0.4f + 0.05f * i, 5);
     // End card.
-    s.impact(at(5, 0.7), 0.5f);
-    for (int j = 0; j < 4; j++) s.bell(at(5, 0.75 + 0.12 * j), 72 + j * 4, 0.06f, 0.3f + 0.12f * j);
-    for (int n : { 48, 55, 60, 64 }) s.pad(at(5, 0.7), 3.6, n, 0.07f, 1300, 0.5f);
+    s.impact(at(6, 0.7), 0.5f);
+    for (int j = 0; j < 4; j++) s.bell(at(6, 0.75 + 0.12 * j), 72 + j * 4, 0.06f, 0.3f + 0.12f * j);
+    for (int n : { 48, 55, 60, 64 }) s.pad(at(6, 0.7), 3.6, n, 0.07f, 1300, 0.5f);
     std::vector<float> mix = s.mix();
-    for (float& x : mix) x = std::tanh(x * 2.0f);
+    for (float& x : mix) x = std::tanh(x * 2.4f);
     float peak = 0;
     for (float x : mix) peak = std::max(peak, std::fabs(x));
-    const float g = peak > 0 ? 0.70f / peak : 1.f;
+    const float g = peak > 0 ? 0.68f / peak : 1.f;
     for (float& x : mix) x *= g;
     media::writeWav(path, mix, procgen::Score::RATE);
 }
@@ -551,7 +737,7 @@ void writeSrt(const std::array<int, SCENES>& st) {
     sub::Track tr;
     for (const Caption& c : CAPTIONS)
         tr.cues.push_back({ (st[(size_t)c.scene] / (double)FPS) + c.from, (st[(size_t)c.scene] / (double)FPS) + c.to, c.text, false });
-    tr.cues.push_back({ st[5] / (double)FPS + 0.7, TOTAL / (double)FPS, "One rig. Any body.", false });
+    tr.cues.push_back({ st[6] / (double)FPS + 0.7, TOTAL / (double)FPS, "One rig. Any body.", false });
     sub::writeSrt(SRT, tr);
 }
 
@@ -605,8 +791,13 @@ void buildFilm(Comp& c, const std::array<int, SCENES>& st) {
     });
     const auto twin = std::make_shared<Twin>(makeTwin());
     add(4, [twin](const Ctx& cx, int t) { twinScene(cx, *twin, t); });
+    const auto acting = std::make_shared<Acting>(makeActing());
+    add(5, [acting](const Ctx& cx, int t) {
+        g3d::render(*acting->scene, t, faded(cx, easeIn(t, 0, 9)));
+        actingOverlay(cx, *acting, t);
+    });
     const auto lineup = makeLineup();
-    add(5, [lineup](const Ctx& cx, int t) {
+    add(6, [lineup](const Ctx& cx, int t) {
         g3d::render(*lineup, t, faded(cx, easeIn(t, 0, 9)));
         const float kt = easeIn(t, 0.7 * FPS);
         Ctx tm = faded(cx, kt);
@@ -622,11 +813,11 @@ void buildFilm(Comp& c, const std::array<int, SCENES>& st) {
         chrome(cx, i, t - st[(size_t)i]);
         captions(cx, t, st);
     };
-    TNode* logo = prefab::use(c.roots, st[5] + 48, DUR[5] - 48, "raymotion-logo",
+    TNode* logo = prefab::use(c.roots, st[6] + 48, DUR[6] - 48, "raymotion-logo",
                               Json::parse(R"({"size": 64, "layout": "horizontal", "tagline": "video as code", "delay": 2, "ink": "#1f1d2b", "accent": "#139e98"})"));
     logo->props.pos = { W / 2 - 150, 1020 };
     // The call to action: where the code lives.
-    addRoot(c.roots, st[5] + 60, DUR[5] - 60)->fn = [](const Ctx& cx, int t) {
+    addRoot(c.roots, st[6] + 60, DUR[6] - 60)->fn = [](const Ctx& cx, int t) {
         dr::text(code::font(false), faded(cx, easeIn(t, 0)), "github.com/pebaryan/raymotion", { W / 2 - 30, 1020 }, 26, 0, DIM, 0, 0.5f);
     };
 }
@@ -634,15 +825,15 @@ void buildFilm(Comp& c, const std::array<int, SCENES>& st) {
 void buildThumb(Comp& c) {
     const auto lineup = makeLineup();
     // The same line-up, framed off-centre so the title has the left third.
-    lineup->camera.position = { -1.15f, 1.2f, 7.4f };
-    lineup->camera.target = { -1.15f, 0.62f, 0 };
+    lineup->camera.position = { -1.35f, 1.2f, 7.4f };
+    lineup->camera.target = { -1.35f, 0.62f, 0 };
     addRoot(c.roots, 0, c.duration)->fn = [lineup](const Ctx& cx, int) {
         dr::rect(cx, 0, 0, W, H, PAPER);
         g3d::render(*lineup, 45, cx);
         text(cx, "CHARACTERS", { 96, 300 }, 30, TEAL, 0, 0.5f, true, 6);
         text(cx, "ONE RIG.", { 96, 400 }, 110, INK, 0, 0.5f, true);
         text(cx, "ANY BODY.", { 96, 520 }, 110, CORAL, 0, 0.5f, true);
-        text(cx, "rigid or soft  /  SVG faces  /  2D or 3D", { 96, 640 }, 34, DIM, 0, 0.5f);
+        text(cx, "rigid or soft  /  SVG faces  /  2D or 3D  /  props", { 96, 640 }, 31, DIM, 0, 0.5f);
     };
 }
 

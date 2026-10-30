@@ -66,6 +66,9 @@ inline std::vector<Vector3> tubeCurve(const std::array<Matrix, kJoints>& f, cons
 // An outfit's dominant colour over a part's strip (v0..v1 of its region): what a flat fill
 // shows when it cannot carry the texture. Cached by outfit id.
 Color outfitColor(const Outfit& o, Region r, float v0, float v1);
+// A Paint::Label face: `bg` filled over `box` (when `fill`), then `text` (lines split at
+// \n) centred and fitted, in ink that reads on `bg`.
+void drawLabel(const Ctx& c, Rectangle box, const std::string& text, Color bg, bool fill = true);
 // The dominant colour of each of `n` rows down that strip, top first: horizontal stripes
 // survive, a small motif does not. Cached by outfit id.
 std::vector<Color> outfitRows(const Outfit& o, Region r, float v0, float v1, int n);
@@ -78,17 +81,53 @@ inline Color paintColor(const Look& l, const Prim& p) {
     case Paint::Accent: return l.accent;
     case Paint::Metal: return l.metal;
     case Paint::Dark: return l.dark;
-    case Paint::Fixed: return p.color;
+    case Paint::Fixed: case Paint::Label: return p.color;
     case Paint::Outfit:
         return outfitColor(l.outfit, p.region, p.v0, p.v1);
     }
     return WHITE;
 }
 
+// ---- props sized to the body that uses them (shared by the parts and the clips that pose
+// hands and feet on them). k scales real sizes to the build: 1 for a 1.75 m figure.
+inline float propScale(const Build& b) { return b.height() / 1.75f; }
+inline float hipHeight(const Build& b) { return b.ankle + b.shin + b.thigh; }
+struct BoardGeom { float top, length, width, wheel; };          // skateboard along x
+inline BoardGeom boardGeom(const Build& b) {
+    const float k = propScale(b);
+    return { 0.11f * k, 0.80f * k, 0.21f * k, 0.028f * k };
+}
+struct ScooterGeom { float top, length, width, wheel, barY, barZ, barW; };   // along +z
+inline ScooterGeom scooterGeom(const Build& b) {
+    const float k = propScale(b);
+    ScooterGeom g{ 0.09f * k, 0.56f * k, 0.13f * k, 0.05f * k, 0, 0, 0 };
+    g.barY = g.top + hipHeight(b) + b.torso.y * 0.22f;         // about the navel
+    g.barZ = g.length * 0.5f + 0.04f * k;
+    g.barW = std::max(b.torso.x * 1.5f, 0.42f * k);
+    return g;
+}
+// A placard: its pole runs up through the fists (the upper fist `grip` from the bottom,
+// at height `hand` when held up), long enough that the board clears the bearer's head.
+struct SignGeom { float pole, grip, width, height, radius, hand; };
+inline SignGeom signGeom(const Build& b) {
+    const float k = propScale(b);
+    SignGeom g{ 0, 0.30f * k, 0.62f * k, 0.44f * k, 0.016f * k, 0 };
+    const float shoulder = hipHeight(b) + b.hips / 2 + b.torso.y - b.armRadius * 1.2f;
+    g.hand = shoulder + 0.42f * (b.upperArm + b.forearm);
+    g.pole = b.height() + 0.06f * k - g.hand + g.height + g.grip;
+    return g;
+}
+struct ShieldGeom { float width, height, below; };               // `below`: under the fist
+inline ShieldGeom shieldGeom(const Build& b) {
+    const float k = propScale(b);
+    return { 0.56f * k, 1.0f * k, 0.55f * k };
+}
+
 // The slot keys in drawing order.
 inline const std::vector<std::string>& slotKeys() {
     static const std::vector<std::string> keys = { "head", "hair", "hat", "torso", "hips", "armL", "armR", "handL", "handR",
-                                                   "legL", "legR", "footL", "footR", "extra" };
+                                                   "legL", "legR", "footL", "footR", "extra", "holdL", "holdR",
+                                                   "ride" };
     return keys;
 }
 

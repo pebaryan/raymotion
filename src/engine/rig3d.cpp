@@ -61,6 +61,12 @@ MeshData superMesh(const Prim& p) {
             d.nrm.insert(d.nrm.end(), { n.x, n.y, n.z });
             Vector2 t;
             if (p.paint == Paint::Outfit) t = outfitUV(p, u, 1 - (q.y / std::max(1e-6f, B) + 1) / 2);
+            else if (p.paint == Paint::Label) {
+                // Flat across the front. An opaque card is mirrored on its back so that side reads
+                // too; a see-through one is not, or its back would show through reversed.
+                const bool mirror = q.z < 0 && p.color.a == 255;
+                t = { 0.5f + (mirror ? -q.x : q.x) / p.size.x, 0.5f - q.y / p.size.y };
+            }
             else if (p.paint == Paint::Face) {
                 t = { 0.5f + q.x / p.size.x, 0.5f - q.y / p.size.y };
                 if (q.z < -0.05f * C) t = { 0.004f, 0.004f };   // the back of the head: plain skin
@@ -160,6 +166,11 @@ g3d::Material materialFor(const Look& l, const Prim& p) {
     if (p.paint == Paint::Hair && l.finish == Finish::Matte) m.roughness = 0.62f;
     if (p.roughness >= 0) m.roughness = p.roughness;
     if (p.kind == Prim::Kind::Super && (p.from > -0.99f || p.to < 0.99f)) m.doubleSided = true;
+    if ((p.paint == Paint::Fixed || p.paint == Paint::Label) && p.color.a < 255) {   // visors, shields
+        m.opacity = std::max(0.05f, p.color.a / 255.f);
+        m.roughness = 0.12f;
+        m.doubleSided = true;
+    }
     return m;
 }
 
@@ -180,7 +191,8 @@ g3d::Object3D* add(g3d::Object3D& parentNode, CharacterPtr ch, int fps) {
     auto built = std::make_shared<Built>();
     for (int i = 0; i < kJoints; i++) {
         const Joint j = (Joint)i;
-        g3d::Object3D* node = j == Joint::Root ? inner->add() : built->joints[(size_t)parent(j)]->add();
+        // Floor hangs from the character's origin like Root, so it does not take the pose's offset.
+        g3d::Object3D* node = j == Joint::Root || j == Joint::Floor ? inner->add() : built->joints[(size_t)parent(j)]->add();
         node->name = std::string("rig:") + name(j);
         node->position = restOffset(ch->looks()[0].build, j);
         built->joints[(size_t)i] = node;
@@ -224,6 +236,19 @@ g3d::Object3D* add(g3d::Object3D& parentNode, CharacterPtr ch, int fps) {
                 g3d::Material m = materialFor(look, p);
                 if (p.paint == Paint::Outfit && outfitTex) { m.dynamicMap = outfitTex; m.color = WHITE; }
                 if (p.paint == Paint::Face && faceTex) { m.dynamicMap = faceTex; m.color = WHITE; }
+                if (p.paint == Paint::Label) {
+                    auto tex = std::make_shared<g3d::DynamicTexture>();
+                    tex->width = 512;
+                    tex->height = std::max(16, (int)std::lround(512 * p.size.y / std::max(1e-4f, p.size.x)));
+                    tex->every = 1 << 30;                          // drawn once: the text never changes
+                    const std::string text = p.label;
+                    const Color bg = p.color;
+                    const float w = (float)tex->width, h = (float)tex->height;
+                    tex->draw = [text, bg, w, h](const Ctx& c, int) { detail::drawLabel(c, { 0, 0, w, h }, text, bg); };
+                    m.dynamicMap = tex;
+                    m.color = WHITE;
+                    if (bg.a < 255) m.opacity = 0.99f;            // the texture's alpha carries it
+                }
                 const std::string nm = "look" + std::to_string(k) + ":" + slot + ":" + p.name;
                 if (p.kind == Prim::Kind::Tube) {
                     const auto frames = solve(look.build, clips::rest()(0));
