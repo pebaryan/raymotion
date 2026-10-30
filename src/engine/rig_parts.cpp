@@ -90,20 +90,23 @@ void heads() {
 }
 
 // ---- hair and hats
-// In 2D, caps of hair sort behind the head (so the face shows) and hats in front of it.
+// In 2D, hair that hangs at the back sorts behind the head, and a cap of hair just over the
+// skull, with its front edge raised to the brow as it faces the viewer (in 3D the skull's
+// front pokes through the cap there); hats sort over both.
 Prim behind(Prim p) { p.depth2d = -0.2f; return p; }
+Prim capOf(Prim p, float brow) { p.depth2d = 0.05f; p.from2d = brow; return p; }
 Prim inFront(Prim p) { p.depth2d = 0.2f; return p; }
 void hair() {
     def("hair.short", Slot::Hair, [](const Build& b, Side, float) {
         const float h = b.head;
         return std::vector<Prim>{
-            behind(dome("cap", Joint::Head, { 0, h * 0.56f, -h * 0.05f }, { h * 1.0f, h * 0.92f, h * 0.98f }, -0.05f, Paint::Hair)),
+            capOf(dome("cap", Joint::Head, { 0, h * 0.56f, -h * 0.05f }, { h * 1.0f, h * 0.92f, h * 0.98f }, -0.05f, Paint::Hair), 0.42f),
             rotated(super("fringe", Joint::Head, { -h * 0.1f, h * 0.9f, h * 0.3f }, { h * 0.55f, h * 0.16f, h * 0.3f }, 1, 1, Paint::Hair), { 18, 0, -10 }) };
     });
     def("hair.bob", Slot::Hair, [](const Build& b, Side, float) {
         const float h = b.head;
         return std::vector<Prim>{
-            behind(dome("cap", Joint::Head, { 0, h * 0.56f, -h * 0.04f }, { h * 1.04f, h * 0.94f, h * 1.0f }, -0.05f, Paint::Hair)),
+            capOf(dome("cap", Joint::Head, { 0, h * 0.56f, -h * 0.04f }, { h * 1.04f, h * 0.94f, h * 1.0f }, -0.05f, Paint::Hair), 0.42f),
             behind(super("back", Joint::Head, { 0, h * 0.4f, -h * 0.2f }, { h * 1.02f, h * 0.85f, h * 0.62f }, 0.8f, 1, Paint::Hair)),
             super("lock-L", Joint::Head, { h * 0.42f, h * 0.36f, 0 }, { h * 0.2f, h * 0.62f, h * 0.5f }, 0.8f, 1, Paint::Hair),
             super("lock-R", Joint::Head, { -h * 0.42f, h * 0.36f, 0 }, { h * 0.2f, h * 0.62f, h * 0.5f }, 0.8f, 1, Paint::Hair),
@@ -123,7 +126,7 @@ void hair() {
     });
     def("hair.spiky", Slot::Hair, [](const Build& b, Side, float) {
         const float h = b.head;
-        std::vector<Prim> v{ behind(dome("cap", Joint::Head, { 0, h * 0.56f, -h * 0.05f }, { h * 1.0f, h * 0.92f, h * 0.98f }, -0.05f, Paint::Hair)) };
+        std::vector<Prim> v{ capOf(dome("cap", Joint::Head, { 0, h * 0.56f, -h * 0.05f }, { h * 1.0f, h * 0.92f, h * 0.98f }, -0.05f, Paint::Hair), 0.42f) };
         const float spikes[][3] = { { 0, 1.0f, 0.1f }, { -0.25f, 0.95f, 0.05f }, { 0.25f, 0.95f, 0.05f },
                                     { -0.12f, 0.9f, -0.25f }, { 0.12f, 0.9f, -0.25f }, { 0, 0.85f, 0.3f } };
         for (int i = 0; i < 6; i++) {
@@ -147,13 +150,13 @@ void hair() {
     def("hair.block", Slot::Hair, [](const Build& b, Side, float) {
         const float h = b.head;
         return std::vector<Prim>{
-            behind(dome("helmet", Joint::Head, { 0, h * 0.6f, -h * 0.05f }, { h * 1.02f, h * 0.76f, h * 1.0f }, -0.25f, Paint::Hair, 0.55f, 1)),
+            capOf(dome("helmet", Joint::Head, { 0, h * 0.6f, -h * 0.05f }, { h * 1.02f, h * 0.76f, h * 1.0f }, -0.25f, Paint::Hair, 0.55f, 1), 0.25f),
             behind(super("back", Joint::Head, { 0, h * 0.36f, -h * 0.26f }, { h * 0.98f, h * 0.6f, h * 0.48f }, 0.4f, 0.9f, Paint::Hair)),
             rotated(super("fringe", Joint::Head, { h * 0.08f, h * 0.84f, h * 0.36f }, { h * 0.86f, h * 0.2f, h * 0.24f }, 0.5f, 0.8f, Paint::Hair), { 14, 0, 6 }) };
     });
     def("hair.cap", Slot::Hair, [](const Build& b, Side, float) {
         const float h = b.head;
-        return std::vector<Prim>{ behind(dome("cap", Joint::Head, { 0, h * 0.68f, -h * 0.04f }, { h * 1.02f, h * 0.62f, h * 0.98f }, -0.1f, Paint::Hair, 0.3f, 0.25f)) };
+        return std::vector<Prim>{ capOf(dome("cap", Joint::Head, { 0, h * 0.68f, -h * 0.04f }, { h * 1.02f, h * 0.62f, h * 0.98f }, -0.1f, Paint::Hair, 0.3f, 0.25f), 0.3f) };
     });
 
     def("hat.cap", Slot::Hat, [](const Build& b, Side, float) {

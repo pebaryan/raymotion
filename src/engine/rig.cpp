@@ -627,9 +627,11 @@ Outfit Outfit::basic(Color top, Color bottom, Color skin, float sleeve, float tr
                              arm ? hem : cuff);
             }
         }
-        // A collar dip at the neck and a waistband: just enough for the eye to read a garment.
-        const Rectangle fr = px(front(Region::Torso));
-        vg::fill(c, vg::Path::ellipse({ fr.x + fr.width / 2, fr.y }, fr.width * 0.22f, fr.height * 0.09f), skin);
+        // A collar band and a waistband: just enough for the eye to read a garment. (No skin
+        // dip at the collar: the neck is its own part, and skin painted on the chest reads as
+        // a second neck in front of it.)
+        const Rectangle tr = px(region(Region::Torso));
+        vg::fill(c, vg::Path::rect({ tr.x, tr.y, tr.width, size * 0.012f }), hem);
         const Rectangle hp = px(region(Region::Hips));
         vg::fill(c, vg::Path::rect({ hp.x, hp.y, hp.width, hp.height * 0.18f }), cuff);
     };

@@ -190,6 +190,16 @@ Reviewer signature: Claude (author) — 2026-10-30
     vertices to the wrong framebuffer. The face canvas flushes first, as `g3d::render`
     does.
   - The brick head clipped round hair, and the fringe hid Pip's brows.
+  - Owner feedback, second round, in the 2D cut-out:
+    - The hair was missing. Caps of hair sorted behind the head, so only a rim showed.
+      They now sort just over the skull, with a 2D hairline (`Prim::from2d`) that rises
+      to the brow as the head faces the viewer. The face is its own item above the cap.
+    - The chest drew a skin band in front of the neck. It came from the torso texture's
+      skin "collar dip" (in `Outfit::basic` and `outfit-sailor.svg`), which the 2D row
+      bands picked up. It is now a collar band in the garment's own colour.
+    - Re-checked on stills f760/f960/f1050/f1115 and on frames from the re-rendered MP4.
+      45/45 tests pass; the film is still -16.6 LUFS / -1.5 dBTP, 1315 frames, and
+      decodes clean.
 - What should be extracted into the engine or tools: a caption table → screen + SRT
   helper (every film re-implements it); the dial widget.
 - What should never be copied into another film: the hard-coded `PIP_BOX`, which is

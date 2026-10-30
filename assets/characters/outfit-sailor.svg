@@ -3,7 +3,7 @@
        the rig::Outfit layout (see outfit-template.svg). -->
   <rect x="0" y="0" width="1024" height="320" fill="#f4f1e8"/>
   <path d="M0 40 H1024 V64 H0 Z M0 104 H1024 V128 H0 Z M0 168 H1024 V192 H0 Z M0 232 H1024 V256 H0 Z M0 296 H1024 V320 H0 Z" fill="#2f4f8f"/>
-  <ellipse cx="512" cy="0" rx="62" ry="34" fill="#e2b48c"/>
+  <rect x="0" y="0" width="1024" height="14" fill="#2f4f8f"/>
   <path d="M512 92 L527 132 L570 133 L536 158 L548 199 L512 175 L476 199 L488 158 L454 133 L497 132 Z" fill="#e8463c"/>
   <rect x="0" y="320" width="1024" height="128" fill="#3c5d8f"/>
   <rect x="0" y="320" width="1024" height="20" fill="#2a4370"/>

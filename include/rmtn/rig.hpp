@@ -271,6 +271,8 @@ struct Prim {
     Vector2 flat{ 0.3f, 0.3f };              // Model: the svg's width and height in 2D
     float roughness = -1;                    // -1: from the Look's finish
     float depth2d = 0;                       // 2D: added to the depth it is sorted by (metres)
+    float from2d = -2;                       // 2D: where `from` rises to as the part's +z faces
+                                             //   the viewer (a cap of hair's hairline; < -1: off)
 };
 
 // A swappable part: the primitives it adds for a build and side.

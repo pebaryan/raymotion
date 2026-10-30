@@ -181,7 +181,15 @@ void draw(const Ctx& c, const Character& ch, double s, const View2D& view) {
                     pts.push_back(project(view, Vector3Transform({ std::cos(a) * p.size.x / 2, -p.size.y / 2, std::sin(a) * p.size.z / 2 }, M)));
                 }
             } else {
-                const float l0 = latFrom(p), l1 = latTo(p);
+                float l0 = latFrom(p);
+                const float l1 = latTo(p);
+                if (p.from2d >= -1) {
+                    const Vector3 front = Vector3Subtract(viewSpace(view, Vector3Transform({ 0, 0, 1 }, M)), viewSpace(view, centre));
+                    const float facing = std::max(0.f, front.z / std::max(1e-6f, Vector3Length(front)));
+                    Prim raised = p;
+                    raised.from = p.from + (p.from2d - p.from) * facing;
+                    l0 = latFrom(raised);
+                }
                 for (int r = 0; r <= 10; r++)
                     for (int q = 0; q < 24; q++)
                         pts.push_back(project(view, Vector3Transform(superPoint(p, l0 + (l1 - l0) * r / 10, 2 * PI * q / 24), M)));
@@ -239,7 +247,7 @@ void draw(const Ctx& c, const Character& ch, double s, const View2D& view) {
                     };
                 }
             }
-            items.push_back({ depth, [outline, col, bands, ink, lw, face, c]() {
+            items.push_back({ depth, [outline, col, bands, ink, lw, c]() {
                 const vg::Path path = vg::Path::polyline(outline, true);
                 if (bands.empty()) {
                     vg::Style st = vg::Style::filled(col);
@@ -249,8 +257,11 @@ void draw(const Ctx& c, const Character& ch, double s, const View2D& view) {
                     for (const auto& [band, bc] : bands) vg::fill(c, vg::Path::polyline(band, true), bc);
                     if (lw > 0) vg::stroke(c, path, ink);
                 }
-                if (face) face();
             } });
+            // The face is its own item, just over a cap of hair: in 3D the brow pokes through
+            // the cap's front, which one flat outline of the cap cannot show. Fringes and hats
+            // still sort over it.
+            if (face) items.push_back({ depth + 0.06f, face });
         }
     }
 
