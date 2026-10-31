@@ -310,6 +310,114 @@ art->add(0, 300)->fn = g3d::draw(scene);      // 2D drawn in `art` gets the wash
 `npr-styles` shows one still life in eight styles (Standard, Toon, Toon + ink, Gooch,
 Hatching, Watercolour, Comic halftone, Poster) and then six of them side by side.
 
+### Characters
+
+Configurable characters, brick-figure to cartoon, share one skeleton (`rmtn/rig.hpp`).
+Motion lives in the skeleton. Body parts, outfit and face are a `Look` it wears, and
+the same `Character` draws as 3D meshes or as a flat 2D cut-out.
+
+```cpp
+rig::Look look = rig::Look::toon();            // or block(), avatar(), robot()
+look.hair = "hair.bun";                        // parts by key: rig::parts::names()
+look.arms("arm.hose").hands("hand.glove");     // soft, rigid, hose, block, robot...
+look.outfit = rig::Outfit::svg("characters/outfit-sailor.svg");
+look.face = rig::svgFace("characters/face-pip.svg");
+
+auto pip = std::make_shared<rig::Character>(look);
+pip->motion.play(rig::clips::walk(), 0).play(rig::clips::wave(rig::Side::Left), 3, 0.4);
+pip->face.say(1.0, 2.6, "Hi! I'm Pip.").expression(3, "happy", 0.2);
+rig::Look brick = rig::Look::block();
+pip->wear(5.0, brick);                         // swap parts mid-motion, with a pop
+
+rig::add(*scene, pip);                         // 3D: joints, meshes, outfit/face textures
+rig::View2D v; v.yaw = 30; v.origin = {960, 900};
+addRoot(c.roots, 0, 300)->fn = [pip, v](const Ctx& c, int t) { rig::draw(c, *pip, t / 30.0, v); };   // 2D
+```
+
+* **Skeleton and motion**: 16 joints, plus a `Floor` joint for things that stay on the ground. `Build` sets the proportions (`adult`, `toon`,
+  `block`, `chibi`, `mix`). Clips are pure functions of time: `idle`, `walk`, `run`,
+  `wave`, `point`, `cheer`, `jump`, `sit`, `shrug`, `keys`. `Motion` crossfades them and
+  layers them under masks (`Mask::Upper`, `Lower`, `ArmL`, `Arms`, `Head`...).
+* **Parts**: procedural superellipsoids, cones and tubes, or a glTF model per part
+  (`parts::model`). Register your own with `parts::add`. A part's `locks` pin joints, so a
+  brick figure's elbows and knees stay rigid on the shared clips. Limbs have a
+  `softness` from 0 (straight segments) to 1 (one smooth bend, a rubber hose), which
+  `Character::softness` can animate.
+* **Outfits**: one texture atlas with a strip per torso, hips, arm and leg
+  (`assets/characters/outfit-template.svg` shows the layout). `Outfit::basic` takes colours,
+  `Outfit::svg` takes a drawing on the template, and `over` layers one outfit over another.
+* **Faces**: `simpleFace` is procedural (eyes, brows, mouth). `svgFace` takes an SVG of
+  shapes named by id: `eye-L/R`, `pupil-L/R`, `brow-L/R`, `mouth`, with `-<expression>`
+  variants, `-closed` eyes for blinks and `mouth-A`..`mouth-H` for speech (Preston Blair
+  shapes, as used by Rhubarb Lip Sync). Shapes morph between states. `FaceTrack` plays
+  expressions, gaze, seeded auto-blinks and speech, either from text (an approximate
+  letters-to-shapes guess) or from Rhubarb cues.
+* **Animals**: `rig::animal("dog" | "cat" | "horse" | "cow" | "giraffe" | "turtle")` builds a
+  four-legged character on its own body plan (`rig::quadruped(QuadSpec)`: a barrel, a
+  two-joint neck, a three-joint tail and four legs). `clips::stand` and
+  `clips::gait(build, Gait::Walk | Trot | Canter | Gallop)` plant the paws with IK while
+  they are down; move the animal by `gaitSpeed` and they hold still; `clips::paddle`
+  swims them (a turtle's flippers, a dog paddling). Animals render in 3D
+  and 2D like any character. Any body plan is a `Skeleton` of named joints on
+  `Build::plan`, and `rig::limb` is the two-bone IK for its legs. Apes (`"chimp"`,
+  `"gorilla"`, `"orangutan"`) are humanoid builds with long arms and short legs: they play
+  every humanoid clip, plus `clips::knuckleWalk` (what `gait` gives them), `clips::hang`
+  from a bar and `clips::brachiate`, swinging hand over hand along bars. Birds and
+  dinosaurs (`"chicken"`, `"duck"`, `"trex"`) stand on two legs (`rig::biped(BipedSpec)`):
+  `gait` walks them (a hen bobs its head, a duck waddles) or runs them, and `rig::wings`
+  folds and spreads a bird's wings. Snakes and fish (`"snake"`, `"fish"`) are a chain of
+  joints (`rig::chain(ChainSpec)`): a snake slithers along a path that stays put on the
+  ground, a fish swims with a wave that grows towards its tail. `clips::fly` and
+  `clips::glide` put a bird in the air.
+* **One character carrying another**: `Character::mount(Mount)` puts a character's root on
+  another's joint for a span of time (easing in and out, hand-offs blending), and `grips`
+  reach its hands and plant its feet on points of the carrier. `rig::saddle(horse)` plus
+  `clips::ride` seats a rider (hips on the back, feet in the stirrups, hands on the reins);
+  the same mount carries a chimp piggyback or a pilot on a titan's palm. Both characters
+  stand on the same node (or share a `View2D`).
+
+  ```cpp
+  rider->motion.play(rig::clips::ride(riderBuild), 0);
+  rider->mount(rig::saddle(horse));          // both added at the same position and turn
+  ```
+
+  ```cpp
+  auto horse = std::make_shared<rig::Character>(rig::animal("horse"));
+  const rig::Build& hb = horse->looks()[0].build;
+  horse->motion.play(rig::clips::stand(hb), 0).play(rig::clips::gait(hb, rig::Gait::Canter), 2);
+  ```
+* **Acting with props and furniture**: two-bone IK (`reach`, `plant`) and `hand`, which
+  places a palm, points the fingers and turns the palm. Held props and rides are parts:
+  `holdL`/`holdR` (`prop.phone`, `prop.tablet`, `prop.sign`, `prop.shield`, `prop.baton`)
+  and `ride` (`ride.skateboard`, `ride.scooter`). They are sized to the body, so any build
+  can use them. `Look::sign` is the text on placards and shields, drawn in both 2D and 3D.
+  The clips `seated`, `typing`, `texting`, `calling`, `tablet`, `protest`, `shieldLine`,
+  `skate` and `scooter` work with the `interior3d` furniture, which is real size: an
+  adult build fits the office chair and desk, and a toon perches on them. `hat.police`
+  and `hat.riot` dress the police.
+
+  ```cpp
+  rig::Look cop = rig::Look::toon();
+  cop.build = rig::Build::adult();
+  cop.hat = "hat.riot"; cop.holdL = "prop.shield"; cop.holdR = "prop.baton"; cop.sign = "POLICE";
+  auto p = std::make_shared<rig::Character>(cop);
+  p->motion.play(rig::clips::shieldLine(cop.build), 0);
+  // At a desk: the character's root on the floor under the chair's seat, facing the desk;
+  // the keyboard given in the character's space.
+  auto typist = std::make_shared<rig::Character>(cop);
+  typist->motion.play(rig::clips::typing(cop.build, 0.61f /* seat top */, { 0, 0.82f, 0.40f }), 0);
+  ```
+* **Prefab**: `character` (mode `2d`/`3d`, preset, part keys including `holdL`, `holdR`,
+  `ride` and `sign`, colours, clip, expression, `say`).
+
+`one-walk-any-body` is a 56 s promo for the module. `raymotion_rig_tests --preview <dir>`
+writes preview sheets of the presets, limbs, hands and feet, swaps, faces and 2D views,
+plus the props: an office (`3d-office.png`), a street (`3d-street.png`) and 2D
+(`2d-acting.png`), and the animals (`3d-animals.png`, `2d-animals.png`, and the horse's
+four gaits in `2d-gaits.png`), the apes (`3d-apes.png`, `2d-apes.png`) and the birds (`3d-birds.png`, `3d-trex.png`,
+`2d-birds.png`), the snakes, fish and turtles (`3d-chains.png`, `2d-chains.png`), and carrying
+(`riding.png`, `carried.png`).
+
 ### Diagrams and structures
 
 Existing diagrams and structures load from their own file formats, lay themselves out

@@ -25,6 +25,7 @@
 #include "particles.hpp"
 
 namespace rmtn {
+namespace splat { struct Cloud; }
 namespace g3d {
 
 // ------------------------------------------------------------------ geometry and models
@@ -60,9 +61,18 @@ using GeometryPtr = std::shared_ptr<Geometry>;
 // `make(t)` returns a new image for frame t (the texture takes it over); it is called again
 // every `every` frames, the frames between reusing the last. Keep the size the same from
 // call to call: the GPU texture is then updated in place.
+//
+// Or drawn on the GPU like a small canvas: `draw(c, t)` paints with dr::/vg:: into a
+// transparent width x height texture (c maps texture px; supersampled `supersample`
+// times), so vector faces, logos and labels stay sharp on a mesh. `draw` wins over `make`.
+//     auto face = std::make_shared<g3d::DynamicTexture>();
+//     face->width = face->height = 512;
+//     face->draw = [](const Ctx& c, int t) { vg::fill(c, vg::Path::circle({ 256, 256 }, 200), RED); };
 struct DynamicTexture {
     std::function<Image(int t)> make;
     int every = 1;
+    std::function<void(const Ctx& c, int t)> draw;
+    int width = 512, height = 512, supersample = 2;
 };
 using DynamicTexturePtr = std::shared_ptr<DynamicTexture>;
 
@@ -79,6 +89,13 @@ public:
     int animationFrames(int index);                   // keyframes in animation `index`
     // Poses the skeleton (fractional frames interpolate; frames wrap).
     void pose(int animation, float frame);
+    // Drives the bone matrices directly (custom skinning, e.g. the rig:: skeleton).
+    // Overrides every pose() call until clearBones().
+    void poseBones(const Matrix* matrices, int count);
+    void clearBones();
+    // Blend skinned vertices as dual quaternions (keeps volume at bent joints; the bone
+    // matrices must be rigid) instead of linearly.
+    bool dualQuaternion = false;
 private:
     void ensure();
     std::string path_;
@@ -86,6 +103,7 @@ private:
     ModelAnimation* anims_ = nullptr;
     int animCount_ = 0;
     bool loaded_ = false;
+    bool overrideBones_ = false;
 };
 using ModelPtr = std::shared_ptr<ModelAsset>;
 ModelPtr loadModel(const std::string& path);
@@ -133,10 +151,75 @@ struct Material {
         float weight = 1;           // stroke thickness multiplier
     } hatch;
 
+    // A cut by a plane in world space: nothing is drawn where dot(position, normal) > offset
+    // (so a front can sweep through an object), and a band `edgeWidth` wide in front of the cut
+    // glows in `edgeColor` (alpha = strength). The default offset hides nothing. Shadows
+    // are not cut.
+    struct Clip {
+        Vector3 normal{ 1, 0, 0 };
+        float offset = 1e9f;
+        float edgeWidth = 0;
+        Color edgeColor = BLANK;
+    } clip;
+
     // Ink lines, when the scene's lines are on (Scene::lines): colour (BLANK = the scene's)
     // and a multiplier on the scene's line width (0 = no lines around this object).
     Color lineColor = BLANK;
     float lineWidth = 1;
+};
+
+// ------------------------------------------------------------------ instancing
+// A mesh of fixed topology whose vertices are baked for every frame of an animation, drawn
+// many times in one call. `rest` carries what does not change (indices, uvs, vertex
+// colours); the per-frame positions and normals are read in the vertex shader from a texture
+// the renderer makes from `positions` and `normals`. Build one in `build`, never per frame.
+struct AnimatedMesh {
+    GeometryPtr rest;                       // any frame's mesh: same indices, uvs and colours
+    int frames = 0, vertices = 0;
+    std::vector<float> positions, normals;  // frames * vertices * 3, frame-major
+    Vector3 centre{ 0, 0, 0 };              // a sphere holding every vertex of every frame
+    float radius = 0;
+};
+
+// One body of an instanced set. `frame` is a position in the clip [clipStart,
+// clipStart + clipLength): its fraction blends two baked frames, and the clip loops.
+struct Instance {
+    Vector3 position{ 0, 0, 0 };
+    float yaw = 0, pitch = 0, bank = 0;     // degrees, as a character's holder and tilt nodes
+    float scale = 1;
+    float frame = 0;
+    int clipStart = 0, clipLength = 1;
+    float shade = 1;                        // brightness multiplier
+};
+
+// An object's instances: `up` refills `list` each frame from t (pure, like any `up`). They
+// are drawn in the object's space with its `material` (opaque only; the colour comes from the
+// mesh's vertex colours, multiplied by the material's). Each one is culled on its own (see
+// Object3D::cullRadius), shadow footprint included, so only what can show is submitted.
+struct Instances {
+    std::shared_ptr<AnimatedMesh> mesh;
+    std::vector<Instance> list;
+};
+
+// ------------------------------------------------------------------ gaussian splats
+// A cloud of Gaussian splats (see splat.hpp) drawn in the object's space: one instanced quad
+// per splat, depth-sorted back to front each frame, blended over what is behind them and
+// hidden by opaque objects in front. Not lit, shadowed, fogged or tinted by water; the colour
+// is the splat's own (view-dependent where the cloud has spherical harmonics). Splats are
+// meant for up to about a million. `up` sets the look from t.
+struct Splats {
+    std::shared_ptr<const splat::Cloud> cloud;
+    struct Look {
+        float scale = 1;            // multiplies every splat's size
+        float opacity = 1;          // multiplies every splat's opacity
+        int shDegree = 1;           // 0 = flat colour, 1 = view-dependent where the cloud has it
+        // A sweeping front, in world space: splats with dot(position, clipNormal) > clipOffset
+        // are gone; those within `clipBand` behind it fade out and scatter by up to `scatter`.
+        Vector3 clipNormal{ 1, 0, 0 };
+        float clipOffset = 1e9f;
+        float clipBand = 0.5f;
+        float scatter = 0;
+    } look;
 };
 
 // ------------------------------------------------------------------ objects
@@ -146,6 +229,15 @@ struct Object3D {
     Vector3 rotation{ 0, 0, 0 };    // Euler XYZ, degrees
     Vector3 scale{ 1, 1, 1 };
     bool visible = true;            // hides the subtree too
+    // Culling, opt-in: a bounding sphere for the whole subtree, centred at `cullCentre` in
+    // this node's own space. While it is out of sight (outside the camera's frustum, and no
+    // shadow of it reaching the view; see Scene::cullFloor) the subtree is skipped whole: its
+    // `up` callbacks do not run, its canvas textures are not drawn, and none of it is
+    // submitted. This node's own `up` still runs. Frames stay pure functions of t: every `up`
+    // assigns from t, so the first frame back in view recomputes everything. 0 = never.
+    float cullRadius = 0;
+    Vector3 cullCentre{ 0, 0, 0 };
+    bool culled = false;            // set by render() each frame
 
     GeometryPtr geometry;           // draw a mesh with `material`...
     Material material;
@@ -157,6 +249,8 @@ struct Object3D {
     // particle is an instance of it in `material` (tinted by the particle's colour), and the
     // geometry itself is not drawn.
     std::shared_ptr<const fx::Emitter3D> emitter;
+    std::shared_ptr<Instances> instances;               // many copies of one baked mesh
+    std::shared_ptr<Splats> splats;                     // a Gaussian splat cloud
 
     std::function<void(int t, Object3D& self)> up;      // animate from the local frame
     std::vector<std::unique_ptr<Object3D>> children;
@@ -165,6 +259,8 @@ struct Object3D {
     Object3D* add(ModelPtr m);
     Object3D* add(fx::Emitter3D e);                    // particles (billboards, streaks, quads)
     Object3D* add(fx::Emitter3D e, GeometryPtr g, Material m = {});   // mesh particles
+    Object3D* add(std::shared_ptr<Instances> i, Material m = {});      // instanced bodies
+    Object3D* add(std::shared_ptr<Splats> s);                          // a splat cloud
     Object3D* add();                                   // empty group
 };
 
@@ -205,6 +301,10 @@ struct Camera {
     struct DepthOfField { float focusDistance = 5, aperture = 0, maxBlur = 12, tilt = 0; } dof;
     std::function<void(int t, Camera& self)> up;
 };
+
+// Whether a sphere may be seen from `cam` at the given width/height `aspect`: false only
+// when it lies wholly outside the view frustum (with a small margin). What culling tests.
+bool visibleSphere(const Camera& cam, float aspect, Vector3 centre, float radius);
 
 // ------------------------------------------------------------------ skies
 // A procedural sky: a gradient from the ground through the horizon to the zenith, the sun
@@ -252,6 +352,51 @@ struct Sky {
 // with fogFalloff > 0, thin out with height above fogHeight (ground fog in the valleys).
 enum class FogMode { Linear, Exponential, Exponential2 };
 
+// ------------------------------------------------------------------ water
+// A sea, lake or pool: an endless surface at `level` that rolls with a sum of waves, seen from
+// above (the sky or environment reflected by Fresnel, sun glints, foam on the crests) and from
+// below (a bright window onto the sky ringed by mirror, the way it looks from a diver's eye).
+// Under it, everything lit is tinted and darkened with depth and distance (red first), and
+// the sun that reaches it is refracted by the waves into moving caustics.
+//
+//     scene->water = g3d::Water::calm();
+//     scene->water.level = 0;
+//     scene->water.openDepth = 30;      // a deep sea: no floor shows through; 0 = clear glass
+//
+// Everything is a pure function of time, and `height` gives the CPU the same surface the
+// shader draws, so a boat can ride it. Reflections are of the sky or environment, not of the
+// objects in the scene.
+struct Water {
+    bool enabled = false;
+    float level = 0;                    // mean surface height (world y)
+
+    // One wave of the sum: it travels towards `direction` (degrees about +y, 0 = +x, 90 = +z).
+    // sharpness 1 is a sine; larger narrows the crests and flattens the troughs.
+    struct Wave {
+        float direction = 0, wavelength = 8, amplitude = 0.1f, sharpness = 1, speed = 1;
+    };
+    std::vector<Wave> waves;            // up to 8
+    float speed = 1;                    // times every wave's speed
+    float fps = 30;                     // the film's frames per second: waves move in seconds
+
+    Color deep{ 6, 62, 84, 255 };       // what the water scatters back
+    Vector3 absorb{ 0.34f, 0.07f, 0.04f };   // loss per metre of path, per red/green/blue
+    float openDepth = 0;                // > 0: water this deep under the surface, so it is opaque
+    float caustics = 1;                 // 0..1: strength of the caustics on what is below
+    float foam = 0.6f;                  // 0..1: foam on the highest crests
+    float sunGlint = 1;                 // strength of the sun's glitter
+
+    static Water calm();                // a lagoon: small ripples, a gentle swell
+    static Water choppy();              // a breezy lake or bay
+    static Water storm();               // open sea: steep crests, foam
+
+    // The surface height at (x, z) at `seconds`, and its slope there (d height / dx, dz).
+    float height(float x, float z, double seconds) const;
+    Vector2 slope(float x, float z, double seconds) const;
+    // Whether a world point lies under the surface at `seconds`.
+    bool submerged(Vector3 p, double seconds) const { return enabled && p.y < height(p.x, p.z, seconds); }
+};
+
 // ------------------------------------------------------------------ scenes
 struct Scene {
     Camera camera;
@@ -275,7 +420,12 @@ struct Scene {
     float fogHeight = 0, fogFalloff = 0;    // height fog: density * exp(-falloff * (y - fogHeight))
     bool fogFromSky = false;        // fog takes the sky's (or environment's) colour in each direction
     Sky sky;                        // a procedural sky (sky.enabled); replaces `environment`
+    Water water;                    // a water surface (water.enabled)
     int shadowMapSize = 1024;       // per atlas tile (shrunk if the atlas would pass 8192)
+    // Culling (Object3D::cullRadius) keeps an out-of-view subtree whose shadow can fall into
+    // view. It assumes shadows land no lower than this y, so it needs only follow the light
+    // down to here. Scenes whose shadowed lights are not all directional are never culled.
+    float cullFloor = 0;
 
     // Ink lines found in screen space from depth, normals and object boundaries: outer
     // silhouettes, inner contours where a surface passes in front of itself, and creases.
@@ -297,6 +447,9 @@ struct Scene {
     Object3D* add(ModelPtr m);
     Object3D* add(fx::Emitter3D e);
     Object3D* add(fx::Emitter3D e, GeometryPtr g, Material m = {});
+    Object3D* add(std::shared_ptr<Instances> i, Material m = {});
+    Object3D* add(std::shared_ptr<Splats> s);
+    Object3D* add(Object3D* object); // takes ownership; supports procedural physics objects
     Object3D* add();
     Object3D* find(const std::string& name);         // depth-first, nullptr when absent
 };
