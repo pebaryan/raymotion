@@ -139,6 +139,16 @@ and available bindings. For 3D, audio, media timelines or other full engine feat
 use a normal CMake project. AngelScript is vendored; `-DRAYMOTION_SCRIPTING=OFF`
 disables that optional backend.
 
+### Native C++ runtime helper
+
+For quick iteration on a native composition, pass one `.cpp`, `.cc` or `.cxx` file to
+`--script`. Raymotion compiles that translation unit and a small entry point against
+the already-built engine, then caches the executable under the build tree. This is an
+out-of-tree CMake build helper that needs the original build SDK and matching compiler.
+It is for source builds only; packaged installs do not include the build-tree SDK and
+report that native C++ compositions are unavailable. See
+[the native C++ runtime guide](docs/native-cpp-runtime.md).
+
 ### Native C++ projects
 
 The engine is the `raymotion::engine` library; a project registers compositions and
