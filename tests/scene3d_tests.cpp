@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <cstring>
 #include <fstream>
 #include <stdexcept>
 
@@ -917,6 +918,46 @@ static void particles3d() {
     UnloadImage(b);
 }
 
+// Culling (Object3D::cullRadius): a subtree out of sight is not animated or drawn, yet the
+// picture is the same pixel for pixel, shadows of what is out of frame included.
+static void culling() {
+    struct Ups { int near = 0, shadow = 0, far = 0; };
+    auto run = [](bool cull, Ups& ups) {
+        auto s = std::make_shared<g3d::Scene>();
+        s->camera.position = { 0, 2, 10 };
+        s->camera.target = { 0, 1, 0 };
+        s->camera.fov = 40;
+        g3d::Material m;
+        m.roughness = 1;
+        s->add(g3d::Geometry::plane(60, 40), m);
+        // A low sun from the left: the box left of the frame casts its shadow into it.
+        s->lights.push_back(g3d::Light::directional({ -10, 3, 0 }, WHITE, 1.6f, true));
+        s->lights.back().shadowExtent = 25;
+        auto group = [&](Vector3 at, int* count) {
+            g3d::Object3D* g = s->add();
+            g->position = at;
+            if (cull) { g->cullRadius = 1.8f; g->cullCentre = { 0, 1, 0 }; }
+            g3d::Object3D* b = g->add(g3d::Geometry::box(1.4f, 2, 1.4f), m);
+            b->position = { 0, 1, 0 };
+            b->up = [count](int, g3d::Object3D&) { (*count)++; };
+        };
+        group({ 0, 0, 0 }, &ups.near);                 // in frame
+        group({ -9.5f, 0, 0 }, &ups.shadow);           // out of frame, its shadow in
+        group({ 40, 0, -20 }, &ups.far);               // out of frame, its shadow too
+        Comp c = sceneComp(s);
+        return render(c, 0);
+    };
+    Ups all, culled;
+    Image a = run(false, all), b = run(true, culled);
+    CHECK(a.width == b.width && std::memcmp(a.data, b.data, (size_t)a.width * a.height * 4) == 0);
+    CHECK(all.near == 1 && all.shadow == 1 && all.far == 1);
+    CHECK(culled.near == 1);                           // seen: animated
+    CHECK(culled.shadow == 1);                         // unseen, but its shadow is: kept
+    CHECK(culled.far == 0);                            // nothing of it reaches the view: skipped
+    UnloadImage(a);
+    UnloadImage(b);
+}
+
 int main() try {
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
@@ -934,6 +975,7 @@ int main() try {
     viewportsAndOpacity();
     transparencyAndHierarchy();
     moreShadows();
+    culling();
     environment(dir);
     skyAndFog();
     depthOfField();

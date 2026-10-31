@@ -139,6 +139,21 @@ Revisions (detail in the brief):
 - **Since then:** this cut changes only `crowd.cpp` and `crowd.hpp` in the engine (the
   pen), which The Trackway does not call.
 
+**Culling check** (a later change to `scene3d.cpp` and `crowd_rig.cpp`):
+
+- **Profile before:** 2,742 items drawn every frame; draw submission was CPU-bound at about
+  5 µs a call. Average frame 55.1 ms: plaza 62.0, field 55.4, flock 52.1, pond 51.4,
+  card 52.4.
+- **Profile after:** average 22.5 ms (about 59% less): plaza 27.7, field 31.0, flock 28.5,
+  pond 11.8, card 9.7; about 980 items.
+- **Frame identity:** all 696 frames hash identically (md5 of every frame) with culling on
+  and off.
+- **Tests:** `scene3d` renders a low-sun scene with and without culling and compares pixels,
+  with an agent out of frame whose shadow is in frame (still drawn) and one far away
+  (culled); `crowd` checks the sphere test and that each bound holds the joints of a person,
+  horse, duck and fish sampled every 0.05 s. Removing the shadow sweep makes the scene3d
+  test fail.
+
 ## 9. Decision
 
 - [x] **Ship as an internal demo:** Authoredness 28 ≥ 22, Craft 15 ≥ 13, Gate 3

@@ -163,6 +163,15 @@ struct Object3D {
     Vector3 rotation{ 0, 0, 0 };    // Euler XYZ, degrees
     Vector3 scale{ 1, 1, 1 };
     bool visible = true;            // hides the subtree too
+    // Culling, opt-in: a bounding sphere for the whole subtree, centred at `cullCentre` in
+    // this node's own space. While it is out of sight (outside the camera's frustum, and no
+    // shadow of it reaching the view; see Scene::cullFloor) the subtree is skipped whole: its
+    // `up` callbacks do not run, its canvas textures are not drawn, and none of it is
+    // submitted. This node's own `up` still runs. Frames stay pure functions of t: every `up`
+    // assigns from t, so the first frame back in view recomputes everything. 0 = never.
+    float cullRadius = 0;
+    Vector3 cullCentre{ 0, 0, 0 };
+    bool culled = false;            // set by render() each frame
 
     GeometryPtr geometry;           // draw a mesh with `material`...
     Material material;
@@ -222,6 +231,10 @@ struct Camera {
     struct DepthOfField { float focusDistance = 5, aperture = 0, maxBlur = 12, tilt = 0; } dof;
     std::function<void(int t, Camera& self)> up;
 };
+
+// Whether a sphere may be seen from `cam` at the given width/height `aspect`: false only
+// when it lies wholly outside the view frustum (with a small margin). What culling tests.
+bool visibleSphere(const Camera& cam, float aspect, Vector3 centre, float radius);
 
 // ------------------------------------------------------------------ skies
 // A procedural sky: a gradient from the ground through the horizon to the zenith, the sun
@@ -293,6 +306,10 @@ struct Scene {
     bool fogFromSky = false;        // fog takes the sky's (or environment's) colour in each direction
     Sky sky;                        // a procedural sky (sky.enabled); replaces `environment`
     int shadowMapSize = 1024;       // per atlas tile (shrunk if the atlas would pass 8192)
+    // Culling (Object3D::cullRadius) keeps an out-of-view subtree whose shadow can fall into
+    // view. It assumes shadows land no lower than this y, so it needs only follow the light
+    // down to here. Scenes whose shadowed lights are not all directional are never culled.
+    float cullFloor = 0;
 
     // Ink lines found in screen space from depth, normals and object boundaries: outer
     // silhouettes, inner contours where a surface passes in front of itself, and creases.

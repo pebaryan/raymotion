@@ -321,6 +321,70 @@ static void feet() {
     }
 }
 
+// Culling: the sphere test agrees with the view, and an agent's bound holds every joint it
+// ever reaches, even sampled finer than the bound was built.
+static void culling() {
+    g3d::Camera cam;
+    cam.position = { 0, 0, 0 };
+    cam.target = { 0, 0, 10 };
+    cam.fov = 60;
+    cam.nearPlane = 0.1f;
+    cam.farPlane = 100;
+    CHECK(g3d::visibleSphere(cam, 1.78f, { 0, 0, 20 }, 1));          // ahead
+    CHECK(!g3d::visibleSphere(cam, 1.78f, { 0, 0, -20 }, 1));        // behind
+    CHECK(!g3d::visibleSphere(cam, 1.78f, { 60, 0, 20 }, 1));        // far to the side
+    CHECK(g3d::visibleSphere(cam, 1.78f, { 60, 0, 20 }, 80));        // ...unless it is big enough
+    CHECK(!g3d::visibleSphere(cam, 1.78f, { 0, 0, 200 }, 1));        // beyond the far plane
+    CHECK(!g3d::visibleSphere(cam, 1.78f, { 0, 40, 20 }, 1));        // far above
+    CHECK(g3d::visibleSphere(cam, 1.78f, { 0, 0, 100 }, 1));         // straddling the far plane
+    g3d::Camera ortho = cam;
+    ortho.orthographic = true;
+    ortho.orthoHeight = 10;
+    CHECK(g3d::visibleSphere(ortho, 2, { 9, 4, 50 }, 0.5f));
+    CHECK(!g3d::visibleSphere(ortho, 2, { 11, 0, 50 }, 0.5f));
+    CHECK(!g3d::visibleSphere(ortho, 2, { 0, 6, 50 }, 0.5f));
+
+    struct Kind { const char* name; rig::Look look; crowd::Medium medium; };
+    const Kind kinds[4] = { { "person", crowd::person(0), crowd::Medium::Ground },
+                            { "horse", crowd::herd("horse", 0), crowd::Medium::Ground },
+                            { "duck", crowd::herd("duck", 0), crowd::Medium::Air },
+                            { "fish", crowd::herd("fish", 0), crowd::Medium::Water } };
+    for (const Kind& k : kinds) {
+        crowd::World w;
+        crowd::Group g;
+        g.name = "a";
+        g.medium = k.medium;
+        g.count = 1;
+        g.spawnSize = { 0, 0, 0 };
+        g.cruise = 2;
+        g.maxSpeed = 5;
+        if (k.medium != crowd::Medium::Ground) g.height0 = g.height1 = 1;
+        g.spawn = { 0, k.medium == crowd::Medium::Ground ? 0.f : 1.f, 0 };
+        g.goal = [](double s, int) { return Vector3{ (float)std::sin(s) * 8, 1, 20 }; };
+        w.groups.push_back(g);
+        w.boundsMin = { -50, 0, -50 };
+        w.boundsMax = { 50, 10, 50 };
+        w.to = 6;
+        const auto c = crowd::bake(w);
+        const rig::Look look = k.look;
+        const auto ch = crowd::cast(c, "a", [look](int) { return look; })[0];
+        g3d::Scene scene;
+        g3d::Object3D* holder = crowd::add(scene, c, 0, ch);
+        CHECK(holder->cullRadius > 0);
+        float worst = 0;
+        for (double s = w.from; s <= w.to; s += 0.05) {
+            const rig::Build& b = ch->lookAt(s).build;
+            const rig::Frames f = rig::solve(b, ch->poseAt(s));
+            for (int i = 0; i < rig::jointCount(b); i++) {
+                const float d = Vector3Distance(holder->cullCentre, rig::position(f, (rig::Joint)i));
+                worst = std::max(worst, d - holder->cullRadius);
+            }
+        }
+        std::printf("[crowd] cull bound %s: radius %.2f m, joints reach %.2f m past it\n", k.name, holder->cullRadius, std::max(0.f, worst));
+        CHECK(worst <= 0);
+    }
+}
+
 int main(int argc, char** argv) try {
     if (argc > 1) band = (float)std::atof(argv[1]);
     determinism();
@@ -331,6 +395,7 @@ int main(int argc, char** argv) try {
     fleeing();
     pen();
     feet();
+    culling();
     if (failures) std::fprintf(stderr, "%d failure(s)\n", failures);
     else std::printf("crowd tests passed\n");
     return failures ? 1 : 0;

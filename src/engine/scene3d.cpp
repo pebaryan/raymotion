@@ -827,7 +827,7 @@ void drawCanvas(const DynamicTexturePtr& src, int t) {
 
 void drawCanvases(std::vector<std::unique_ptr<Object3D>>& list, int t) {
     for (auto& o : list) {
-        if (!o->visible) continue;
+        if (!o->visible || o->culled) continue;
         if (o->material.dynamicMap && o->material.dynamicMap->draw) drawCanvas(o->material.dynamicMap, t);
         drawCanvases(o->children, t);
     }
@@ -957,21 +957,61 @@ float opacityOf(const Item& it) { return it.obj->material.opacity * it.alpha; }
 // An emitter without a geometry: its particles are drawn as billboards after the meshes.
 struct Emitting { const Object3D* obj; Matrix world; };
 
-void animate(std::vector<std::unique_ptr<Object3D>>& list, int t) {
+Matrix localMatrix(const Object3D& o) {
+    return MatrixMultiply(MatrixMultiply(MatrixScale(o.scale.x, o.scale.y, o.scale.z),
+                                         MatrixRotateXYZ(Vector3Scale(o.rotation, DEG2RAD))),
+                          MatrixTranslate(o.position.x, o.position.y, o.position.z));
+}
+
+// What culling needs for one frame (Object3D::cullRadius).
+struct Cull {
+    bool on = false;
+    const Camera* cam = nullptr;
+    float aspect = 1, floorY = 0;
+    std::vector<Vector3> shadowDirs;     // unit: the way the shadows of each shadowing light run
+};
+// Seen, or casting a shadow that can fall into view. A shadow runs from the sphere along
+// each light's direction down to the floor (at most 80 m): the swept sphere is tested as a
+// string of spheres no further apart than its radius.
+bool inSight(const Cull& k, Vector3 c, float r) {
+    if (visibleSphere(*k.cam, k.aspect, c, r)) return true;
+    for (const Vector3& away : k.shadowDirs) {
+        float reach = 80;
+        if (away.y < -0.05f) reach = std::min(reach, std::max(0.f, (c.y - k.floorY) / -away.y));
+        const float rs = r + 0.3f;
+        const int n = std::clamp((int)std::ceil(reach / std::max(rs, 0.5f)), 1, 160);
+        for (int i = 1; i <= n; i++)
+            if (visibleSphere(*k.cam, k.aspect, Vector3Add(c, Vector3Scale(away, reach * i / n)), rs)) return true;
+    }
+    return false;
+}
+
+void animate(std::vector<std::unique_ptr<Object3D>>& list, int t, const Matrix& parent, const Cull& k) {
     for (auto& o : list) {
         if (o->up) o->up(t, *o);
-        animate(o->children, t);
+        o->culled = false;
+        Matrix world = parent;
+        if (k.on) {
+            world = MatrixMultiply(localMatrix(*o), parent);
+            if (o->cullRadius > 0) {
+                const float sc = std::max({ std::sqrt(world.m0 * world.m0 + world.m1 * world.m1 + world.m2 * world.m2),
+                                            std::sqrt(world.m4 * world.m4 + world.m5 * world.m5 + world.m6 * world.m6),
+                                            std::sqrt(world.m8 * world.m8 + world.m9 * world.m9 + world.m10 * world.m10) });
+                if (!inSight(k, Vector3Transform(o->cullCentre, world), o->cullRadius * sc)) {
+                    o->culled = true;
+                    continue;
+                }
+            }
+        }
+        animate(o->children, t, world, k);
     }
 }
 
 void collect(std::vector<std::unique_ptr<Object3D>>& list, const Matrix& parent, std::vector<Item>& out,
              std::vector<Emitting>& emitters, double t) {
     for (auto& o : list) {
-        if (!o->visible) continue;
-        Matrix local = MatrixMultiply(MatrixMultiply(MatrixScale(o->scale.x, o->scale.y, o->scale.z),
-                                                     MatrixRotateXYZ(Vector3Scale(o->rotation, DEG2RAD))),
-                                      MatrixTranslate(o->position.x, o->position.y, o->position.z));
-        Matrix world = MatrixMultiply(local, parent);
+        if (!o->visible || o->culled) continue;
+        Matrix world = MatrixMultiply(localMatrix(*o), parent);
         if (o->emitter && o->geometry) {
             fx::each(*o->emitter, t, [&](const fx::Particle3D& p) {
                 const float a = p.alpha * p.color.a / 255.f;
@@ -1092,6 +1132,30 @@ void drawItem(const Item& it, Pass pass) {
 Vector3 safeUp(Vector3 dir, Vector3 up) {
     return std::fabs(Vector3DotProduct(Vector3Normalize(dir), Vector3Normalize(up))) > 0.999f ? Vector3{ 0, 0, 1 } : up;
 }
+} // namespace
+
+bool visibleSphere(const Camera& cam, float aspect, Vector3 c, float r) {
+    const Vector3 look = Vector3Subtract(cam.target, cam.position);
+    const Vector3 f = Vector3Normalize(look);
+    const Vector3 right = Vector3Normalize(Vector3CrossProduct(f, safeUp(look, cam.upVector)));
+    const Vector3 up = Vector3CrossProduct(right, f);
+    const Vector3 v = Vector3Subtract(c, cam.position);
+    const float z = Vector3DotProduct(v, f), x = Vector3DotProduct(v, right), y = Vector3DotProduct(v, up);
+    if (z + r < cam.nearPlane || z - r > cam.farPlane) return false;
+    constexpr float margin = 1.03f;           // the viewport's aspect is rounded to pixels
+    if (cam.orthographic) {
+        const float halfH = cam.orthoHeight * 0.5f * margin;
+        return std::fabs(x) <= halfH * aspect + r && std::fabs(y) <= halfH + r;
+    }
+    const float ty = std::tan(cam.fov * 0.5f * DEG2RAD) * margin, tx = ty * aspect;
+    // The side planes pass through the eye: a sphere meets a half-space when its centre is
+    // within r of the plane, measured along the plane's unit normal.
+    if ((std::fabs(x) - z * tx) / std::sqrt(1 + tx * tx) > r) return false;
+    if ((std::fabs(y) - z * ty) / std::sqrt(1 + ty * ty) > r) return false;
+    return true;
+}
+
+namespace {
 
 // ---- shadows --------------------------------------------------------------------------
 struct Tile { Matrix vp; Vector4 rect, params; };
@@ -2093,7 +2157,21 @@ void render(Scene& s, int t, const Ctx& c, Rectangle viewport, Camera* camera) {
     if (s.up) s.up(t, s);
     if (cam.up) cam.up(t, cam);
     for (Light& l : s.lights) if (l.up) l.up(t, l);
-    animate(s.objects, t);
+    Cull cull;
+    cull.cam = &cam;
+    cull.floorY = s.cullFloor;
+    {
+        const Vector2 cs = canvasSize();
+        cull.aspect = viewport.width > 0 && viewport.height > 0 ? viewport.width / viewport.height : cs.x / std::max(1.f, cs.y);
+        cull.on = cull.aspect > 0;
+        for (const Light& l : s.lights) {
+            if (!l.castShadow) continue;
+            if (l.type != Light::Type::Directional) { cull.on = false; break; }
+            const Vector3 d = Vector3Subtract(l.target, l.position);
+            if (Vector3Length(d) > 1e-6f) cull.shadowDirs.push_back(Vector3Normalize(d));
+        }
+    }
+    animate(s.objects, t, MatrixIdentity(), cull);
     if (canvasSize().x > 0) drawCanvases(s.objects, t);
     drawOffscreen(c.a, [&](const RenderTexture& target, float scale) {
         Rectangle vp = viewport;

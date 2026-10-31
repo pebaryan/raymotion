@@ -277,12 +277,42 @@ rig::Look herd(const std::string& species, int i, unsigned long long seed) {
     return l;
 }
 
+namespace {
+// A sphere (in the agent's own space) round everything the character does during the bake:
+// its joints over every pose it takes on, sampled every 0.15 s, then padded for the limbs'
+// thickness and what falls between samples. Out of sight, the agent is culled whole.
+void boundOf(const World& w, const rig::Character& ch, bool tilts, Vector3& centre, float& radius) {
+    std::vector<Vector3> pts;
+    Vector3 lo{ 1e9f, 1e9f, 1e9f }, hi{ -1e9f, -1e9f, -1e9f };
+    for (double s = w.from; s <= w.to + 1e-9; s += 0.15) {
+        const rig::Build& b = ch.lookAt(s).build;
+        const rig::Frames f = rig::solve(b, ch.poseAt(s));
+        for (int i = 0; i < rig::jointCount(b); i++) {
+            const Vector3 p = rig::position(f, (rig::Joint)i);
+            pts.push_back(p);
+            lo = Vector3Min(lo, p);
+            hi = Vector3Max(hi, p);
+        }
+    }
+    centre = Vector3Scale(Vector3Add(lo, hi), 0.5f);
+    float r = 0;
+    for (const Vector3& p : pts) r = std::max(r, Vector3Distance(centre, p));
+    radius = r * 1.1f + 0.3f;
+    // A flyer or swimmer pitches and banks about its origin, which carries the centre round it.
+    if (tilts) {
+        radius += Vector3Length(centre);
+        centre = { 0, 0, 0 };
+    }
+}
+} // namespace
+
 g3d::Object3D* add(g3d::Scene& scene, CrowdPtr c, int agent, rig::CharacterPtr ch, int fps) {
     g3d::Object3D* holder = scene.add();
     holder->name = "crowd-agent";
     g3d::Object3D* tilt = holder->add();
     rig::add(*tilt, ch, fps);
     const bool tilts = c->groupOf(agent).medium != Medium::Ground;
+    boundOf(c->world(), *ch, tilts, holder->cullCentre, holder->cullRadius);
     holder->up = [c, agent, fps](int t, g3d::Object3D& o) {
         const State st = c->at(agent, t / (double)fps);
         o.position = st.pos;
