@@ -30,7 +30,7 @@ const char* SKIN_VS_HEAD = R"(#version 330
 in vec3 vertexPosition; in vec2 vertexTexCoord; in vec3 vertexNormal; in vec4 vertexColor;
 in vec4 vertexBoneIndices; in vec4 vertexBoneWeights;
 uniform mat4 mvp; uniform mat4 matModel; uniform mat4 matNormal;
-uniform int skinned;
+uniform int skinned;                        // 0 none, 1 linear blend, 2 dual quaternion
 uniform mat4 boneMatrices[128];
 mat4 skinMatrix() {
     if (skinned == 0) return mat4(1.0);
@@ -39,16 +39,54 @@ mat4 skinMatrix() {
          + boneMatrices[int(vertexBoneIndices.z)] * vertexBoneWeights.z
          + boneMatrices[int(vertexBoneIndices.w)] * vertexBoneWeights.w;
 }
+// Dual-quaternion skinning (Kavan et al. 2007): the bones' rigid motions are blended as
+// rotations, so a bent joint keeps its volume instead of collapsing towards the bone.
+vec4 quatOf(mat3 m) {                       // m[c][r]; a rotation without scale
+    float t = m[0][0] + m[1][1] + m[2][2];
+    if (t > 0.0) { float s = sqrt(t + 1.0) * 2.0;
+        return vec4((m[1][2] - m[2][1]) / s, (m[2][0] - m[0][2]) / s, (m[0][1] - m[1][0]) / s, 0.25 * s); }
+    if (m[0][0] > m[1][1] && m[0][0] > m[2][2]) { float s = sqrt(1.0 + m[0][0] - m[1][1] - m[2][2]) * 2.0;
+        return vec4(0.25 * s, (m[1][0] + m[0][1]) / s, (m[2][0] + m[0][2]) / s, (m[1][2] - m[2][1]) / s); }
+    if (m[1][1] > m[2][2]) { float s = sqrt(1.0 + m[1][1] - m[0][0] - m[2][2]) * 2.0;
+        return vec4((m[1][0] + m[0][1]) / s, 0.25 * s, (m[2][1] + m[1][2]) / s, (m[2][0] - m[0][2]) / s); }
+    float s = sqrt(1.0 + m[2][2] - m[0][0] - m[1][1]) * 2.0;
+    return vec4((m[2][0] + m[0][2]) / s, (m[2][1] + m[1][2]) / s, 0.25 * s, (m[0][1] - m[1][0]) / s);
+}
+vec4 qmul(vec4 a, vec4 b) { return vec4(a.w * b.xyz + b.w * a.xyz + cross(a.xyz, b.xyz), a.w * b.w - dot(a.xyz, b.xyz)); }
+vec4 dqReal; vec4 dqDual;
+void blendDQ() {
+    dqReal = vec4(0.0); dqDual = vec4(0.0);
+    vec4 first = vec4(0.0);
+    for (int i = 0; i < 4; i++) {
+        float w = vertexBoneWeights[i];
+        if (w <= 0.0) continue;
+        mat4 m = boneMatrices[int(vertexBoneIndices[i])];
+        vec4 r = quatOf(mat3(m));
+        vec4 d = 0.5 * qmul(vec4(m[3].xyz, 0.0), r);
+        if (i == 0) first = r;
+        if (dot(r, first) < 0.0) { r = -r; d = -d; }          // the short way round
+        dqReal += w * r; dqDual += w * d;
+    }
+    float n = length(dqReal);
+    dqReal /= n; dqDual /= n;
+}
+vec3 dqRotate(vec3 v) { return v + 2.0 * cross(dqReal.xyz, cross(dqReal.xyz, v) + dqReal.w * v); }
+vec3 skinPosition(vec3 p) {
+    if (skinned != 2) return (skinMatrix() * vec4(p, 1.0)).xyz;
+    blendDQ();
+    vec3 t = 2.0 * (dqReal.w * dqDual.xyz - dqDual.w * dqReal.xyz + cross(dqReal.xyz, dqDual.xyz));
+    return dqRotate(p) + t;
+}
+vec3 skinNormal(vec3 n) { return skinned == 2 ? dqRotate(n) : mat3(skinMatrix()) * n; }
 )";
 
 const char* LIT_VS_BODY = R"(
 out vec3 fragPos; out vec2 fragTexCoord; out vec3 fragNormal; out vec4 fragColor;
 void main() {
-    mat4 skin = skinMatrix();
-    vec4 pos = skin * vec4(vertexPosition, 1.0);
+    vec4 pos = vec4(skinPosition(vertexPosition), 1.0);
     vec4 world = matModel * pos;
     fragPos = world.xyz;
-    fragNormal = mat3(matNormal) * (mat3(skin) * vertexNormal);
+    fragNormal = mat3(matNormal) * skinNormal(vertexNormal);
     fragTexCoord = vertexTexCoord;
     fragColor = vertexColor;
     gl_Position = mvp * pos;
@@ -56,7 +94,7 @@ void main() {
 )";
 
 const char* DEPTH_VS_BODY = R"(
-void main() { gl_Position = mvp * (skinMatrix() * vec4(vertexPosition, 1.0)); }
+void main() { gl_Position = mvp * vec4(skinPosition(vertexPosition), 1.0); }
 )";
 
 const char* DEPTH_FS = R"(#version 330
@@ -953,10 +991,10 @@ void collect(std::vector<std::unique_ptr<Object3D>>& list, const Matrix& parent,
     }
 }
 
-void setBones(int loc, int skinnedLoc, const Shader& sh, const Model* model, bool skinned) {
-    int flag = skinned ? 1 : 0;
-    SetShaderValue(sh, skinnedLoc, &flag, SHADER_UNIFORM_INT);
-    if (skinned && loc >= 0) {
+// mode: 0 not skinned, 1 linear blend, 2 dual quaternion (the shader's `skinned`).
+void setBones(int loc, int skinnedLoc, const Shader& sh, const Model* model, int mode) {
+    SetShaderValue(sh, skinnedLoc, &mode, SHADER_UNIFORM_INT);
+    if (mode && loc >= 0) {
         rlEnableShader(sh.id);
         rlSetUniformMatrices(loc, model->boneMatrices, (int)std::min<unsigned>(model->skeleton.boneCount, MAX_BONES));
     }
@@ -1025,7 +1063,7 @@ void drawItem(const Item& it, Pass pass) {
         const Color c = o.material.color, k = it.tint;
         mat.maps[MATERIAL_MAP_DIFFUSE].color = { (unsigned char)(c.r * k.r / 255), (unsigned char)(c.g * k.g / 255),
                                                  (unsigned char)(c.b * k.b / 255), c.a };
-        setBones(bonesLoc, skinnedLoc, sh, nullptr, false);
+        setBones(bonesLoc, skinnedLoc, sh, nullptr, 0);
         DrawMesh(o.geometry->mesh(), mat, it.world);
         return;
     }
@@ -1046,7 +1084,7 @@ void drawItem(const Item& it, Pass pass) {
             mat.maps[MATERIAL_MAP_DIFFUSE].color = o.material.color;
         }
         bool skinned = mesh.boneIndices && mesh.boneWeights && model.boneMatrices && model.skeleton.boneCount > 0;
-        setBones(bonesLoc, skinnedLoc, sh, &model, skinned);
+        setBones(bonesLoc, skinnedLoc, sh, &model, skinned ? (o.model->dualQuaternion ? 2 : 1) : 0);
         DrawMesh(mesh, mat, world);
     }
 }
@@ -1232,7 +1270,7 @@ void drawSkybox(const Camera& cam) {
     mat.shader = gpu.lit;
     mat.maps[MATERIAL_MAP_DIFFUSE].texture = whiteTexture();
     mat.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
-    setBones(gpu.L.bones, gpu.L.skinned, gpu.lit, nullptr, false);
+    setBones(gpu.L.bones, gpu.L.skinned, gpu.lit, nullptr, 0);
     const float size = cam.farPlane;                    // corners stay inside the far plane
     rlDisableBackfaceCulling();
     rlDisableDepthMask();
@@ -1862,12 +1900,21 @@ int ModelAsset::animationIndex(const std::string& name) {
     for (int i = 0; i < animCount_; i++) if (name == anims_[i].name) return i;
     return -1;
 }
+void ModelAsset::poseBones(const Matrix* matrices, int count) {
+    ensure();
+    if (!model_.boneMatrices || !model_.skeleton.boneCount) throw std::runtime_error("g3d: poseBones: model has no skeleton: " + path_);
+    const int n = std::min<int>(count, (int)model_.skeleton.boneCount);
+    for (int i = 0; i < n; i++) model_.boneMatrices[i] = matrices[i];
+    overrideBones_ = true;
+}
+void ModelAsset::clearBones() { overrideBones_ = false; }
 int ModelAsset::animationFrames(int index) {
     ensure();
     return index >= 0 && index < animCount_ ? anims_[index].keyframeCount : 0;
 }
 void ModelAsset::pose(int animation, float frame) {
     ensure();
+    if (overrideBones_) return;
     if (!model_.boneMatrices) return;
     if (animation >= 0 && animation < animCount_) {
         UpdateModelAnimationBones(model_, anims_[animation], std::max(0.f, frame));

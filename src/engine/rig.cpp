@@ -151,7 +151,7 @@ Build Build::scaled(float k) const {
     Build b = *this;
     b.head *= k; b.neck *= k; b.torso = Vector3Scale(torso, k); b.hips *= k; b.hipWidth *= k;
     b.upperArm *= k; b.forearm *= k; b.armRadius *= k; b.hand *= k;
-    b.thigh *= k; b.shin *= k; b.legRadius *= k; b.foot *= k; b.ankle *= k;
+    b.thigh *= k; b.shin *= k; b.legRadius *= k; b.foot *= k; b.ankle *= k; b.shoulderZ *= k;
     if (plan) {
         auto s = std::make_shared<Skeleton>(*plan);
         for (JointDef& d : s->joints) d.rest = Vector3Scale(d.rest, k);
@@ -169,7 +169,7 @@ Build Build::mix(const Build& a, const Build& b, float u) {
     r.armRadius = lerpf(a.armRadius, b.armRadius, u); r.hand = lerpf(a.hand, b.hand, u);
     r.thigh = lerpf(a.thigh, b.thigh, u); r.shin = lerpf(a.shin, b.shin, u);
     r.legRadius = lerpf(a.legRadius, b.legRadius, u); r.foot = lerpf(a.foot, b.foot, u);
-    r.ankle = lerpf(a.ankle, b.ankle, u);
+    r.ankle = lerpf(a.ankle, b.ankle, u); r.shoulderZ = lerpf(a.shoulderZ, b.shoulderZ, u);
     r.plan = u < 0.5f ? a.plan : b.plan;
     if (a.plan && b.plan && a.plan != b.plan && a.plan->joints.size() == b.plan->joints.size()) {
         auto s = std::make_shared<Skeleton>(*a.plan);
@@ -194,8 +194,8 @@ Vector3 restOffset(const Build& b, Joint j) {
     case Joint::Chest: return { 0, b.hips / 2, 0 };
     case Joint::Neck: return { 0, b.torso.y, 0 };
     case Joint::Head: return { 0, b.neck, 0 };
-    case Joint::ShoulderL: return { sx, sy, 0 };
-    case Joint::ShoulderR: return { -sx, sy, 0 };
+    case Joint::ShoulderL: return { sx, sy, b.shoulderZ };
+    case Joint::ShoulderR: return { -sx, sy, b.shoulderZ };
     case Joint::ElbowL: case Joint::ElbowR: return { 0, -b.upperArm, 0 };
     case Joint::WristL: case Joint::WristR: return { 0, -b.forearm, 0 };
     case Joint::HipL: return { b.hipWidth / 2, 0, 0 };
@@ -736,6 +736,8 @@ bool inside(const std::vector<vg::Polyline>& polys, Vector2 p, vg::FillRule rule
     return rule == vg::FillRule::EvenOdd ? (winding % 2) != 0 : winding != 0;
 }
 } // namespace
+
+Outfit Outfit::svg(const std::string& file) { return svg(file, Outfit{}); }
 
 Outfit Outfit::svg(const std::string& file, const Outfit& under) {
     auto data = std::make_shared<SvgOutfit>();

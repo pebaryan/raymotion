@@ -1354,7 +1354,30 @@ static void apes() {
     CHECK(near3(rig::clips::stand(rig::animal("chimp").build)(0.5)[rig::Joint::Chest], rig::clips::idle()(0.5)[rig::Joint::Chest]));
 }
 
-int main(int argc, char** argv) try {
+// Skinned meshes: the bind pose leaves the mesh where it is, and a bent joint carries a
+// vertex exactly as the skeleton moves the joint (the bone matrices are frame / bind).
+static void skins() {
+    rig::Build b = rig::Build::adult();
+    b.shoulderZ = -0.03f;
+    CHECK(near(rig::position(rig::solve(b, rig::Pose{}), rig::Joint::ShoulderL).z, -0.03f));
+    rig::Pose bind;
+    bind[rig::Joint::ShoulderL] = { 0, 0, 90 };
+    bind[rig::Joint::ShoulderR] = { 0, 0, 90 };
+    for (const Matrix& m : rig::skinMatrices(b, bind, bind))
+        CHECK(near3(Vector3Transform({ 0.3f, 1.2f, -0.1f }, m), { 0.3f, 1.2f, -0.1f }));
+    CHECK(rig::skinMatrices(b, bind, bind).size() == (size_t)rig::Joint::Floor);
+    rig::Pose bent = bind;
+    bent[rig::Joint::ElbowL] = { -70, 0, 0 };
+    bent.offset = { 0.2f, 0, 0.5f };
+    const auto f0 = rig::solve(b, bind), f1 = rig::solve(b, bent);
+    // A point on the forearm, half way to the wrist, in the bind pose...
+    const Vector3 v = Vector3Lerp(rig::position(f0, rig::Joint::ElbowL), rig::position(f0, rig::Joint::WristL), 0.5f);
+    const Vector3 moved = Vector3Transform(v, rig::skinMatrices(b, bind, bent)[(size_t)rig::Joint::ElbowL]);
+    // ...lands half way along the bent forearm.
+    CHECK(near3(moved, Vector3Lerp(rig::position(f1, rig::Joint::ElbowL), rig::position(f1, rig::Joint::WristL), 0.5f), 1e-3f));
+}
+
+static void logic() {
     skeleton();
     motion();
     partsAndLocks();
@@ -1367,11 +1390,22 @@ int main(int argc, char** argv) try {
     animals();
     apes();
     birds();
+    skins();
     chains();
     turtles();
     mounts();
+}
+
+// --no-gl: the logic checks only. --gl-only: the rendering only, exiting 77 (ctest: skipped)
+// where there is no window, as on a headless runner.
+int main(int argc, char** argv) try {
+    const std::string mode = argc == 2 ? argv[1] : "";
+    if (mode != "--gl-only") logic();
     const bool preview = argc == 3 && std::string(argv[1]) == "--preview";
-    if (!(argc == 2 && std::string(argv[1]) == "--no-gl")) CHECK(render(preview ? argv[2] : "", preview));
+    if (mode != "--no-gl" && !render(preview ? argv[2] : "", preview)) {
+        if (mode == "--gl-only" && !failures && !IsWindowReady()) return 77;
+        CHECK(false);
+    }
     if (failures) std::fprintf(stderr, "%d failure(s)\n", failures);
     else std::printf("rig tests passed\n");
     return failures ? 1 : 0;

@@ -280,6 +280,20 @@ rig::Clip carried(rig::Clip c, Vector3 from, float speed, double dur) {
     };
 }
 
+// Bending down to the ground by `k` (0..1): hips down and back, the body leaning in, the
+// feet kept where they stood.
+rig::Pose squat(const rig::Build& b, rig::Pose p, float k) {
+    const rig::Frames f = rig::solve(b, p);
+    const Vector3 l = rig::position(f, rig::Joint::AnkleL), r = rig::position(f, rig::Joint::AnkleR);
+    p.offset.y -= k * 0.46f * (b.thigh + b.shin);
+    p.offset.z -= k * 0.3f * b.thigh;
+    p[rig::Joint::Pelvis].x += k * 40;
+    p[rig::Joint::Chest].x += k * 45;
+    p[rig::Joint::Head].x -= k * 50;
+    p = rig::plant(b, p, rig::Side::Left, l);
+    return rig::plant(b, p, rig::Side::Right, r);
+}
+
 rig::Look person(Color top, Color bottom, const char* hair) {
     rig::Look l = rig::Look::toon();
     l.build = rig::Build::adult();
@@ -477,8 +491,13 @@ std::shared_ptr<World> makeWorld() {
         tr.v = { { C5 + 2.0, vk }, { BARS_AT, vk }, { BARS_AT + 0.45, vb } };
         a.pos = [tr](double s) { return Vector3{ (float)tr.at(s), 0, 0 }; };
         // The bars sit where the hands grip: spacing apart from half a spacing past the
-        // node's position where brachiation starts (see clips::brachiate).
-        const float start = (float)tr.at(BARS_AT);
+        // node's position where brachiation starts (see clips::brachiate). The clip slides
+        // its bars back at the swinging speed from its first frame, but the node only reaches
+        // that speed after the ramp: the hands land short of a moving-from-the-start node by
+        // the ground lost in the ramp.
+        const double settled = BARS_AT + 1.0;
+        const float lag = (float)(tr.at(BARS_AT) + vb * (settled - BARS_AT) - tr.at(settled));
+        const float start = (float)tr.at(BARS_AT) - lag;
         for (int m = 0; m < 12; m++) w->bars.push_back({ start + spacing * 0.5f + m * spacing });
         a.show0 = C5 + 2.0;
         a.show1 = C6 + 0.5;
@@ -610,19 +629,22 @@ std::shared_ptr<World> makeWorld() {
         tl.build = rig::Build::adult().scaled(K);
         t.ch = std::make_shared<rig::Character>(tl);
         const rig::Build tb = tl.build;
-        const double raise0 = PALM_AT + 0.5, raise1 = PALM_AT + 1.9, go = PALM_AT + 2.1;
-        const float cad = 0.6f;
-        auto palmTarget = [raise0, raise1](double s) {
-            const float u = smooth((s - raise0) / (raise1 - raise0));
-            return Vector3Lerp({ -0.3f * K, 0.86f * K, 0.32f * K }, { -0.34f * K, 1.12f * K, 0.42f * K }, u);
+        // It bends down and lays its palm on the sand in front of the pilot, the pilot steps
+        // on (PALM_AT .. +0.45), and it stands up, lifting the palm to its chest.
+        const double lower0 = PALM_AT - 1.4, raise0 = PALM_AT + 0.6, raise1 = PALM_AT + 2.0, go = PALM_AT + 2.1;
+        const float cad = 0.6f, stopZ = 0.32f * K + 0.05f;
+        const Vector3 low{ -0.3f * K, 0.3f, stopZ + 0.3f }, carry{ -0.34f * K, 1.12f * K, 0.42f * K };
+        auto palmTarget = [raise0, raise1, low, carry](double s) {
+            return Vector3Lerp(low, carry, smooth((s - raise0) / (raise1 - raise0)));
         };
-        const double lower0 = PALM_AT - 1.6;
-        t.ch->motion.play([tb, palmTarget, lower0](double s) {
+        auto bend = [lower0, raise0, raise1](double s) {
+            return smooth((s - lower0) / 1.2) * (1 - smooth((s - raise0) / (raise1 - raise0)));
+        };
+        t.ch->motion.play([tb, palmTarget, bend, lower0](double s) {
             const double at = lower0 + s;
-            const float k = smooth(s / 1.2);
-            rig::Pose p = rig::clips::idle(0.5f)(s);
+            const rig::Pose p = squat(tb, rig::clips::idle(0.5f)(s), bend(at));
             const rig::Pose h = rig::hand(tb, p, rig::Side::Right, palmTarget(at), { -0.3f, 0, 1 }, { 0, 1, 0 });
-            return rig::Pose::mix(p, h, k);
+            return rig::Pose::mix(p, h, smooth(s / 1.2));
         }, lower0).play([tb, palmTarget, go](double s) {
             rig::Pose p = rig::clips::walk(0.6f)(s);
             return rig::hand(tb, p, rig::Side::Right, palmTarget(go + s), { -0.3f, 0, 1 }, { 0, 1, 0 });
@@ -648,9 +670,8 @@ std::shared_ptr<World> makeWorld() {
         p.ch = std::make_shared<rig::Character>(pl);
         const float pc = 1.0f, vp = rig::walkSpeed(pl.build, pc);
         const Vector3 from{ -0.3f * K, 0, -3.4f };
-        const float stopZ = 0.32f * K + 0.05f;
         const double walkFor = (stopZ - from.z) / vp;
-        const double arrive = PALM_AT - 0.4, start = arrive - walkFor;
+        const double arrive = PALM_AT - 0.9, start = arrive - walkFor;
         p.ch->motion.play(carried(rig::clips::walk(pc), from, vp, walkFor), start)
             .play(carried(rig::clips::idle(), { from.x, 0, stopZ }, 0, 0), arrive, 0.3)
             .play(rig::clips::idle(0.6f), PALM_AT, 0.3);
@@ -658,7 +679,7 @@ std::shared_ptr<World> makeWorld() {
         palm.carrier = t.ch;
         palm.joint = rig::Joint::WristR;
         palm.at = { 0.04f * K, -tb.hand * 0.55f, 0 };
-        palm.rot = { 0, 0, -90 };
+        palm.upright = true;
         palm.from = PALM_AT + 0.45;
         palm.blend = 0.45;
         p.ch->mount(palm);

@@ -88,6 +88,13 @@ public:
     int animationFrames(int index);                   // keyframes in animation `index`
     // Poses the skeleton (fractional frames interpolate; frames wrap).
     void pose(int animation, float frame);
+    // Drives the bone matrices directly (custom skinning, e.g. the rig:: skeleton).
+    // Overrides every pose() call until clearBones().
+    void poseBones(const Matrix* matrices, int count);
+    void clearBones();
+    // Blend skinned vertices as dual quaternions (keeps volume at bent joints; the bone
+    // matrices must be rigid) instead of linearly.
+    bool dualQuaternion = false;
 private:
     void ensure();
     std::string path_;
@@ -95,6 +102,7 @@ private:
     ModelAnimation* anims_ = nullptr;
     int animCount_ = 0;
     bool loaded_ = false;
+    bool overrideBones_ = false;
 };
 using ModelPtr = std::shared_ptr<ModelAsset>;
 ModelPtr loadModel(const std::string& path);

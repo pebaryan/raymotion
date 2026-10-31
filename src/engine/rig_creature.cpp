@@ -447,7 +447,10 @@ Build quadruped(const QuadSpec& q) {
     add("neck-2", "neck-1", Vector3Scale(neckDir(q.neckPitch), q.neckLength / 2));
     add("head", "neck-2", Vector3Scale(neckDir(q.neckPitch), q.neckLength / 2));
     const Vector3 tailStep{ 0, sinDeg(q.tailPitch) * q.tailLength / 2, -cosDeg(q.tailPitch) * q.tailLength / 2 };
-    add("tail-1", "pelvis", { 0, r * 0.5f, -r * q.rump * 1.1f });
+    // A turtle's tail comes out from under the back of its shell (bodyPart: the shell reaches
+    // 0.875 body lengths either side of the spine); other tails sit high on the rump.
+    if (q.species == "turtle") add("tail-1", "pelvis", { 0, -r * 0.3f, -q.bodyLength * 0.3f });
+    else add("tail-1", "pelvis", { 0, r * 0.5f, -r * q.rump * 1.1f });
     add("tail-2", "tail-1", tailStep);
     add("tail-3", "tail-2", tailStep);
     for (Side s : { Side::Left, Side::Right }) {
@@ -582,13 +585,16 @@ struct GaitDef {
     float bob;                               // body bounce, times the leg length
     float nod; int nods;                     // head nod (degrees) and nods per cycle
     float flex;                              // spine flex (degrees)
+    float rise = 0.2f;                       // bounding gaits: when the body is highest (cycles)
 };
 GaitDef gaitDef(Gait g) {
     switch (g) {
     case Gait::Walk: return { { 0, 0.25f, 0.5f, 0.75f }, 0.65f, 0.75f, 0.3f, 0.1f, 60, 25, 0.012f, 5, 2, 0 };
     case Gait::Trot: return { { 0.5f, 0, 0, 0.5f }, 0.45f, 1.25f, 0.42f, 0.14f, 75, 35, 0.02f, 2, 2, 0 };
     case Gait::Canter: return { { 0, 0.33f, 0.33f, 0.6f }, 0.4f, 1.5f, 0.45f, 0.16f, 85, 40, 0.03f, 9, 1, 5 };
-    case Gait::Gallop: default: return { { 0, 0.45f, 0.1f, 0.55f }, 0.3f, 1.9f, 0.5f, 0.18f, 95, 45, 0.035f, 10, 1, 9 };
+    // Hinds, then fronts, then one gathered moment with every hoof in the air (about a third
+    // of the stride), the body at its highest.
+    case Gait::Gallop: default: return { { 0, 0.3f, 0.08f, 0.4f }, 0.26f, 1.9f, 0.5f, 0.18f, 95, 45, 0.035f, 10, 1, 9, 0.84f };
     }
 }
 void tailSway(const Skeleton& k, Pose& p, double s, float rate, float amp) {
@@ -653,7 +659,7 @@ Clip gait(const Build& b, Gait g, float cadence) {
         const float u = frac(s * c);
         Pose p;
         const bool bound = d.flex > 0;           // canter and gallop: one bounce, the spine flexing
-        p.offset.y = -sink + d.bob * L * (bound ? std::cos(TAU * (u - 0.2f)) : std::cos(2 * TAU * u));
+        p.offset.y = -sink + d.bob * L * (bound ? std::cos(TAU * (u - d.rise)) : std::cos(2 * TAU * u));
         if (bound) {
             p[(*k)["pelvis"]].x = d.flex * std::sin(TAU * u);
             p[(*k)["chest"]].x = -1.2f * d.flex * std::sin(TAU * u);

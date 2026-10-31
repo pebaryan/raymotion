@@ -83,6 +83,7 @@ struct Build {
     float hipWidth = 0.18f;                  // between the hip joints
     float upperArm = 0.27f, forearm = 0.25f, armRadius = 0.055f, hand = 0.09f;
     float thigh = 0.36f, shin = 0.34f, legRadius = 0.07f, foot = 0.20f, ankle = 0.07f;
+    float shoulderZ = 0;                     // the shoulder joints ahead (+) or behind (-) the spine
     SkeletonPtr plan;                        // another body plan (null: the humanoid above)
 
     static Build adult();                    // ~1.75 m, natural proportions
@@ -324,7 +325,9 @@ struct Outfit {
                         float sleeve = 0.45f, float trouser = 1.0f);
     // An SVG drawn over the whole texture (its document square; see assets/characters/
     // outfit-template.svg). `under` paints first (e.g. basic colours below a print).
-    static Outfit svg(const std::string& file, const Outfit& under = {});
+    // (Two overloads, not `under = {}`: GCC and clang reject that default inside the class.)
+    static Outfit svg(const std::string& file);
+    static Outfit svg(const std::string& file, const Outfit& under);
     // Adds a layer on top (prints, numbers, animated logos).
     Outfit& over(std::function<void(const Ctx& c, int t, float size)> layer);
     bool painted() const { return (bool)paint; }
@@ -570,6 +573,9 @@ struct Mount {
     Vector3 at{ 0, 0, 0 }, rot{ 0, 0, 0 };
     double from = 0, until = 1e30, blend = 0.3;
     std::vector<Grip> grips;
+    // Stand upright: follow the joint's position and heading (its +z, levelled) but not its
+    // tilt -- a passenger on a palm or a platform that rocks.
+    bool upright = false;
 };
 
 class Character {
@@ -620,6 +626,26 @@ Pose locked(const Look& look, Pose p);
 // scene's frame t (seconds = t / fps). Move/turn the returned root to place it.
 g3d::Object3D* add(g3d::Object3D& parent, CharacterPtr ch, int fps = 30);
 g3d::Object3D* add(g3d::Scene& scene, CharacterPtr ch, int fps = 30);
+
+// ---- skinned meshes: a scanned or generated body bound to the humanoid skeleton by
+// tools/skin_bake.py, which writes the GLB (one bone per joint, in Joint order, Floor left
+// out) and `<file>.rig.json` beside it: the build fitted to the mesh and the pose it was
+// bound in. Pose it with any clip; its bones follow the joints.
+struct Skin {
+    g3d::ModelPtr model;
+    Build build;                             // fitted to the mesh: play clips with this build
+    Pose bind;                               // the pose the mesh was modelled in (a T or A)
+};
+// Throws std::runtime_error when the sidecar is missing or names another skeleton.
+Skin loadSkin(const std::string& glb);
+// The bone matrices that carry the mesh from `bind` to `p` (raymath order, one per joint
+// up to AnkleR): each joint's frame in `p` after the inverse of its frame in `bind`.
+std::vector<Matrix> skinMatrices(const Build& b, const Pose& bind, const Pose& p);
+// Poses the model's bones (it stays posed until the next call).
+void pose(const Skin& s, const Pose& p);
+// A skin worn by a character: a subtree like add(), its model posed from the character's
+// pose each frame (mounts and locks included). The character should use the skin's build.
+g3d::Object3D* add(g3d::Scene& scene, CharacterPtr ch, const Skin& skin, int fps = 30);
 
 // ---- 2D: a flat cut-out puppet, the 3D shapes projected orthographically and drawn
 // back to front with an ink outline.

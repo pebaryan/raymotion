@@ -83,6 +83,9 @@ add_library(rmtn_engine STATIC
   src/engine/rig_parts.cpp
   src/engine/rig_act.cpp
   src/engine/rig_creature.cpp
+  src/engine/rig_skin.cpp
+  src/engine/crowd.cpp
+  src/engine/crowd_rig.cpp
   src/engine/rig_ape.cpp
   src/engine/rig_bird.cpp
   src/engine/rig_chain.cpp
@@ -139,6 +142,8 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/asp_v2.cpp
     examples/showcase/one_walk.cpp
     examples/showcase/trackway.cpp
+    examples/showcase/skin_demo.cpp
+    examples/showcase/crowd_demo.cpp
     examples/showcase/tokens.cpp
     examples/showcase/own_compute.cpp
     examples/showcase/own_compute_v2.cpp
@@ -297,7 +302,18 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
 
   add_executable(raymotion_rig_tests tests/rig_tests.cpp)
   target_link_libraries(raymotion_rig_tests PRIVATE rmtn_engine)
-  add_test(NAME rig COMMAND raymotion_rig_tests)
+  add_test(NAME rig COMMAND raymotion_rig_tests --no-gl)
+  add_test(NAME rig_render COMMAND raymotion_rig_tests --gl-only)
+  set_tests_properties(rig_render PROPERTIES LABELS gl SKIP_RETURN_CODE 77)
+  add_executable(raymotion_crowd_tests tests/crowd_tests.cpp)
+  target_link_libraries(raymotion_crowd_tests PRIVATE rmtn_engine)
+  add_test(NAME crowd COMMAND raymotion_crowd_tests)
+
+  # A body baked by tools/skin_bake.py, posed by clips (writes stills; not a ctest).
+  add_executable(raymotion_skin_view tests/skin_view.cpp)
+  target_link_libraries(raymotion_skin_view PRIVATE rmtn_engine)
+  add_executable(raymotion_skin_anim tests/skin_anim.cpp)
+  target_link_libraries(raymotion_skin_anim PRIVATE rmtn_engine)
 
   add_executable(raymotion_diagram_render_tests tests/diagram_render_tests.cpp)
   target_link_libraries(raymotion_diagram_render_tests PRIVATE rmtn_engine)

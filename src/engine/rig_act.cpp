@@ -186,6 +186,11 @@ Pose mounted(const Character& ch, double s, Pose p) {
         const Matrix M = MatrixMultiply(MatrixMultiply(rootOwn, attach), cf[(size_t)m.joint]);
         Pose q = own;
         q[Joint::Root] = eulerOf(M);
+        if (m.upright) {
+            // The frame's +z (raymath: the third row), levelled; its own root turn on top.
+            const float yaw = std::atan2(M.m8, M.m10);
+            q[Joint::Root] = eulerOf(MatrixMultiply(MatrixRotateXYZ(Vector3Scale(own[Joint::Root], DEG2RAD)), MatrixRotateY(yaw)));
+        }
         q.offset = { M.m12, M.m13, M.m14 };
         if (!b.plan)
             for (const Grip& g : m.grips) {

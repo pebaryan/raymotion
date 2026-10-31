@@ -276,3 +276,10 @@ Kept in `docs/the-trackway-qc.md`.
 - Cue-sync pass after the first full render: the gap outline, duck trace, nested hen print,
   groove highlight and coral last prints were moved to lead their phrase (or their label) by
   0.25-0.33 s; the reveal map above has the new times.
+- Re-review: the titan squats and lays its palm on the sand; the pilot steps on and rides
+  upright (a new `Mount::upright`). The gallop's footfalls were retimed in `clips::gait`
+  (hinds, then fronts, then one gathered suspension of about a third of the stride), so the
+  chart's gap is 0.32 s instead of 0.19 s.
+- Owner review: the turtle's tail now leaves from under the rear of its shell (a rig fix for
+  every turtle), and the bars are placed for the chimp's speed ramp into the swing, so each
+  hand closes on a rung.

@@ -917,12 +917,14 @@ static void particles3d() {
     UnloadImage(b);
 }
 
-int main() {
+int main() try {
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
     InitWindow(W, H, "raymotion 3d");
     if (!IsWindowReady()) return 77;
-    const fs::path dir = fs::temp_directory_path() / "raymotion-scene3d-test";
+    // Beside the test (ctest runs it in the build directory), not in the system temp
+    // folder, which a sandboxed shell may not let it write to.
+    const fs::path dir = fs::current_path() / "raymotion-scene3d-test";
     fs::create_directories(dir);
     geometryExtents();
     placementAndDepth();
@@ -949,4 +951,7 @@ int main() {
     if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }
     std::puts("scene3d tests passed");
     return 0;
+} catch (const std::exception& e) {
+    std::fprintf(stderr, "uncaught: %s\n", e.what());
+    return 2;
 }

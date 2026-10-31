@@ -3,10 +3,10 @@
 | | |
 | --- | --- |
 | Composition | `the-trackway` (+ `the-trackway-thumb`) |
-| Commit / build | on top of `8b88334` (uncommitted: `examples/showcase/trackway.cpp`); `build/raymotion.exe` 15:17:39, source 15:17:35, final render 15:19:11 |
+| Commit / build | `5ee483a` + re-review (titan staging, gallop suspension, turtle tail, bar placement); `build/raymotion.exe` 18:55:24, last source edit 18:55:17, final render 18:56:47 |
 | Reviewer | Claude (agent); owner sign-off pending |
 | Date | 2026-10-30 |
-| Review stage | final |
+| Review stage | re-review after revision |
 | Story mode | promo (for `rig::` animals, gaits and mounts; the claims about real animals are sourced) |
 | Artifacts | `docs/the-trackway-brief.md`, `out/the-trackway.mp4`, `out/the-trackway.srt`, `out/the-trackway-thumb.png`, `out/the-trackway-stills/f*.png` (from the encoded MP4), `out/the-trackway-assets/score.wav` |
 
@@ -32,9 +32,9 @@ Reviewer's restatement after viewing:
 | 2 Stills | pass | every chapter at start/middle/end and the transitions, first from `still`, then from the encoded MP4 (§10 frames, `out/the-trackway-stills/`); the issues found are in §10 and fixed |
 | 2b Staged reveal & narration sync | pass | ledger §5b; each scene starts on empty sand or a single animal, and overlays arrive one at a time; cue audit §5c; exe newer than source, final render newer than exe |
 | 3 Draft (muted + sound) | **conditional** | the agent can't watch in real time or hear: the muted review is from encoded frames, the sound from the cue code and loudness. **The owner must watch once muted and once with sound** |
-| 4 Final technical QA | pass | §7: ffprobe, full decode, -16.0 LUFS / -1.7 dBTP, frames from the MP4, deterministic stills |
+| 4 Final technical QA | pass | §7: ffprobe, full decode, -16.0 LUFS / -1.6 dBTP, frames from the MP4, deterministic stills |
 | 5 Authored test | pass | §5 |
-| 6 Craft & coherence | pass | craft 16/18 (§3) |
+| 6 Craft & coherence | pass | craft 17/18 (§3) |
 | 7 Release packaging | pass | end card with title, API line, logo prefab and repo URL (CTA); SRT; thumbnail comp |
 
 ## 3. Scorecard
@@ -44,7 +44,7 @@ Reviewer's restatement after viewing:
 | 1 | Conceit | 3 | one strip of sand is the whole film; each chapter is a different hand writing on it | — |
 | 2 | Script / voice | 2 | ten speakable caption lines, one per beat; no voice | voiced cut (Qwen clone) if the owner wants one |
 | 3 | Evidence | 3 | prints, footfall chart and thuds all come from one contact list detected from the solved feet; the chart's gap is a measured airborne span, not drawn by hand | — |
-| 4 | Timing | 2 | reveals lead their caption phrases by 0.27–0.33 s; but the gallop gap is only ~6 frames, and transitions are fast trucks over empty sand | longer gap pose in `clips::gait`'s gallop; a held beat at each transition |
+| 4 | Timing | 2 | reveals lead their caption phrases by 0.27–0.33 s; the gallop's suspension is now 0.32 s (~10 frames, one per stride); transitions are still fast trucks over empty sand | a held beat at each transition |
 | 5 | Sound | 2 | score generated from the contacts (thuds per hoof, silence in the gap, hiss, splash, creaks, plucks, end bell); not heard by the reviewer | owner listen (Gate 3) |
 | 6 | Visual system | 3 | warm paper, pale sand, pressed prints in darker sand, teal for data, coral for the trail's last print; one camera grammar (follow + truck) | — |
 | 7 | Chapter differentiation | 3 | chart (2), head traces (3), nested prints and push-in (4), groove (5), three endings (6), counters (7), map (8) | — |
@@ -59,13 +59,13 @@ Reviewer's restatement after viewing:
 
 | # | Criterion | Score (0-3) | Evidence / notes | Fix if < 3 |
 | --- | --- | --- | --- | --- |
-| 13 | Scenario coherence | 2 | one continuous world, prints never move; but the pilot tilts while lifted, and the titan is scaled 2.6x so its palm is in reach | fix the palm grip orientation in `Character::mount` |
+| 13 | Scenario coherence | 3 | one continuous world, prints never move; the titan squats and lays its palm on the sand, the pilot steps on and rides upright (`Mount::upright`) | — |
 | 14 | Information design | 3 | chart lanes labelled once (LH/LF/RF/RH), gait names on the chart's time axis, one label per print, a single counter for chapter 7 | — |
 | 15 | Text performance & pacing | 2 | one headline and one caption per beat at ~2.5 words/s; chapter 6's 11-word caption must cover three events | split chapter 6 into three short lines timed to each ending |
 | 16 | House style & mode grammar | 3 | raymotion paper/ink/teal, kicker and chapter counter, logo prefab, API line and URL on the end card | — |
 | 17 | Spec-to-screen fidelity | 3 | every brief chapter is on screen; departures (T. rex ratio, chapter 6 wording, hen run, titan scale) recorded in brief §14 | — |
 | 18 | Revision quality | 3 | first-render issues (single detected hoof, overexposed sand, aliasing ripples, hidden duck, camera chasing the hen into the sky, rider standing on the horse, a 1-frame false gap, -20.8 LUFS) each fixed at the cause | — |
-| | **Craft total** | **16/18** | | |
+| | **Craft total** | **17/18** | | |
 
 ## 4. Critical fails
 
@@ -95,7 +95,7 @@ Reviewer's restatement after viewing:
 | **Cue-sync test** | pass | §5c |
 | **No-duplicate-label test** | pass | lane names only on the chart; gait names only on its axis; animal names only as print labels in ch4 and the ch7 counter heading |
 | **Scene-review test** | pass | §5b |
-| **Fresh-build test** | pass | source 15:17:35 < exe 15:17:39 < final render 15:19:11 |
+| **Fresh-build test** | pass | source 18:55:17 < exe 18:55:24 < final render 18:56:47 |
 | **Distinct chapter test** | pass | none: each chapter's proof object differs (§3 row 7) |
 
 ## 5b. Scene review ledger
@@ -103,12 +103,12 @@ Reviewer's restatement after viewing:
 | Scene | Review asset (clip / stills) | Reveal notes | Approved? | Re-render |
 | --- | --- | --- | --- | --- |
 | 01 ground remembers | stills at 0, 40, 90, 150, 178 | prints press one at a time on empty sand, then the ghost horse fades in on them | yes | f40, f150 |
-| 02 four feet | stills at 180–540; chart frames at the walk/trot/gallop changes and the gap | chart draws from the contacts; the gap outline leads caption 2b by 0.30 s; Muybridge card 1.0 s later. First pass found only one hoof and a 1-frame false gap: fixed | yes (after revision) | f280, f400 |
+| 02 four feet | stills at 180–540; chart frames at the walk/trot/gallop changes and the gap | chart draws from the contacts; the gap outline leads caption 2b by 0.30 s; Muybridge card 1.0 s later. First pass found only one hoof and a 1-frame false gap: fixed. Re-review: one gathered suspension per stride, 0.32 s, all hooves off at frame 383 | yes (after revision) | f280, f383, f400 |
 | 03 two feet | stills at 540–810 | hen staircase trace first, duck follows 0.5 m behind with a smooth trace on the same scale. First pass: duck hidden behind the hen; fixed | yes (after revision) | f620, f760 |
 | 04 any size | stills through the push-in | T. rex print first; hen print appears after the foot lifts; push-in, then crane back. First pass: focus print under the standing foot; fixed | yes (after revision) | f880 |
 | 05 no feet | stills at 990–1170 | groove draws behind the head; the "one groove" label leads its phrase by 0.27 s | yes | f1100 |
-| 06 where trails end | stills at each ending | hen runs and flies; the camera holds on the last prints (coral, then label); turtle at the waterline; chimp under the first bar. First pass: camera chased the hen upward; fixed | yes (after revision) | f1280, f1400 |
-| 07 one trail | stills at each mount | rider, passenger, pilot each step off their own trail; counter after each mount. First pass: rider stood on the horse before the mount blend; fixed. Known: the pilot tilts while lifted | yes, with the known issue | f1640, f1880 |
+| 06 where trails end | stills at each ending | hen runs and flies; the camera holds on the last prints (coral, then label); turtle at the waterline; chimp under the first bar. First pass: camera chased the hen upward; fixed. Owner review: the turtle's tail floated behind its shell (now under the rear rim) and the chimp's hands landed ~0.3 m short of the rungs (the bars now allow for the speed ramp into the swing) | yes (after revision) | f1280, f1320, f1400, f1435, f1480 |
+| 07 one trail | stills at each mount | rider, passenger, pilot each step off their own trail; counter after each mount. First pass: rider stood on the horse before the mount blend; fixed. Re-review: the titan's palm was at hip height, so the pilot was dragged up through its leg and leaned; now it squats, lays the palm on the sand, the pilot steps on and stays upright (frames 1790–1895) | yes | f1640, f1818, f1834, f1870, f1880 |
 | 08 end card | stills at 1890–2099 | crane up to the map of trails, then title, API line, logo, URL | yes | f2060 |
 
 ## 5c. Cue-sync audit
@@ -142,12 +142,12 @@ Text-only: the anchor is the caption phrase's onset at ~2.5 words/s from the cap
 | Duration | 70 s | 69.999 s; AAC 48 kHz stereo | pass |
 | Full decode | no errors | no errors | pass |
 | Integrated loudness | -16 LUFS | -16.0 LUFS, LRA 5.4 | pass |
-| True peak | ≤ -1 dBTP | -1.7 dBTP | pass |
+| True peak | ≤ -1 dBTP | -1.6 dBTP | pass |
 | Voice sync at chapter starts | n/a | text-only | n/a |
 | Encoded-frame check | frames from the MP4 | 13 frames (§10 list) in `out/the-trackway-stills/` | pass |
 | Still vs render determinism | identical | repeated stills byte-identical; still vs encoded 44.6 dB PSNR | pass |
-| Source vs executable freshness | exe newer | 15:17:35 < 15:17:39 | pass |
-| Final render after last edit | yes | 15:19:11 | pass |
+| Source vs executable freshness | exe newer | 18:55:17 < 18:55:24 | pass |
+| Final render after last edit | yes | 18:56:47 (score regenerated) | pass |
 | Reviewed scene present in final | yes | encoded stills match the reviewed stills | pass |
 | SRT present | yes | yes | pass |
 | Thumbnail present | yes | yes | pass |
@@ -156,9 +156,9 @@ Text-only: the anchor is the caption phrase's onset at ~2.5 words/s from the cap
 
 | Axis | Criterion | Score | Why it is low | Fix | Owner | Re-score |
 | --- | --- | --- | --- | --- | --- | --- |
-| Authoredness | Timing | 2 | the gallop gap is ~6 frames; transitions are quick trucks | longer suspension in the gallop clip; a held beat per transition | agent | after the fix |
+| Authoredness | Timing | 2 | transitions are quick trucks over empty sand | a held beat per transition | agent | after the fix |
 | Authoredness | Verification | 2 | no real-time or audio review | owner watches muted, then with sound | owner | after Gate 3 |
-| Craft | Scenario coherence | 2 | the pilot tilts while lifted; titan scaled for reach | palm-grip orientation in `Character::mount` | agent | after the fix |
+| Craft | Spec-to-screen fidelity | 3 | lowest-but-one at 3; no fix needed | — | — | — |
 | Craft | Text pacing | 2 | chapter 6 carries three events in one caption | three short captions | agent | after the fix |
 
 ## 9. Decision
@@ -167,7 +167,7 @@ Text-only: the anchor is the caption phrase's onset at ~2.5 words/s from the cap
 - [x] **Revise** — only Gate 3: the owner's muted and sound watch. Keep everything else.
 - [ ] **Rewrite**
 
-Verdict: **Authored** at **32/36 authoredness**, **16/18 craft** (meets the showcase bar),
+Verdict: **Authored** at **32/36 authoredness**, **17/18 craft** (meets the showcase bar),
 pending Gate 3.
 
 Reviewer signature: Claude (agent) — 2026-10-30
@@ -182,5 +182,5 @@ Reviewer signature: Claude (agent) — 2026-10-30
   eases in before `from`, so add the blend).
 - What should be extracted into the engine or tools: contact detection from a solved rig
   (`rig::contacts(track, foot, eps, vmax)`) and the print-tile renderer.
-- What should never be copied into another film: the hard-coded titan scale for reach;
-  use a grip that adapts to the carrier's size.
+- What should never be copied into another film: the hard-coded titan scale (2.6x); a
+  carrier that squats to the passenger (as here) works at any size.
