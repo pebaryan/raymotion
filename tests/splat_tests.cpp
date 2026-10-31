@@ -169,6 +169,25 @@ static void plyFiles(const fs::path& dir) {
         CHECK(throws([&] { splat::loadPly((dir / "nox.ply").string()); }));
         CHECK(throws([&] { splat::loadPly((dir / "notply.ply").string()); }));
         CHECK(throws([&] { splat::loadPly((dir / "missing.ply").string()); }));
+        writeBytes(dir / "empty.ply", "", {});
+        CHECK(throws([&] { splat::loadPly((dir / "empty.ply").string()); }));
+        const std::string zeroHeader = "ply\nformat binary_little_endian 1.0\nelement vertex 0\nproperty float x\nproperty float y\nproperty float z\n";
+        writeBytes(dir / "zero.ply", zeroHeader + "end_header\n", {});
+        CHECK(splat::loadPly((dir / "zero.ply").string()).size() == 0);
+        // A header that never ends is malformed, with or without vertices to read.
+        writeBytes(dir / "no-end.ply", zeroHeader, {});
+        CHECK(throws([&] { splat::loadPly((dir / "no-end.ply").string()); }));
+        writeBytes(dir / "no-end-one.ply", "ply\nformat binary_little_endian 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\n", {});
+        CHECK(throws([&] { splat::loadPly((dir / "no-end-one.ply").string()); }));
+        // Opacity is optional: without it the loader uses the documented point-cloud defaults.
+        const std::string noOpacity = "ply\nformat binary_little_endian 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nproperty float scale_0\nproperty float rot_0\nend_header\n";
+        const float values[5] = { 1, 2, 3, 0, 1 };
+        std::vector<unsigned char> point;
+        put(point, values, sizeof(values));
+        writeBytes(dir / "no-opacity.ply", noOpacity, point);
+        const splat::Cloud fallback = splat::loadPly((dir / "no-opacity.ply").string());
+        CHECK(fallback.size() == 1 && approx(fallback.position[0], 1) && approx(fallback.opacity[0], 1) && approx(fallback.scale[0], 0.01f));
+
     }
 }
 

@@ -449,6 +449,7 @@ struct Scene {
     Object3D* add(fx::Emitter3D e, GeometryPtr g, Material m = {});
     Object3D* add(std::shared_ptr<Instances> i, Material m = {});
     Object3D* add(std::shared_ptr<Splats> s);
+    Object3D* add(Object3D* object); // takes ownership; supports procedural physics objects
     Object3D* add();
     Object3D* find(const std::string& name);         // depth-first, nullptr when absent
 };

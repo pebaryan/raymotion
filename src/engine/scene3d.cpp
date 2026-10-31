@@ -2895,6 +2895,11 @@ Object3D* Scene::add(std::shared_ptr<Splats> s) {
     o->splats = std::move(s);
     return o;
 }
+Object3D* Scene::add(Object3D* object) {
+    if (!object) return nullptr;
+    objects.emplace_back(object);
+    return object;
+}
 Object3D* Scene::add() {
     objects.push_back(std::make_unique<Object3D>());
     return objects.back().get();

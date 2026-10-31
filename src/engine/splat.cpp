@@ -205,9 +205,10 @@ Cloud loadPly(const std::string& path) {
     bool inVertex = false, haveVertex = false;
     std::vector<Prop> props;
     size_t row = 0;
+    bool headerEnded = false;
     while (std::getline(in, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (line == "end_header") break;
+        if (line == "end_header") { headerEnded = true; break; }
         std::istringstream ss(line);
         std::string word;
         ss >> word;
@@ -231,6 +232,7 @@ Cloud loadPly(const std::string& path) {
             props.push_back(p);
         }
     }
+    if (!headerEnded) throw std::runtime_error("splat: " + path + " has no end_header");
     if (format != "binary_little_endian") throw std::runtime_error("splat: only binary_little_endian .ply files load (this one is '" + format + "')");
     if (!haveVertex) throw std::runtime_error("splat: " + path + " has no vertex element");
     std::map<std::string, Prop> byName;

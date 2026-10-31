@@ -25,6 +25,7 @@
 #include "crowd.hpp"
 #include "voxel.hpp"
 #include "splat.hpp"
+#include "physics.hpp"
 #include "particles.hpp"
 #include "paths.hpp"
 #include "math.hpp"

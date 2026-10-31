@@ -88,6 +88,7 @@ add_library(rmtn_engine STATIC
   src/engine/crowd_rig.cpp
   src/engine/voxel.cpp
   src/engine/splat.cpp
+  src/engine/physics.cpp
   src/engine/rig_ape.cpp
   src/engine/rig_bird.cpp
   src/engine/rig_chain.cpp
@@ -319,6 +320,11 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   add_executable(raymotion_splat_tests tests/splat_tests.cpp)
   target_link_libraries(raymotion_splat_tests PRIVATE rmtn_engine)
   add_test(NAME splat COMMAND raymotion_splat_tests)
+
+  add_executable(raymotion_physics_tests tests/physics_tests.cpp)
+  target_link_libraries(raymotion_physics_tests PRIVATE rmtn_engine)
+  add_test(NAME physics COMMAND raymotion_physics_tests)
+  set_tests_properties(voxel splat physics PROPERTIES LABELS gl SKIP_RETURN_CODE 77)
 
   # A body baked by tools/skin_bake.py, posed by clips (writes stills; not a ctest).
   add_executable(raymotion_skin_view tests/skin_view.cpp)

@@ -197,7 +197,7 @@ static void voxFiles(const fs::path& dir) {
         modelChunks(kids, 2, 2, 2, { { 0, 0, 0, 1 } });
         std::vector<unsigned char> whole = voxFile(kids);
         writeFile(cut, std::vector<unsigned char>(whole.begin(), whole.end() - 6));
-        writeFile(ver, voxFile(kids, 1));
+        writeFile(ver, voxFile(kids, 149));
         writeFile(empty, voxFile({}));
         std::vector<unsigned char> outside;
         modelChunks(outside, 2, 2, 2, { { 5, 0, 0, 1 } });
@@ -208,6 +208,27 @@ static void voxFiles(const fs::path& dir) {
         CHECK(throws([&] { voxel::load(empty.string()); }));
         CHECK(throws([&] { voxel::load(stray.string()); }));
         CHECK(throws([&] { voxel::load((dir / "missing.vox").string()); }));
+        // Exercise both public scene loaders on the additional malformed headers and chunks.
+        writeFile(dir / "zero-bytes.vox", {});
+        writeFile(dir / "header-cut.vox", { 'V', 'O', 'X', ' ', 150, 0 });
+        std::vector<unsigned char> noSize, xyzi;
+        put32(xyzi, 1); xyzi.insert(xyzi.end(), { 0, 0, 0, 1 });
+        putChunk(noSize, "XYZI", xyzi);
+        writeFile(dir / "no-size.vox", voxFile(noSize));
+        for (const char* name : { "missing.vox", "zero-bytes.vox", "junk.vox", "header-cut.vox", "cut.vox", "ver.vox", "stray.vox", "no-size.vox" }) {
+            const std::string path = (dir / name).string();
+            CHECK(throws([&] { voxel::load(path); }));
+            CHECK(throws([&] { voxel::loadScene(path); }));
+        }
+        // Palette entry zero is empty, including when explicitly present in XYZI.
+        std::vector<unsigned char> zeroIndex;
+        modelChunks(zeroIndex, 2, 2, 2, { { 0, 0, 0, 0 }, { 1, 1, 1, 7 } });
+        const fs::path zero = dir / "zero-index.vox";
+        writeFile(zero, voxFile(zeroIndex));
+        const auto placed = voxel::loadScene(zero.string());
+        CHECK(placed.size() == 1 && placed[0].grid.count() == 1);
+        const voxel::Grid zeroGrid = voxel::load(zero.string());
+        CHECK(zeroGrid.count() == 1 && zeroGrid.get(1, 1, 0) == 7);
         CHECK(throws([&] { voxel::save((dir / "x.vox").string(), voxel::Grid(0, 3, 3)); }));
     }
 }
