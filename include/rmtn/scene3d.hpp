@@ -81,6 +81,7 @@ struct DynamicTexture {
     int every = 1;
     std::function<void(const Ctx& c, int t)> draw;
     int width = 512, height = 512, supersample = 2;
+    bool repeat = false;        // `draw` canvases clamp at the edge unless set (a tile, e.g. a facade)
 };
 using DynamicTexturePtr = std::shared_ptr<DynamicTexture>;
 

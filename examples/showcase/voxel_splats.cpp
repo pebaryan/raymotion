@@ -233,7 +233,7 @@ std::shared_ptr<g3d::Scene> makeScene(const std::shared_ptr<World>& w) {
     g3d::Light key = g3d::Light::directional({ 7, 11, 5 }, { 255, 240, 214, 255 }, 2.3f, true);
     key.shadowExtent = 11;
     scene->lights.push_back(key);
-    scene->camera.up = [](int t, g3d::Camera& c) { c = camera(t / (double)FPS); };
+    scene->camera.up = [](int t, g3d::Camera& c) { const auto keep = c.up; c = camera(t / (double)FPS); c.up = keep; };   // assigning a whole Camera would drop `up`
 
     scene->water = g3d::Water::calm();
     scene->water.level = 0;

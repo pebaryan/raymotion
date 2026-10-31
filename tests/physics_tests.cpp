@@ -113,6 +113,19 @@ static void clothTests(physics::Params p) {
     for (int i = 0; i <= 90; ++i) windOrderB.frame(i);
     CHECK(same(windyFuture, windOrderB.frame(90)));
 
+    // Aerodynamic wind pushes a cloth that faces it, leaves one edge-on to it nearly alone, and stays deterministic.
+    const physics::Wind breeze{ { 0, 0, 1 }, 8, 0.4f, 0.7f, 3, 1.5f, 2.0f };
+    physics::Cloth facing(8, 8, 0.1f, { 0, 0, 0 }, { 1, 0, 0 }, { 0, -1, 0 }, p);        // hangs in the xy plane
+    physics::Cloth edgeOn(8, 8, 0.1f, { 0, 0, 0 }, { 0, 0, 1 }, { 0, -1, 0 }, p);        // hangs in the zy plane
+    physics::Cloth facingAgain(8, 8, 0.1f, { 0, 0, 0 }, { 1, 0, 0 }, { 0, -1, 0 }, p);
+    facing.pinRow(0).wind(breeze);
+    edgeOn.pinRow(0).wind(breeze);
+    facingAgain.pinRow(0).wind(breeze);
+    const Vector3 pushed = facing.frame(45).back(), still = edgeOn.frame(45).back();
+    CHECK(pushed.z > 0.25f);                                     // billows downwind
+    CHECK(still.z < 0.7f + 0.05f && still.z > 0.7f - 0.05f);     // its free corner stays where it hung
+    CHECK(same(facing.frame(45), facingAgain.frame(45)));
+
     physics::Cloth tearing(8, 8, 0.1f, { 0, 0, 0 }, { 1, 0, 0 }, { 0, 0, 1 }, p);
     const int intact = tearing.liveConstraintCount();
     CHECK(intact > 0);
@@ -138,6 +151,25 @@ static void frictionTest(physics::Params p) {
     const float free = slide(0), held = slide(0.9f);
     CHECK(free > 0.2f);
     CHECK(held < free * 0.5f);
+}
+
+// A pin can let go at a set time: a banner row held rolled up, then released, drops to its length.
+static void releaseTest(physics::Params p) {
+    physics::Cloth banner(3, 5, 0.1f, { 0, 2, 0 }, { 1, 0, 0 }, { 0, -1, 0 }, p);
+    banner.pin(0, [](double) { return Vector3{ 0, 2, 0 }; }).pin(1, [](double) { return Vector3{ 0.1f, 2, 0 }; })
+          .pin(2, [](double) { return Vector3{ 0.2f, 2, 0 }; });
+    const int bottom = 4 * 3;                                    // first particle of the last row
+    for (int x = 0; x < 3; ++x) {
+        const Vector3 rolled{ 0.1f * x, 2.0f - 0.6f, 0 };         // held 0.2 m below its rest place: the cloth is stretched
+        banner.pin(bottom + x, [rolled](double) { return rolled; }, 1.0);
+    }
+    const auto& held = banner.frame(15);
+    CHECK(std::fabs(held[(size_t)bottom].y - 1.4f) < 1e-6f);
+    const auto& freed = banner.frame(120);
+    CHECK(freed[(size_t)bottom].y > 1.5f);                       // back to its length, 2.0 - 0.4 = 1.6
+    CHECK(freed[(size_t)bottom].y < 1.7f);
+    const auto again = banner.frame(15);
+    CHECK(same(again, held));
 }
 
 static void meshTests(physics::Params p) {
@@ -213,6 +245,7 @@ int main() {
     ropeTests(params);
     clothTests(params);
     frictionTest(params);
+    releaseTest(params);
     meshTests(params);
     timingTest(params);
     const int glResult = glTest();

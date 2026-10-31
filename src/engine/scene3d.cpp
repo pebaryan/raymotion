@@ -1169,7 +1169,7 @@ void drawCanvas(const DynamicTexturePtr& src, int t) {
     d.made = turn;
     if (!d.canvas.id) {
         d.canvas = LoadRenderTexture(w, h);
-        SetTextureWrap(d.canvas.texture, TEXTURE_WRAP_CLAMP);
+        SetTextureWrap(d.canvas.texture, src->repeat ? TEXTURE_WRAP_REPEAT : TEXTURE_WRAP_CLAMP);
     }
     drawToTexture(d.canvas, (float)ss, [&] { src->draw(Ctx{ { 0, 0 }, 1, 0, 1 }, t); });
     d.tex = d.canvas.texture;

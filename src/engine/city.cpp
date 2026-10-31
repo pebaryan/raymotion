@@ -459,7 +459,7 @@ Color colorOf(const Look& look, const Object& o, const Face& f) {
 namespace {
 
 struct Buffer {
-    std::vector<float> v, n;
+    std::vector<float> v, n, uv;
     std::vector<unsigned char> c;
     void add(const Object& o, const Look& look, Vector3 offset) {
         const Geometry* g = o.at(look.lod);
@@ -473,11 +473,21 @@ struct Buffer {
             for (const auto& r : f.rings) pts.insert(pts.end(), r.begin(), r.end());
             const Color col = colorOf(look, o, f);
             const Vector3 sn = toScene(normal);
+            const bool textured = look.textureSize.x > 0 && look.textureSize.y > 0;
+            const bool wall = std::fabs(normal.z) < 0.3f;
+            // along the wall: the horizontal direction in the face's plane (CityJSON axes)
+            const Vector3 along = Vector3Normalize({ -normal.y, normal.x, 0 });
             for (int i : tris) {
-                const Vector3 p = toScene(Vector3Subtract(pts[(size_t)i], offset));
+                const Vector3 q = Vector3Subtract(pts[(size_t)i], offset);
+                const Vector3 p = toScene(q);
                 v.insert(v.end(), { p.x, p.y, p.z });
                 n.insert(n.end(), { sn.x, sn.y, sn.z });
                 c.insert(c.end(), { col.r, col.g, col.b, col.a });
+                if (textured) {
+                    if (wall) uv.insert(uv.end(), { Vector3DotProduct(pts[(size_t)i], along) / look.textureSize.x,
+                                                    1 - pts[(size_t)i].z / look.textureSize.y });
+                    else uv.insert(uv.end(), { look.flatUV.x, look.flatUV.y });
+                }
             }
         }
     }
@@ -492,10 +502,12 @@ struct Buffer {
         m.vertices = (float*)MemAlloc((unsigned)(m.vertexCount * 3 * sizeof(float)));
         m.normals = (float*)MemAlloc((unsigned)(m.vertexCount * 3 * sizeof(float)));
         m.colors = (unsigned char*)MemAlloc((unsigned)(m.vertexCount * 4));
+        if (!uv.empty()) m.texcoords = (float*)MemAlloc((unsigned)(m.vertexCount * 2 * sizeof(float)));
         if (!v.empty()) {
             std::copy(v.begin(), v.end(), m.vertices);
             std::copy(n.begin(), n.end(), m.normals);
             std::copy(c.begin(), c.end(), m.colors);
+            if (!uv.empty()) std::copy(uv.begin(), uv.end(), m.texcoords);
         }
         UploadMesh(&m, false);
         return m;
