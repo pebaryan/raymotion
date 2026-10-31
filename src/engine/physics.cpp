@@ -23,6 +23,7 @@ struct Link {
 struct Sim {
     Params params;
     int count = 0, columns = 0, rows = 0;
+    float spacing = 1;                   // cloth: the rest distance between neighbours
     std::vector<Vector3> positions, previous;
     std::vector<Link> structural, shear, bending;
     std::vector<Pin> pins;
@@ -38,6 +39,7 @@ Vector3 add(Vector3 a, Vector3 b) { return Vector3Add(a, b); }
 Vector3 sub(Vector3 a, Vector3 b) { return Vector3Subtract(a, b); }
 Vector3 scale(Vector3 a, float k) { return Vector3Scale(a, k); }
 float dot(Vector3 a, Vector3 b) { return Vector3DotProduct(a, b); }
+Vector3 cross(Vector3 a, Vector3 b) { return Vector3CrossProduct(a, b); }
 float magnitude(Vector3 a) { return Vector3Length(a); }
 Vector3 unit(Vector3 a) { const float n = magnitude(a); return n > 1e-8f ? scale(a, 1 / n) : Vector3{ 0, 1, 0 }; }
 double seconds(const Sim& s, int frame) { return frame / (double)std::max(1.0f, s.params.fps); }
@@ -93,9 +95,18 @@ bool projectCollider(Vector3& p, const Collider& c, double t, float thickness, V
     return true;
 }
 
+// A pin holds its particle until its release time, if it has one.
+bool holds(const Pin& pin, double t) { return pin.at && (pin.until < 0 || t < pin.until); }
+
+void refreshPins(Sim& s, double t) {
+    s.pinMask.assign((size_t)s.count, 0);
+    for (const Pin& pin : s.pins)
+        if (holds(pin, t) && pin.index >= 0 && pin.index < s.count) s.pinMask[(size_t)pin.index] = 1;
+}
+
 void applyPins(Sim& s, double t) {
     for (const Pin& pin : s.pins) {
-        if (pin.index < 0 || pin.index >= s.count || !pin.at) continue;
+        if (pin.index < 0 || pin.index >= s.count || !holds(pin, t)) continue;
         const Vector3 p = pin.at(t);
         s.positions[pin.index] = p;
         s.previous[pin.index] = p;
@@ -150,21 +161,64 @@ void solveSelfCollision(Sim& s) {
     }
 }
 
+// The gust factor at a point: on the particle's own phase, or a wave travelling downwind.
+float gustAt(const Wind& w, Vector3 p, int i, double t) {
+    const double phase = w.wavelength > 0 ? -2 * PI * dot(p, unit(w.direction)) / w.wavelength + rrange(w.seed, 0ull, 0, 2 * PI)
+                                          : rrange(w.seed, (unsigned long long)i, 0, 2 * PI);
+    return 1 + w.gust * std::sin((float)(t * w.gustHz * 2 * PI + phase));
+}
+
+// Aerodynamic wind on a cloth grid: each triangle is pushed along its normal by the normal part of
+// the wind relative to the triangle's own velocity; a third of it goes to each corner, scaled by the
+// triangle's area over the area a particle stands for, so the result does not depend on spacing.
+void aerodynamic(const Sim& s, double t, float dt, std::vector<Vector3>& accel) {
+    accel.assign((size_t)s.count, { 0, 0, 0 });
+    if (s.columns < 2 || s.rows < 2) return;
+    const Vector3 dir = unit(s.wind.direction);
+    const float particleArea = std::max(1e-6f, s.spacing * s.spacing);
+    auto tri = [&](int a, int b, int c) {
+        const Vector3 pa = s.positions[a], pb = s.positions[b], pc = s.positions[c];
+        const Vector3 n2 = cross(sub(pb, pa), sub(pc, pa));
+        const float twice = magnitude(n2);
+        if (twice < 1e-9f) return;
+        const Vector3 n = scale(n2, 1 / twice);
+        const Vector3 centre = scale(add(add(pa, pb), pc), 1.0f / 3);
+        const Vector3 v = scale(add(add(sub(pa, s.previous[a]), sub(pb, s.previous[b])), sub(pc, s.previous[c])), 1 / (3 * dt));
+        const Vector3 wind = scale(dir, s.wind.strength * gustAt(s.wind, centre, 0, t));
+        const float push = s.wind.drag * dot(n, sub(wind, v)) * (0.5f * twice) / (3 * particleArea);
+        const Vector3 f = scale(n, push);
+        accel[(size_t)a] = add(accel[(size_t)a], f);
+        accel[(size_t)b] = add(accel[(size_t)b], f);
+        accel[(size_t)c] = add(accel[(size_t)c], f);
+    };
+    for (int y = 0; y + 1 < s.rows; ++y)
+        for (int x = 0; x + 1 < s.columns; ++x) {
+            const int i = y * s.columns + x;
+            tri(i, i + 1, i + s.columns);
+            tri(i + 1, i + s.columns + 1, i + s.columns);
+        }
+}
+
 void step(Sim& s, int frame) {
     const double t = seconds(s, frame);
     const float substeps = (float)std::max(1, s.params.substeps);
     const float dt = 1 / (std::max(1.0f, s.params.fps) * substeps);
+    std::vector<Vector3> aero;
+    const bool aeroWind = s.wind.strength != 0 && s.wind.drag > 0 && s.columns >= 2;
     for (int substep = 0; substep < (int)substeps; ++substep) {
         const double stepTime = (frame - 1 + (substep + 1) / substeps) / std::max(1.0f, s.params.fps);
+        refreshPins(s, stepTime);
         applyPins(s, stepTime);
+        if (aeroWind) aerodynamic(s, stepTime, dt, aero);
         for (int i = 0; i < s.count; ++i) {
             if (pinned(s, i)) continue;
             Vector3 velocity = scale(sub(s.positions[i], s.previous[i]), 1 - std::clamp(s.params.damping, 0.0f, 1.0f));
             s.previous[i] = s.positions[i];
             Vector3 force = s.params.gravity;
-            if (s.wind.strength != 0) {
-                const double phase = rrange(s.wind.seed, (unsigned long long)i, 0, 6.283185307179586);
-                const float gust = 1 + s.wind.gust * std::sin((float)(stepTime * s.wind.gustHz * 6.2831853) + (float)phase);
+            if (aeroWind) {
+                force = add(force, aero[(size_t)i]);
+            } else if (s.wind.strength != 0) {
+                const float gust = gustAt(s.wind, s.positions[i], i, stepTime);
                 force = add(force, scale(unit(s.wind.direction), s.wind.strength * gust));
             }
             s.positions[i] = add(add(s.positions[i], velocity), scale(force, dt * dt));
@@ -191,14 +245,13 @@ void step(Sim& s, int frame) {
             solveSelfCollision(s);
         }
     }
+    refreshPins(s, t);
     applyPins(s, t);
 }
 
 void ensure(Sim& s, int frame) {
     if (s.cache.empty()) {
-        s.pinMask.assign((size_t)s.count, 0);
-        for (const Pin& pin : s.pins)
-            if (pin.at && pin.index >= 0 && pin.index < s.count) s.pinMask[(size_t)pin.index] = 1;
+        refreshPins(s, 0);
         applyPins(s, 0);
         s.cache.push_back(s.positions);
     }
@@ -273,8 +326,8 @@ Rope::Rope(Vector3 from, Vector3 to, int segments, Params params) : s_(std::make
     for (int i = 0; i + 1 < s.count; ++i) s.structural.push_back({ i, i + 1, rest });
 }
 
-Rope& Rope::pin(int i, std::function<Vector3(double)> at) {
-    s_->pins.push_back({ i, std::move(at) });
+Rope& Rope::pin(int i, std::function<Vector3(double)> at, double until) {
+    s_->pins.push_back({ i, std::move(at), until });
     return *this;
 }
 
@@ -318,6 +371,7 @@ Cloth::Cloth(int cols, int rows, float spacing, Vector3 origin, Vector3 axisU, V
     s.params = params;
     s.cloth = true;
     s.columns = std::max(2, cols);
+    s.spacing = spacing;
     s.rows = std::max(2, rows);
     s.count = s.columns * s.rows;
     s.positions.resize(s.count);
@@ -346,8 +400,8 @@ Cloth::Cloth(int cols, int rows, float spacing, Vector3 origin, Vector3 axisU, V
     }
 }
 
-Cloth& Cloth::pin(int i, std::function<Vector3(double)> at) {
-    s_->pins.push_back({ i, std::move(at) });
+Cloth& Cloth::pin(int i, std::function<Vector3(double)> at, double until) {
+    s_->pins.push_back({ i, std::move(at), until });
     return *this;
 }
 

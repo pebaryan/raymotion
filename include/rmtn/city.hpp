@@ -93,6 +93,12 @@ struct Look {
     Color road{ 92, 96, 108, 255 }, water{ 70, 140, 200, 255 }, vegetation{ 110, 168, 96, 255 };
     Color terrain{ 170, 160, 130, 255 }, furniture{ 78, 82, 94, 255 }, other{ 200, 200, 200, 255 };
     std::string lod;                        // empty: each object's most detailed geometry
+    // Texture coordinates, for a tiled material map (a facade, paving): `textureSize` is the
+    // metres one repeat of the texture covers on a wall (width, height); 0 = none. Walls run
+    // along the wall and up from height 0, so floors line up from one building to the next;
+    // roofs and other near-horizontal faces all sample `flatUV` (pick a plain patch).
+    Vector2 textureSize{ 0, 0 };
+    Vector2 flatUV{ 0, 0 };
     // Optional: a colour per face (return BLANK to fall back to the rules above).
     std::function<Color(const Object&, const Face&)> color;
     // Optional: modify each CityObject's lit material before its mesh is added.

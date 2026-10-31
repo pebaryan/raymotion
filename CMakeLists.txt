@@ -149,6 +149,7 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/crowd_demo.cpp
     examples/showcase/zombie_horde.cpp
     examples/showcase/voxel_splats.cpp
+    examples/showcase/bundaran_hi_banner.cpp
     examples/showcase/tokens.cpp
     examples/showcase/own_compute.cpp
     examples/showcase/own_compute_v2.cpp
