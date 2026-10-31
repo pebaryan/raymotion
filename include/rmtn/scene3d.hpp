@@ -156,6 +156,39 @@ struct Material {
     float lineWidth = 1;
 };
 
+// ------------------------------------------------------------------ instancing
+// A mesh of fixed topology whose vertices are baked for every frame of an animation, drawn
+// many times in one call. `rest` carries what does not change (indices, uvs, vertex
+// colours); the per-frame positions and normals are read in the vertex shader from a texture
+// the renderer makes from `positions` and `normals`. Build one in `build`, never per frame.
+struct AnimatedMesh {
+    GeometryPtr rest;                       // any frame's mesh: same indices, uvs and colours
+    int frames = 0, vertices = 0;
+    std::vector<float> positions, normals;  // frames * vertices * 3, frame-major
+    Vector3 centre{ 0, 0, 0 };              // a sphere holding every vertex of every frame
+    float radius = 0;
+};
+
+// One body of an instanced set. `frame` is a position in the clip [clipStart,
+// clipStart + clipLength): its fraction blends two baked frames, and the clip loops.
+struct Instance {
+    Vector3 position{ 0, 0, 0 };
+    float yaw = 0, pitch = 0, bank = 0;     // degrees, as a character's holder and tilt nodes
+    float scale = 1;
+    float frame = 0;
+    int clipStart = 0, clipLength = 1;
+    float shade = 1;                        // brightness multiplier
+};
+
+// An object's instances: `up` refills `list` each frame from t (pure, like any `up`). They
+// are drawn in the object's space with its `material` (opaque only; the colour comes from the
+// mesh's vertex colours, multiplied by the material's). Each one is culled on its own (see
+// Object3D::cullRadius), shadow footprint included, so only what can show is submitted.
+struct Instances {
+    std::shared_ptr<AnimatedMesh> mesh;
+    std::vector<Instance> list;
+};
+
 // ------------------------------------------------------------------ objects
 struct Object3D {
     std::string name;
@@ -183,6 +216,7 @@ struct Object3D {
     // particle is an instance of it in `material` (tinted by the particle's colour), and the
     // geometry itself is not drawn.
     std::shared_ptr<const fx::Emitter3D> emitter;
+    std::shared_ptr<Instances> instances;               // many copies of one baked mesh
 
     std::function<void(int t, Object3D& self)> up;      // animate from the local frame
     std::vector<std::unique_ptr<Object3D>> children;
@@ -191,6 +225,7 @@ struct Object3D {
     Object3D* add(ModelPtr m);
     Object3D* add(fx::Emitter3D e);                    // particles (billboards, streaks, quads)
     Object3D* add(fx::Emitter3D e, GeometryPtr g, Material m = {});   // mesh particles
+    Object3D* add(std::shared_ptr<Instances> i, Material m = {});      // instanced bodies
     Object3D* add();                                   // empty group
 };
 
@@ -331,6 +366,7 @@ struct Scene {
     Object3D* add(ModelPtr m);
     Object3D* add(fx::Emitter3D e);
     Object3D* add(fx::Emitter3D e, GeometryPtr g, Material m = {});
+    Object3D* add(std::shared_ptr<Instances> i, Material m = {});
     Object3D* add();
     Object3D* find(const std::string& name);         // depth-first, nullptr when absent
 };

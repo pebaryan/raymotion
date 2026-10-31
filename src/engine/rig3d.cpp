@@ -19,7 +19,11 @@ struct MeshData {
     std::vector<unsigned short> idx;
 };
 
-Mesh toMesh(const MeshData& d) {
+// How finely the shapes are cut: the full grid for a character, a coarse one for the baked
+// bodies of a crowd, which are drawn hundreds at a time.
+struct Grid { int lat = kLat, lon = kLon, tubeBody = kTubeBody, tubeCap = kTubeCap, tubeSides = kTubeSides; };
+
+Mesh toMesh(const MeshData& d, const std::vector<unsigned char>* colours = nullptr) {
     Mesh m{};
     m.vertexCount = (int)d.pos.size() / 3;
     m.triangleCount = (int)d.idx.size() / 3;
@@ -31,6 +35,10 @@ Mesh toMesh(const MeshData& d) {
     std::memcpy(m.normals, d.nrm.data(), d.nrm.size() * sizeof(float));
     std::memcpy(m.texcoords, d.uv.data(), d.uv.size() * sizeof(float));
     std::memcpy(m.indices, d.idx.data(), d.idx.size() * sizeof(unsigned short));
+    if (colours && colours->size() == (size_t)m.vertexCount * 4) {
+        m.colors = (unsigned char*)MemAlloc((unsigned)colours->size());
+        std::memcpy(m.colors, colours->data(), colours->size());
+    }
     UploadMesh(&m, true);
     return m;
 }
@@ -42,7 +50,8 @@ Vector2 outfitUV(const Prim& p, float u, float v) {
     return { r.x + std::clamp(u, 0.002f, 0.998f) * r.width, r.y + std::clamp(vv, 0.002f, 0.998f) * r.height };
 }
 
-MeshData superMesh(const Prim& p) {
+MeshData superMesh(const Prim& p, const Grid& g = Grid{}) {
+    const int kLat = g.lat, kLon = g.lon;
     MeshData d;
     const float l0 = latFrom(p), l1 = latTo(p), B = p.size.y / 2, C = p.size.z / 2;
     const float eps = 1e-3f;
@@ -86,8 +95,9 @@ MeshData superMesh(const Prim& p) {
 // A limb tube for the given joint frames: positions and normals (and, once, uvs/indices).
 // Rings run from joint a to c with hemispherical caps; round each ring the front (the
 // first joint's +z) is at u = 0.5.
-void tubeMesh(const Frames& f, const Prim& p, float pop, MeshData& d, bool topology) {
-    const std::vector<Vector3> pts = tubeCurve(f, p, kTubeBody);
+void tubeMesh(const Frames& f, const Prim& p, float pop, MeshData& d, bool topology, const Grid& g = Grid{}) {
+    const int kTubeCap = g.tubeCap, kTubeSides = g.tubeSides;
+    const std::vector<Vector3> pts = tubeCurve(f, p, g.tubeBody);
     const int n = (int)pts.size();
     std::vector<Vector3> T(n), N(n), Bn(n);
     for (int i = 0; i < n; i++) {
@@ -325,6 +335,124 @@ g3d::Object3D* add(g3d::Object3D& parentNode, CharacterPtr ch, int fps) {
         }
     };
     return root;
+}
+
+namespace {
+// A cone, apex +y and centred, as Geometry::cone makes it.
+MeshData coneData(float radius, float height, int slices) {
+    MeshData d;
+    const float h2 = height / 2, slope = radius / std::max(1e-6f, height);
+    for (int i = 0; i <= slices; i++) {
+        const float a = 2 * PI * i / slices, c = std::cos(a), s = std::sin(a);
+        const Vector3 n = Vector3Normalize({ c, slope, s });
+        d.pos.insert(d.pos.end(), { radius * c, -h2, radius * s });
+        d.nrm.insert(d.nrm.end(), { n.x, n.y, n.z });
+        d.uv.insert(d.uv.end(), { (float)i / slices, 1.f });
+        d.pos.insert(d.pos.end(), { 0, h2, 0 });
+        d.nrm.insert(d.nrm.end(), { n.x, n.y, n.z });
+        d.uv.insert(d.uv.end(), { (float)i / slices, 0.f });
+    }
+    for (int i = 0; i < slices; i++) {
+        const auto a = (unsigned short)(i * 2), b = (unsigned short)(i * 2 + 1), c = (unsigned short)(i * 2 + 2);
+        d.idx.insert(d.idx.end(), { a, c, b });
+    }
+    const auto centre = (unsigned short)(d.pos.size() / 3);
+    d.pos.insert(d.pos.end(), { 0, -h2, 0 });
+    d.nrm.insert(d.nrm.end(), { 0, -1, 0 });
+    d.uv.insert(d.uv.end(), { 0.5f, 0.5f });
+    for (int i = 0; i <= slices; i++) {
+        const float a = 2 * PI * i / slices;
+        d.pos.insert(d.pos.end(), { radius * std::cos(a), -h2, radius * std::sin(a) });
+        d.nrm.insert(d.nrm.end(), { 0, -1, 0 });
+        d.uv.insert(d.uv.end(), { 0.5f, 0.5f });
+    }
+    for (int i = 0; i < slices; i++)
+        d.idx.insert(d.idx.end(), { centre, (unsigned short)(centre + 1 + i), (unsigned short)(centre + 2 + i) });
+    return d;
+}
+} // namespace
+
+std::shared_ptr<g3d::AnimatedMesh> bakeAnimated(const Look& look, const std::vector<BakeClip>& clips,
+                                                std::vector<BakedClip>* where, bool coarse) {
+    if (clips.empty()) throw std::runtime_error("rig::bakeAnimated: no clips");
+    const Grid grid = coarse ? Grid{ 8, 12, 6, 2, 8 } : Grid{};
+    // What to bake: opaque shapes (a visor, a model file, a see-through label are left out).
+    std::vector<Prim> shapes;
+    for (const Prim& p : prims(look))
+        if (p.kind != Prim::Kind::Model && !((p.paint == Paint::Fixed || p.paint == Paint::Label) && p.color.a < 255))
+            shapes.push_back(p);
+    std::vector<MeshData> local(shapes.size());           // rigid shapes in their own space
+    for (size_t i = 0; i < shapes.size(); i++) {
+        const Prim& p = shapes[i];
+        if (p.kind == Prim::Kind::Cone) local[i] = coneData(p.size.x / 2, p.size.y, 10);
+        else if (p.kind != Prim::Kind::Tube) local[i] = superMesh(p, grid);
+    }
+
+    auto am = std::make_shared<g3d::AnimatedMesh>();
+    auto topo = std::make_shared<MeshData>();
+    auto colours = std::make_shared<std::vector<unsigned char>>();
+    Vector3 lo{ 1e9f, 1e9f, 1e9f }, hi{ -1e9f, -1e9f, -1e9f };
+    int frame = 0;
+    for (const BakeClip& bc : clips) {
+        if (bc.frames <= 0) throw std::runtime_error("rig::bakeAnimated: a clip needs frames");
+        if (where) where->push_back({ frame, bc.frames });
+        for (int k = 0; k < bc.frames; k++, frame++) {
+            const Frames frames = solve(look.build, locked(look, bc.clip(bc.seconds * k / bc.frames)));
+            const bool first = frame == 0;
+            int vertices = 0;
+            for (size_t i = 0; i < shapes.size(); i++) {
+                const Prim& p = shapes[i];
+                MeshData tube;
+                const MeshData* src = &local[i];
+                Matrix m = MatrixIdentity();
+                if (p.kind == Prim::Kind::Tube) {
+                    tubeMesh(frames, p, 1, tube, first, grid);
+                    src = &tube;
+                } else {
+                    m = MatrixMultiply(MatrixMultiply(MatrixRotateXYZ(Vector3Scale(p.rot, DEG2RAD)), MatrixTranslate(p.at.x, p.at.y, p.at.z)),
+                                       frames[(size_t)p.joint]);
+                }
+                const int n = (int)src->pos.size() / 3;
+                for (int v = 0; v < n; v++) {
+                    Vector3 q{ src->pos[(size_t)v * 3], src->pos[(size_t)v * 3 + 1], src->pos[(size_t)v * 3 + 2] };
+                    Vector3 nv{ src->nrm[(size_t)v * 3], src->nrm[(size_t)v * 3 + 1], src->nrm[(size_t)v * 3 + 2] };
+                    if (p.kind != Prim::Kind::Tube) {
+                        q = Vector3Transform(q, m);
+                        nv = Vector3Normalize(Vector3Subtract(Vector3Transform(nv, m), Vector3Transform({ 0, 0, 0 }, m)));
+                    }
+                    am->positions.insert(am->positions.end(), { q.x, q.y, q.z });
+                    am->normals.insert(am->normals.end(), { nv.x, nv.y, nv.z });
+                    lo = Vector3Min(lo, q);
+                    hi = Vector3Max(hi, q);
+                }
+                if (first) {
+                    const auto base = (unsigned short)vertices;
+                    if (vertices + n > 65535) throw std::runtime_error("rig::bakeAnimated: too many vertices for one mesh");
+                    for (const unsigned short ix : src->idx) topo->idx.push_back((unsigned short)(base + ix));
+                    topo->uv.insert(topo->uv.end(), src->uv.begin(), src->uv.end());
+                    const Color c = paintColor(look, p);
+                    for (int v = 0; v < n; v++) colours->insert(colours->end(), { c.r, c.g, c.b, c.a });
+                }
+                vertices += n;
+            }
+            if (first) am->vertices = vertices;
+            else if (vertices != am->vertices) throw std::runtime_error("rig::bakeAnimated: the mesh changed topology between frames");
+        }
+    }
+    am->frames = frame;
+    am->centre = Vector3Scale(Vector3Add(lo, hi), 0.5f);
+    float r = 0;
+    for (size_t i = 0; i + 2 < am->positions.size(); i += 3)
+        r = std::max(r, Vector3Distance(am->centre, { am->positions[i], am->positions[i + 1], am->positions[i + 2] }));
+    am->radius = r + 0.05f;
+    // The rest mesh is frame 0: it carries the indices, uvs and colours the shader keeps.
+    const size_t n3 = (size_t)am->vertices * 3;
+    topo->pos.assign(am->positions.begin(), am->positions.begin() + (std::ptrdiff_t)n3);
+    topo->nrm.assign(am->normals.begin(), am->normals.begin() + (std::ptrdiff_t)n3);
+    am->rest = std::make_shared<g3d::Geometry>([topo, colours] {
+        return toMesh(*topo, colours.get());
+    });
+    return am;
 }
 
 g3d::Object3D* add(g3d::Scene& scene, CharacterPtr ch, int fps) {

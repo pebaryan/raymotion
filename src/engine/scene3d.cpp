@@ -5,7 +5,9 @@
 #include <raymath.h>
 #include <rlgl.h>
 #include <algorithm>
+#include <array>
 #include <climits>
+#include <deque>
 #include <cmath>
 #include <map>
 #include <stdexcept>
@@ -78,23 +80,59 @@ vec3 skinPosition(vec3 p) {
     return dqRotate(p) + t;
 }
 vec3 skinNormal(vec3 n) { return skinned == 2 ? dqRotate(n) : mat3(skinMatrix()) * n; }
+// Instancing: each body's world matrix arrives as instanceTransform, with its animation
+// (two baked frames, the blend, a brightness) in the w of its columns, which an affine matrix
+// leaves at 0, 0, 0 and 1. The baked positions and normals are one texture: frame f's vertex v
+// is texel f * vatVerts + v of the first half, its normal the same texel of the second.
+in mat4 instanceTransform;
+uniform int instanced;
+uniform sampler2D vat;
+uniform int vatWidth; uniform int vatVerts; uniform int vatRows;
+mat4 instM; vec4 instAnim;
+void setupInstance() {
+    instM = instanceTransform;
+    instAnim = vec4(instM[0].w, instM[1].w, instM[2].w, instM[3].w);
+    instM[0].w = 0.0; instM[1].w = 0.0; instM[2].w = 0.0; instM[3].w = 1.0;
+}
+vec3 vatFetch(float frame, int row0) {
+    int i = int(frame) * vatVerts + gl_VertexID;
+    return texelFetch(vat, ivec2(i % vatWidth, row0 + i / vatWidth), 0).xyz;
+}
+vec3 instPosition() { return mix(vatFetch(instAnim.x, 0), vatFetch(instAnim.y, 0), instAnim.z); }
+vec3 instNormal() { return normalize(mix(vatFetch(instAnim.x, vatRows), vatFetch(instAnim.y, vatRows), instAnim.z)); }
 )";
 
 const char* LIT_VS_BODY = R"(
 out vec3 fragPos; out vec2 fragTexCoord; out vec3 fragNormal; out vec4 fragColor;
 void main() {
+    fragTexCoord = vertexTexCoord;
+    if (instanced != 0) {
+        setupInstance();
+        vec4 world = instM * vec4(instPosition(), 1.0);
+        fragPos = world.xyz;
+        fragNormal = mat3(instM) * instNormal();
+        fragColor = vertexColor * vec4(vec3(instAnim.w), 1.0);
+        gl_Position = mvp * world;
+        return;
+    }
     vec4 pos = vec4(skinPosition(vertexPosition), 1.0);
     vec4 world = matModel * pos;
     fragPos = world.xyz;
     fragNormal = mat3(matNormal) * skinNormal(vertexNormal);
-    fragTexCoord = vertexTexCoord;
     fragColor = vertexColor;
     gl_Position = mvp * pos;
 }
 )";
 
 const char* DEPTH_VS_BODY = R"(
-void main() { gl_Position = mvp * vec4(skinPosition(vertexPosition), 1.0); }
+void main() {
+    if (instanced != 0) {
+        setupInstance();
+        gl_Position = mvp * (instM * vec4(instPosition(), 1.0));
+        return;
+    }
+    gl_Position = mvp * vec4(skinPosition(vertexPosition), 1.0);
+}
 )";
 
 const char* DEPTH_FS = R"(#version 330
@@ -597,6 +635,10 @@ struct LitLocs {
 };
 struct DofLocs { int depthTex, texel, zNear, zFar, ortho, focus, aperture, maxBlur, radStep, tanTilt, tanHalfFov, viewY; };
 struct GbufLocs { int objectId, lineStyle, skinned, bones; };
+// The instancing uniforms of one program (lit, depth or g-buffer): the program is the same
+// one, drawn through a copy of its Shader whose model-matrix location is the attribute.
+struct InstLocs { int instanced = -1, vat = -1, width = -1, verts = -1, rows = -1; };
+constexpr int VAT_SLOT = 12;             // the baked-animation texture (material maps use 0..11)
 struct LineLocs { int depthTex, texel, zNear, zFar, ortho, pixelWorld, pxScale, styles, maxRadius, creaseCos,
                   depthThreshold, wobble, wobbleScale, seed; };
 constexpr int MAX_STYLES = 64;
@@ -614,6 +656,12 @@ struct Gpu {
     GbufLocs G{};
     LineLocs N{};
     int depthSkinned = -1, depthBones = -1;
+    Shader inst[3]{};                    // lit, depth, gbuf, for DrawMeshInstanced
+    std::array<int, 32> instLocs[3]{};
+    InstLocs il[3];
+    int instState[3] = { -1, -1, -1 };   // the `instanced` uniform last set per program
+    struct Vat { unsigned int tex = 0; int width = 0, rows = 0; std::shared_ptr<AnimatedMesh> keep; };
+    std::map<const AnimatedMesh*, Vat> vat;
     ::Material material{};               // raylib material: owns a MAX_MATERIAL_MAPS maps array
     unsigned int atlasFbo = 0, atlasTex = 0;
     int atlasSize = 0;
@@ -642,6 +690,8 @@ void releaseGpu() {
     if (gpu.line.id) UnloadShader(gpu.line);
     if (gpu.particle.id) UnloadShader(gpu.particle);
     if (gpu.sky.id) UnloadShader(gpu.sky);
+    for (auto& [mesh, v] : gpu.vat)
+        if (v.tex) rlUnloadTexture(v.tex);
     if (gpu.skyTarget.id) UnloadRenderTexture(gpu.skyTarget);
     if (gpu.material.maps) {
         gpu.material.maps[MATERIAL_MAP_DIFFUSE].texture = whiteTexture();   // cached textures are freed below
@@ -687,6 +737,18 @@ void ensureGpu() {
               loc("hatchInk"), loc("hatchSpacing"), loc("hatchAngle"), loc("hatchWeight") };
     auto gloc = [](const char* name) { return GetShaderLocation(gpu.gbuf, name); };
     gpu.G = { gloc("objectId"), gloc("lineStyle"), gloc("skinned"), gloc("boneMatrices") };
+    {
+        const Shader* base[3] = { &gpu.lit, &gpu.depth, &gpu.gbuf };
+        for (int i = 0; i < 3; i++) {
+            const Shader& b = *base[i];
+            std::copy(b.locs, b.locs + 32, gpu.instLocs[i].begin());
+            gpu.instLocs[i][SHADER_LOC_MATRIX_MODEL] = rlGetLocationAttrib(b.id, "instanceTransform");
+            gpu.inst[i] = b;
+            gpu.inst[i].locs = gpu.instLocs[i].data();
+            gpu.il[i] = { GetShaderLocation(b, "instanced"), GetShaderLocation(b, "vat"), GetShaderLocation(b, "vatWidth"),
+                          GetShaderLocation(b, "vatVerts"), GetShaderLocation(b, "vatRows") };
+        }
+    }
     auto nloc = [](const char* name) { return GetShaderLocation(gpu.line, name); };
     gpu.N = { nloc("depthTex"), nloc("texel"), nloc("zNear"), nloc("zFar"), nloc("ortho"), nloc("pixelWorld"),
               nloc("pxScale"), nloc("styles"), nloc("maxRadius"), nloc("creaseCos"), nloc("depthThreshold"),
@@ -952,6 +1014,7 @@ struct Item {
     float alpha = 1;
     Color tint = WHITE;
     bool particle = false;
+    const std::vector<Matrix>* inst = nullptr;   // an instanced set: the bodies that can show
 };
 float opacityOf(const Item& it) { return it.obj->material.opacity * it.alpha; }
 // An emitter without a geometry: its particles are drawn as billboards after the meshes.
@@ -1007,8 +1070,40 @@ void animate(std::vector<std::unique_ptr<Object3D>>& list, int t, const Matrix& 
     }
 }
 
+// The world matrices of an object's instances that can show, each carrying its animation (two
+// baked frames, their blend, a brightness) in the w of its columns, where an affine matrix has
+// 0, 0, 0 and 1: see the shader's setupInstance.
+void gatherInstances(const Object3D& o, const Matrix& world, const Cull& k, std::vector<Matrix>& out) {
+    const Instances& in = *o.instances;
+    const AnimatedMesh& am = *in.mesh;
+    if (am.frames <= 0) return;
+    out.reserve(in.list.size());
+    for (const Instance& i : in.list) {
+        const Matrix tilt = MatrixRotateXYZ(Vector3Scale({ i.pitch, 0, i.bank }, DEG2RAD));
+        const Matrix turn = MatrixMultiply(MatrixRotateXYZ(Vector3Scale({ 0, i.yaw, 0 }, DEG2RAD)),
+                                           MatrixTranslate(i.position.x, i.position.y, i.position.z));
+        Matrix m = MatrixMultiply(MatrixMultiply(MatrixMultiply(MatrixScale(i.scale, i.scale, i.scale), tilt), turn), world);
+        if (k.on) {
+            const float sc = std::max({ std::sqrt(m.m0 * m.m0 + m.m1 * m.m1 + m.m2 * m.m2),
+                                        std::sqrt(m.m4 * m.m4 + m.m5 * m.m5 + m.m6 * m.m6),
+                                        std::sqrt(m.m8 * m.m8 + m.m9 * m.m9 + m.m10 * m.m10) });
+            if (!inSight(k, Vector3Transform(am.centre, m), am.radius * sc)) continue;
+        }
+        const int len = std::max(1, i.clipLength);
+        float f = std::fmod(i.frame, (float)len);
+        if (f < 0) f += len;
+        const int a = std::min((int)f, len - 1);
+        const int last = am.frames - 1;
+        m.m3 = (float)std::clamp(i.clipStart + a, 0, last);
+        m.m7 = (float)std::clamp(i.clipStart + (a + 1) % len, 0, last);
+        m.m11 = f - (float)a;
+        m.m15 = i.shade;
+        out.push_back(m);
+    }
+}
+
 void collect(std::vector<std::unique_ptr<Object3D>>& list, const Matrix& parent, std::vector<Item>& out,
-             std::vector<Emitting>& emitters, double t) {
+             std::vector<Emitting>& emitters, double t, const Cull& k, std::deque<std::vector<Matrix>>& store) {
     for (auto& o : list) {
         if (!o->visible || o->culled) continue;
         Matrix world = MatrixMultiply(localMatrix(*o), parent);
@@ -1026,8 +1121,16 @@ void collect(std::vector<std::unique_ptr<Object3D>>& list, const Matrix& parent,
                 out.push_back(it);
             });
         } else if (o->emitter) emitters.push_back({ o.get(), world });
-        else if (o->geometry || o->model) out.push_back({ o.get(), world, 0 });
-        collect(o->children, world, out, emitters, t);
+        else if (o->instances && o->instances->mesh) {
+            store.emplace_back();
+            gatherInstances(*o, world, k, store.back());
+            if (!store.back().empty()) {
+                Item it{ o.get(), world, 0 };
+                it.inst = &store.back();
+                out.push_back(it);
+            }
+        } else if (o->geometry || o->model) out.push_back({ o.get(), world, 0 });
+        collect(o->children, world, out, emitters, t, k, store);
     }
 }
 
@@ -1081,8 +1184,72 @@ void setMaterial(const g3d::Material& m) {
 
 enum class Pass { Lit, Depth, Gbuf };
 
+void bindUnit(int slot, unsigned int id);
+
+// The baked animation of a mesh as one float texture: positions in the top half, normals in
+// the bottom, `width` texels to a row. Made on first use, kept until the GPU is released.
+const Gpu::Vat& vatOf(const std::shared_ptr<AnimatedMesh>& am) {
+    auto found = gpu.vat.find(am.get());
+    if (found != gpu.vat.end()) return found->second;
+    const size_t n = (size_t)am->frames * (size_t)am->vertices;
+    if (n == 0 || am->positions.size() < n * 3 || am->normals.size() < n * 3)
+        throw std::runtime_error("g3d: an AnimatedMesh needs frames * vertices positions and normals");
+    Gpu::Vat v;
+    v.keep = am;
+    v.width = 2048;
+    v.rows = (int)((n + (size_t)v.width - 1) / (size_t)v.width);
+    if (v.rows * 2 > 16384) throw std::runtime_error("g3d: an AnimatedMesh is too large (frames * vertices)");
+    std::vector<float> texels((size_t)v.width * (size_t)v.rows * 2 * 3, 0.f);
+    std::copy(am->positions.begin(), am->positions.begin() + (std::ptrdiff_t)(n * 3), texels.begin());
+    std::copy(am->normals.begin(), am->normals.begin() + (std::ptrdiff_t)(n * 3),
+              texels.begin() + (std::ptrdiff_t)((size_t)v.width * (size_t)v.rows * 3));
+    v.tex = rlLoadTexture(texels.data(), v.width, v.rows * 2, RL_PIXELFORMAT_UNCOMPRESSED_R32G32B32, 1);
+    rlTextureParameters(v.tex, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_NEAREST);
+    rlTextureParameters(v.tex, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_NEAREST);
+    return gpu.vat.emplace(am.get(), std::move(v)).first->second;
+}
+
+// Whether the pass's program reads its vertices as instances; the value is kept in the
+// program, so it is only set when it changes.
+void setInstanced(Pass pass, bool on) {
+    const int p = (int)pass, value = on ? 1 : 0;
+    if (gpu.instState[p] == value) return;
+    gpu.instState[p] = value;
+    const Shader& sh = pass == Pass::Lit ? gpu.lit : pass == Pass::Depth ? gpu.depth : gpu.gbuf;
+    SetShaderValue(sh, gpu.il[p].instanced, &value, SHADER_UNIFORM_INT);
+}
+
+// Draws an instanced item: every body that can show, in one call.
+void drawInstances(const Item& it, Pass pass) {
+    Object3D& o = *it.obj;
+    const int p = (int)pass;
+    const Shader& base = pass == Pass::Lit ? gpu.lit : pass == Pass::Depth ? gpu.depth : gpu.gbuf;
+    const AnimatedMesh& am = *o.instances->mesh;
+    if (!am.rest) return;
+    const Gpu::Vat& vat = vatOf(o.instances->mesh);
+    ::Material mat = gpu.material;
+    mat.shader = gpu.inst[p];
+    if (pass == Pass::Lit) setMaterial(o.material);
+    if (o.material.doubleSided) rlDisableBackfaceCulling(); else rlEnableBackfaceCulling();
+    mat.maps[MATERIAL_MAP_DIFFUSE].texture = mapOf(o.material);
+    mat.maps[MATERIAL_MAP_DIFFUSE].color = o.material.color;
+    const int skinnedLoc = pass == Pass::Lit ? gpu.L.skinned : pass == Pass::Depth ? gpu.depthSkinned : gpu.G.skinned;
+    setBones(pass == Pass::Lit ? gpu.L.bones : pass == Pass::Depth ? gpu.depthBones : gpu.G.bones, skinnedLoc, base, nullptr, 0);
+    setInstanced(pass, true);
+    const int unit = VAT_SLOT;
+    SetShaderValue(base, gpu.il[p].vat, &unit, SHADER_UNIFORM_INT);
+    SetShaderValue(base, gpu.il[p].width, &vat.width, SHADER_UNIFORM_INT);
+    SetShaderValue(base, gpu.il[p].verts, &am.vertices, SHADER_UNIFORM_INT);
+    SetShaderValue(base, gpu.il[p].rows, &vat.rows, SHADER_UNIFORM_INT);
+    bindUnit(VAT_SLOT, vat.tex);
+    DrawMeshInstanced(am.rest->mesh(), mat, it.inst->data(), (int)it.inst->size());
+    bindUnit(VAT_SLOT, 0);
+}
+
 // Draws one item with the lit, depth (shadow maps) or line g-buffer shader.
 void drawItem(const Item& it, Pass pass) {
+    if (it.inst) { drawInstances(it, pass); return; }
+    setInstanced(pass, false);
     Object3D& o = *it.obj;
     const Shader& sh = pass == Pass::Lit ? gpu.lit : pass == Pass::Depth ? gpu.depth : gpu.gbuf;
     const int bonesLoc = pass == Pass::Lit ? gpu.L.bones : pass == Pass::Depth ? gpu.depthBones : gpu.G.bones;
@@ -1619,13 +1786,14 @@ void drawParticles(const Scene& s, const Camera& cam, const std::vector<Emitting
     rlEnableDepthMask();
 }
 
-void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target, float scale, int t) {
+void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target, float scale, int t, const Cull& cull) {
     ensureGpu();
     std::vector<Item> items;
     std::vector<Emitting> emitters;
     const double ft = frameTime(t);              // particles follow motion-blur subframes
     gpu.frame = t;
-    collect(s.objects, MatrixIdentity(), items, emitters, ft);
+    std::deque<std::vector<Matrix>> instanceStore;           // what the instanced items point into
+    collect(s.objects, MatrixIdentity(), items, emitters, ft, cull, instanceStore);
     const Texture2D envTex = s.sky.enabled ? renderSky(s, ft, target.id, target.texture.width, target.texture.height)
                                            : environmentTexture(s);
 
@@ -2011,6 +2179,12 @@ Object3D* Object3D::add(fx::Emitter3D e, GeometryPtr g, Material m) {
     o->emitter = std::make_shared<const fx::Emitter3D>(std::move(e));
     return o;
 }
+Object3D* Object3D::add(std::shared_ptr<Instances> i, Material m) {
+    Object3D* o = add();
+    o->instances = std::move(i);
+    o->material = std::move(m);
+    return o;
+}
 Object3D* Object3D::add() {
     children.push_back(std::make_unique<Object3D>());
     return children.back().get();
@@ -2053,6 +2227,12 @@ Object3D* Scene::add(fx::Emitter3D e) {
 Object3D* Scene::add(fx::Emitter3D e, GeometryPtr g, Material m) {
     Object3D* o = add(std::move(g), std::move(m));
     o->emitter = std::make_shared<const fx::Emitter3D>(std::move(e));
+    return o;
+}
+Object3D* Scene::add(std::shared_ptr<Instances> i, Material m) {
+    Object3D* o = add();
+    o->instances = std::move(i);
+    o->material = std::move(m);
     return o;
 }
 Object3D* Scene::add() {
@@ -2177,7 +2357,7 @@ void render(Scene& s, int t, const Ctx& c, Rectangle viewport, Camera* camera) {
         Rectangle vp = viewport;
         if (vp.width <= 0 || vp.height <= 0) vp = { 0, 0, target.texture.width / scale, target.texture.height / scale };
         else vp = { c.o.x + vp.x * c.s, c.o.y + vp.y * c.s, vp.width * c.s, vp.height * c.s };
-        renderBody(s, cam, vp, target, scale, t);
+        renderBody(s, cam, vp, target, scale, t, cull);
     });
 }
 

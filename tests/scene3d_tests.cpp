@@ -958,6 +958,80 @@ static void culling() {
     UnloadImage(b);
 }
 
+// Instancing: bodies drawn from a baked mesh match the same bodies as ordinary objects, in
+// the lit pass and in the shadow maps, with an unseen one still casting its shadow into view.
+static void instancing() {
+    auto bake = [] {
+        auto am = std::make_shared<g3d::AnimatedMesh>();
+        am->rest = g3d::Geometry::box(1, 1, 1);
+        const Mesh& m = am->rest->mesh();
+        am->frames = 2;
+        am->vertices = m.vertexCount;
+        for (int f = 0; f < 2; f++)
+            for (int v = 0; v < m.vertexCount; v++) {
+                for (int k = 0; k < 3; k++) {
+                    float p = m.vertices[v * 3 + k];
+                    if (f == 1 && k == 1) p *= 1.5f;                // frame 1: half again as tall
+                    am->positions.push_back(p);
+                    am->normals.push_back(m.normals[v * 3 + k]);
+                }
+            }
+        am->centre = { 0, 0, 0 };
+        am->radius = 1.2f;                                          // a unit box, grown by half in y
+        return am;
+    };
+    struct Body { Vector3 at; float yaw, scale; };
+    const std::vector<Body> bodies = { { { -1.5f, 0.6f, 0 }, 0, 1 }, { { 0, 0.5f, 1 }, 30, 1 }, { { 1.6f, 0.9f, -1 }, 65, 1.4f },
+                                       { { 0.4f, 0.5f, -2.5f }, 110, 0.8f }, { { -9.5f, 0.5f, 0 }, 20, 1 } };   // the last: off screen
+    auto run = [&](bool instanced, float tall, bool cull) {
+        auto s = std::make_shared<g3d::Scene>();
+        s->camera.position = { 0, 2.5f, 8 };
+        s->camera.target = { 0, 0.5f, 0 };
+        s->camera.fov = 40;
+        g3d::Material m;
+        m.roughness = 0.8f;
+        m.color = { 200, 120, 90, 255 };
+        s->add(g3d::Geometry::plane(60, 40), m);
+        s->lights.push_back(g3d::Light::directional({ -10, 3, 0 }, WHITE, 1.6f, true));
+        s->lights.back().shadowExtent = 25;
+        if (instanced) {
+            auto set = std::make_shared<g3d::Instances>();
+            set->mesh = bake();
+            for (const Body& b : bodies) {
+                g3d::Instance i;
+                i.position = b.at;
+                i.yaw = b.yaw;
+                i.scale = b.scale;
+                i.frame = tall;                                     // 0 or 1: one baked frame, no blend
+                i.clipLength = 2;
+                set->list.push_back(i);
+            }
+            g3d::Object3D* o = s->add(set, m);
+            (void)o;
+        } else {
+            for (const Body& b : bodies) {
+                g3d::Object3D* o = s->add(g3d::Geometry::box(1, 1 + 0.5f * tall, 1), m);
+                o->position = b.at;
+                o->rotation = { 0, b.yaw, 0 };
+                o->scale = { b.scale, b.scale, b.scale };
+            }
+        }
+        (void)cull;
+        Comp c = sceneComp(s);
+        return render(c, 0);
+    };
+    for (int tall = 0; tall < 2; tall++) {
+        Image a = run(false, (float)tall, false), b = run(true, (float)tall, true);
+        long differ = 0;
+        for (int i = 0; i < a.width * a.height * 4; i++)
+            if (std::abs((int)((unsigned char*)a.data)[i] - (int)((unsigned char*)b.data)[i]) > 6) differ++;
+        std::printf("[scene3d] instancing, frame %d: %ld of %d channel values differ by more than 6\n", tall, differ, a.width * a.height * 4);
+        CHECK(a.width == b.width && differ < a.width * a.height * 4 / 2000);
+        UnloadImage(a);
+        UnloadImage(b);
+    }
+}
+
 int main() try {
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
@@ -976,6 +1050,7 @@ int main() try {
     transparencyAndHierarchy();
     moreShadows();
     culling();
+    instancing();
     environment(dir);
     skyAndFog();
     depthOfField();

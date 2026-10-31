@@ -4,6 +4,7 @@
 #include <raymath.h>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <map>
 #include <mutex>
 
@@ -277,7 +278,96 @@ rig::Look herd(const std::string& species, int i, unsigned long long seed) {
     return l;
 }
 
+rig::Look zombie(int i, unsigned long long seed) {
+    auto r = [&](int k) { return (float)rnd01(seed, (unsigned long long)i * 41ULL + (unsigned long long)k); };
+    static const char* const kHair[] = { "hair.spiky", "hair.short", "hair.long", "hair.bun" };
+    rig::Look l = rig::Look::toon();
+    l.build = rig::Build::adult().scaled(0.94f + 0.1f * r(1));
+    l.build.head = 0.34f * l.build.height() / 1.75f;
+    l.hair = kHair[(int)(r(2) * 4) % 4];
+    l.hairColor = { (unsigned char)(34 + 30 * r(3)), (unsigned char)(30 + 24 * r(3)), 26, 255 };
+    // Skin the grey-green of the dead; rags in the faded colours of whatever they wore.
+    const Color skin{ (unsigned char)(118 + 30 * r(4)), (unsigned char)(140 + 26 * r(4)), (unsigned char)(104 + 20 * r(4)), 255 };
+    static const Color kTop[] = { { 96, 70, 62, 255 }, { 72, 84, 92, 255 }, { 110, 104, 80, 255 }, { 84, 62, 84, 255 } };
+    static const Color kBottom[] = { { 50, 52, 62, 255 }, { 66, 58, 48, 255 }, { 44, 60, 56, 255 } };
+    l.outfit = rig::Outfit::basic(kTop[(int)(r(5) * 4) % 4], kBottom[(int)(r(6) * 3) % 3], skin, 0.15f + 0.4f * r(7), 0.8f);
+    l.skin = skin;
+    l.feet("foot.shoe");
+    return l;
+}
+
 namespace {
+// One body of a baked mesh's data, built a frame at a time with a fixed topology.
+struct Soup {
+    std::vector<float> pos, nrm;
+    std::vector<unsigned short> idx;
+    std::vector<unsigned char> col;
+    void vertex(Vector3 p, Vector3 n, Color c) {
+        pos.insert(pos.end(), { p.x, p.y, p.z });
+        nrm.insert(nrm.end(), { n.x, n.y, n.z });
+        col.insert(col.end(), { c.r, c.g, c.b, c.a });
+    }
+    unsigned short count() const { return (unsigned short)(pos.size() / 3); }
+    // An ellipsoid with radii `r` at `at`, `lat` rings by `lon` slices.
+    void ellipsoid(Vector3 at, Vector3 r, int lat, int lon, Color c, bool topology) {
+        const unsigned short base = count();
+        for (int a = 0; a <= lat; a++) {
+            const float phi = PI * a / lat - PI / 2;
+            for (int b = 0; b <= lon; b++) {
+                const float th = 2 * PI * b / lon;
+                const Vector3 u{ std::cos(phi) * std::cos(th), std::sin(phi), std::cos(phi) * std::sin(th) };
+                const Vector3 n = Vector3Normalize({ u.x / r.x, u.y / r.y, u.z / r.z });
+                vertex(Vector3Add(at, { u.x * r.x, u.y * r.y, u.z * r.z }), n, c);
+            }
+        }
+        if (!topology) return;
+        for (int a = 0; a < lat; a++)
+            for (int b = 0; b < lon; b++) {
+                const auto i0 = (unsigned short)(base + a * (lon + 1) + b), i1 = (unsigned short)(i0 + 1);
+                const auto i2 = (unsigned short)(i0 + lon + 1), i3 = (unsigned short)(i2 + 1);
+                idx.insert(idx.end(), { i0, i1, i3, i0, i3, i2 });
+            }
+    }
+    // A flat triangle, facing the side its winding does and then the other, so a membrane
+    // shows from both (the shader culls back faces).
+    void membrane(Vector3 a, Vector3 b, Vector3 c, Color col3, bool topology) {
+        const Vector3 n = Vector3Normalize(Vector3CrossProduct(Vector3Subtract(b, a), Vector3Subtract(c, a)));
+        const unsigned short base = count();
+        vertex(a, n, col3); vertex(b, n, col3); vertex(c, n, col3);
+        const Vector3 m = Vector3Negate(n);
+        vertex(a, m, col3); vertex(c, m, col3); vertex(b, m, col3);
+        if (topology) idx.insert(idx.end(), { base, (unsigned short)(base + 1), (unsigned short)(base + 2),
+                                              (unsigned short)(base + 3), (unsigned short)(base + 4), (unsigned short)(base + 5) });
+    }
+};
+
+// A bat at a moment of its wingbeat (phase 0..1): lying along +z, wings out along +-x.
+void batPose(Soup& s, float phase, Color body, Color membrane, bool topology) {
+    const float beat = std::sin(2 * PI * phase);
+    s.ellipsoid({ 0, 0, 0 }, { 0.032f, 0.028f, 0.065f }, 5, 8, body, topology);              // body
+    s.ellipsoid({ 0, 0.008f, 0.085f }, { 0.024f, 0.022f, 0.026f }, 4, 6, body, topology);    // head
+    for (int side = -1; side <= 1; side += 2) {                                               // ears
+        const float sx = (float)side;
+        s.membrane({ sx * 0.010f, 0.025f, 0.088f }, { sx * 0.026f, 0.058f, 0.082f }, { sx * 0.022f, 0.022f, 0.096f }, body, topology);
+    }
+    for (int side = -1; side <= 1; side += 2) {
+        const float sx = (float)side;
+        // Shoulder, wrist (the elbow's lift), three finger tips lagging the beat, the hip.
+        const float lift = 52 * DEG2RAD * beat, lag = 52 * DEG2RAD * std::sin(2 * PI * phase - 0.9f) - 0.18f;
+        const Vector3 sh{ sx * 0.03f, 0.008f, 0.025f }, hip{ sx * 0.028f, -0.004f, -0.06f };
+        const Vector3 wr = Vector3Add(sh, { sx * 0.12f * std::cos(lift), 0.12f * std::sin(lift), -0.01f });
+        auto tip = [&](float len, float spread, float extra) {
+            const float e = lag + extra;
+            return Vector3Add(wr, { sx * len * std::cos(e) * std::cos(spread), len * std::sin(e), -len * std::sin(spread) - 0.01f });
+        };
+        const Vector3 t1 = tip(0.19f, 0.28f, 0.05f), t2 = tip(0.17f, 0.75f, -0.02f), t3 = tip(0.12f, 1.2f, -0.08f);
+        s.membrane(sh, wr, t1, membrane, topology);
+        s.membrane(sh, t1, t2, membrane, topology);
+        s.membrane(sh, t2, t3, membrane, topology);
+        s.membrane(sh, t3, hip, membrane, topology);
+    }
+}
+
 // A sphere (in the agent's own space) round everything the character does during the bake:
 // its joints over every pose it takes on, sampled every 0.15 s, then padded for the limbs'
 // thickness and what falls between samples. Out of sight, the agent is culled whole.
@@ -324,6 +414,148 @@ g3d::Object3D* add(g3d::Scene& scene, CrowdPtr c, int agent, rig::CharacterPtr c
             o.rotation = { st.pitch, 0, st.bank };
         };
     return holder;
+}
+
+Baked bakeWalker(const rig::Look& look, rig::Clip walk, double walkSeconds, rig::Clip idle, double idleSeconds,
+                 float stride, int walkFrames, int idleFrames) {
+    Baked b;
+    std::vector<rig::BakedClip> where;
+    b.mesh = rig::bakeAnimated(look, { { std::move(idle), idleFrames, idleSeconds }, { std::move(walk), walkFrames, walkSeconds } }, &where);
+    b.still = where[0];
+    b.move = where[1];
+    b.stillSeconds = idleSeconds;
+    b.stride = stride;
+    return b;
+}
+
+Baked bakeBat(int frames, Color bodyColor, Color membraneColor) {
+    Baked b;
+    auto am = std::make_shared<g3d::AnimatedMesh>();
+    auto topo = std::make_shared<Soup>();
+    Vector3 lo{ 1e9f, 1e9f, 1e9f }, hi{ -1e9f, -1e9f, -1e9f };
+    for (int f = 0; f < frames; f++) {
+        Soup s;
+        batPose(s, (float)f / frames, bodyColor, membraneColor, f == 0);
+        if (f == 0) *topo = s;
+        am->vertices = (int)(s.pos.size() / 3);
+        am->positions.insert(am->positions.end(), s.pos.begin(), s.pos.end());
+        am->normals.insert(am->normals.end(), s.nrm.begin(), s.nrm.end());
+        for (size_t i = 0; i + 2 < s.pos.size(); i += 3) {
+            lo = Vector3Min(lo, { s.pos[i], s.pos[i + 1], s.pos[i + 2] });
+            hi = Vector3Max(hi, { s.pos[i], s.pos[i + 1], s.pos[i + 2] });
+        }
+    }
+    am->frames = frames;
+    am->centre = Vector3Scale(Vector3Add(lo, hi), 0.5f);
+    am->radius = Vector3Distance(lo, hi) * 0.5f + 0.02f;
+    am->rest = std::make_shared<g3d::Geometry>([topo] {
+        Mesh m{};
+        m.vertexCount = (int)topo->pos.size() / 3;
+        m.triangleCount = (int)topo->idx.size() / 3;
+        m.vertices = (float*)MemAlloc((unsigned)(topo->pos.size() * sizeof(float)));
+        m.normals = (float*)MemAlloc((unsigned)(topo->nrm.size() * sizeof(float)));
+        m.texcoords = (float*)MemAlloc((unsigned)(m.vertexCount * 2 * sizeof(float)));
+        m.colors = (unsigned char*)MemAlloc((unsigned)topo->col.size());
+        m.indices = (unsigned short*)MemAlloc((unsigned)(topo->idx.size() * sizeof(unsigned short)));
+        std::memcpy(m.vertices, topo->pos.data(), topo->pos.size() * sizeof(float));
+        std::memcpy(m.normals, topo->nrm.data(), topo->nrm.size() * sizeof(float));
+        std::memset(m.texcoords, 0, (size_t)m.vertexCount * 2 * sizeof(float));
+        std::memcpy(m.colors, topo->col.data(), topo->col.size());
+        std::memcpy(m.indices, topo->idx.data(), topo->idx.size() * sizeof(unsigned short));
+        UploadMesh(&m, true);
+        return m;
+    });
+    b.mesh = am;
+    b.still = { 0, frames };
+    b.move = { 0, frames };
+    b.stillSeconds = 1;
+    return b;
+}
+
+Cycle walkCycle(CrowdPtr c, const std::string& group, int index, double s, const Baked& body) {
+    const int a = c->first(group) + index;
+    const State st = c->at(a, s);
+    if (st.speed < 0.12f || c->resting(a, s)) {
+        const double u = std::fmod(s + 1.7 * rnd01(78, (unsigned long long)index), body.stillSeconds) / body.stillSeconds;
+        return { (float)(u - std::floor(u)), true };
+    }
+    const double cycles = c->travelled(a, s) / (double)(body.stride * c->sizeFactor(a)) + rnd01(79, (unsigned long long)index);
+    return { (float)(cycles - std::floor(cycles)), false };
+}
+
+float flapCycle(CrowdPtr c, const std::string& group, int index, double s, float flapsPerSecond) {
+    (void)c; (void)group;
+    const double cycles = s * flapsPerSecond * (0.9 + 0.2 * rnd01(81, (unsigned long long)index)) + rnd01(82, (unsigned long long)index);
+    return (float)(cycles - std::floor(cycles));
+}
+
+g3d::Object3D* addInstanced(g3d::Scene& scene, CrowdPtr c, const std::string& group, const std::vector<Baked>& bodies,
+                            g3d::Material material, int fps) {
+    if (bodies.empty()) throw std::runtime_error("crowd::addInstanced: no bodies");
+    const int a0 = c->first(group), n = c->groupOf(a0).count;
+    g3d::Object3D* holder = scene.add();
+    holder->name = "crowd-instances";
+    for (size_t v = 0; v < bodies.size(); v++) {
+        const Baked body = bodies[v];
+        auto set = std::make_shared<g3d::Instances>();
+        set->mesh = body.mesh;
+        g3d::Object3D* o = holder->add(set, material);
+        o->name = "crowd-bodies";
+        // Agents are dealt out by a hash of their index, so each body is spread through the crowd.
+        std::vector<int> mine;
+        for (int i = 0; i < n; i++)
+            if ((size_t)(rnd01(77, (unsigned long long)i) * (double)bodies.size()) % bodies.size() == v) mine.push_back(i);
+        o->up = [c, set, body, mine, a0, group, fps](int t, g3d::Object3D&) {
+            const double s = t / (double)fps;
+            set->list.clear();
+            set->list.reserve(mine.size());
+            for (const int i : mine) {
+                const State st = c->at(a0 + i, s);
+                g3d::Instance in;
+                in.position = st.pos;
+                in.yaw = st.yaw;
+                in.scale = c->sizeFactor(a0 + i);
+                const Cycle cy = walkCycle(c, group, i, s, body);
+                const rig::BakedClip& clip = cy.still ? body.still : body.move;
+                in.clipStart = clip.start;
+                in.clipLength = clip.length;
+                in.frame = cy.phase * clip.length;
+                in.shade = 0.88f + 0.24f * (float)rnd01(80, (unsigned long long)i);
+                set->list.push_back(in);
+            }
+        };
+    }
+    return holder;
+}
+
+g3d::Object3D* addFlock(g3d::Scene& scene, CrowdPtr c, const std::string& group, const Baked& body, float flapsPerSecond,
+                        g3d::Material material, int fps) {
+    const int a0 = c->first(group), n = c->groupOf(a0).count;
+    auto set = std::make_shared<g3d::Instances>();
+    set->mesh = body.mesh;
+    g3d::Object3D* o = scene.add(set, material);
+    o->name = "crowd-flock";
+    const Baked b = body;
+    o->up = [c, set, b, a0, n, group, flapsPerSecond, fps](int t, g3d::Object3D&) {
+        const double s = t / (double)fps;
+        set->list.clear();
+        set->list.reserve((size_t)n);
+        for (int i = 0; i < n; i++) {
+            const State st = c->at(a0 + i, s);
+            g3d::Instance in;
+            in.position = st.pos;
+            in.yaw = st.yaw;
+            in.pitch = st.pitch;
+            in.bank = st.bank;
+            in.scale = c->sizeFactor(a0 + i);
+            in.clipStart = b.move.start;
+            in.clipLength = b.move.length;
+            in.frame = flapCycle(c, group, i, s, flapsPerSecond) * b.move.length;
+            in.shade = 0.85f + 0.3f * (float)rnd01(83, (unsigned long long)i);
+            set->list.push_back(in);
+        }
+    };
+    return o;
 }
 
 void addAll(g3d::Scene& scene, CrowdPtr c, const std::string& group, const std::vector<rig::CharacterPtr>& chars, int fps) {

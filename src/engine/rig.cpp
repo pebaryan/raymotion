@@ -333,6 +333,23 @@ Clip walk(float cadence) {
     };
 }
 
+Clip shamble(float cadence) {
+    const Clip base = walk(cadence);
+    return [base, cadence](double s) {
+        Pose p = base(s);
+        const float ph = TAU * cadence * (float)s;
+        p[Joint::ShoulderL] = { -76 + 16 * std::sin(ph + 0.6f), 4, 6 };
+        p[Joint::ShoulderR] = { -68 + 16 * std::sin(ph + 2.4f), 4, 6 };
+        p[Joint::ElbowL] = { -22 - 16 * std::sin(ph + 1.0f), 0, 0 };
+        p[Joint::ElbowR] = { -16 - 16 * std::sin(ph + 2.8f), 0, 0 };
+        p[Joint::Chest].x = 18 + 4 * std::sin(2 * ph);
+        p[Joint::Neck].x = 10;
+        p[Joint::Head] = { 16, 14 * std::sin(ph), 17 + 6 * std::sin(ph + 1.0f) };
+        p.offset.y -= 0.03f;
+        return p;
+    };
+}
+
 Clip run(float cadence) {
     return [cadence](double s) {
         Pose p = restPose();

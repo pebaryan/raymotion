@@ -164,6 +164,9 @@ Clip hold(Pose p);
 Clip idle(float energy = 1);                 // breathing, weight shift, a little arm sway
 Clip walk(float cadence = 1);                // in place; `cadence` strides per second per foot
 Clip run(float cadence = 1.4f);
+// The walk, stooped, arms reaching ahead and swaying out of step, the head lolling: the legs
+// are the walk's, so walkSpeed(b, cadence) keeps its feet planted.
+Clip shamble(float cadence = 0.8f);
 Clip wave(Side side = Side::Right);
 Clip point(Side side = Side::Right);         // arm out ahead, held
 Clip cheer();                                // both arms up, bouncing
@@ -626,6 +629,17 @@ Pose locked(const Look& look, Pose p);
 // scene's frame t (seconds = t / fps). Move/turn the returned root to place it.
 g3d::Object3D* add(g3d::Object3D& parent, CharacterPtr ch, int fps = 30);
 g3d::Object3D* add(g3d::Scene& scene, CharacterPtr ch, int fps = 30);
+
+// ---- baked bodies for instancing (g3d::Instances): a look, posed by clips, as one mesh of
+// fixed topology with every pose stored. A clip is sampled at seconds * k / frames, k = 0 ..
+// frames - 1, so a looping clip of period `seconds` loops. Outfit textures and faces become
+// flat per-shape colours, and a model file or see-through shape is left out; a coarse cut
+// keeps a body to a few thousand vertices. `where` receives each clip's first frame and
+// length, in order, for g3d::Instance::clipStart and clipLength.
+struct BakeClip { Clip clip; int frames; double seconds; };
+struct BakedClip { int start, length; };
+std::shared_ptr<g3d::AnimatedMesh> bakeAnimated(const Look& look, const std::vector<BakeClip>& clips,
+                                                std::vector<BakedClip>* where = nullptr, bool coarse = true);
 
 // ---- skinned meshes: a scanned or generated body bound to the humanoid skeleton by
 // tools/skin_bake.py, which writes the GLB (one bone per joint, in Joint order, Floor left

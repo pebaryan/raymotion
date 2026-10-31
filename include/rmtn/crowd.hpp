@@ -162,6 +162,49 @@ g3d::Object3D* add(g3d::Scene& scene, CrowdPtr c, int agent, rig::CharacterPtr c
 void addAll(g3d::Scene& scene, CrowdPtr c, const std::string& group, const std::vector<rig::CharacterPtr>& chars,
             int fps = 30);
 
+// ---- 3D, instanced: the same crowd as a few baked bodies drawn in one call each (see
+// g3d::Instances). Characters cost a dozen draw calls and a rebuilt limb mesh apiece; a baked
+// body costs a slot in a buffer, so hundreds fit. What is given up: faces and outfit textures
+// (each shape is one colour) and mounts. Faces and outfits stay for the few characters near
+// the camera, which can be cast() and added as before from the same group's first agents.
+//
+// A baked body and what to play of it.
+struct Baked {
+    std::shared_ptr<g3d::AnimatedMesh> mesh;
+    rig::BakedClip still{ 0, 1 };            // standing: loops over `stillSeconds`
+    rig::BakedClip move{ 0, 1 };             // one cycle of walking, or one wingbeat
+    double stillSeconds = 2;
+    float stride = 1;                        // metres a walker covers per cycle of `move`
+};
+// A walker: `walk` is a looping clip of period `walkSeconds` (rig::clips::walk(c) has 1 / c),
+// `idle` one of period `idleSeconds`. `stride` is the ground the walk covers in one cycle
+// (rig::walkSpeed(look.build, 1) for the rig's walks and shamble).
+Baked bakeWalker(const rig::Look& look, rig::Clip walk, double walkSeconds, rig::Clip idle, double idleSeconds,
+                 float stride, int walkFrames = 24, int idleFrames = 16);
+// A bat: a body, head and ears, and two jointed wings in a looping wingbeat of `frames` frames.
+Baked bakeBat(int frames = 12, Color body = { 34, 30, 42, 255 }, Color membrane = { 52, 44, 64, 255 });
+// A rotted person: grey-green skin, torn rags, wild hair. `i` picks among a few.
+rig::Look zombie(int i, unsigned long long seed = 7);
+
+// Where in its cycle an instanced agent is at `s` (0..1 of `Baked::move`, or of `still`):
+// the numbers addInstanced and addFlock play, for a gauge that must agree with the picture.
+// `index` is within the group. walkCycle also says whether the agent is standing.
+struct Cycle { float phase; bool still; };
+Cycle walkCycle(CrowdPtr c, const std::string& group, int index, double s, const Baked& body);
+float flapCycle(CrowdPtr c, const std::string& group, int index, double s, float flapsPerSecond);
+
+// The walkers of `group`, drawn from `bodies` (agent k wears bodies[k % bodies.size()], by
+// index in the group): one object per body, under a node named "crowd-instances". Each
+// frame, a walker stands (idle, a seeded phase each) or walks, the cycle following the ground
+// it has covered so its feet keep their stride. `material` is shared: roughness, finish and
+// shading as for any object; the colours come from the bodies.
+g3d::Object3D* addInstanced(g3d::Scene& scene, CrowdPtr c, const std::string& group, const std::vector<Baked>& bodies,
+                            g3d::Material material = {}, int fps = 30);
+// The flyers (or swimmers) of `group`, each flapping `flapsPerSecond` beats a second with its
+// own phase, banking and pitching as the agent does.
+g3d::Object3D* addFlock(g3d::Scene& scene, CrowdPtr c, const std::string& group, const Baked& body,
+                        float flapsPerSecond, g3d::Material material = {}, int fps = 30);
+
 // ---- 2D: the group's characters as cut-outs, back to front. `view` is the shared camera:
 // its origin is where the world's (0, 0, 0) lands; each agent is offset by its projected
 // position and turned by its yaw.

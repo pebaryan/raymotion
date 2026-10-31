@@ -144,6 +144,7 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/trackway.cpp
     examples/showcase/skin_demo.cpp
     examples/showcase/crowd_demo.cpp
+    examples/showcase/zombie_horde.cpp
     examples/showcase/tokens.cpp
     examples/showcase/own_compute.cpp
     examples/showcase/own_compute_v2.cpp

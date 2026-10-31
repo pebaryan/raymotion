@@ -385,6 +385,107 @@ static void culling() {
     }
 }
 
+// Baked bodies: a fixed topology, loops that close, feet on the ground, bounds that hold.
+static float frameStep(const g3d::AnimatedMesh& m, int a, int b) {
+    float worst = 0;
+    const size_t n = (size_t)m.vertices * 3, oa = (size_t)a * n, ob = (size_t)b * n;
+    for (size_t i = 0; i < n; i += 3)
+        worst = std::max(worst, std::hypot(m.positions[oa + i] - m.positions[ob + i],
+                                           std::hypot(m.positions[oa + i + 1] - m.positions[ob + i + 1], m.positions[oa + i + 2] - m.positions[ob + i + 2])));
+    return worst;
+}
+
+static void bakedBodies() {
+    const rig::Look look = crowd::zombie(0);
+    const crowd::Baked z = crowd::bakeWalker(look, rig::clips::shamble(1), 1, rig::clips::idle(), 2, rig::walkSpeed(look.build, 1));
+    const g3d::AnimatedMesh& m = *z.mesh;
+    CHECK(m.frames == 16 + 24);
+    CHECK(m.vertices > 500 && m.vertices < 65535);
+    CHECK(m.positions.size() == (size_t)m.frames * m.vertices * 3 && m.normals.size() == m.positions.size());
+    CHECK(z.still.start == 0 && z.still.length == 16 && z.move.start == 16 && z.move.length == 24);
+    // Every vertex of every frame lies inside the bound.
+    float outside = 0, lowest = 1e9f;
+    for (int f = z.move.start; f < z.move.start + z.move.length; f++)
+        for (int v = 0; v < m.vertices; v++) {
+            const size_t i = ((size_t)f * m.vertices + v) * 3;
+            outside = std::max(outside, Vector3Distance(m.centre, { m.positions[i], m.positions[i + 1], m.positions[i + 2] }) - m.radius);
+            lowest = std::min(lowest, m.positions[i + 1]);
+        }
+    CHECK(outside <= 0);
+    CHECK(lowest > -0.06f && lowest < 0.04f);               // the soles stand on the ground
+    // The walk closes its loop: the step from the last frame back to the first is no bigger
+    // than the steps between the others.
+    float step = 0;
+    for (int f = z.move.start; f + 1 < z.move.start + z.move.length; f++) step = std::max(step, frameStep(m, f, f + 1));
+    const float closing = frameStep(m, z.move.start + z.move.length - 1, z.move.start);
+    std::printf("[crowd] zombie bake: %d vertices x %d frames, bound %.2f m, lowest %.1f cm, biggest step %.1f cm, closing step %.1f cm\n",
+                m.vertices, m.frames, m.radius, lowest * 100, step * 100, closing * 100);
+    CHECK(closing < step * 1.5f);
+    // A different zombie is a different body.
+    const rig::Look other = crowd::zombie(1);
+    CHECK(other.skin.g != look.skin.g || other.hair != look.hair);
+
+    const crowd::Baked bat = crowd::bakeBat(12);
+    const g3d::AnimatedMesh& b = *bat.mesh;
+    CHECK(b.frames == 12 && b.vertices > 100);
+    float spread = 0, outsideBat = 0;
+    for (int f = 0; f < b.frames; f++)
+        for (int v = 0; v < b.vertices; v++) {
+            const size_t i = ((size_t)f * b.vertices + v) * 3;
+            outsideBat = std::max(outsideBat, Vector3Distance(b.centre, { b.positions[i], b.positions[i + 1], b.positions[i + 2] }) - b.radius);
+        }
+    spread = frameStep(b, 0, 3);
+    std::printf("[crowd] bat bake: %d vertices x %d frames, bound %.2f m, quarter-beat moves a wingtip %.1f cm\n", b.vertices, b.frames, b.radius, spread * 100);
+    CHECK(outsideBat <= 0);
+    CHECK(spread > 0.05f);                                  // the wings really beat
+    CHECK(frameStep(b, 11, 0) < frameStep(b, 0, 3));        // and the beat loops without a jump
+}
+
+// The phase an instanced walker plays follows the ground it covers: a stride of baked frames
+// per `stride` metres, and a standing agent reports standing.
+static void cycles() {
+    crowd::World w;
+    crowd::Group g;
+    g.name = "z";
+    g.count = 3;
+    g.spawn = { 0, 0, 0 };
+    g.spawnSize = { 4, 0, 0 };
+    g.heading0 = { 0, 0, 1 };
+    g.cruise = 0.8f;
+    g.sizeJitter = 0;
+    g.goal = [](double, int i) { return Vector3{ (float)i * 2, 0, 60 }; };
+    w.groups.push_back(g);
+    w.boundsMin = { -50, 0, -50 };
+    w.boundsMax = { 50, 5, 100 };
+    w.to = 20;
+    const auto c = crowd::bake(w);
+    crowd::Baked body;
+    body.stride = 1.4f;
+    body.stillSeconds = 2;
+    for (int i = 0; i < 3; i++) {
+        double worst = 0;
+        float prev = crowd::walkCycle(c, "z", i, 5, body).phase;
+        for (double s = 5.1; s < 15; s += 0.1) {
+            const crowd::Cycle cy = crowd::walkCycle(c, "z", i, s, body);
+            CHECK(!cy.still);
+            const double d = c->travelled(i, s) - c->travelled(i, s - 0.1);
+            double step = cy.phase - prev;
+            if (step < -0.5) step += 1;
+            worst = std::max(worst, std::fabs(step - d / body.stride));
+            prev = cy.phase;
+        }
+        CHECK(worst < 1e-3);
+    }
+    // Before the crowd has moved at all (the clamped start), an agent is standing.
+    crowd::World still = w;
+    still.groups[0].goal = [](double, int i) { return Vector3{ (float)i * 2 - 2, 0, 0 }; };
+    still.groups[0].spawnSize = { 0, 0, 0 };
+    still.groups[0].cruise = 0;
+    const auto s0 = crowd::bake(still);
+    CHECK(crowd::walkCycle(s0, "z", 0, 10, body).still);
+    std::printf("[crowd] cycles: phase advances stride-for-stride; a parked agent stands\n");
+}
+
 int main(int argc, char** argv) try {
     if (argc > 1) band = (float)std::atof(argv[1]);
     determinism();
@@ -396,6 +497,8 @@ int main(int argc, char** argv) try {
     pen();
     feet();
     culling();
+    bakedBodies();
+    cycles();
     if (failures) std::fprintf(stderr, "%d failure(s)\n", failures);
     else std::printf("crowd tests passed\n");
     return failures ? 1 : 0;
