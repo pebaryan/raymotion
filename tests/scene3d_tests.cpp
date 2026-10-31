@@ -8,6 +8,7 @@
 #include <cstring>
 #include <fstream>
 #include <stdexcept>
+#include <string>
 
 using namespace rmtn;
 namespace fs = std::filesystem;
@@ -1032,6 +1033,160 @@ static void instancing() {
     }
 }
 
+// ---- water: the CPU's surface, the surface seen from above and below, the water's colour on
+// what is under it, and caustics that move the light about without changing its sum.
+static g3d::ScenePtr waterScene(bool water, float caustics, Vector3 eye, Vector3 target) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = eye;
+    s->camera.target = target;
+    s->camera.fov = 55;
+    s->sky = g3d::Sky::day();
+    s->sky.sunLight = 0;
+    s->lights.push_back(g3d::Light::directional({ 3, 9, 2 }, WHITE, 1.5f, false));
+    g3d::Material sand;
+    sand.color = { 214, 196, 150, 255 };
+    sand.roughness = 0.9f;
+    sand.receiveShadow = false;
+    s->add(g3d::Geometry::plane(60, 60), sand)->position = { 0, -3, 0 };
+    g3d::Material rock;
+    rock.color = { 130, 128, 124, 255 };
+    s->add(g3d::Geometry::sphere(0.8f), rock)->position = { 1.5f, -2.4f, -1 };
+    s->add(g3d::Geometry::box(0.6f, 3, 0.6f), rock)->position = { -2, -1.5f, -2 };
+    if (water) {
+        s->water = g3d::Water::calm();
+        s->water.caustics = caustics;
+    }
+    return s;
+}
+// Like sceneComp, but long enough to render later frames.
+static Comp longComp(g3d::ScenePtr scene, int w = W, int h = H) {
+    Comp c;
+    c.w = w; c.h = h; c.duration = 20; c.background = BLACK;
+    addRoot(c.roots, 0, 600)->fn = g3d::draw(scene, {});
+    return c;
+}
+static void dumpWater(const char* name, const Image& img) {
+    if (const char* dir = std::getenv("RMTN_WATER_DUMP")) {
+        fs::create_directories(dir);
+        ExportImage(img, (fs::path(dir) / name).string().c_str());
+    }
+}
+static void waterTest() {
+    // The CPU surface: slope is the derivative of height, the level is the mean, time moves it.
+    {
+        g3d::Water w = g3d::Water::choppy();
+        w.level = 2;
+        double meanH = 0, maxErr = 0;
+        int n = 0;
+        for (float x = -20; x < 20; x += 1.37f)
+            for (float z = -20; z < 20; z += 1.91f) {
+                const float e = 0.002f;
+                const Vector2 g = w.slope(x, z, 3.0);
+                const float dx = (w.height(x + e, z, 3.0) - w.height(x - e, z, 3.0)) / (2 * e);
+                const float dz = (w.height(x, z + e, 3.0) - w.height(x, z - e, 3.0)) / (2 * e);
+                maxErr = std::max({ maxErr, (double)std::fabs(dx - g.x), (double)std::fabs(dz - g.y) });
+                meanH += w.height(x, z, 3.0);
+                n++;
+            }
+        CHECK(maxErr < 0.01);
+        CHECK(std::fabs(meanH / n - 2.0) < 0.35);
+        CHECK(std::fabs(w.height(3, 4, 0.0) - w.height(3, 4, 1.0)) > 1e-3f);
+        CHECK(w.height(5, 5, 2.5) == w.height(5, 5, 2.5));
+        CHECK(w.submerged({ 0, w.level - 5, 0 }, 1.0) && !w.submerged({ 0, w.level + 5, 0 }, 1.0));
+        g3d::Water off;
+        CHECK(!off.submerged({ 0, -100, 0 }, 0.0));
+    }
+    const Vector3 above{ 0, 2.5f, 7 }, aim{ 0, -1.5f, 0 };
+    // Seen from above, the surface reflects the sky over the floor it hides: the picture changes.
+    {
+        Comp dry = longComp(waterScene(false, 0, above, aim)), wet = longComp(waterScene(true, 1, above, aim));
+        Image a = render(dry, 5), b = render(wet, 5);
+        long diff = 0;
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) diff += std::abs(luma(GetImageColor(a, x, y)) - luma(GetImageColor(b, x, y)));
+        CHECK(diff > (long)W * H * 3);
+        CHECK(allOpaque(b));
+        dumpWater("above_dry.png", a); dumpWater("above_wet.png", b);
+        Image b2 = render(wet, 5);
+        CHECK(std::memcmp(b.data, b2.data, (size_t)W * H * 4) == 0);   // the same frame twice is the same picture
+        UnloadImage(a); UnloadImage(b); UnloadImage(b2);
+    }
+    // Under the surface: the sand is bluer and darker than dry, and looking up shows the window.
+    const Vector3 diver{ 0, -1.2f, 6 }, ahead{ 0, -2.2f, 0 };
+    {
+        Comp dry = longComp(waterScene(false, 0, diver, ahead)), wet = longComp(waterScene(true, 0, diver, ahead));
+        Image a = render(dry, 5), b = render(wet, 5);
+        const Color ca = GetImageColor(a, W / 2, H - 20), cb = GetImageColor(b, W / 2, H - 20);   // sand near the diver
+        CHECK(ca.r > ca.b);                                  // dry sand is warm
+        CHECK(cb.b >= cb.r);                                 // wet: red is gone first
+        CHECK(luma(cb) < luma(ca));
+        dumpWater("under.png", b);
+        UnloadImage(a); UnloadImage(b);
+        Comp up = longComp(waterScene(true, 1, diver, { 0, 6, 0 }));
+        Image c = render(up, 5);
+        const Color top = GetImageColor(c, W / 2, 10);
+        CHECK(top.r + top.g + top.b > 60);                   // not black: the sky through the window
+        UnloadImage(c);
+    }
+    // Caustics: the sunlit floor gets light and dark patches with the same overall brightness.
+    {
+        const Vector3 look{ 0, -1.0f, 4 }, floorAt{ 0, -3, 0 };
+        Comp flat = longComp(waterScene(true, 0, look, floorAt)), caus = longComp(waterScene(true, 1, look, floorAt));
+        Image a = render(flat, 5), b = render(caus, 5), b2 = render(caus, 40);
+        auto stats = [](const Image& img, double& mean, double& sd) {
+            double sum = 0, sum2 = 0;
+            int n = 0;
+            for (int y = H * 3 / 4; y < H - 4; y++)          // the near floor, clear of the rocks
+                for (int x = W / 4; x < W * 3 / 4; x++) {
+                    const double l = luma(GetImageColor(img, x, y));
+                    sum += l; sum2 += l * l; n++;
+                }
+            mean = sum / n;
+            sd = std::sqrt(std::max(0.0, sum2 / n - mean * mean));
+        };
+        double m0, s0, m1, s1;
+        stats(a, m0, s0); stats(b, m1, s1);
+        CHECK(s1 > s0 * 1.5 + 1);                            // a pattern where there was none
+        CHECK(m1 > m0 * 0.6 && m1 < m0 * 1.6);               // the light is moved, not made
+        long moved = 0;
+        for (int y = H * 3 / 4; y < H - 4; y++)
+            for (int x = W / 4; x < W * 3 / 4; x++)
+                moved += std::abs(luma(GetImageColor(b, x, y)) - luma(GetImageColor(b2, x, y)));
+        CHECK(moved > 200);                                  // it moves with time
+        dumpWater("caustics.png", b);
+        UnloadImage(a); UnloadImage(b); UnloadImage(b2);
+    }
+    if (std::getenv("RMTN_WATER_DUMP")) {          // pictures to look at, not checks
+        for (int k = 0; k < 4; k++) {
+            auto sea = std::make_shared<g3d::Scene>();
+            sea->sky = k < 3 ? g3d::Sky::at(k == 2 ? 17.6f : 10.5f) : g3d::Sky::day();
+            sea->sky.sunLight = 0;
+            sea->lights.push_back(g3d::Light::directional({ -3, k == 2 ? 2.2f : 7, -9 }, { 255, 244, 224, 255 }, 2.2f, false));
+            sea->water = k == 0 ? g3d::Water::choppy() : g3d::Water::storm();
+            if (k == 3) sea->water = g3d::Water::calm();
+            sea->water.openDepth = k == 3 ? 0 : 40;
+            sea->camera.position = k == 3 ? g3d::Camera{}.position : Vector3{ 0, k == 1 ? 7.f : 3.f, 12 };
+            sea->camera.target = k == 3 ? Vector3{ 0, 0, 0 } : Vector3{ 0, 1.2f, -20 };
+            sea->camera.fov = 60;
+            if (k == 3) {                              // from below: looking up at the window
+                sea->camera.position = { 0, -3, 4 };
+                sea->camera.target = { 0, 3, -2 };
+            }
+            sea->camera.farPlane = 4000;
+            Comp c = longComp(sea, 960, 540);
+            Image img = render(c, 60 + k * 7);
+            dumpWater(("sea" + std::to_string(k) + ".png").c_str(), img);
+            UnloadImage(img);
+        }
+    }
+    {
+        Comp wet = longComp(waterScene(true, 1, above, aim));
+        Image b = render(wet, 40);
+        dumpWater("surface.png", b);
+        UnloadImage(b);
+    }
+}
+
 int main() try {
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
@@ -1051,6 +1206,7 @@ int main() try {
     moreShadows();
     culling();
     instancing();
+    waterTest();
     environment(dir);
     skyAndFog();
     depthOfField();

@@ -317,6 +317,50 @@ struct Sky {
 // with fogFalloff > 0, thin out with height above fogHeight (ground fog in the valleys).
 enum class FogMode { Linear, Exponential, Exponential2 };
 
+// ------------------------------------------------------------------ water
+// A sea, lake or pool: an endless surface at `level` that rolls with a sum of waves, seen from
+// above (the sky or environment reflected by Fresnel, sun glints, foam on the crests) and from
+// below (a bright window onto the sky ringed by mirror, the way it looks from a diver's eye).
+// Under it, everything lit is tinted and darkened with depth and distance (red first), and
+// the sun that reaches it is refracted by the waves into moving caustics.
+//
+//     scene->water = g3d::Water::calm();
+//     scene->water.level = 0;
+//     scene->water.openDepth = 30;      // a deep sea: no floor shows through; 0 = clear glass
+//
+// Everything is a pure function of time, and `height` gives the CPU the same surface the
+// shader draws, so a boat can ride it. Reflections are of the sky or environment, not of the
+// objects in the scene.
+struct Water {
+    bool enabled = false;
+    float level = 0;                    // mean surface height (world y)
+
+    // One wave of the sum: it travels towards `direction` (degrees about +y, 0 = +x, 90 = +z).
+    // sharpness 1 is a sine; larger narrows the crests and flattens the troughs.
+    struct Wave {
+        float direction = 0, wavelength = 8, amplitude = 0.1f, sharpness = 1, speed = 1;
+    };
+    std::vector<Wave> waves;            // up to 8
+    float speed = 1;                    // times every wave's speed
+
+    Color deep{ 6, 62, 84, 255 };       // what the water scatters back
+    Vector3 absorb{ 0.34f, 0.07f, 0.04f };   // loss per metre of path, per red/green/blue
+    float openDepth = 0;                // > 0: water this deep under the surface, so it is opaque
+    float caustics = 1;                 // 0..1: strength of the caustics on what is below
+    float foam = 0.6f;                  // 0..1: foam on the highest crests
+    float sunGlint = 1;                 // strength of the sun's glitter
+
+    static Water calm();                // a lagoon: small ripples, a gentle swell
+    static Water choppy();              // a breezy lake or bay
+    static Water storm();               // open sea: steep crests, foam
+
+    // The surface height at (x, z) at `seconds`, and its slope there (d height / dx, dz).
+    float height(float x, float z, double seconds) const;
+    Vector2 slope(float x, float z, double seconds) const;
+    // Whether a world point lies under the surface at `seconds`.
+    bool submerged(Vector3 p, double seconds) const { return enabled && p.y < height(p.x, p.z, seconds); }
+};
+
 // ------------------------------------------------------------------ scenes
 struct Scene {
     Camera camera;
@@ -340,6 +384,7 @@ struct Scene {
     float fogHeight = 0, fogFalloff = 0;    // height fog: density * exp(-falloff * (y - fogHeight))
     bool fogFromSky = false;        // fog takes the sky's (or environment's) colour in each direction
     Sky sky;                        // a procedural sky (sky.enabled); replaces `environment`
+    Water water;                    // a water surface (water.enabled)
     int shadowMapSize = 1024;       // per atlas tile (shrunk if the atlas would pass 8192)
     // Culling (Object3D::cullRadius) keeps an out-of-view subtree whose shadow can fall into
     // view. It assumes shadows land no lower than this y, so it needs only follow the light

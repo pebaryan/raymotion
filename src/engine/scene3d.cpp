@@ -102,10 +102,166 @@ vec3 instPosition() { return mix(vatFetch(instAnim.x, 0), vatFetch(instAnim.y, 0
 vec3 instNormal() { return normalize(mix(vatFetch(instAnim.x, vatRows), vatFetch(instAnim.y, vatRows), instAnim.z)); }
 )";
 
+
+// ---- water: the wave sum is shared by the surface's vertices and every fragment's caustics
+const char* WATER_COMMON = R"(
+uniform int waterOn; uniform int waterMode;
+uniform float waterLevel; uniform float waterEye; uniform float waterTime; uniform vec2 waterCentre;
+uniform int waveCount; uniform vec4 waveA[8]; uniform vec4 waveB[8];
+// Height of the sea at p and its slope. A wave is (direction.xy, wavenumber, amplitude) and
+// (angular speed, phase, sharpness); sharpness 1 is a sine, more narrows the crests. `foot`
+// is the size of what is being sampled (a pixel, a blur): waves shorter than a few of it
+// fade out, as they would average out in the sample (0 = all of them).
+float waveHeightLod(vec2 p, float foot, out vec2 g) {
+    float h = 0.0; g = vec2(0.0);
+    for (int i = 0; i < 8; i++) {
+        if (i >= waveCount) break;
+        float fade = foot > 0.0 ? smoothstep(2.0, 5.0, 6.2832 / (waveA[i].z * foot)) : 1.0;
+        if (fade <= 0.0) continue;
+        float s = waveA[i].z * dot(waveA[i].xy, p) - waveB[i].x * waterTime + waveB[i].y;
+        float u = max(0.5 + 0.5 * sin(s), 1e-4), sh = waveB[i].z;
+        h += fade * waveA[i].w * (2.0 * pow(u, sh) - 1.0);
+        g += fade * waveA[i].w * sh * pow(u, sh - 1.0) * cos(s) * waveA[i].z * waveA[i].xy;
+    }
+    return h;
+}
+float waveHeight(vec2 p, out vec2 g) { return waveHeightLod(p, 0.0, g); }
+)";
+
+const char* WATER_FS = R"(
+uniform vec3 waterAbsorb; uniform vec3 waterScatter; uniform float waterCaustics; uniform float waterFoam;
+uniform float waterOpen; uniform float waterInvAmp; uniform float waterGlint; uniform float waterBand;
+const float WATER_IOR = 1.333;
+
+// Length of the segment a-b that lies under a horizontal surface at `lvl`.
+float waterPath(vec3 a, vec3 b, float lvl) {
+    float ya = a.y - lvl, yb = b.y - lvl, len = distance(a, b);
+    if (ya <= 0.0 && yb <= 0.0) return len;
+    if (ya > 0.0 && yb > 0.0) return 0.0;
+    return len * (ya <= 0.0 ? -ya / (yb - ya) : -yb / (ya - yb));
+}
+// The surface above a point, or a level it cannot be under when well clear of the waves.
+float surfaceAt(vec3 p) {
+    if (p.y > waterLevel + waterBand) return waterLevel + waterBand;
+    vec2 g;
+    return waterLevel + waveHeight(p.xz, g);
+}
+// Where a sun ray (travelling along dir) that crosses the surface at s, bent by the wave
+// there, reaches the horizontal plane at planeY.
+vec2 causticLand(vec2 s, vec3 dir, float planeY, float foot) {
+    vec2 g;
+    float h = waveHeightLod(s, foot, g);
+    vec3 r = refract(dir, normalize(vec3(-g.x, 1.0, -g.y)), 1.0 / WATER_IOR);
+    return s + r.xz * ((waterLevel + h - planeY) / max(-r.y, 0.05));
+}
+// How much more or less light reaches p than a flat surface would give: the area of a patch
+// of surface over the area its refracted rays cover down here. The patch widens with depth,
+// as the light's blur does.
+float caustic(vec3 p, vec3 dir) {
+    float depth = max(waterLevel - p.y, 0.0);
+    vec3 r0 = refract(dir, vec3(0.0, 1.0, 0.0), 1.0 / WATER_IOR);
+    vec2 s = p.xz - r0.xz * (depth / max(-r0.y, 0.05));
+    float e = 0.03 + 0.05 * depth, foot = e * 0.7;
+    for (int i = 0; i < 2; i++) s += p.xz - causticLand(s, dir, p.y, foot);
+    vec2 h0 = causticLand(s, dir, p.y, foot);
+    vec2 a = causticLand(s + vec2(e, 0.0), dir, p.y, foot) - h0;
+    vec2 b = causticLand(s + vec2(0.0, e), dir, p.y, foot) - h0;
+    return clamp(e * e / max(abs(a.x * b.y - a.y * b.x), 1e-5), 0.0, 6.0);
+}
+// What light i is worth at this fragment once it has come through the water: absorbed over
+// its path down from the surface, and focused by the waves.
+vec3 waterLight(int i) {
+    if (waterOn == 0 || lightType[i] != 0 || lightDir[i].y > -0.02) return vec3(1.0);
+    float lvl = surfaceAt(fragPos);
+    if (fragPos.y >= lvl) return vec3(1.0);
+    vec3 r = refract(lightDir[i], vec3(0.0, 1.0, 0.0), 1.0 / WATER_IOR);
+    vec3 t = exp(-waterAbsorb * ((lvl - fragPos.y) / max(-r.y, 0.05)));
+    float c = waterCaustics > 0.0 ? mix(1.0, caustic(fragPos, lightDir[i]), waterCaustics) : 1.0;
+    return t * c;
+}
+// The water's own fog: what the part of the way to this fragment that is under the surface
+// does to its colour.
+vec3 waterTint(vec3 color) {
+    if (waterOn == 0) return color;
+    float lvl = surfaceAt(fragPos);
+    float d = waterPath(viewPos, fragPos, viewPos.y < waterEye || fragPos.y < lvl ? lvl : waterLevel);
+    if (d <= 0.0) return color;
+    vec3 t = exp(-waterAbsorb * d);
+    return color * t + waterScatter * (1.0 - t);
+}
+
+float hash21(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+float vnoise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash21(i), hash21(i + vec2(1.0, 0.0)), f.x), mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+vec3 skyAt(vec3 d) {
+    if (hasEnv == 1) return env(d, 0.0) * backdropScale;
+    return mix(groundColor, skyColor, clamp(d.y * 0.5 + 0.5, 0.0, 1.0));
+}
+
+// The surface itself, as a straight colour and an alpha to blend over what is behind it.
+vec4 waterSurface() {
+    vec2 g;
+    float h = waveHeightLod(fragPos.xz, length(fwidth(fragPos.xz)), g);   // ripples finer than a pixel fade
+    float dist = length(viewPos - fragPos);
+    vec3 n = normalize(vec3(-g.x, 1.0, -g.y));
+    vec3 v = normalize(viewPos - fragPos);
+    if (viewPos.y < waterEye) {                      // from below: a window onto the sky, ringed by mirror
+        vec3 nd = -n;
+        vec3 t = refract(-v, nd, WATER_IOR);
+        vec3 mirror = waterScatter * 0.8, c = mirror;
+        if (dot(t, t) > 1e-6) {
+            float cosT = abs(dot(t, nd));
+            c = mix(skyAt(t), mirror, 0.02 + 0.98 * pow(1.0 - cosT, 5.0));
+        }
+        vec3 tr = exp(-waterAbsorb * dist);
+        return vec4(c * tr + waterScatter * (1.0 - tr), 1.0);
+    }
+    float ndv = max(dot(n, v), 1e-3);
+    float F = 0.02 + 0.98 * pow(1.0 - ndv, 5.0);
+    vec3 r = reflect(-v, n);
+    r.y = abs(r.y);
+    float crest = clamp(h * waterInvAmp, -1.0, 1.0);
+    vec3 body = waterScatter * (1.0 + 0.5 * max(crest, 0.0));
+    float bodyA = waterOpen > 0.0 ? 1.0 - exp(-waterOpen * dot(waterAbsorb, vec3(0.3333)) / max(ndv, 0.25)) : 0.0;
+    vec3 glint = vec3(0.0), foamLight = mix(groundColor, skyColor, 0.5);
+    for (int i = 0; i < 8; i++) {
+        if (i >= lightCount) break;
+        vec3 l; float ndl;
+        float a = lightAt(i, n, l, ndl);
+        if (a <= 0.0) continue;
+        float sp = pow(max(dot(n, normalize(l + v)), 0.0), 900.0) * (908.0 / 25.1327);
+        glint += lightColor[i] * (a * sp * F * 0.25 * waterGlint);
+        foamLight += lightColor[i] * (a * ndl);
+    }
+    float fn = vnoise(fragPos.xz * 2.2 + waterTime * 0.15) * 0.6 + vnoise(fragPos.xz * 7.0) * 0.4;
+    float foamA = waterFoam * smoothstep(0.55, 0.85, crest + (fn - 0.5) * 0.5);
+    vec3 premul = F * skyAt(r) + (1.0 - F) * bodyA * body + glint;
+    float a = clamp(F + (1.0 - F) * bodyA + dot(glint, vec3(0.3333)), 0.0, 1.0);
+    premul = mix(premul, vec3(0.95) * foamLight, foamA);
+    a = mix(a, 1.0, foamA);
+    vec3 col = premul / max(a, 1e-3);
+    float f = fogAmount(fragPos);
+    if (f > 0.0) { col = mix(col, fogTint(fragPos), f); a = mix(a, 1.0, f); }
+    return vec4(col, a);
+}
+)";
+
 const char* LIT_VS_BODY = R"(
 out vec3 fragPos; out vec2 fragTexCoord; out vec3 fragNormal; out vec4 fragColor;
 void main() {
     fragTexCoord = vertexTexCoord;
+    if (waterMode == 1) {                     // the sea's surface: a mesh round the camera, rolled by the waves
+        vec2 p = vertexPosition.xz + waterCentre, g;
+        vec4 world = vec4(p.x, waterLevel + waveHeight(p, g), p.y, 1.0);
+        fragPos = world.xyz;
+        fragNormal = vec3(0.0, 1.0, 0.0);
+        fragColor = vec4(1.0);
+        gl_Position = mvp * world;
+        return;
+    }
     if (instanced != 0) {
         setupInstance();
         vec4 world = instM * vec4(instPosition(), 1.0);
@@ -166,6 +322,7 @@ uniform vec3 rimColor; uniform float rimWidth;
 uniform vec3 goochWarm; uniform vec3 goochCool;
 uniform vec3 hatchInk; uniform float hatchSpacing; uniform float hatchAngle; uniform float hatchWeight;
 out vec4 finalColor;
+//@WATER_COMMON@
 
 const float PI = 3.14159265;
 
@@ -259,6 +416,7 @@ float lightAt(int i, vec3 n, out vec3 l, out float ndl) {
     return atten;
 }
 
+//@WATER_FS@
 // ---- stylised shading
 // x in 0..1 to `toonBands` flat steps; each step's edge ramps over toonSoftness.
 float band(float x) {
@@ -275,10 +433,11 @@ vec3 toon(vec3 albedo, vec3 n, vec3 v) {
         vec3 l; float ndl;
         float a = lightAt(i, n, l, ndl);
         if (a <= 0.0) continue;
-        color += albedo * lightColor[i] * band(ndl * a);
+        vec3 lc = lightColor[i] * waterLight(i);
+        color += albedo * lc * band(ndl * a);
         float spot = dot(n, normalize(l + v));
         float cut = 1.0 - toonHighlightSize * toonHighlightSize;
-        color += lightColor[i] * toonHighlight * smoothstep(cut - edge * 0.25, cut + edge * 0.25, spot) * step(0.5, a);
+        color += lc * toonHighlight * smoothstep(cut - edge * 0.25, cut + edge * 0.25, spot) * step(0.5, a);
     }
     float r = 1.0 - max(dot(n, v), 0.0);
     color += rimColor * smoothstep(1.0 - rimWidth - edge, 1.0 - rimWidth + edge, r);
@@ -326,7 +485,12 @@ vec3 hatch(vec3 albedo, vec3 n) {
 }
 
 void main() {
-    if (skybox == 1) { finalColor = encode(env(normalize(fragPos - viewPos), 0.0) * backdropScale, 1.0); return; }
+    if (skybox == 1) {
+        if (waterOn == 1 && viewPos.y < waterEye) { finalColor = encode(waterScatter, 1.0); return; }
+        finalColor = encode(env(normalize(fragPos - viewPos), 0.0) * backdropScale, 1.0);
+        return;
+    }
+    if (waterMode == 1) { vec4 w = waterSurface(); finalColor = encode(w.rgb, w.a); return; }
     vec4 base = texture(texture0, fragTexCoord) * colDiffuse * fragColor;
     if (unlit == 1) { finalColor = vec4(base.rgb, base.a * opacity); return; }
     vec3 albedo = pow(base.rgb, vec3(2.2));
@@ -359,11 +523,12 @@ void main() {
             if (atten <= 0.0) continue;
             vec3 h = normalize(l + v);
             float spec = pow(max(dot(n, h), 0.0), shininess) * (shininess + 8.0) / 25.1327;
-            color += (diffColor + specColor * spec) * lightColor[i] * atten * ndl;
+            color += (diffColor + specColor * spec) * lightColor[i] * waterLight(i) * atten * ndl;
         }
     }
     color += emissive;
-    float f = fogAmount(fragPos);
+    color = waterTint(color);
+    float f = waterOn == 1 && viewPos.y < waterEye ? 0.0 : fogAmount(fragPos);
     if (f > 0.0) color = mix(color, fogTint(fragPos), f);
     finalColor = encode(color, base.a * opacity);
 }
@@ -633,6 +798,8 @@ struct LitLocs {
         shading, pxScale, toonBands, toonSoftness, toonHighlight, toonHighlightSize, rimColor, rimWidth,
         goochWarm, goochCool, hatchInk, hatchSpacing, hatchAngle, hatchWeight;
 };
+struct WaterLocs { int on, mode, level, eye, time, centre, count, waveA, waveB, absorb, scatter, caustics, foam,
+                   open, invAmp, glint, band; };
 struct DofLocs { int depthTex, texel, zNear, zFar, ortho, focus, aperture, maxBlur, radStep, tanTilt, tanHalfFov, viewY; };
 struct GbufLocs { int objectId, lineStyle, skinned, bones; };
 // The instancing uniforms of one program (lit, depth or g-buffer): the program is the same
@@ -650,6 +817,8 @@ struct Gpu {
     bool ready = false;
     Shader lit{}, depth{}, dof{}, gbuf{}, line{}, particle{}, sky{};
     LitLocs L{};
+    WaterLocs W{};
+    std::unique_ptr<Object3D> waterObj;  // the sea's surface, drawn with the transparent objects
     SkyLocs S{};
     RenderTexture skyTarget{};          // the procedural sky, remade each frame
     DofLocs D{};
@@ -713,10 +882,17 @@ void releaseGpu() {
 void ensureGpu() {
     if (gpu.ready) return;
     const std::string head = SKIN_VS_HEAD;
-    gpu.lit = LoadShaderFromMemory((head + LIT_VS_BODY).c_str(), LIT_FS);
+    std::string litFs = LIT_FS;
+    for (const auto& [marker, text] : { std::pair<const char*, const char*>{ "//@WATER_COMMON@", WATER_COMMON },
+                                        { "//@WATER_FS@", WATER_FS } }) {
+        const size_t at = litFs.find(marker);
+        if (at != std::string::npos) litFs.replace(at, std::strlen(marker), text);
+    }
+    const std::string litVs = head + WATER_COMMON + LIT_VS_BODY;
+    gpu.lit = LoadShaderFromMemory(litVs.c_str(), litFs.c_str());
     gpu.depth = LoadShaderFromMemory((head + DEPTH_VS_BODY).c_str(), DEPTH_FS);
     gpu.dof = LoadShaderFromMemory(nullptr, DOF_FS);
-    gpu.gbuf = LoadShaderFromMemory((head + LIT_VS_BODY).c_str(), GBUF_FS);
+    gpu.gbuf = LoadShaderFromMemory(litVs.c_str(), GBUF_FS);
     gpu.line = LoadShaderFromMemory(nullptr, LINE_FS);
     gpu.particle = LoadShaderFromMemory(nullptr, PARTICLE_FS);
     gpu.sky = LoadShaderFromMemory(nullptr, SKY_FS);
@@ -735,6 +911,9 @@ void ensureGpu() {
               loc("shading"), loc("pxScale"), loc("toonBands"), loc("toonSoftness"), loc("toonHighlight"),
               loc("toonHighlightSize"), loc("rimColor"), loc("rimWidth"), loc("goochWarm"), loc("goochCool"),
               loc("hatchInk"), loc("hatchSpacing"), loc("hatchAngle"), loc("hatchWeight") };
+    gpu.W = { loc("waterOn"), loc("waterMode"), loc("waterLevel"), loc("waterEye"), loc("waterTime"), loc("waterCentre"),
+              loc("waveCount"), loc("waveA"), loc("waveB"), loc("waterAbsorb"), loc("waterScatter"), loc("waterCaustics"),
+              loc("waterFoam"), loc("waterOpen"), loc("waterInvAmp"), loc("waterGlint"), loc("waterBand") };
     auto gloc = [](const char* name) { return GetShaderLocation(gpu.gbuf, name); };
     gpu.G = { gloc("objectId"), gloc("lineStyle"), gloc("skinned"), gloc("boneMatrices") };
     {
@@ -1416,7 +1595,124 @@ Shadows renderShadows(const Scene& s, const std::vector<Item>& items) {
     return out;
 }
 
+// A water's waves as the shader reads them: (direction.xy, wavenumber, amplitude) and
+// (angular speed, phase, sharpness), with deep-water dispersion (omega^2 = g k).
+struct PackedWaves {
+    int count = 0;
+    Vector4 a[8] = {}, b[8] = {};
+    float amplitude = 0;        // the sum of the amplitudes
+};
+PackedWaves packWaves(const Water& w) {
+    PackedWaves p;
+    for (const Water::Wave& v : w.waves) {
+        if (p.count == 8) break;
+        const float k = 2 * PI / std::max(v.wavelength, 0.05f), d = v.direction * DEG2RAD;
+        p.a[p.count] = { std::cos(d), std::sin(d), k, v.amplitude };
+        p.b[p.count] = { std::sqrt(9.81f * k) * v.speed * w.speed, 1.7f * (float)p.count + 0.3f, std::max(v.sharpness, 1.f), 0 };
+        p.amplitude += std::fabs(v.amplitude);
+        p.count++;
+    }
+    return p;
+}
+
+// Everything the lit shader needs of the sea: the waves, the water's fog and the light
+// that reaches under it.
+void setWaterUniforms(const Scene& s, const Camera& cam) {
+    const Water& w = s.water;
+    const WaterLocs& K = gpu.W;
+    const Shader& lit = gpu.lit;
+    const int on = w.enabled ? 1 : 0, mode = 0;
+    SetShaderValue(lit, K.on, &on, SHADER_UNIFORM_INT);
+    SetShaderValue(lit, K.mode, &mode, SHADER_UNIFORM_INT);
+    if (!on) return;
+    const double seconds = frameTime(gpu.frame);
+    const PackedWaves pk = packWaves(w);
+    const float time = (float)seconds, eye = w.level + w.height(cam.position.x, cam.position.z, seconds);
+    const Vector2 centre{ cam.position.x, cam.position.z };
+    SetShaderValue(lit, K.level, &w.level, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, K.eye, &eye, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, K.time, &time, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, K.centre, &centre, SHADER_UNIFORM_VEC2);
+    SetShaderValue(lit, K.count, &pk.count, SHADER_UNIFORM_INT);
+    SetShaderValueV(lit, K.waveA, pk.a, SHADER_UNIFORM_VEC4, 8);
+    SetShaderValueV(lit, K.waveB, pk.b, SHADER_UNIFORM_VEC4, 8);
+    SetShaderValue(lit, K.absorb, &w.absorb, SHADER_UNIFORM_VEC3);
+    // The water scatters back the daylight that reaches it, dimmer the deeper the eye is.
+    float daylight = s.ambient * 0.5f;
+    for (const Light& l : s.lights) {
+        if (l.type != Light::Type::Directional) continue;
+        const Vector3 d = Vector3Normalize(Vector3Subtract(l.target, l.position));
+        const Vector3 c = linear(l.color, l.intensity);
+        daylight += (0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z) * std::clamp(-d.y, 0.f, 1.f) * 0.6f;
+    }
+    const float meanAbsorb = (w.absorb.x + w.absorb.y + w.absorb.z) / 3;
+    const float fade = std::exp(-meanAbsorb * std::max(0.f, w.level - cam.position.y) * 0.5f);
+    const Vector3 scatter = Vector3Scale(linear(w.deep), std::clamp(daylight, 0.03f, 2.f) * fade);
+    SetShaderValue(lit, K.scatter, &scatter, SHADER_UNIFORM_VEC3);
+    const float caustics = std::clamp(w.caustics, 0.f, 1.f), foam = std::clamp(w.foam, 0.f, 1.f);
+    const float open = std::max(w.openDepth, 0.f), invAmp = 1.f / std::max(pk.amplitude, 1e-3f), band = pk.amplitude + 0.05f;
+    SetShaderValue(lit, K.caustics, &caustics, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, K.foam, &foam, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, K.open, &open, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, K.invAmp, &invAmp, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, K.glint, &w.sunGlint, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, K.band, &band, SHADER_UNIFORM_FLOAT);
+}
+
+// The sea's surface: rings that thicken with distance round a point (the camera, which the
+// shader moves it to), so waves are well sampled near the eye and the surface reaches the horizon.
+Mesh makeWaterMesh() {
+    constexpr int R = 96, S = 192;
+    constexpr float r0 = 0.3f, r1 = 1500.f;
+    Mesh m = {};
+    m.vertexCount = 1 + R * S;
+    m.triangleCount = S + (R - 1) * S * 2;
+    m.vertices = (float*)MemAlloc((unsigned)m.vertexCount * 3 * sizeof(float));
+    m.normals = (float*)MemAlloc((unsigned)m.vertexCount * 3 * sizeof(float));
+    m.texcoords = (float*)MemAlloc((unsigned)m.vertexCount * 2 * sizeof(float));
+    m.indices = (unsigned short*)MemAlloc((unsigned)m.triangleCount * 3 * sizeof(unsigned short));
+    for (int v = 0; v < m.vertexCount; v++) {
+        m.normals[v * 3 + 1] = 1;
+        m.normals[v * 3] = m.normals[v * 3 + 2] = 0;
+    }
+    for (int i = 0; i < R; i++) {
+        const float r = r0 * std::pow(r1 / r0, (float)i / (R - 1));
+        for (int j = 0; j < S; j++) {
+            const float a = 2 * PI * j / S;
+            const int v = 1 + i * S + j;
+            m.vertices[v * 3] = r * std::cos(a);
+            m.vertices[v * 3 + 1] = 0;
+            m.vertices[v * 3 + 2] = r * std::sin(a);
+        }
+    }
+    int k = 0;
+    auto tri = [&](int a, int b, int c) {
+        m.indices[k++] = (unsigned short)a; m.indices[k++] = (unsigned short)b; m.indices[k++] = (unsigned short)c;
+    };
+    for (int j = 0; j < S; j++) tri(0, 1 + (j + 1) % S, 1 + j);
+    for (int i = 0; i + 1 < R; i++)
+        for (int j = 0; j < S; j++) {
+            const int a = 1 + i * S + j, b = 1 + i * S + (j + 1) % S, c = a + S, d = b + S;
+            tri(a, b, c);
+            tri(b, d, c);
+        }
+    UploadMesh(&m, false);
+    return m;
+}
+Object3D& waterObject() {
+    if (!gpu.waterObj) {
+        gpu.waterObj = std::make_unique<Object3D>();
+        gpu.waterObj->name = "water";
+        gpu.waterObj->geometry = std::make_shared<Geometry>([] { return makeWaterMesh(); });
+        Material& m = gpu.waterObj->material;
+        m.doubleSided = true;
+        m.castShadow = false;
+    }
+    return *gpu.waterObj;
+}
+
 void setSceneUniforms(const Scene& s, const Camera& cam, const Shadows& sh, Texture2D envTex, float scale) {
+    setWaterUniforms(s, cam);
     const Shader& lit = gpu.lit;
     const LitLocs& L = gpu.L;
     SetShaderValue(lit, L.pxScale, &scale, SHADER_UNIFORM_FLOAT);
@@ -1854,9 +2150,15 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
         } else drawItem(it, Pass::Lit);
     }
     // Stable: at equal depth keep scene order, so coplanar layers do not swap between frames.
+    if (s.water.enabled) clear.push_back({ &waterObject(), MatrixIdentity(), std::numeric_limits<float>::max() });
     std::stable_sort(clear.begin(), clear.end(), [](const Item& a, const Item& b) { return a.viewDepth > b.viewDepth; });
     rlDisableDepthMask();
-    for (const Item& it : clear) drawItem(it, Pass::Lit);
+    for (const Item& it : clear) {
+        const bool surface = it.obj == gpu.waterObj.get();       // the sea's surface is its own mode of the lit shader
+        if (surface) { const int on = 1; SetShaderValue(gpu.lit, gpu.W.mode, &on, SHADER_UNIFORM_INT); }
+        drawItem(it, Pass::Lit);
+        if (surface) { const int off = 0; SetShaderValue(gpu.lit, gpu.W.mode, &off, SHADER_UNIFORM_INT); }
+    }
     rlEnableDepthMask();
     if (!emitters.empty()) drawParticles(s, cam, emitters, view, ft);
 
@@ -1901,6 +2203,59 @@ Vector3 sunAt(float hour) {
     return Vector3Normalize({ std::cos(a), std::sin(a) * 0.85f, -0.45f - 0.2f * std::sin(a) });
 }
 } // namespace
+
+// ------------------------------------------------------------------ water
+namespace {
+// The shader's sum, in the same float arithmetic: height and slope at p.
+float waveSum(const PackedWaves& p, float x, float z, double seconds, Vector2* slope) {
+    float h = 0, gx = 0, gz = 0;
+    const float t = (float)seconds;
+    for (int i = 0; i < p.count; i++) {
+        const float s = p.a[i].z * (p.a[i].x * x + p.a[i].y * z) - p.b[i].x * t + p.b[i].y;
+        const float u = std::max(0.5f + 0.5f * std::sin(s), 1e-4f), sh = p.b[i].z;
+        h += p.a[i].w * (2 * std::pow(u, sh) - 1);
+        const float d = p.a[i].w * sh * std::pow(u, sh - 1) * std::cos(s) * p.a[i].z;
+        gx += d * p.a[i].x;
+        gz += d * p.a[i].y;
+    }
+    if (slope) *slope = { gx, gz };
+    return h;
+}
+} // namespace
+
+float Water::height(float x, float z, double seconds) const {
+    return level + waveSum(packWaves(*this), x, z, seconds, nullptr);
+}
+Vector2 Water::slope(float x, float z, double seconds) const {
+    Vector2 g;
+    waveSum(packWaves(*this), x, z, seconds, &g);
+    return g;
+}
+Water Water::calm() {
+    Water w;
+    w.enabled = true;
+    w.waves = { { 20, 7.0f, 0.045f, 1, 1 }, { -35, 3.1f, 0.03f, 1, 1 }, { 75, 1.7f, 0.022f, 1, 1 },
+                { -58, 1.05f, 0.014f, 1, 1 }, { 31, 0.72f, 0.009f, 1, 1 }, { 112, 0.52f, 0.0065f, 1, 1 },
+                { -17, 0.4f, 0.005f, 1, 1 }, { 152, 0.29f, 0.0035f, 1, 1 } };
+    w.foam = 0.2f;
+    return w;
+}
+Water Water::choppy() {
+    Water w;
+    w.enabled = true;
+    w.waves = { { 15, 14.0f, 0.16f, 1.6f, 1 }, { -30, 7.0f, 0.1f, 1.8f, 1 }, { 60, 3.3f, 0.06f, 1.5f, 1 },
+                { -75, 1.8f, 0.035f, 1, 1 }, { 5, 0.9f, 0.02f, 1, 1 }, { 120, 0.5f, 0.01f, 1, 1 } };
+    return w;
+}
+Water Water::storm() {
+    Water w;
+    w.enabled = true;
+    w.waves = { { 10, 34.0f, 0.7f, 2.4f, 1 }, { -25, 17.0f, 0.42f, 2.6f, 1 }, { 40, 9.0f, 0.24f, 2.2f, 1 },
+                { -60, 4.5f, 0.12f, 1.8f, 1 }, { 80, 2.3f, 0.06f, 1.4f, 1 }, { -5, 1.2f, 0.03f, 1, 1 } };
+    w.foam = 1;
+    w.deep = { 10, 52, 66, 255 };
+    return w;
+}
 
 Sky Sky::day() {
     Sky k;
