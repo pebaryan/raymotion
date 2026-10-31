@@ -125,23 +125,19 @@ build/raymotion prefabs                        # list prefabs and their default 
 
 ### Runtime scripts
 
-Run the same native C++ composition code without rebuilding the application.
-The runtime command compiles and caches the scene against the prebuilt engine:
+Use the embedded `.as` backend for quick 2D motion graphics without a native compiler:
 
 ```sh
 cmake --build build --config Release --target raymotion_script
-build/raymotion_script list --script examples/starter/main.cpp
-build/raymotion_script preview hello --script examples/starter/main.cpp
-build/raymotion_script render hello --script examples/starter/main.cpp
+build/raymotion_script list --script examples/scripts/lower_third.as
+build/raymotion_script preview lower-third --script examples/scripts/lower_third.as
 ```
 
-Native `.cpp` files use the full engine API and need the matching C++ toolchain and
-development build. `.as` files use the optional embedded AngelScript backend and a
-smaller C++-like API without a runtime compiler dependency
-(`build/raymotion_script preview hello-script --script examples/scripts/hello.as`). See
-[runtime scripting](docs/scripting.md) for both workflows and the language-neutral
-interface for future Lua, Python or ActionScript backends. Disable AngelScript with
-`-DRAYMOTION_SCRIPTING=OFF`; native C++ remains available.
+The script API includes nested transforms, gradients, images, polygons, font choices,
+props and seeded animation. See [runtime scripting](docs/scripting.md) for the scope
+and available bindings. For 3D, audio, media timelines or other full engine features,
+use a normal CMake project. AngelScript is vendored; `-DRAYMOTION_SCRIPTING=OFF`
+disables that optional backend.
 
 ### Native C++ projects
 

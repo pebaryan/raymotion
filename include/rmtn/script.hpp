@@ -10,6 +10,7 @@ struct Scene {
 struct Description {
     std::string name;
     int w = 1920, h = 1080, fps = 30, duration = 0, supersample = 2;
+    int statementBudget = 1000000;
     unsigned int background = 0x04040a;
     std::vector<Scene> scenes;
 };
@@ -19,7 +20,8 @@ public:
     // CPU only: called during registration and again with merged input props.
     virtual Description configure(const Json& props) = 0;
     // Called only inside the renderer. Frame is local to the scene.
-    virtual void draw(const std::string& function, const Ctx& ctx, int frame) = 0;
+    virtual void draw(const std::string& function, const Ctx& ctx, int frame,
+                      const Json& props, int statementBudget) = 0;
 };
 using Loader = std::function<std::shared_ptr<Program>(const std::string& path)>;
 // Register once at application startup. Extension includes the dot; duplicate registration throws.

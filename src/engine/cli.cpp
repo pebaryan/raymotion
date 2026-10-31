@@ -17,7 +17,6 @@
 #include <stdexcept>
 #include <chrono>
 #include <thread>
-#include <optional>
 #include "rmtn/timeline.hpp"
 #include "rmtn/draw.hpp"
 #include "rmtn/synth.hpp"
@@ -38,7 +37,6 @@
 #endif
 
 namespace rmtn {
-std::optional<int> runNativeCpp(int argc, const char** argv);
 namespace {
 
 const int AUDIO_RATE = 48000;
@@ -310,8 +308,6 @@ void usage() {
     puts("         --ss N        supersampling 1, 2 or 4 (default: the composition's)");
     puts("         --props JSON  input props merged over the defaults; @file.json reads a file");
     puts("         --script PATH load a runtime composition (.as); repeat for multiple files");
-    puts("                       .cpp/.cc/.cxx compile a native scene against the prebuilt engine");
-    puts("         --cpp-entry FUNCTION native registration function (default registerComps)");
 }
 
 int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
@@ -628,7 +624,6 @@ int runCli(int argc, const char** argv, const RegisterFn& registerAll){
     icons::registerPrefabs();   // built-in prefabs first, so a project's own may replace them
     flags::registerPrefabs();
     try {
-        if (auto status = runNativeCpp(argc, argv)) return *status;
         std::vector<std::string> scripts;
         std::vector<const char*> args;
         for (int i = 0; i < argc; ++i) {

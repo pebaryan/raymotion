@@ -41,9 +41,9 @@ class Scripts(unittest.TestCase):
         self.path = self.cwd / "scene with spaces.as"
         self.path.write_text(SOURCE)
 
-    def run_cli(self, *args, ok=True):
+    def run_cli(self, *args, ok=True, timeout=45):
         result = subprocess.run([EXE, *map(str, args)], cwd=self.cwd,
-                                text=True, capture_output=True, timeout=45)
+                                text=True, capture_output=True, timeout=timeout)
         self.assertEqual(result.returncode, 0 if ok else 2, result.stdout + result.stderr)
         return result.stdout + result.stderr
 
@@ -58,6 +58,18 @@ class Scripts(unittest.TestCase):
     def test_shipped_sample_draws(self):
         self.run_cli("still", "hello-script", "--script", SAMPLE, "--at", 110, "--ss", 1, "--png", "sample.png")
         self.assertGreater((self.cwd / "sample.png").stat().st_size, 1000)
+        lower_third = pathlib.Path(__file__).resolve().parents[1] / "examples/scripts/lower_third.as"
+        self.run_cli("still", "lower-third", "--script", lower_third, "--at", 90,
+                     "--props", '{"title":"Runtime API"}', "--ss", 1, "--png", "lower-third.png")
+        self.assertGreater((self.cwd / "lower-third.png").stat().st_size, 1000)
+        bounded = CONFIG.replace('c.duration = 4;', 'c.duration = 4; c.statementBudget = 5;') + '''
+void first(int t) { int i = 0; while (i < 100) i++; }
+void second(int t) { }
+'''
+        self.path.write_text(bounded)
+        output = self.run_cli("still", "fixture", "--script", self.path, "--at", 0,
+                              "--ss", 1, "--png", "budget.png", ok=False, timeout=5)
+        self.assertIn("statement budget exceeded", output)
 
     def test_reload_after_edit_without_build(self):
         self.assertIn("64x32", self.run_cli("list", "--script", self.path))
@@ -88,6 +100,7 @@ class Scripts(unittest.TestCase):
     def test_contract_failures(self):
         cases = [
             (SOURCE.replace('c.w = 64', 'c.w = 0').replace('c.w = int(props::number("width", 64));', ''), "invalid"),
+            (SOURCE.replace('c.duration = 4;', 'c.duration = 4; c.statementBudget = 100000001;'), "statementBudget"),
             (SOURCE.replace('scene(0, 2, "first")', 'scene(3, 2, "first")'), "timeline"),
             (SOURCE.replace('void first(int t)', 'void missing(int t)'), "missing void first"),
             (SOURCE.replace('void configure', 'void missing'), "missing void configure"),
@@ -99,6 +112,18 @@ class Scripts(unittest.TestCase):
             with self.subTest(message=message):
                 self.path.write_text(source)
                 self.assertIn(message, self.run_cli("list", "--script", self.path, ok=False))
+
+    def test_statement_budget_aborts_with_diagnostic(self):
+        self.path.write_text(CONFIG.replace('scene(0, 2, "first"); scene(2, 2, "second");',
+                                            'while (true) {}'))
+        output = self.run_cli("list", "--script", self.path, ok=False, timeout=5)
+        self.assertIn("statement budget exceeded", output)
+
+    def test_global_variable_is_rejected_during_build(self):
+        self.path.write_text("int counter = 0;\n" + SOURCE)
+        output = self.run_cli("list", "--script", self.path, ok=False, timeout=5)
+        self.assertIn("Global variables", output)
+        self.assertIn(":1:", output)
 
     @unittest.skipUnless(GL, "needs OpenGL")
     def test_frames_props_and_parallel_workers(self):

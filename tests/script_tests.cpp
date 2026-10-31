@@ -7,15 +7,16 @@ using namespace rmtn;
 namespace {
 void require(bool ok) { if (!ok) throw std::runtime_error("script backend contract failed"); }
 struct TestProgram : script::Program {
-    int frame = -1;
+    int frame = -1, drawWidth = -1, drawBudget = -1;
     script::Description configure(const Json& props) override {
         script::Description d;
         d.name = "backend-test"; d.w = props.integer("width", 64); d.h = 32; d.duration = 20;
         d.scenes.push_back({5, 10, "body"});
         return d;
     }
-    void draw(const std::string& function, const Ctx&, int t) override {
+    void draw(const std::string& function, const Ctx&, int t, const Json& props, int budget) override {
         require(function == "body"); frame = t;
+        drawWidth = props.integer("width", -1); drawBudget = budget;
     }
 };
 }
@@ -29,13 +30,18 @@ int main() {
         require(r.size() == 1 && r[0].w == 64);
         r[0].build(r[0], Json::parse("{\"width\":128}"));
         require(r[0].w == 128 && r[0].roots.size() == 1);
-        r[0].roots[0]->fn(Ctx{}, 8);
-        require(program->frame == 8);
+        auto drawWidth128 = r[0].roots[0]->fn;
+        r[0].build(r[0], Json::parse("{\"width\":256}"));
+        r[0].roots[0]->fn(Ctx{}, 3);
+        require(program->drawWidth == 256 && program->drawBudget == 1000000);
+        drawWidth128(Ctx{}, 8);
+        require(program->frame == 8 && program->drawWidth == 128);
         try { script::registerFile(r, "unused.testvm"); require(false); }
         catch (const std::runtime_error& e) { require(std::string(e.what()).find("duplicate") != std::string::npos); }
         try { r[0].build(r[0], Json::parse("{\"width\":-1}")); require(false); }
         catch (const std::runtime_error& e) { require(std::string(e.what()).find("invalid") != std::string::npos); }
         program.reset(); require(!weak.expired());
+        drawWidth128 = {};
         r.clear(); require(weak.expired());
         std::cout << "script backend contract passed\n";
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }

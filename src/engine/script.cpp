@@ -29,21 +29,25 @@ void validate(const Description& d) {
         throw std::runtime_error("invalid script composition dimensions, fps or duration");
     if (d.supersample != 1 && d.supersample != 2 && d.supersample != 4)
         throw std::runtime_error("script supersample must be 1, 2 or 4");
+    if (d.statementBudget < 1 || d.statementBudget > 100000000)
+        throw std::runtime_error("script statementBudget must be between 1 and 100000000");
     for (const auto& s : d.scenes)
         if (s.function.empty() || s.start < 0 || s.duration < 1 || (long long)s.start + s.duration > d.duration)
             throw std::runtime_error("script scene must lie inside the composition timeline");
 }
-void apply(Comp& c, const Description& d, const std::shared_ptr<Program>& program) {
+void apply(Comp& c, const Description& d, const std::shared_ptr<Program>& program,
+           const Json& props) {
     validate(d);
     c.name = d.name; c.w = d.w; c.h = d.h; c.fps = d.fps;
     c.duration = d.duration; c.supersample = d.supersample; c.background = mkColor(d.background);
     c.roots.clear();
     auto scenes = d.scenes;
     if (scenes.empty()) scenes.push_back({0, d.duration, "draw"});
+    const int statementBudget = d.statementBudget;
     for (const auto& scene : scenes) {
         auto function = scene.function;
-        addRoot(c.roots, scene.start, scene.duration)->fn = [program, function](const Ctx& ctx, int t) {
-            program->draw(function, ctx, t);
+        addRoot(c.roots, scene.start, scene.duration)->fn = [program, function, props, statementBudget](const Ctx& ctx, int t) {
+            program->draw(function, ctx, t, props, statementBudget);
         };
     }
 }
@@ -62,14 +66,14 @@ void registerFile(Registry& registry, const std::string& path) {
     auto program = it->second(std::filesystem::absolute(path).string());
     if (!program) throw std::runtime_error("script backend returned no program: " + path);
     Comp c;
-    apply(c, program->configure(Json()), program);
+    apply(c, program->configure(Json()), program, Json());
     for (const auto& existing : registry)
         if (existing.name == c.name) throw std::runtime_error("duplicate composition name: " + c.name);
     const auto name = c.name;
     c.build = [program, name](Comp& target, const Json& props) {
         auto description = program->configure(props);
         if (description.name != name) throw std::runtime_error("script props must not change composition name");
-        apply(target, description, program);
+        apply(target, description, program, props);
     };
     registry.push_back(std::move(c));
 }

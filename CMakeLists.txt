@@ -111,19 +111,18 @@ target_compile_definitions(rmtn_engine PRIVATE RMTN_BUNDLED_ASSETS="${CMAKE_CURR
 
 # Runtime scripting uses the same renderer and a language-neutral backend contract.
 if(RAYMOTION_SCRIPTING)
-  include(FetchContent)
-  FetchContent_Declare(angelscript
-    URL https://www.angelcode.com/angelscript/sdk/files/angelscript_2.38.0.zip
-    URL_HASH SHA256=b33b5dbcda10317ef67d628353d83246984ce6fcac102d4dc2aed121eba52e6f
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    SOURCE_SUBDIR angelscript/projects/cmake)
-  FetchContent_MakeAvailable(angelscript)
+  set(RMTN_ANGELSCRIPT_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/angelscript")
+  add_subdirectory("${RMTN_ANGELSCRIPT_SOURCE_DIR}/angelscript/projects/cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/angelscript-build" EXCLUDE_FROM_ALL)
   target_sources(rmtn_engine PRIVATE src/engine/script_angelscript.cpp
-    "${angelscript_SOURCE_DIR}/add_on/scriptstdstring/scriptstdstring.cpp"
-    "${angelscript_SOURCE_DIR}/add_on/scriptmath/scriptmath.cpp")
+    "${RMTN_ANGELSCRIPT_SOURCE_DIR}/add_on/scriptstdstring/scriptstdstring.cpp"
+    "${RMTN_ANGELSCRIPT_SOURCE_DIR}/add_on/scriptmath/scriptmath.cpp"
+    "${RMTN_ANGELSCRIPT_SOURCE_DIR}/add_on/scriptarray/scriptarray.cpp")
   target_include_directories(rmtn_engine PRIVATE
-    "${angelscript_SOURCE_DIR}/add_on/scriptstdstring"
-    "${angelscript_SOURCE_DIR}/add_on/scriptmath")
+    "${RMTN_ANGELSCRIPT_SOURCE_DIR}/angelscript/include"
+    "${RMTN_ANGELSCRIPT_SOURCE_DIR}/add_on/scriptstdstring"
+    "${RMTN_ANGELSCRIPT_SOURCE_DIR}/add_on/scriptmath"
+    "${RMTN_ANGELSCRIPT_SOURCE_DIR}/add_on/scriptarray")
   target_compile_definitions(rmtn_engine PRIVATE RMTN_ANGELSCRIPT=1)
   target_link_libraries(rmtn_engine PRIVATE angelscript)
 endif()
@@ -131,7 +130,6 @@ endif()
 # Small runtime host: no showcase compositions need to be compiled to run scripts.
 add_executable(raymotion_script src/script_main.cpp)
 target_link_libraries(raymotion_script PRIVATE rmtn_engine)
-include(cmake/NativeCpp.cmake)
 
 # ---------------------------------------------------------------- example projects
 if(RAYMOTION_BUILD_EXAMPLES)
@@ -213,24 +211,9 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING)
   add_executable(raymotion_script_tests tests/script_tests.cpp)
   target_link_libraries(raymotion_script_tests PRIVATE rmtn_engine)
   add_test(NAME script_backend_contract COMMAND raymotion_script_tests)
-  add_executable(raymotion_cpp_reference examples/starter/main.cpp)
-  target_link_libraries(raymotion_cpp_reference PRIVATE rmtn_engine)
   find_package(Python3 COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND)
-    add_test(NAME native_cpp_runtime COMMAND "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cpp_runtime.py" "$<TARGET_FILE:raymotion_script>"
-      "$<TARGET_FILE:raymotion_cpp_reference>" "${RMTN_CPP_SDK_DIRECTORY}"
-      "$<TARGET_LINKER_FILE:rmtn_engine>")
-    add_test(NAME native_cpp_rendering COMMAND "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cpp_runtime.py" "$<TARGET_FILE:raymotion_script>"
-      "$<TARGET_FILE:raymotion_cpp_reference>" "${RMTN_CPP_SDK_DIRECTORY}"
-      "$<TARGET_LINKER_FILE:rmtn_engine>" --gl)
-    set_tests_properties(native_cpp_runtime native_cpp_rendering PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE)
-    set_tests_properties(native_cpp_rendering PROPERTIES LABELS gl)
-  endif()
-  if(RAYMOTION_SCRIPTING)
-    find_package(Python3 COMPONENTS Interpreter)
-    if(Python3_Interpreter_FOUND)
+    if(RAYMOTION_SCRIPTING)
       add_test(NAME script_runtime COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_script.py" "$<TARGET_FILE:raymotion_script>")
       add_test(NAME script_rendering COMMAND "${Python3_EXECUTABLE}"
@@ -238,6 +221,9 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING)
       set_tests_properties(script_runtime PROPERTIES TIMEOUT 120)
       set_tests_properties(script_rendering PROPERTIES TIMEOUT 180 LABELS gl)
     endif()
+  endif()
+  if(RAYMOTION_SCRIPTING AND NOT Python3_Interpreter_FOUND)
+    message(STATUS "Python3 not found; runtime scripting tests are disabled")
   endif()
 endif()
 if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
