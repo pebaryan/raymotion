@@ -52,6 +52,10 @@ Try it
   raymotion_script preview hello-script --script scripts/hello.as
                                               a runtime composition: edit it, run it again
 
+Native C++ compositions passed with --script need the original source build and its
+build-tree SDK. This packaged install does not include that SDK and will report that
+the native C++ runtime is unavailable.
+
 Keep the assets folder next to raymotion.exe.
 Source, docs and the intro video: https://github.com/pebaryan/raymotion
 Licensed under the Apache License 2.0 (LICENSE.txt); third-party notices in NOTICE.txt and licenses/.

@@ -122,6 +122,8 @@ target_include_directories(rmtn_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/inclu
 # Single-header decoders (stb_image, nanosvg), compiled privately into media.cpp.
 target_include_directories(rmtn_engine PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
 target_link_libraries(rmtn_engine PUBLIC raylib)
+# Source-build-only compile-on-demand runner for native composition files.
+include(cmake/NativeCpp.cmake)
 # Development fallback for bundled fonts; installed apps ship assets/ beside the executable.
 target_compile_definitions(rmtn_engine PRIVATE RMTN_BUNDLED_ASSETS="${CMAKE_CURRENT_SOURCE_DIR}/assets")
 
@@ -253,6 +255,8 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING)
   endif()
 endif()
 if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
+  add_executable(raymotion_cpp_reference examples/starter/main.cpp)
+  target_link_libraries(raymotion_cpp_reference PRIVATE rmtn_engine)
   # Pure logic: runs anywhere.
   add_executable(raymotion_ht_tests tests/ht_logic_tests.cpp)
   add_test(NAME ht_semantics COMMAND raymotion_ht_tests)
@@ -428,5 +432,15 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
     add_test(NAME cli_regressions COMMAND "${Python3_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli.py" "$<TARGET_FILE:raymotion>" "$<TARGET_FILE:raymotion_starter>")
     set_tests_properties(cli_regressions PROPERTIES TIMEOUT 300 LABELS gl)
+    add_test(NAME native_cpp_runtime COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cpp_runtime.py" "$<TARGET_FILE:raymotion_cpp_reference>"
+      "$<TARGET_FILE:raymotion_cpp_reference>" "${RMTN_CPP_SDK_DIRECTORY}"
+      "$<TARGET_LINKER_FILE:rmtn_engine>")
+    add_test(NAME native_cpp_rendering COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cpp_runtime.py" "$<TARGET_FILE:raymotion_cpp_reference>"
+      "$<TARGET_FILE:raymotion_cpp_reference>" "${RMTN_CPP_SDK_DIRECTORY}"
+      "$<TARGET_LINKER_FILE:rmtn_engine>" --gl)
+    set_tests_properties(native_cpp_runtime native_cpp_rendering PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE)
+    set_tests_properties(native_cpp_rendering PROPERTIES LABELS gl)
   endif()
 endif()

@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <chrono>
 #include <thread>
+#include <optional>
 #include "rmtn/timeline.hpp"
 #include "rmtn/draw.hpp"
 #include "rmtn/synth.hpp"
@@ -38,6 +39,7 @@
 #endif
 
 namespace rmtn {
+std::optional<int> runNativeCpp(int argc, const char** argv);
 namespace {
 
 const int AUDIO_RATE = 48000;
@@ -308,7 +310,9 @@ void usage() {
     puts("options: --ffmpeg PATH overrides auto-detected ffmpeg binary");
     puts("         --ss N        supersampling 1, 2 or 4 (default: the composition's)");
     puts("         --props JSON  input props merged over the defaults; @file.json reads a file");
-    puts("         --script PATH load a runtime composition (.as); repeat for multiple files");
+    puts("         --script PATH load a runtime composition (.as); repeat for multiple files,");
+    puts("                       or compile and run one native C++ composition (.cpp/.cc/.cxx)");
+    puts("         --cpp-entry FUNCTION registration function name (default registerComps)");
 }
 
 int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
@@ -626,6 +630,8 @@ int runCli(int argc, const char** argv, const RegisterFn& registerAll){
     flags::registerPrefabs();
     rig::registerPrefabs();
     try {
+        // A .cpp script runs in its own compiled executable, which handles any .as scripts.
+        if (auto status = runNativeCpp(argc, argv)) return *status;
         std::vector<std::string> scripts;
         std::vector<const char*> args;
         for (int i = 0; i < argc; ++i) {
