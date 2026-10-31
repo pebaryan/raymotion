@@ -309,7 +309,8 @@ static void acting() {
         bent[Joint::Chest] = { 20, 30, -10 };
         bent[Joint::Neck] = { -15, 10, 5 };
         const rig::Pose o = rig::orient(b, bent, Joint::Head, { 0, 0, 1 }, { 0, -1, 0 });
-        const Matrix& H = rig::solve(b, o)[(size_t)Joint::Head];
+        const rig::Frames oriented = rig::solve(b, o);   // kept alive: H must not point into a temporary
+        const Matrix& H = oriented[(size_t)Joint::Head];
         const Vector3 hc = Vector3Transform({ 0, 0, 0 }, H);
         CHECK(near3(Vector3Subtract(Vector3Transform({ 0, 1, 0 }, H), hc), { 0, 0, 1 }, 1e-3f));
         CHECK(near3(Vector3Subtract(Vector3Transform({ 0, 0, 1 }, H), hc), { 0, -1, 0 }, 1e-3f));
