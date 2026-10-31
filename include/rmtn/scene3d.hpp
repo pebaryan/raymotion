@@ -25,6 +25,7 @@
 #include "particles.hpp"
 
 namespace rmtn {
+namespace splat { struct Cloud; }
 namespace g3d {
 
 // ------------------------------------------------------------------ geometry and models
@@ -150,6 +151,17 @@ struct Material {
         float weight = 1;           // stroke thickness multiplier
     } hatch;
 
+    // A cut by a plane in world space: nothing is drawn where dot(position, normal) > offset
+    // (so a front can sweep through an object), and a band `edgeWidth` wide in front of the cut
+    // glows in `edgeColor` (alpha = strength). The default offset hides nothing. Shadows
+    // are not cut.
+    struct Clip {
+        Vector3 normal{ 1, 0, 0 };
+        float offset = 1e9f;
+        float edgeWidth = 0;
+        Color edgeColor = BLANK;
+    } clip;
+
     // Ink lines, when the scene's lines are on (Scene::lines): colour (BLANK = the scene's)
     // and a multiplier on the scene's line width (0 = no lines around this object).
     Color lineColor = BLANK;
@@ -189,6 +201,27 @@ struct Instances {
     std::vector<Instance> list;
 };
 
+// ------------------------------------------------------------------ gaussian splats
+// A cloud of Gaussian splats (see splat.hpp) drawn in the object's space: one instanced quad
+// per splat, depth-sorted back to front each frame, blended over what is behind them and
+// hidden by opaque objects in front. Not lit, shadowed, fogged or tinted by water; the colour
+// is the splat's own (view-dependent where the cloud has spherical harmonics). Splats are
+// meant for up to about a million. `up` sets the look from t.
+struct Splats {
+    std::shared_ptr<const splat::Cloud> cloud;
+    struct Look {
+        float scale = 1;            // multiplies every splat's size
+        float opacity = 1;          // multiplies every splat's opacity
+        int shDegree = 1;           // 0 = flat colour, 1 = view-dependent where the cloud has it
+        // A sweeping front, in world space: splats with dot(position, clipNormal) > clipOffset
+        // are gone; those within `clipBand` behind it fade out and scatter by up to `scatter`.
+        Vector3 clipNormal{ 1, 0, 0 };
+        float clipOffset = 1e9f;
+        float clipBand = 0.5f;
+        float scatter = 0;
+    } look;
+};
+
 // ------------------------------------------------------------------ objects
 struct Object3D {
     std::string name;
@@ -217,6 +250,7 @@ struct Object3D {
     // geometry itself is not drawn.
     std::shared_ptr<const fx::Emitter3D> emitter;
     std::shared_ptr<Instances> instances;               // many copies of one baked mesh
+    std::shared_ptr<Splats> splats;                     // a Gaussian splat cloud
 
     std::function<void(int t, Object3D& self)> up;      // animate from the local frame
     std::vector<std::unique_ptr<Object3D>> children;
@@ -226,6 +260,7 @@ struct Object3D {
     Object3D* add(fx::Emitter3D e);                    // particles (billboards, streaks, quads)
     Object3D* add(fx::Emitter3D e, GeometryPtr g, Material m = {});   // mesh particles
     Object3D* add(std::shared_ptr<Instances> i, Material m = {});      // instanced bodies
+    Object3D* add(std::shared_ptr<Splats> s);                          // a splat cloud
     Object3D* add();                                   // empty group
 };
 
@@ -342,6 +377,7 @@ struct Water {
     };
     std::vector<Wave> waves;            // up to 8
     float speed = 1;                    // times every wave's speed
+    float fps = 30;                     // the film's frames per second: waves move in seconds
 
     Color deep{ 6, 62, 84, 255 };       // what the water scatters back
     Vector3 absorb{ 0.34f, 0.07f, 0.04f };   // loss per metre of path, per red/green/blue
@@ -412,6 +448,7 @@ struct Scene {
     Object3D* add(fx::Emitter3D e);
     Object3D* add(fx::Emitter3D e, GeometryPtr g, Material m = {});
     Object3D* add(std::shared_ptr<Instances> i, Material m = {});
+    Object3D* add(std::shared_ptr<Splats> s);
     Object3D* add();
     Object3D* find(const std::string& name);         // depth-first, nullptr when absent
 };

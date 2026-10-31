@@ -86,6 +86,8 @@ add_library(rmtn_engine STATIC
   src/engine/rig_skin.cpp
   src/engine/crowd.cpp
   src/engine/crowd_rig.cpp
+  src/engine/voxel.cpp
+  src/engine/splat.cpp
   src/engine/rig_ape.cpp
   src/engine/rig_bird.cpp
   src/engine/rig_chain.cpp
@@ -145,6 +147,7 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/skin_demo.cpp
     examples/showcase/crowd_demo.cpp
     examples/showcase/zombie_horde.cpp
+    examples/showcase/voxel_splats.cpp
     examples/showcase/tokens.cpp
     examples/showcase/own_compute.cpp
     examples/showcase/own_compute_v2.cpp
@@ -309,6 +312,13 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   add_executable(raymotion_crowd_tests tests/crowd_tests.cpp)
   target_link_libraries(raymotion_crowd_tests PRIVATE rmtn_engine)
   add_test(NAME crowd COMMAND raymotion_crowd_tests)
+  add_executable(raymotion_voxel_tests tests/voxel_tests.cpp)
+  target_link_libraries(raymotion_voxel_tests PRIVATE rmtn_engine)
+  add_test(NAME voxel COMMAND raymotion_voxel_tests)
+
+  add_executable(raymotion_splat_tests tests/splat_tests.cpp)
+  target_link_libraries(raymotion_splat_tests PRIVATE rmtn_engine)
+  add_test(NAME splat COMMAND raymotion_splat_tests)
 
   # A body baked by tools/skin_bake.py, posed by clips (writes stills; not a ctest).
   add_executable(raymotion_skin_view tests/skin_view.cpp)
