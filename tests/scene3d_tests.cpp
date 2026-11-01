@@ -5,8 +5,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <cstring>
 #include <fstream>
 #include <stdexcept>
+#include <string>
 
 using namespace rmtn;
 namespace fs = std::filesystem;
@@ -917,12 +919,282 @@ static void particles3d() {
     UnloadImage(b);
 }
 
-int main() {
+// Culling (Object3D::cullRadius): a subtree out of sight is not animated or drawn, yet the
+// picture is the same pixel for pixel, shadows of what is out of frame included.
+static void culling() {
+    struct Ups { int near = 0, shadow = 0, far = 0; };
+    auto run = [](bool cull, Ups& ups) {
+        auto s = std::make_shared<g3d::Scene>();
+        s->camera.position = { 0, 2, 10 };
+        s->camera.target = { 0, 1, 0 };
+        s->camera.fov = 40;
+        g3d::Material m;
+        m.roughness = 1;
+        s->add(g3d::Geometry::plane(60, 40), m);
+        // A low sun from the left: the box left of the frame casts its shadow into it.
+        s->lights.push_back(g3d::Light::directional({ -10, 3, 0 }, WHITE, 1.6f, true));
+        s->lights.back().shadowExtent = 25;
+        auto group = [&](Vector3 at, int* count) {
+            g3d::Object3D* g = s->add();
+            g->position = at;
+            if (cull) { g->cullRadius = 1.8f; g->cullCentre = { 0, 1, 0 }; }
+            g3d::Object3D* b = g->add(g3d::Geometry::box(1.4f, 2, 1.4f), m);
+            b->position = { 0, 1, 0 };
+            b->up = [count](int, g3d::Object3D&) { (*count)++; };
+        };
+        group({ 0, 0, 0 }, &ups.near);                 // in frame
+        group({ -9.5f, 0, 0 }, &ups.shadow);           // out of frame, its shadow in
+        group({ 40, 0, -20 }, &ups.far);               // out of frame, its shadow too
+        Comp c = sceneComp(s);
+        return render(c, 0);
+    };
+    Ups all, culled;
+    Image a = run(false, all), b = run(true, culled);
+    CHECK(a.width == b.width && std::memcmp(a.data, b.data, (size_t)a.width * a.height * 4) == 0);
+    CHECK(all.near == 1 && all.shadow == 1 && all.far == 1);
+    CHECK(culled.near == 1);                           // seen: animated
+    CHECK(culled.shadow == 1);                         // unseen, but its shadow is: kept
+    CHECK(culled.far == 0);                            // nothing of it reaches the view: skipped
+    UnloadImage(a);
+    UnloadImage(b);
+}
+
+// Instancing: bodies drawn from a baked mesh match the same bodies as ordinary objects, in
+// the lit pass and in the shadow maps, with an unseen one still casting its shadow into view.
+static void instancing() {
+    auto bake = [] {
+        auto am = std::make_shared<g3d::AnimatedMesh>();
+        am->rest = g3d::Geometry::box(1, 1, 1);
+        const Mesh& m = am->rest->mesh();
+        am->frames = 2;
+        am->vertices = m.vertexCount;
+        for (int f = 0; f < 2; f++)
+            for (int v = 0; v < m.vertexCount; v++) {
+                for (int k = 0; k < 3; k++) {
+                    float p = m.vertices[v * 3 + k];
+                    if (f == 1 && k == 1) p *= 1.5f;                // frame 1: half again as tall
+                    am->positions.push_back(p);
+                    am->normals.push_back(m.normals[v * 3 + k]);
+                }
+            }
+        am->centre = { 0, 0, 0 };
+        am->radius = 1.2f;                                          // a unit box, grown by half in y
+        return am;
+    };
+    struct Body { Vector3 at; float yaw, scale; };
+    const std::vector<Body> bodies = { { { -1.5f, 0.6f, 0 }, 0, 1 }, { { 0, 0.5f, 1 }, 30, 1 }, { { 1.6f, 0.9f, -1 }, 65, 1.4f },
+                                       { { 0.4f, 0.5f, -2.5f }, 110, 0.8f }, { { -9.5f, 0.5f, 0 }, 20, 1 } };   // the last: off screen
+    auto run = [&](bool instanced, float tall, bool cull) {
+        auto s = std::make_shared<g3d::Scene>();
+        s->camera.position = { 0, 2.5f, 8 };
+        s->camera.target = { 0, 0.5f, 0 };
+        s->camera.fov = 40;
+        g3d::Material m;
+        m.roughness = 0.8f;
+        m.color = { 200, 120, 90, 255 };
+        s->add(g3d::Geometry::plane(60, 40), m);
+        s->lights.push_back(g3d::Light::directional({ -10, 3, 0 }, WHITE, 1.6f, true));
+        s->lights.back().shadowExtent = 25;
+        if (instanced) {
+            auto set = std::make_shared<g3d::Instances>();
+            set->mesh = bake();
+            for (const Body& b : bodies) {
+                g3d::Instance i;
+                i.position = b.at;
+                i.yaw = b.yaw;
+                i.scale = b.scale;
+                i.frame = tall;                                     // 0 or 1: one baked frame, no blend
+                i.clipLength = 2;
+                set->list.push_back(i);
+            }
+            g3d::Object3D* o = s->add(set, m);
+            (void)o;
+        } else {
+            for (const Body& b : bodies) {
+                g3d::Object3D* o = s->add(g3d::Geometry::box(1, 1 + 0.5f * tall, 1), m);
+                o->position = b.at;
+                o->rotation = { 0, b.yaw, 0 };
+                o->scale = { b.scale, b.scale, b.scale };
+            }
+        }
+        (void)cull;
+        Comp c = sceneComp(s);
+        return render(c, 0);
+    };
+    for (int tall = 0; tall < 2; tall++) {
+        Image a = run(false, (float)tall, false), b = run(true, (float)tall, true);
+        long differ = 0;
+        for (int i = 0; i < a.width * a.height * 4; i++)
+            if (std::abs((int)((unsigned char*)a.data)[i] - (int)((unsigned char*)b.data)[i]) > 6) differ++;
+        std::printf("[scene3d] instancing, frame %d: %ld of %d channel values differ by more than 6\n", tall, differ, a.width * a.height * 4);
+        CHECK(a.width == b.width && differ < a.width * a.height * 4 / 2000);
+        UnloadImage(a);
+        UnloadImage(b);
+    }
+}
+
+// ---- water: the CPU's surface, the surface seen from above and below, the water's colour on
+// what is under it, and caustics that move the light about without changing its sum.
+static g3d::ScenePtr waterScene(bool water, float caustics, Vector3 eye, Vector3 target) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = eye;
+    s->camera.target = target;
+    s->camera.fov = 55;
+    s->sky = g3d::Sky::day();
+    s->sky.sunLight = 0;
+    s->lights.push_back(g3d::Light::directional({ 3, 9, 2 }, WHITE, 1.5f, false));
+    g3d::Material sand;
+    sand.color = { 214, 196, 150, 255 };
+    sand.roughness = 0.9f;
+    sand.receiveShadow = false;
+    s->add(g3d::Geometry::plane(60, 60), sand)->position = { 0, -3, 0 };
+    g3d::Material rock;
+    rock.color = { 130, 128, 124, 255 };
+    s->add(g3d::Geometry::sphere(0.8f), rock)->position = { 1.5f, -2.4f, -1 };
+    s->add(g3d::Geometry::box(0.6f, 3, 0.6f), rock)->position = { -2, -1.5f, -2 };
+    if (water) {
+        s->water = g3d::Water::calm();
+        s->water.caustics = caustics;
+    }
+    return s;
+}
+// Like sceneComp, but long enough to render later frames.
+static Comp longComp(g3d::ScenePtr scene, int w = W, int h = H) {
+    Comp c;
+    c.w = w; c.h = h; c.duration = 20; c.background = BLACK;
+    addRoot(c.roots, 0, 600)->fn = g3d::draw(scene, {});
+    return c;
+}
+static void dumpWater(const char* name, const Image& img) {
+    if (const char* dir = std::getenv("RMTN_WATER_DUMP")) {
+        fs::create_directories(dir);
+        ExportImage(img, (fs::path(dir) / name).string().c_str());
+    }
+}
+static void waterTest() {
+    // The CPU surface: slope is the derivative of height, the level is the mean, time moves it.
+    {
+        g3d::Water w = g3d::Water::choppy();
+        w.level = 2;
+        double meanH = 0, maxErr = 0;
+        int n = 0;
+        for (float x = -20; x < 20; x += 1.37f)
+            for (float z = -20; z < 20; z += 1.91f) {
+                const float e = 0.002f;
+                const Vector2 g = w.slope(x, z, 3.0);
+                const float dx = (w.height(x + e, z, 3.0) - w.height(x - e, z, 3.0)) / (2 * e);
+                const float dz = (w.height(x, z + e, 3.0) - w.height(x, z - e, 3.0)) / (2 * e);
+                maxErr = std::max({ maxErr, (double)std::fabs(dx - g.x), (double)std::fabs(dz - g.y) });
+                meanH += w.height(x, z, 3.0);
+                n++;
+            }
+        CHECK(maxErr < 0.01);
+        CHECK(std::fabs(meanH / n - 2.0) < 0.35);
+        CHECK(std::fabs(w.height(3, 4, 0.0) - w.height(3, 4, 1.0)) > 1e-3f);
+        CHECK(w.height(5, 5, 2.5) == w.height(5, 5, 2.5));
+        CHECK(w.submerged({ 0, w.level - 5, 0 }, 1.0) && !w.submerged({ 0, w.level + 5, 0 }, 1.0));
+        g3d::Water off;
+        CHECK(!off.submerged({ 0, -100, 0 }, 0.0));
+    }
+    const Vector3 above{ 0, 2.5f, 7 }, aim{ 0, -1.5f, 0 };
+    // Seen from above, the surface reflects the sky over the floor it hides: the picture changes.
+    {
+        Comp dry = longComp(waterScene(false, 0, above, aim)), wet = longComp(waterScene(true, 1, above, aim));
+        Image a = render(dry, 5), b = render(wet, 5);
+        long diff = 0;
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) diff += std::abs(luma(GetImageColor(a, x, y)) - luma(GetImageColor(b, x, y)));
+        CHECK(diff > (long)W * H * 3);
+        CHECK(allOpaque(b));
+        dumpWater("above_dry.png", a); dumpWater("above_wet.png", b);
+        Image b2 = render(wet, 5);
+        CHECK(std::memcmp(b.data, b2.data, (size_t)W * H * 4) == 0);   // the same frame twice is the same picture
+        UnloadImage(a); UnloadImage(b); UnloadImage(b2);
+    }
+    // Under the surface: the sand is bluer and darker than dry, and looking up shows the window.
+    const Vector3 diver{ 0, -1.2f, 6 }, ahead{ 0, -2.2f, 0 };
+    {
+        Comp dry = longComp(waterScene(false, 0, diver, ahead)), wet = longComp(waterScene(true, 0, diver, ahead));
+        Image a = render(dry, 5), b = render(wet, 5);
+        const Color ca = GetImageColor(a, W / 2, H - 20), cb = GetImageColor(b, W / 2, H - 20);   // sand near the diver
+        CHECK(ca.r > ca.b);                                  // dry sand is warm
+        CHECK(cb.b >= cb.r);                                 // wet: red is gone first
+        CHECK(luma(cb) < luma(ca));
+        dumpWater("under.png", b);
+        UnloadImage(a); UnloadImage(b);
+        Comp up = longComp(waterScene(true, 1, diver, { 0, 6, 0 }));
+        Image c = render(up, 5);
+        const Color top = GetImageColor(c, W / 2, 10);
+        CHECK(top.r + top.g + top.b > 60);                   // not black: the sky through the window
+        UnloadImage(c);
+    }
+    // Caustics: the sunlit floor gets light and dark patches with the same overall brightness.
+    {
+        const Vector3 look{ 0, -1.0f, 4 }, floorAt{ 0, -3, 0 };
+        Comp flat = longComp(waterScene(true, 0, look, floorAt)), caus = longComp(waterScene(true, 1, look, floorAt));
+        Image a = render(flat, 5), b = render(caus, 5), b2 = render(caus, 40);
+        auto stats = [](const Image& img, double& mean, double& sd) {
+            double sum = 0, sum2 = 0;
+            int n = 0;
+            for (int y = H * 3 / 4; y < H - 4; y++)          // the near floor, clear of the rocks
+                for (int x = W / 4; x < W * 3 / 4; x++) {
+                    const double l = luma(GetImageColor(img, x, y));
+                    sum += l; sum2 += l * l; n++;
+                }
+            mean = sum / n;
+            sd = std::sqrt(std::max(0.0, sum2 / n - mean * mean));
+        };
+        double m0, s0, m1, s1;
+        stats(a, m0, s0); stats(b, m1, s1);
+        CHECK(s1 > s0 * 1.5 + 1);                            // a pattern where there was none
+        CHECK(m1 > m0 * 0.6 && m1 < m0 * 1.6);               // the light is moved, not made
+        long moved = 0;
+        for (int y = H * 3 / 4; y < H - 4; y++)
+            for (int x = W / 4; x < W * 3 / 4; x++)
+                moved += std::abs(luma(GetImageColor(b, x, y)) - luma(GetImageColor(b2, x, y)));
+        CHECK(moved > 200);                                  // it moves with time
+        dumpWater("caustics.png", b);
+        UnloadImage(a); UnloadImage(b); UnloadImage(b2);
+    }
+    if (std::getenv("RMTN_WATER_DUMP")) {          // pictures to look at, not checks
+        for (int k = 0; k < 4; k++) {
+            auto sea = std::make_shared<g3d::Scene>();
+            sea->sky = k < 3 ? g3d::Sky::at(k == 2 ? 17.6f : 10.5f) : g3d::Sky::day();
+            sea->sky.sunLight = 0;
+            sea->lights.push_back(g3d::Light::directional({ -3, k == 2 ? 2.2f : 7, -9 }, { 255, 244, 224, 255 }, 2.2f, false));
+            sea->water = k == 0 ? g3d::Water::choppy() : g3d::Water::storm();
+            if (k == 3) sea->water = g3d::Water::calm();
+            sea->water.openDepth = k == 3 ? 0 : 40;
+            sea->camera.position = k == 3 ? g3d::Camera{}.position : Vector3{ 0, k == 1 ? 7.f : 3.f, 12 };
+            sea->camera.target = k == 3 ? Vector3{ 0, 0, 0 } : Vector3{ 0, 1.2f, -20 };
+            sea->camera.fov = 60;
+            if (k == 3) {                              // from below: looking up at the window
+                sea->camera.position = { 0, -3, 4 };
+                sea->camera.target = { 0, 3, -2 };
+            }
+            sea->camera.farPlane = 4000;
+            Comp c = longComp(sea, 960, 540);
+            Image img = render(c, 60 + k * 7);
+            dumpWater(("sea" + std::to_string(k) + ".png").c_str(), img);
+            UnloadImage(img);
+        }
+    }
+    {
+        Comp wet = longComp(waterScene(true, 1, above, aim));
+        Image b = render(wet, 40);
+        dumpWater("surface.png", b);
+        UnloadImage(b);
+    }
+}
+
+int main() try {
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
     InitWindow(W, H, "raymotion 3d");
     if (!IsWindowReady()) return 77;
-    const fs::path dir = fs::temp_directory_path() / "raymotion-scene3d-test";
+    // Beside the test (ctest runs it in the build directory), not in the system temp
+    // folder, which a sandboxed shell may not let it write to.
+    const fs::path dir = fs::current_path() / "raymotion-scene3d-test";
     fs::create_directories(dir);
     geometryExtents();
     placementAndDepth();
@@ -932,6 +1204,9 @@ int main() {
     viewportsAndOpacity();
     transparencyAndHierarchy();
     moreShadows();
+    culling();
+    instancing();
+    waterTest();
     environment(dir);
     skyAndFog();
     depthOfField();
@@ -949,4 +1224,7 @@ int main() {
     if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }
     std::puts("scene3d tests passed");
     return 0;
+} catch (const std::exception& e) {
+    std::fprintf(stderr, "uncaught: %s\n", e.what());
+    return 2;
 }

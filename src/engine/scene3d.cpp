@@ -2,10 +2,14 @@
 #include "rmtn/scene3d.hpp"
 #include "rmtn/render.hpp"
 #include "rmtn/media.hpp"
+#include "rmtn/splat.hpp"
 #include <raymath.h>
 #include <rlgl.h>
 #include <algorithm>
+#include <array>
 #include <climits>
+#include <cstring>
+#include <deque>
 #include <cmath>
 #include <map>
 #include <stdexcept>
@@ -30,7 +34,7 @@ const char* SKIN_VS_HEAD = R"(#version 330
 in vec3 vertexPosition; in vec2 vertexTexCoord; in vec3 vertexNormal; in vec4 vertexColor;
 in vec4 vertexBoneIndices; in vec4 vertexBoneWeights;
 uniform mat4 mvp; uniform mat4 matModel; uniform mat4 matNormal;
-uniform int skinned;
+uniform int skinned;                        // 0 none, 1 linear blend, 2 dual quaternion
 uniform mat4 boneMatrices[128];
 mat4 skinMatrix() {
     if (skinned == 0) return mat4(1.0);
@@ -39,24 +43,326 @@ mat4 skinMatrix() {
          + boneMatrices[int(vertexBoneIndices.z)] * vertexBoneWeights.z
          + boneMatrices[int(vertexBoneIndices.w)] * vertexBoneWeights.w;
 }
+// Dual-quaternion skinning (Kavan et al. 2007): the bones' rigid motions are blended as
+// rotations, so a bent joint keeps its volume instead of collapsing towards the bone.
+vec4 quatOf(mat3 m) {                       // m[c][r]; a rotation without scale
+    float t = m[0][0] + m[1][1] + m[2][2];
+    if (t > 0.0) { float s = sqrt(t + 1.0) * 2.0;
+        return vec4((m[1][2] - m[2][1]) / s, (m[2][0] - m[0][2]) / s, (m[0][1] - m[1][0]) / s, 0.25 * s); }
+    if (m[0][0] > m[1][1] && m[0][0] > m[2][2]) { float s = sqrt(1.0 + m[0][0] - m[1][1] - m[2][2]) * 2.0;
+        return vec4(0.25 * s, (m[1][0] + m[0][1]) / s, (m[2][0] + m[0][2]) / s, (m[1][2] - m[2][1]) / s); }
+    if (m[1][1] > m[2][2]) { float s = sqrt(1.0 + m[1][1] - m[0][0] - m[2][2]) * 2.0;
+        return vec4((m[1][0] + m[0][1]) / s, 0.25 * s, (m[2][1] + m[1][2]) / s, (m[2][0] - m[0][2]) / s); }
+    float s = sqrt(1.0 + m[2][2] - m[0][0] - m[1][1]) * 2.0;
+    return vec4((m[2][0] + m[0][2]) / s, (m[2][1] + m[1][2]) / s, 0.25 * s, (m[0][1] - m[1][0]) / s);
+}
+vec4 qmul(vec4 a, vec4 b) { return vec4(a.w * b.xyz + b.w * a.xyz + cross(a.xyz, b.xyz), a.w * b.w - dot(a.xyz, b.xyz)); }
+vec4 dqReal; vec4 dqDual;
+void blendDQ() {
+    dqReal = vec4(0.0); dqDual = vec4(0.0);
+    vec4 first = vec4(0.0);
+    for (int i = 0; i < 4; i++) {
+        float w = vertexBoneWeights[i];
+        if (w <= 0.0) continue;
+        mat4 m = boneMatrices[int(vertexBoneIndices[i])];
+        vec4 r = quatOf(mat3(m));
+        vec4 d = 0.5 * qmul(vec4(m[3].xyz, 0.0), r);
+        if (i == 0) first = r;
+        if (dot(r, first) < 0.0) { r = -r; d = -d; }          // the short way round
+        dqReal += w * r; dqDual += w * d;
+    }
+    float n = length(dqReal);
+    dqReal /= n; dqDual /= n;
+}
+vec3 dqRotate(vec3 v) { return v + 2.0 * cross(dqReal.xyz, cross(dqReal.xyz, v) + dqReal.w * v); }
+vec3 skinPosition(vec3 p) {
+    if (skinned != 2) return (skinMatrix() * vec4(p, 1.0)).xyz;
+    blendDQ();
+    vec3 t = 2.0 * (dqReal.w * dqDual.xyz - dqDual.w * dqReal.xyz + cross(dqReal.xyz, dqDual.xyz));
+    return dqRotate(p) + t;
+}
+vec3 skinNormal(vec3 n) { return skinned == 2 ? dqRotate(n) : mat3(skinMatrix()) * n; }
+// Instancing: each body's world matrix arrives as instanceTransform, with its animation
+// (two baked frames, the blend, a brightness) in the w of its columns, which an affine matrix
+// leaves at 0, 0, 0 and 1. The baked positions and normals are one texture: frame f's vertex v
+// is texel f * vatVerts + v of the first half, its normal the same texel of the second.
+in mat4 instanceTransform;
+uniform int instanced;
+uniform sampler2D vat;
+uniform int vatWidth; uniform int vatVerts; uniform int vatRows;
+mat4 instM; vec4 instAnim;
+void setupInstance() {
+    instM = instanceTransform;
+    instAnim = vec4(instM[0].w, instM[1].w, instM[2].w, instM[3].w);
+    instM[0].w = 0.0; instM[1].w = 0.0; instM[2].w = 0.0; instM[3].w = 1.0;
+}
+vec3 vatFetch(float frame, int row0) {
+    int i = int(frame) * vatVerts + gl_VertexID;
+    return texelFetch(vat, ivec2(i % vatWidth, row0 + i / vatWidth), 0).xyz;
+}
+vec3 instPosition() { return mix(vatFetch(instAnim.x, 0), vatFetch(instAnim.y, 0), instAnim.z); }
+vec3 instNormal() { return normalize(mix(vatFetch(instAnim.x, vatRows), vatFetch(instAnim.y, vatRows), instAnim.z)); }
+)";
+
+
+// ---- water: the wave sum is shared by the surface's vertices and every fragment's caustics
+const char* WATER_COMMON = R"(
+uniform int waterOn; uniform int waterMode;
+uniform float waterLevel; uniform float waterEye; uniform float waterTime; uniform vec2 waterCentre;
+uniform int waveCount; uniform vec4 waveA[8]; uniform vec4 waveB[8];
+// Height of the sea at p and its slope. A wave is (direction.xy, wavenumber, amplitude) and
+// (angular speed, phase, sharpness); sharpness 1 is a sine, more narrows the crests. `foot`
+// is the size of what is being sampled (a pixel, a blur): waves shorter than a few of it
+// fade out, as they would average out in the sample (0 = all of them).
+float waveHeightLod(vec2 p, float foot, out vec2 g) {
+    float h = 0.0; g = vec2(0.0);
+    for (int i = 0; i < 8; i++) {
+        if (i >= waveCount) break;
+        float fade = foot > 0.0 ? smoothstep(2.0, 5.0, 6.2832 / (waveA[i].z * foot)) : 1.0;
+        if (fade <= 0.0) continue;
+        float s = waveA[i].z * dot(waveA[i].xy, p) - waveB[i].x * waterTime + waveB[i].y;
+        float u = max(0.5 + 0.5 * sin(s), 1e-4), sh = waveB[i].z;
+        h += fade * waveA[i].w * (2.0 * pow(u, sh) - 1.0);
+        g += fade * waveA[i].w * sh * pow(u, sh - 1.0) * cos(s) * waveA[i].z * waveA[i].xy;
+    }
+    return h;
+}
+float waveHeight(vec2 p, out vec2 g) { return waveHeightLod(p, 0.0, g); }
+)";
+
+const char* WATER_FS = R"(
+uniform vec3 waterAbsorb; uniform vec3 waterScatter; uniform float waterCaustics; uniform float waterFoam;
+uniform float waterOpen; uniform float waterInvAmp; uniform float waterGlint; uniform float waterBand;
+const float WATER_IOR = 1.333;
+
+// Length of the segment a-b that lies under a horizontal surface at `lvl`.
+float waterPath(vec3 a, vec3 b, float lvl) {
+    float ya = a.y - lvl, yb = b.y - lvl, len = distance(a, b);
+    if (ya <= 0.0 && yb <= 0.0) return len;
+    if (ya > 0.0 && yb > 0.0) return 0.0;
+    return len * (ya <= 0.0 ? -ya / (yb - ya) : -yb / (ya - yb));
+}
+// The surface above a point, or a level it cannot be under when well clear of the waves.
+float surfaceAt(vec3 p) {
+    if (p.y > waterLevel + waterBand) return waterLevel + waterBand;
+    vec2 g;
+    return waterLevel + waveHeight(p.xz, g);
+}
+// Where a sun ray (travelling along dir) that crosses the surface at s, bent by the wave
+// there, reaches the horizontal plane at planeY.
+vec2 causticLand(vec2 s, vec3 dir, float planeY, float foot) {
+    vec2 g;
+    float h = waveHeightLod(s, foot, g);
+    vec3 r = refract(dir, normalize(vec3(-g.x, 1.0, -g.y)), 1.0 / WATER_IOR);
+    return s + r.xz * ((waterLevel + h - planeY) / max(-r.y, 0.05));
+}
+// How much more or less light reaches p than a flat surface would give: the area of a patch
+// of surface over the area its refracted rays cover down here. The patch widens with depth,
+// as the light's blur does.
+float caustic(vec3 p, vec3 dir) {
+    float depth = max(waterLevel - p.y, 0.0);
+    vec3 r0 = refract(dir, vec3(0.0, 1.0, 0.0), 1.0 / WATER_IOR);
+    vec2 s = p.xz - r0.xz * (depth / max(-r0.y, 0.05));
+    float e = 0.03 + 0.05 * depth, foot = e * 0.7;
+    for (int i = 0; i < 2; i++) s += p.xz - causticLand(s, dir, p.y, foot);
+    vec2 h0 = causticLand(s, dir, p.y, foot);
+    vec2 a = causticLand(s + vec2(e, 0.0), dir, p.y, foot) - h0;
+    vec2 b = causticLand(s + vec2(0.0, e), dir, p.y, foot) - h0;
+    return clamp(e * e / max(abs(a.x * b.y - a.y * b.x), 1e-5), 0.0, 6.0);
+}
+// What light i is worth at this fragment once it has come through the water: absorbed over
+// its path down from the surface, and focused by the waves.
+vec3 waterLight(int i) {
+    if (waterOn == 0 || lightType[i] != 0 || lightDir[i].y > -0.02) return vec3(1.0);
+    float lvl = surfaceAt(fragPos);
+    if (fragPos.y >= lvl) return vec3(1.0);
+    vec3 r = refract(lightDir[i], vec3(0.0, 1.0, 0.0), 1.0 / WATER_IOR);
+    vec3 t = exp(-waterAbsorb * ((lvl - fragPos.y) / max(-r.y, 0.05)));
+    float c = waterCaustics > 0.0 ? mix(1.0, caustic(fragPos, lightDir[i]), waterCaustics) : 1.0;
+    return t * c;
+}
+// The water's own fog: what the part of the way to this fragment that is under the surface
+// does to its colour.
+vec3 waterTint(vec3 color) {
+    if (waterOn == 0) return color;
+    float lvl = surfaceAt(fragPos);
+    float d = waterPath(viewPos, fragPos, viewPos.y < waterEye || fragPos.y < lvl ? lvl : waterLevel);
+    if (d <= 0.0) return color;
+    vec3 t = exp(-waterAbsorb * d);
+    return color * t + waterScatter * (1.0 - t);
+}
+
+float hash21(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+float vnoise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash21(i), hash21(i + vec2(1.0, 0.0)), f.x), mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+vec3 skyAt(vec3 d) {
+    if (hasEnv == 1) return env(d, 0.0) * backdropScale;
+    return mix(groundColor, skyColor, clamp(d.y * 0.5 + 0.5, 0.0, 1.0));
+}
+
+// The surface itself, as a straight colour and an alpha to blend over what is behind it.
+vec4 waterSurface() {
+    vec2 g;
+    float h = waveHeightLod(fragPos.xz, length(fwidth(fragPos.xz)), g);   // ripples finer than a pixel fade
+    float dist = length(viewPos - fragPos);
+    vec3 n = normalize(vec3(-g.x, 1.0, -g.y));
+    vec3 v = normalize(viewPos - fragPos);
+    if (viewPos.y < waterEye) {                      // from below: a window onto the sky, ringed by mirror
+        vec3 nd = -n;
+        vec3 t = refract(-v, nd, WATER_IOR);
+        vec3 mirror = waterScatter * 0.8, c = mirror;
+        if (dot(t, t) > 1e-6) {
+            float cosT = abs(dot(t, nd));
+            c = mix(skyAt(t), mirror, 0.02 + 0.98 * pow(1.0 - cosT, 5.0));
+        }
+        vec3 tr = exp(-waterAbsorb * dist);
+        return vec4(c * tr + waterScatter * (1.0 - tr), 1.0);
+    }
+    float ndv = max(dot(n, v), 1e-3);
+    float F = 0.02 + 0.98 * pow(1.0 - ndv, 5.0);
+    vec3 r = reflect(-v, n);
+    r.y = abs(r.y);
+    float crest = clamp(h * waterInvAmp, -1.0, 1.0);
+    vec3 body = waterScatter * (1.0 + 0.5 * max(crest, 0.0));
+    float bodyA = waterOpen > 0.0 ? 1.0 - exp(-waterOpen * dot(waterAbsorb, vec3(0.3333)) / max(ndv, 0.25)) : 0.0;
+    vec3 glint = vec3(0.0), foamLight = mix(groundColor, skyColor, 0.5);
+    for (int i = 0; i < 8; i++) {
+        if (i >= lightCount) break;
+        vec3 l; float ndl;
+        float a = lightAt(i, n, l, ndl);
+        if (a <= 0.0) continue;
+        float sp = pow(max(dot(n, normalize(l + v)), 0.0), 900.0) * (908.0 / 25.1327);
+        glint += lightColor[i] * (a * sp * F * 0.25 * waterGlint);
+        foamLight += lightColor[i] * (a * ndl);
+    }
+    float fn = vnoise(fragPos.xz * 2.2 + waterTime * 0.15) * 0.6 + vnoise(fragPos.xz * 7.0) * 0.4;
+    float foamA = waterFoam * smoothstep(0.55, 0.85, crest + (fn - 0.5) * 0.5);
+    vec3 premul = F * skyAt(r) + (1.0 - F) * bodyA * body + glint;
+    float a = clamp(F + (1.0 - F) * bodyA + dot(glint, vec3(0.3333)), 0.0, 1.0);
+    premul = mix(premul, vec3(0.95) * foamLight, foamA);
+    a = mix(a, 1.0, foamA);
+    vec3 col = premul / max(a, 1e-3);
+    float f = fogAmount(fragPos);
+    if (f > 0.0) { col = mix(col, fogTint(fragPos), f); a = mix(a, 1.0, f); }
+    return vec4(col, a);
+}
+)";
+
+
+// ---- Gaussian splats: one instanced quad per splat, sized and oriented by its projected covariance
+const char* SPLAT_VS = R"(#version 330
+in vec2 corner;                       // (-1..1)
+in float splatIndex;                  // the splat for this instance, in drawing order
+uniform sampler2D splatData;          // 6 texels a splat: see uploadSplats
+uniform mat4 viewM; uniform mat4 worldM; uniform mat4 projM;
+uniform vec2 viewport; uniform vec3 camObj;
+uniform float scaleMul; uniform float opacityMul; uniform int shDegree;
+uniform vec4 clipPlane;               // world: xyz = unit normal, w = offset; w > 1e8 = none
+uniform float clipBand; uniform float scatter;
+out vec2 vOff; out vec4 vColor;
+const int W = 2048;
+vec4 fetch(int i, int k) { int t = i * 6 + k; return texelFetch(splatData, ivec2(t % W, t / W), 0); }
+void cull() { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); vOff = vec2(0.0); vColor = vec4(0.0); }
+void main() {
+    int i = int(splatIndex + 0.5);
+    vec4 t0 = fetch(i, 0), t1 = fetch(i, 1), t2 = fetch(i, 2), t3 = fetch(i, 3), t4 = fetch(i, 4), t5 = fetch(i, 5);
+    vec4 wp = worldM * vec4(t0.xyz, 1.0);
+    float op = t0.w * opacityMul;
+    if (clipPlane.w < 1e8) {
+        // A front sweeps through: what it has passed is gone, and what is in its band is scattered and fading.
+        float keep = clamp(-(dot(wp.xyz, clipPlane.xyz) - clipPlane.w) / max(clipBand, 1e-4), 0.0, 1.0);
+        if (keep <= 0.0) { cull(); return; }
+        float h = t2.z;
+        vec3 away = normalize(vec3(fract(h * 7.13) - 0.5, fract(h * 3.77) - 0.5, fract(h * 11.9) - 0.5) + clipPlane.xyz * 0.9 + vec3(1e-3));
+        wp.xyz += away * ((1.0 - keep) * scatter);
+        op *= keep;
+    }
+    vec4 vp = viewM * wp;
+    float zc = -vp.z;
+    if (zc < 0.05 || op < 0.002) { cull(); return; }
+    vec4 clip = projM * vp;
+    vec3 ndc = clip.xyz / clip.w;
+    mat3 Vr = mat3(viewM) * mat3(worldM);
+    mat3 S = mat3(t1.x, t1.y, t1.z, t1.y, t1.w, t2.x, t1.z, t2.x, t2.y) * (scaleMul * scaleMul);
+    mat3 Sv = Vr * S * transpose(Vr);
+    float fx = projM[0][0] * viewport.x * 0.5, fy = projM[1][1] * viewport.y * 0.5;
+    vec3 ra = vec3(fx / zc, 0.0, fx * vp.x / (zc * zc)), rb = vec3(0.0, fy / zc, fy * vp.y / (zc * zc));
+    float c00 = dot(ra, Sv * ra) + 0.3, c01 = dot(ra, Sv * rb), c11 = dot(rb, Sv * rb) + 0.3;
+    float mid = 0.5 * (c00 + c11), rad = length(vec2(0.5 * (c00 - c11), c01));
+    float l1 = mid + rad, l2 = max(mid - rad, 0.1);
+    vec2 v = vec2(c01, l1 - c00);
+    if (dot(v, v) < 1e-12) v = c00 >= c11 ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+    vec2 v1 = normalize(v), v2 = vec2(-v1.y, v1.x);
+    float r1 = min(3.0 * sqrt(l1), 1500.0), r2 = min(3.0 * sqrt(l2), 1500.0);
+    vec2 px = ndc.xy * viewport * 0.5;
+    if (abs(px.x) > viewport.x * 0.5 + r1 || abs(px.y) > viewport.y * 0.5 + r1) { cull(); return; }
+    vec2 offPx = corner.x * r1 * v1 + corner.y * r2 * v2;
+    gl_Position = vec4(ndc.xy + offPx * 2.0 / viewport, ndc.z, 1.0);
+    vOff = corner * 3.0;
+    vec3 col = t3.rgb;
+    if (shDegree >= 1) {
+        vec3 d = normalize(t0.xyz - camObj);
+        const float C1 = 0.4886025119;
+        vec3 basis = vec3(-C1 * d.y, C1 * d.z, -C1 * d.x);
+        col += vec3(dot(vec3(t3.w, t4.x, t4.y), basis), dot(vec3(t4.z, t4.w, t5.x), basis), dot(vec3(t5.y, t5.z, t2.w), basis));
+    }
+    vColor = vec4(max(col, vec3(0.0)), op);
+}
+)";
+
+const char* SPLAT_FS = R"(#version 330
+in vec2 vOff; in vec4 vColor;
+out vec4 finalColor;
+void main() {
+    float a = vColor.a * exp(-0.5 * dot(vOff, vOff));
+    if (a < 1.0 / 255.0) discard;
+    finalColor = vec4(clamp(vColor.rgb, 0.0, 1.0), a);
+}
 )";
 
 const char* LIT_VS_BODY = R"(
 out vec3 fragPos; out vec2 fragTexCoord; out vec3 fragNormal; out vec4 fragColor;
 void main() {
-    mat4 skin = skinMatrix();
-    vec4 pos = skin * vec4(vertexPosition, 1.0);
+    fragTexCoord = vertexTexCoord;
+    if (waterMode == 1) {                     // the sea's surface: a mesh round the camera, rolled by the waves
+        vec2 p = vertexPosition.xz + waterCentre, g;
+        vec4 world = vec4(p.x, waterLevel + waveHeight(p, g), p.y, 1.0);
+        fragPos = world.xyz;
+        fragNormal = vec3(0.0, 1.0, 0.0);
+        fragColor = vec4(1.0);
+        gl_Position = mvp * world;
+        return;
+    }
+    if (instanced != 0) {
+        setupInstance();
+        vec4 world = instM * vec4(instPosition(), 1.0);
+        fragPos = world.xyz;
+        fragNormal = mat3(instM) * instNormal();
+        fragColor = vertexColor * vec4(vec3(instAnim.w), 1.0);
+        gl_Position = mvp * world;
+        return;
+    }
+    vec4 pos = vec4(skinPosition(vertexPosition), 1.0);
     vec4 world = matModel * pos;
     fragPos = world.xyz;
-    fragNormal = mat3(matNormal) * (mat3(skin) * vertexNormal);
-    fragTexCoord = vertexTexCoord;
+    fragNormal = mat3(matNormal) * skinNormal(vertexNormal);
     fragColor = vertexColor;
     gl_Position = mvp * pos;
 }
 )";
 
 const char* DEPTH_VS_BODY = R"(
-void main() { gl_Position = mvp * (skinMatrix() * vec4(vertexPosition, 1.0)); }
+void main() {
+    if (instanced != 0) {
+        setupInstance();
+        gl_Position = mvp * (instM * vec4(instPosition(), 1.0));
+        return;
+    }
+    gl_Position = mvp * vec4(skinPosition(vertexPosition), 1.0);
+}
 )";
 
 const char* DEPTH_FS = R"(#version 330
@@ -84,12 +390,14 @@ uniform float envIntensity; uniform float envRotation; uniform int skybox;
 uniform vec3 fogColor; uniform float fogNear; uniform float fogFar;
 uniform int fogMode; uniform float fogDensity; uniform float fogHeight; uniform float fogFalloff; uniform int fogSky;
 uniform float backdropScale;
+uniform vec4 clipPlane; uniform vec4 clipEdge;        // Material::clip: xyz normal, w offset; rgb colour (linear), a width
 uniform int shading; uniform float pxScale;
 uniform int toonBands; uniform float toonSoftness; uniform float toonHighlight; uniform float toonHighlightSize;
 uniform vec3 rimColor; uniform float rimWidth;
 uniform vec3 goochWarm; uniform vec3 goochCool;
 uniform vec3 hatchInk; uniform float hatchSpacing; uniform float hatchAngle; uniform float hatchWeight;
 out vec4 finalColor;
+//@WATER_COMMON@
 
 const float PI = 3.14159265;
 
@@ -183,6 +491,7 @@ float lightAt(int i, vec3 n, out vec3 l, out float ndl) {
     return atten;
 }
 
+//@WATER_FS@
 // ---- stylised shading
 // x in 0..1 to `toonBands` flat steps; each step's edge ramps over toonSoftness.
 float band(float x) {
@@ -199,10 +508,11 @@ vec3 toon(vec3 albedo, vec3 n, vec3 v) {
         vec3 l; float ndl;
         float a = lightAt(i, n, l, ndl);
         if (a <= 0.0) continue;
-        color += albedo * lightColor[i] * band(ndl * a);
+        vec3 lc = lightColor[i] * waterLight(i);
+        color += albedo * lc * band(ndl * a);
         float spot = dot(n, normalize(l + v));
         float cut = 1.0 - toonHighlightSize * toonHighlightSize;
-        color += lightColor[i] * toonHighlight * smoothstep(cut - edge * 0.25, cut + edge * 0.25, spot) * step(0.5, a);
+        color += lc * toonHighlight * smoothstep(cut - edge * 0.25, cut + edge * 0.25, spot) * step(0.5, a);
     }
     float r = 1.0 - max(dot(n, v), 0.0);
     color += rimColor * smoothstep(1.0 - rimWidth - edge, 1.0 - rimWidth + edge, r);
@@ -250,7 +560,14 @@ vec3 hatch(vec3 albedo, vec3 n) {
 }
 
 void main() {
-    if (skybox == 1) { finalColor = encode(env(normalize(fragPos - viewPos), 0.0) * backdropScale, 1.0); return; }
+    if (skybox == 1) {
+        if (waterOn == 1 && viewPos.y < waterEye) { finalColor = encode(waterScatter, 1.0); return; }
+        finalColor = encode(env(normalize(fragPos - viewPos), 0.0) * backdropScale, 1.0);
+        return;
+    }
+    if (waterMode == 1) { vec4 w = waterSurface(); finalColor = encode(w.rgb, w.a); return; }
+    float cutDist = clipPlane.w - dot(fragPos, clipPlane.xyz);     // < 0: beyond the cut
+    if (cutDist < 0.0) discard;
     vec4 base = texture(texture0, fragTexCoord) * colDiffuse * fragColor;
     if (unlit == 1) { finalColor = vec4(base.rgb, base.a * opacity); return; }
     vec3 albedo = pow(base.rgb, vec3(2.2));
@@ -283,11 +600,13 @@ void main() {
             if (atten <= 0.0) continue;
             vec3 h = normalize(l + v);
             float spec = pow(max(dot(n, h), 0.0), shininess) * (shininess + 8.0) / 25.1327;
-            color += (diffColor + specColor * spec) * lightColor[i] * atten * ndl;
+            color += (diffColor + specColor * spec) * lightColor[i] * waterLight(i) * atten * ndl;
         }
     }
     color += emissive;
-    float f = fogAmount(fragPos);
+    if (clipEdge.a > 0.0) color += clipEdge.rgb * (1.0 - smoothstep(0.0, clipEdge.a, cutDist));
+    color = waterTint(color);
+    float f = waterOn == 1 && viewPos.y < waterEye ? 0.0 : fogAmount(fragPos);
     if (f > 0.0) color = mix(color, fogTint(fragPos), f);
     finalColor = encode(color, base.a * opacity);
 }
@@ -557,8 +876,17 @@ struct LitLocs {
         shading, pxScale, toonBands, toonSoftness, toonHighlight, toonHighlightSize, rimColor, rimWidth,
         goochWarm, goochCool, hatchInk, hatchSpacing, hatchAngle, hatchWeight;
 };
+struct WaterLocs { int on, mode, level, eye, time, centre, count, waveA, waveB, absorb, scatter, caustics, foam,
+                   open, invAmp, glint, band; };
+struct ClipLocs { int plane, edge; };
+struct SplatLocs { int data, view, world, proj, viewport, camObj, scaleMul, opacityMul, shDegree, clipPlane, clipBand, scatter, corner, index; };
+constexpr int SPLAT_SLOT = 13;           // a splat cloud's texture
 struct DofLocs { int depthTex, texel, zNear, zFar, ortho, focus, aperture, maxBlur, radStep, tanTilt, tanHalfFov, viewY; };
 struct GbufLocs { int objectId, lineStyle, skinned, bones; };
+// The instancing uniforms of one program (lit, depth or g-buffer): the program is the same
+// one, drawn through a copy of its Shader whose model-matrix location is the attribute.
+struct InstLocs { int instanced = -1, vat = -1, width = -1, verts = -1, rows = -1; };
+constexpr int VAT_SLOT = 12;             // the baked-animation texture (material maps use 0..11)
 struct LineLocs { int depthTex, texel, zNear, zFar, ortho, pixelWorld, pxScale, styles, maxRadius, creaseCos,
                   depthThreshold, wobble, wobbleScale, seed; };
 constexpr int MAX_STYLES = 64;
@@ -570,12 +898,31 @@ struct Gpu {
     bool ready = false;
     Shader lit{}, depth{}, dof{}, gbuf{}, line{}, particle{}, sky{};
     LitLocs L{};
+    WaterLocs W{};
+    ClipLocs C{};
+    Shader splat{};
+    SplatLocs P{};
+    struct SplatGpu {
+        unsigned int tex = 0, vao = 0, cornerVbo = 0, indexVbo = 0;
+        size_t capacity = 0, drawn = 0;
+        std::shared_ptr<const splat::Cloud> keep;
+        float lastView[16] = {};         // what the order was sorted for
+        bool sorted = false;
+    };
+    std::map<const splat::Cloud*, SplatGpu> splats;
+    std::unique_ptr<Object3D> waterObj;  // the sea's surface, drawn with the transparent objects
     SkyLocs S{};
     RenderTexture skyTarget{};          // the procedural sky, remade each frame
     DofLocs D{};
     GbufLocs G{};
     LineLocs N{};
     int depthSkinned = -1, depthBones = -1;
+    Shader inst[3]{};                    // lit, depth, gbuf, for DrawMeshInstanced
+    std::array<int, 32> instLocs[3]{};
+    InstLocs il[3];
+    int instState[3] = { -1, -1, -1 };   // the `instanced` uniform last set per program
+    struct Vat { unsigned int tex = 0; int width = 0, rows = 0; std::shared_ptr<AnimatedMesh> keep; };
+    std::map<const AnimatedMesh*, Vat> vat;
     ::Material material{};               // raylib material: owns a MAX_MATERIAL_MAPS maps array
     unsigned int atlasFbo = 0, atlasTex = 0;
     int atlasSize = 0;
@@ -583,7 +930,7 @@ struct Gpu {
     Mesh skyCube{};
     std::map<std::string, Texture2D> textures;
     std::map<const Scene*, Texture2D> generated;    // environmentGenerator results
-    struct Dynamic { DynamicTexturePtr keep; Texture2D tex{}; long long made = LLONG_MIN; };
+    struct Dynamic { DynamicTexturePtr keep; Texture2D tex{}; RenderTexture canvas{}; long long made = LLONG_MIN; };
     std::map<const DynamicTexture*, Dynamic> dynamic;   // Material::dynamicMap textures
     int frame = 0;                                      // the frame being drawn (for dynamic maps)
 };
@@ -604,6 +951,15 @@ void releaseGpu() {
     if (gpu.line.id) UnloadShader(gpu.line);
     if (gpu.particle.id) UnloadShader(gpu.particle);
     if (gpu.sky.id) UnloadShader(gpu.sky);
+    for (auto& [mesh, v] : gpu.vat)
+        if (v.tex) rlUnloadTexture(v.tex);
+    if (gpu.splat.id) UnloadShader(gpu.splat);
+    for (auto& [cloud, s] : gpu.splats) {
+        if (s.tex) rlUnloadTexture(s.tex);
+        if (s.vao) rlUnloadVertexArray(s.vao);
+        if (s.cornerVbo) rlUnloadVertexBuffer(s.cornerVbo);
+        if (s.indexVbo) rlUnloadVertexBuffer(s.indexVbo);
+    }
     if (gpu.skyTarget.id) UnloadRenderTexture(gpu.skyTarget);
     if (gpu.material.maps) {
         gpu.material.maps[MATERIAL_MAP_DIFFUSE].texture = whiteTexture();   // cached textures are freed below
@@ -615,22 +971,34 @@ void releaseGpu() {
     if (gpu.skyCube.vertexCount) UnloadMesh(gpu.skyCube);
     for (auto& [path, tex] : gpu.textures) UnloadTexture(tex);
     for (auto& [scene, tex] : gpu.generated) UnloadTexture(tex);
-    for (auto& [src, d] : gpu.dynamic) if (d.tex.id) UnloadTexture(d.tex);
+    for (auto& [src, d] : gpu.dynamic) {
+        if (d.canvas.id) UnloadRenderTexture(d.canvas);
+        else if (d.tex.id) UnloadTexture(d.tex);
+    }
     gpu = Gpu{};
 }
 
 void ensureGpu() {
     if (gpu.ready) return;
     const std::string head = SKIN_VS_HEAD;
-    gpu.lit = LoadShaderFromMemory((head + LIT_VS_BODY).c_str(), LIT_FS);
+    std::string litFs = LIT_FS;
+    for (const auto& [marker, text] : { std::pair<const char*, const char*>{ "//@WATER_COMMON@", WATER_COMMON },
+                                        { "//@WATER_FS@", WATER_FS } }) {
+        const size_t at = litFs.find(marker);
+        if (at != std::string::npos) litFs.replace(at, std::strlen(marker), text);
+    }
+    const std::string litVs = head + WATER_COMMON + LIT_VS_BODY;
+    gpu.lit = LoadShaderFromMemory(litVs.c_str(), litFs.c_str());
     gpu.depth = LoadShaderFromMemory((head + DEPTH_VS_BODY).c_str(), DEPTH_FS);
     gpu.dof = LoadShaderFromMemory(nullptr, DOF_FS);
-    gpu.gbuf = LoadShaderFromMemory((head + LIT_VS_BODY).c_str(), GBUF_FS);
+    gpu.gbuf = LoadShaderFromMemory(litVs.c_str(), GBUF_FS);
     gpu.line = LoadShaderFromMemory(nullptr, LINE_FS);
     gpu.particle = LoadShaderFromMemory(nullptr, PARTICLE_FS);
     gpu.sky = LoadShaderFromMemory(nullptr, SKY_FS);
+    gpu.splat = LoadShaderFromMemory(SPLAT_VS, SPLAT_FS);
     if (!IsShaderValid(gpu.lit) || !IsShaderValid(gpu.depth) || !IsShaderValid(gpu.dof) ||
-        !IsShaderValid(gpu.gbuf) || !IsShaderValid(gpu.line) || !IsShaderValid(gpu.particle) || !IsShaderValid(gpu.sky))
+        !IsShaderValid(gpu.gbuf) || !IsShaderValid(gpu.line) || !IsShaderValid(gpu.particle) || !IsShaderValid(gpu.sky) ||
+        !IsShaderValid(gpu.splat))
         throw std::runtime_error("g3d: shader compilation failed");
     auto loc = [](const char* name) { return GetShaderLocation(gpu.lit, name); };
     gpu.L = { loc("viewPos"), loc("skyColor"), loc("groundColor"), loc("lightCount"), loc("lightType"),
@@ -644,8 +1012,32 @@ void ensureGpu() {
               loc("shading"), loc("pxScale"), loc("toonBands"), loc("toonSoftness"), loc("toonHighlight"),
               loc("toonHighlightSize"), loc("rimColor"), loc("rimWidth"), loc("goochWarm"), loc("goochCool"),
               loc("hatchInk"), loc("hatchSpacing"), loc("hatchAngle"), loc("hatchWeight") };
+    gpu.W = { loc("waterOn"), loc("waterMode"), loc("waterLevel"), loc("waterEye"), loc("waterTime"), loc("waterCentre"),
+              loc("waveCount"), loc("waveA"), loc("waveB"), loc("waterAbsorb"), loc("waterScatter"), loc("waterCaustics"),
+              loc("waterFoam"), loc("waterOpen"), loc("waterInvAmp"), loc("waterGlint"), loc("waterBand") };
+    gpu.C = { loc("clipPlane"), loc("clipEdge") };
+    {
+        auto sp = [](const char* name) { return GetShaderLocation(gpu.splat, name); };
+        gpu.P = { sp("splatData"), sp("viewM"), sp("worldM"), sp("projM"), sp("viewport"), sp("camObj"), sp("scaleMul"),
+                  sp("opacityMul"), sp("shDegree"), sp("clipPlane"), sp("clipBand"), sp("scatter"),
+                  GetShaderLocationAttrib(gpu.splat, "corner"), GetShaderLocationAttrib(gpu.splat, "splatIndex") };
+        const int unit = SPLAT_SLOT;
+        SetShaderValue(gpu.splat, gpu.P.data, &unit, SHADER_UNIFORM_INT);
+    }
     auto gloc = [](const char* name) { return GetShaderLocation(gpu.gbuf, name); };
     gpu.G = { gloc("objectId"), gloc("lineStyle"), gloc("skinned"), gloc("boneMatrices") };
+    {
+        const Shader* base[3] = { &gpu.lit, &gpu.depth, &gpu.gbuf };
+        for (int i = 0; i < 3; i++) {
+            const Shader& b = *base[i];
+            std::copy(b.locs, b.locs + 32, gpu.instLocs[i].begin());
+            gpu.instLocs[i][SHADER_LOC_MATRIX_MODEL] = rlGetLocationAttrib(b.id, "instanceTransform");
+            gpu.inst[i] = b;
+            gpu.inst[i].locs = gpu.instLocs[i].data();
+            gpu.il[i] = { GetShaderLocation(b, "instanced"), GetShaderLocation(b, "vat"), GetShaderLocation(b, "vatWidth"),
+                          GetShaderLocation(b, "vatVerts"), GetShaderLocation(b, "vatRows") };
+        }
+    }
     auto nloc = [](const char* name) { return GetShaderLocation(gpu.line, name); };
     gpu.N = { nloc("depthTex"), nloc("texel"), nloc("zNear"), nloc("zFar"), nloc("ortho"), nloc("pixelWorld"),
               nloc("pxScale"), nloc("styles"), nloc("maxRadius"), nloc("creaseCos"), nloc("depthThreshold"),
@@ -742,6 +1134,7 @@ Texture2D dynamicTexture(const DynamicTexturePtr& src) {
     Gpu::Dynamic& d = gpu.dynamic[src.get()];
     d.keep = src;                                   // the address stays this source's
     const long long turn = (long long)std::floor((double)gpu.frame / std::max(1, src->every));
+    if (src->draw) return d.tex.id ? d.tex : whiteTexture();    // drawn by drawCanvases before the pass
     if (d.made == turn && d.tex.id) return d.tex;
     d.made = turn;
     if (!src->make) return d.tex.id ? d.tex : whiteTexture();
@@ -758,6 +1151,37 @@ Texture2D dynamicTexture(const DynamicTexturePtr& src) {
     }
     UnloadImage(img);
     return d.tex.id ? d.tex : whiteTexture();
+}
+
+// Draws the canvas-style dynamic maps (DynamicTexture::draw) of the visible objects for
+// frame t. Runs before the scene's own passes, while the 2D canvas target is still bound.
+void drawCanvas(const DynamicTexturePtr& src, int t) {
+    Gpu::Dynamic& d = gpu.dynamic[src.get()];
+    d.keep = src;
+    const long long turn = (long long)std::floor((double)t / std::max(1, src->every));
+    const int ss = std::clamp(src->supersample, 1, 4);
+    const int w = std::max(1, src->width) * ss, h = std::max(1, src->height) * ss;
+    if (d.canvas.id && (d.canvas.texture.width != w || d.canvas.texture.height != h)) {
+        UnloadRenderTexture(d.canvas);
+        d.canvas = RenderTexture{};
+    }
+    if (d.made == turn && d.canvas.id) return;
+    d.made = turn;
+    if (!d.canvas.id) {
+        d.canvas = LoadRenderTexture(w, h);
+        SetTextureWrap(d.canvas.texture, TEXTURE_WRAP_CLAMP);
+    }
+    drawToTexture(d.canvas, (float)ss, [&] { src->draw(Ctx{ { 0, 0 }, 1, 0, 1 }, t); });
+    d.tex = d.canvas.texture;
+    d.tex.mipmaps = 1 + (int)std::floor(std::log2((float)std::max(w, h)));
+}
+
+void drawCanvases(std::vector<std::unique_ptr<Object3D>>& list, int t) {
+    for (auto& o : list) {
+        if (!o->visible || o->culled) continue;
+        if (o->material.dynamicMap && o->material.dynamicMap->draw) drawCanvas(o->material.dynamicMap, t);
+        drawCanvases(o->children, t);
+    }
 }
 
 Texture2D mapOf(const g3d::Material& m) {
@@ -879,26 +1303,99 @@ struct Item {
     float alpha = 1;
     Color tint = WHITE;
     bool particle = false;
+    const std::vector<Matrix>* inst = nullptr;   // an instanced set: the bodies that can show
 };
 float opacityOf(const Item& it) { return it.obj->material.opacity * it.alpha; }
 // An emitter without a geometry: its particles are drawn as billboards after the meshes.
 struct Emitting { const Object3D* obj; Matrix world; };
 
-void animate(std::vector<std::unique_ptr<Object3D>>& list, int t) {
+Matrix localMatrix(const Object3D& o) {
+    return MatrixMultiply(MatrixMultiply(MatrixScale(o.scale.x, o.scale.y, o.scale.z),
+                                         MatrixRotateXYZ(Vector3Scale(o.rotation, DEG2RAD))),
+                          MatrixTranslate(o.position.x, o.position.y, o.position.z));
+}
+
+// What culling needs for one frame (Object3D::cullRadius).
+struct Cull {
+    bool on = false;
+    const Camera* cam = nullptr;
+    float aspect = 1, floorY = 0;
+    std::vector<Vector3> shadowDirs;     // unit: the way the shadows of each shadowing light run
+};
+// Seen, or casting a shadow that can fall into view. A shadow runs from the sphere along
+// each light's direction down to the floor (at most 80 m): the swept sphere is tested as a
+// string of spheres no further apart than its radius.
+bool inSight(const Cull& k, Vector3 c, float r) {
+    if (visibleSphere(*k.cam, k.aspect, c, r)) return true;
+    for (const Vector3& away : k.shadowDirs) {
+        float reach = 80;
+        if (away.y < -0.05f) reach = std::min(reach, std::max(0.f, (c.y - k.floorY) / -away.y));
+        const float rs = r + 0.3f;
+        const int n = std::clamp((int)std::ceil(reach / std::max(rs, 0.5f)), 1, 160);
+        for (int i = 1; i <= n; i++)
+            if (visibleSphere(*k.cam, k.aspect, Vector3Add(c, Vector3Scale(away, reach * i / n)), rs)) return true;
+    }
+    return false;
+}
+
+void animate(std::vector<std::unique_ptr<Object3D>>& list, int t, const Matrix& parent, const Cull& k) {
     for (auto& o : list) {
         if (o->up) o->up(t, *o);
-        animate(o->children, t);
+        o->culled = false;
+        Matrix world = parent;
+        if (k.on) {
+            world = MatrixMultiply(localMatrix(*o), parent);
+            if (o->cullRadius > 0) {
+                const float sc = std::max({ std::sqrt(world.m0 * world.m0 + world.m1 * world.m1 + world.m2 * world.m2),
+                                            std::sqrt(world.m4 * world.m4 + world.m5 * world.m5 + world.m6 * world.m6),
+                                            std::sqrt(world.m8 * world.m8 + world.m9 * world.m9 + world.m10 * world.m10) });
+                if (!inSight(k, Vector3Transform(o->cullCentre, world), o->cullRadius * sc)) {
+                    o->culled = true;
+                    continue;
+                }
+            }
+        }
+        animate(o->children, t, world, k);
+    }
+}
+
+// The world matrices of an object's instances that can show, each carrying its animation (two
+// baked frames, their blend, a brightness) in the w of its columns, where an affine matrix has
+// 0, 0, 0 and 1: see the shader's setupInstance.
+void gatherInstances(const Object3D& o, const Matrix& world, const Cull& k, std::vector<Matrix>& out) {
+    const Instances& in = *o.instances;
+    const AnimatedMesh& am = *in.mesh;
+    if (am.frames <= 0) return;
+    out.reserve(in.list.size());
+    for (const Instance& i : in.list) {
+        const Matrix tilt = MatrixRotateXYZ(Vector3Scale({ i.pitch, 0, i.bank }, DEG2RAD));
+        const Matrix turn = MatrixMultiply(MatrixRotateXYZ(Vector3Scale({ 0, i.yaw, 0 }, DEG2RAD)),
+                                           MatrixTranslate(i.position.x, i.position.y, i.position.z));
+        Matrix m = MatrixMultiply(MatrixMultiply(MatrixMultiply(MatrixScale(i.scale, i.scale, i.scale), tilt), turn), world);
+        if (k.on) {
+            const float sc = std::max({ std::sqrt(m.m0 * m.m0 + m.m1 * m.m1 + m.m2 * m.m2),
+                                        std::sqrt(m.m4 * m.m4 + m.m5 * m.m5 + m.m6 * m.m6),
+                                        std::sqrt(m.m8 * m.m8 + m.m9 * m.m9 + m.m10 * m.m10) });
+            if (!inSight(k, Vector3Transform(am.centre, m), am.radius * sc)) continue;
+        }
+        const int len = std::max(1, i.clipLength);
+        float f = std::fmod(i.frame, (float)len);
+        if (f < 0) f += len;
+        const int a = std::min((int)f, len - 1);
+        const int last = am.frames - 1;
+        m.m3 = (float)std::clamp(i.clipStart + a, 0, last);
+        m.m7 = (float)std::clamp(i.clipStart + (a + 1) % len, 0, last);
+        m.m11 = f - (float)a;
+        m.m15 = i.shade;
+        out.push_back(m);
     }
 }
 
 void collect(std::vector<std::unique_ptr<Object3D>>& list, const Matrix& parent, std::vector<Item>& out,
-             std::vector<Emitting>& emitters, double t) {
+             std::vector<Emitting>& emitters, double t, const Cull& k, std::deque<std::vector<Matrix>>& store) {
     for (auto& o : list) {
-        if (!o->visible) continue;
-        Matrix local = MatrixMultiply(MatrixMultiply(MatrixScale(o->scale.x, o->scale.y, o->scale.z),
-                                                     MatrixRotateXYZ(Vector3Scale(o->rotation, DEG2RAD))),
-                                      MatrixTranslate(o->position.x, o->position.y, o->position.z));
-        Matrix world = MatrixMultiply(local, parent);
+        if (!o->visible || o->culled) continue;
+        Matrix world = MatrixMultiply(localMatrix(*o), parent);
         if (o->emitter && o->geometry) {
             fx::each(*o->emitter, t, [&](const fx::Particle3D& p) {
                 const float a = p.alpha * p.color.a / 255.f;
@@ -913,15 +1410,24 @@ void collect(std::vector<std::unique_ptr<Object3D>>& list, const Matrix& parent,
                 out.push_back(it);
             });
         } else if (o->emitter) emitters.push_back({ o.get(), world });
-        else if (o->geometry || o->model) out.push_back({ o.get(), world, 0 });
-        collect(o->children, world, out, emitters, t);
+        else if (o->splats && o->splats->cloud) emitters.push_back({ o.get(), world });
+        else if (o->instances && o->instances->mesh) {
+            store.emplace_back();
+            gatherInstances(*o, world, k, store.back());
+            if (!store.back().empty()) {
+                Item it{ o.get(), world, 0 };
+                it.inst = &store.back();
+                out.push_back(it);
+            }
+        } else if (o->geometry || o->model) out.push_back({ o.get(), world, 0 });
+        collect(o->children, world, out, emitters, t, k, store);
     }
 }
 
-void setBones(int loc, int skinnedLoc, const Shader& sh, const Model* model, bool skinned) {
-    int flag = skinned ? 1 : 0;
-    SetShaderValue(sh, skinnedLoc, &flag, SHADER_UNIFORM_INT);
-    if (skinned && loc >= 0) {
+// mode: 0 not skinned, 1 linear blend, 2 dual quaternion (the shader's `skinned`).
+void setBones(int loc, int skinnedLoc, const Shader& sh, const Model* model, int mode) {
+    SetShaderValue(sh, skinnedLoc, &mode, SHADER_UNIFORM_INT);
+    if (mode && loc >= 0) {
         rlEnableShader(sh.id);
         rlSetUniformMatrices(loc, model->boneMatrices, (int)std::min<unsigned>(model->skeleton.boneCount, MAX_BONES));
     }
@@ -938,6 +1444,13 @@ void setMaterial(const g3d::Material& m) {
     SetShaderValue(sh, gpu.L.unlit, &unlit, SHADER_UNIFORM_INT);
     SetShaderValue(sh, gpu.L.opacity, &m.opacity, SHADER_UNIFORM_FLOAT);
     SetShaderValue(sh, gpu.L.receiveShadow, &receive, SHADER_UNIFORM_INT);
+
+    const Vector3 cn = Vector3Length(m.clip.normal) > 1e-6f ? Vector3Normalize(m.clip.normal) : Vector3{ 1, 0, 0 };
+    const Vector4 plane{ cn.x, cn.y, cn.z, m.clip.offset };
+    const Vector3 edgeRgb = linear(m.clip.edgeColor, m.clip.edgeColor.a / 255.f);
+    const Vector4 edge{ edgeRgb.x, edgeRgb.y, edgeRgb.z, m.clip.edgeColor.a > 0 ? std::max(m.clip.edgeWidth, 0.f) : 0.f };
+    SetShaderValue(sh, gpu.C.plane, &plane, SHADER_UNIFORM_VEC4);
+    SetShaderValue(sh, gpu.C.edge, &edge, SHADER_UNIFORM_VEC4);
 
     const int shading = (int)m.shading;
     SetShaderValue(sh, gpu.L.shading, &shading, SHADER_UNIFORM_INT);
@@ -968,8 +1481,72 @@ void setMaterial(const g3d::Material& m) {
 
 enum class Pass { Lit, Depth, Gbuf };
 
+void bindUnit(int slot, unsigned int id);
+
+// The baked animation of a mesh as one float texture: positions in the top half, normals in
+// the bottom, `width` texels to a row. Made on first use, kept until the GPU is released.
+const Gpu::Vat& vatOf(const std::shared_ptr<AnimatedMesh>& am) {
+    auto found = gpu.vat.find(am.get());
+    if (found != gpu.vat.end()) return found->second;
+    const size_t n = (size_t)am->frames * (size_t)am->vertices;
+    if (n == 0 || am->positions.size() < n * 3 || am->normals.size() < n * 3)
+        throw std::runtime_error("g3d: an AnimatedMesh needs frames * vertices positions and normals");
+    Gpu::Vat v;
+    v.keep = am;
+    v.width = 2048;
+    v.rows = (int)((n + (size_t)v.width - 1) / (size_t)v.width);
+    if (v.rows * 2 > 16384) throw std::runtime_error("g3d: an AnimatedMesh is too large (frames * vertices)");
+    std::vector<float> texels((size_t)v.width * (size_t)v.rows * 2 * 3, 0.f);
+    std::copy(am->positions.begin(), am->positions.begin() + (std::ptrdiff_t)(n * 3), texels.begin());
+    std::copy(am->normals.begin(), am->normals.begin() + (std::ptrdiff_t)(n * 3),
+              texels.begin() + (std::ptrdiff_t)((size_t)v.width * (size_t)v.rows * 3));
+    v.tex = rlLoadTexture(texels.data(), v.width, v.rows * 2, RL_PIXELFORMAT_UNCOMPRESSED_R32G32B32, 1);
+    rlTextureParameters(v.tex, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_NEAREST);
+    rlTextureParameters(v.tex, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_NEAREST);
+    return gpu.vat.emplace(am.get(), std::move(v)).first->second;
+}
+
+// Whether the pass's program reads its vertices as instances; the value is kept in the
+// program, so it is only set when it changes.
+void setInstanced(Pass pass, bool on) {
+    const int p = (int)pass, value = on ? 1 : 0;
+    if (gpu.instState[p] == value) return;
+    gpu.instState[p] = value;
+    const Shader& sh = pass == Pass::Lit ? gpu.lit : pass == Pass::Depth ? gpu.depth : gpu.gbuf;
+    SetShaderValue(sh, gpu.il[p].instanced, &value, SHADER_UNIFORM_INT);
+}
+
+// Draws an instanced item: every body that can show, in one call.
+void drawInstances(const Item& it, Pass pass) {
+    Object3D& o = *it.obj;
+    const int p = (int)pass;
+    const Shader& base = pass == Pass::Lit ? gpu.lit : pass == Pass::Depth ? gpu.depth : gpu.gbuf;
+    const AnimatedMesh& am = *o.instances->mesh;
+    if (!am.rest) return;
+    const Gpu::Vat& vat = vatOf(o.instances->mesh);
+    ::Material mat = gpu.material;
+    mat.shader = gpu.inst[p];
+    if (pass == Pass::Lit) setMaterial(o.material);
+    if (o.material.doubleSided) rlDisableBackfaceCulling(); else rlEnableBackfaceCulling();
+    mat.maps[MATERIAL_MAP_DIFFUSE].texture = mapOf(o.material);
+    mat.maps[MATERIAL_MAP_DIFFUSE].color = o.material.color;
+    const int skinnedLoc = pass == Pass::Lit ? gpu.L.skinned : pass == Pass::Depth ? gpu.depthSkinned : gpu.G.skinned;
+    setBones(pass == Pass::Lit ? gpu.L.bones : pass == Pass::Depth ? gpu.depthBones : gpu.G.bones, skinnedLoc, base, nullptr, 0);
+    setInstanced(pass, true);
+    const int unit = VAT_SLOT;
+    SetShaderValue(base, gpu.il[p].vat, &unit, SHADER_UNIFORM_INT);
+    SetShaderValue(base, gpu.il[p].width, &vat.width, SHADER_UNIFORM_INT);
+    SetShaderValue(base, gpu.il[p].verts, &am.vertices, SHADER_UNIFORM_INT);
+    SetShaderValue(base, gpu.il[p].rows, &vat.rows, SHADER_UNIFORM_INT);
+    bindUnit(VAT_SLOT, vat.tex);
+    DrawMeshInstanced(am.rest->mesh(), mat, it.inst->data(), (int)it.inst->size());
+    bindUnit(VAT_SLOT, 0);
+}
+
 // Draws one item with the lit, depth (shadow maps) or line g-buffer shader.
 void drawItem(const Item& it, Pass pass) {
+    if (it.inst) { drawInstances(it, pass); return; }
+    setInstanced(pass, false);
     Object3D& o = *it.obj;
     const Shader& sh = pass == Pass::Lit ? gpu.lit : pass == Pass::Depth ? gpu.depth : gpu.gbuf;
     const int bonesLoc = pass == Pass::Lit ? gpu.L.bones : pass == Pass::Depth ? gpu.depthBones : gpu.G.bones;
@@ -990,7 +1567,7 @@ void drawItem(const Item& it, Pass pass) {
         const Color c = o.material.color, k = it.tint;
         mat.maps[MATERIAL_MAP_DIFFUSE].color = { (unsigned char)(c.r * k.r / 255), (unsigned char)(c.g * k.g / 255),
                                                  (unsigned char)(c.b * k.b / 255), c.a };
-        setBones(bonesLoc, skinnedLoc, sh, nullptr, false);
+        setBones(bonesLoc, skinnedLoc, sh, nullptr, 0);
         DrawMesh(o.geometry->mesh(), mat, it.world);
         return;
     }
@@ -1011,7 +1588,7 @@ void drawItem(const Item& it, Pass pass) {
             mat.maps[MATERIAL_MAP_DIFFUSE].color = o.material.color;
         }
         bool skinned = mesh.boneIndices && mesh.boneWeights && model.boneMatrices && model.skeleton.boneCount > 0;
-        setBones(bonesLoc, skinnedLoc, sh, &model, skinned);
+        setBones(bonesLoc, skinnedLoc, sh, &model, skinned ? (o.model->dualQuaternion ? 2 : 1) : 0);
         DrawMesh(mesh, mat, world);
     }
 }
@@ -1019,6 +1596,30 @@ void drawItem(const Item& it, Pass pass) {
 Vector3 safeUp(Vector3 dir, Vector3 up) {
     return std::fabs(Vector3DotProduct(Vector3Normalize(dir), Vector3Normalize(up))) > 0.999f ? Vector3{ 0, 0, 1 } : up;
 }
+} // namespace
+
+bool visibleSphere(const Camera& cam, float aspect, Vector3 c, float r) {
+    const Vector3 look = Vector3Subtract(cam.target, cam.position);
+    const Vector3 f = Vector3Normalize(look);
+    const Vector3 right = Vector3Normalize(Vector3CrossProduct(f, safeUp(look, cam.upVector)));
+    const Vector3 up = Vector3CrossProduct(right, f);
+    const Vector3 v = Vector3Subtract(c, cam.position);
+    const float z = Vector3DotProduct(v, f), x = Vector3DotProduct(v, right), y = Vector3DotProduct(v, up);
+    if (z + r < cam.nearPlane || z - r > cam.farPlane) return false;
+    constexpr float margin = 1.03f;           // the viewport's aspect is rounded to pixels
+    if (cam.orthographic) {
+        const float halfH = cam.orthoHeight * 0.5f * margin;
+        return std::fabs(x) <= halfH * aspect + r && std::fabs(y) <= halfH + r;
+    }
+    const float ty = std::tan(cam.fov * 0.5f * DEG2RAD) * margin, tx = ty * aspect;
+    // The side planes pass through the eye: a sphere meets a half-space when its centre is
+    // within r of the plane, measured along the plane's unit normal.
+    if ((std::fabs(x) - z * tx) / std::sqrt(1 + tx * tx) > r) return false;
+    if ((std::fabs(y) - z * ty) / std::sqrt(1 + ty * ty) > r) return false;
+    return true;
+}
+
+namespace {
 
 // ---- shadows --------------------------------------------------------------------------
 struct Tile { Matrix vp; Vector4 rect, params; };
@@ -1112,7 +1713,124 @@ Shadows renderShadows(const Scene& s, const std::vector<Item>& items) {
     return out;
 }
 
+// A water's waves as the shader reads them: (direction.xy, wavenumber, amplitude) and
+// (angular speed, phase, sharpness), with deep-water dispersion (omega^2 = g k).
+struct PackedWaves {
+    int count = 0;
+    Vector4 a[8] = {}, b[8] = {};
+    float amplitude = 0;        // the sum of the amplitudes
+};
+PackedWaves packWaves(const Water& w) {
+    PackedWaves p;
+    for (const Water::Wave& v : w.waves) {
+        if (p.count == 8) break;
+        const float k = 2 * PI / std::max(v.wavelength, 0.05f), d = v.direction * DEG2RAD;
+        p.a[p.count] = { std::cos(d), std::sin(d), k, v.amplitude };
+        p.b[p.count] = { std::sqrt(9.81f * k) * v.speed * w.speed, 1.7f * (float)p.count + 0.3f, std::max(v.sharpness, 1.f), 0 };
+        p.amplitude += std::fabs(v.amplitude);
+        p.count++;
+    }
+    return p;
+}
+
+// Everything the lit shader needs of the sea: the waves, the water's fog and the light
+// that reaches under it.
+void setWaterUniforms(const Scene& s, const Camera& cam) {
+    const Water& w = s.water;
+    const WaterLocs& K = gpu.W;
+    const Shader& lit = gpu.lit;
+    const int on = w.enabled ? 1 : 0, mode = 0;
+    SetShaderValue(lit, K.on, &on, SHADER_UNIFORM_INT);
+    SetShaderValue(lit, K.mode, &mode, SHADER_UNIFORM_INT);
+    if (!on) return;
+    const double seconds = frameTime(gpu.frame) / std::max(w.fps, 1.f);   // frames to seconds
+    const PackedWaves pk = packWaves(w);
+    const float time = (float)seconds, eye = w.level + w.height(cam.position.x, cam.position.z, seconds);
+    const Vector2 centre{ cam.position.x, cam.position.z };
+    SetShaderValue(lit, K.level, &w.level, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, K.eye, &eye, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, K.time, &time, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, K.centre, &centre, SHADER_UNIFORM_VEC2);
+    SetShaderValue(lit, K.count, &pk.count, SHADER_UNIFORM_INT);
+    SetShaderValueV(lit, K.waveA, pk.a, SHADER_UNIFORM_VEC4, 8);
+    SetShaderValueV(lit, K.waveB, pk.b, SHADER_UNIFORM_VEC4, 8);
+    SetShaderValue(lit, K.absorb, &w.absorb, SHADER_UNIFORM_VEC3);
+    // The water scatters back the daylight that reaches it, dimmer the deeper the eye is.
+    float daylight = s.ambient * 0.5f;
+    for (const Light& l : s.lights) {
+        if (l.type != Light::Type::Directional) continue;
+        const Vector3 d = Vector3Normalize(Vector3Subtract(l.target, l.position));
+        const Vector3 c = linear(l.color, l.intensity);
+        daylight += (0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z) * std::clamp(-d.y, 0.f, 1.f) * 0.6f;
+    }
+    const float meanAbsorb = (w.absorb.x + w.absorb.y + w.absorb.z) / 3;
+    const float fade = std::exp(-meanAbsorb * std::max(0.f, w.level - cam.position.y) * 0.5f);
+    const Vector3 scatter = Vector3Scale(linear(w.deep), std::clamp(daylight, 0.03f, 2.f) * fade);
+    SetShaderValue(lit, K.scatter, &scatter, SHADER_UNIFORM_VEC3);
+    const float caustics = std::clamp(w.caustics, 0.f, 1.f), foam = std::clamp(w.foam, 0.f, 1.f);
+    const float open = std::max(w.openDepth, 0.f), invAmp = 1.f / std::max(pk.amplitude, 1e-3f), band = pk.amplitude + 0.05f;
+    SetShaderValue(lit, K.caustics, &caustics, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, K.foam, &foam, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, K.open, &open, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, K.invAmp, &invAmp, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, K.glint, &w.sunGlint, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, K.band, &band, SHADER_UNIFORM_FLOAT);
+}
+
+// The sea's surface: rings that thicken with distance round a point (the camera, which the
+// shader moves it to), so waves are well sampled near the eye and the surface reaches the horizon.
+Mesh makeWaterMesh() {
+    constexpr int R = 96, S = 192;
+    constexpr float r0 = 0.3f, r1 = 1500.f;
+    Mesh m = {};
+    m.vertexCount = 1 + R * S;
+    m.triangleCount = S + (R - 1) * S * 2;
+    m.vertices = (float*)MemAlloc((unsigned)m.vertexCount * 3 * sizeof(float));
+    m.normals = (float*)MemAlloc((unsigned)m.vertexCount * 3 * sizeof(float));
+    m.texcoords = (float*)MemAlloc((unsigned)m.vertexCount * 2 * sizeof(float));
+    m.indices = (unsigned short*)MemAlloc((unsigned)m.triangleCount * 3 * sizeof(unsigned short));
+    for (int v = 0; v < m.vertexCount; v++) {
+        m.normals[v * 3 + 1] = 1;
+        m.normals[v * 3] = m.normals[v * 3 + 2] = 0;
+    }
+    for (int i = 0; i < R; i++) {
+        const float r = r0 * std::pow(r1 / r0, (float)i / (R - 1));
+        for (int j = 0; j < S; j++) {
+            const float a = 2 * PI * j / S;
+            const int v = 1 + i * S + j;
+            m.vertices[v * 3] = r * std::cos(a);
+            m.vertices[v * 3 + 1] = 0;
+            m.vertices[v * 3 + 2] = r * std::sin(a);
+        }
+    }
+    int k = 0;
+    auto tri = [&](int a, int b, int c) {
+        m.indices[k++] = (unsigned short)a; m.indices[k++] = (unsigned short)b; m.indices[k++] = (unsigned short)c;
+    };
+    for (int j = 0; j < S; j++) tri(0, 1 + (j + 1) % S, 1 + j);
+    for (int i = 0; i + 1 < R; i++)
+        for (int j = 0; j < S; j++) {
+            const int a = 1 + i * S + j, b = 1 + i * S + (j + 1) % S, c = a + S, d = b + S;
+            tri(a, b, c);
+            tri(b, d, c);
+        }
+    UploadMesh(&m, false);
+    return m;
+}
+Object3D& waterObject() {
+    if (!gpu.waterObj) {
+        gpu.waterObj = std::make_unique<Object3D>();
+        gpu.waterObj->name = "water";
+        gpu.waterObj->geometry = std::make_shared<Geometry>([] { return makeWaterMesh(); });
+        Material& m = gpu.waterObj->material;
+        m.doubleSided = true;
+        m.castShadow = false;
+    }
+    return *gpu.waterObj;
+}
+
 void setSceneUniforms(const Scene& s, const Camera& cam, const Shadows& sh, Texture2D envTex, float scale) {
+    setWaterUniforms(s, cam);
     const Shader& lit = gpu.lit;
     const LitLocs& L = gpu.L;
     SetShaderValue(lit, L.pxScale, &scale, SHADER_UNIFORM_FLOAT);
@@ -1197,7 +1915,7 @@ void drawSkybox(const Camera& cam) {
     mat.shader = gpu.lit;
     mat.maps[MATERIAL_MAP_DIFFUSE].texture = whiteTexture();
     mat.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
-    setBones(gpu.L.bones, gpu.L.skinned, gpu.lit, nullptr, false);
+    setBones(gpu.L.bones, gpu.L.skinned, gpu.lit, nullptr, 0);
     const float size = cam.farPlane;                    // corners stay inside the far plane
     rlDisableBackfaceCulling();
     rlDisableDepthMask();
@@ -1458,9 +2176,183 @@ void submit(const std::vector<Quad>& quads) {
 
 // Depth-tested against the meshes but not writing depth: alpha-blended particles back to
 // front, then the additive ones, whose order does not matter.
+// ---- splats --------------------------------------------------------------------------
+// A cloud's texture: 6 RGBA32F texels a splat, made once. 0: position, opacity. 1: covariance
+// xx xy xz yy. 2: covariance yz zz, a per-splat random number, SH blue 3. 3: colour, SH red 1.
+// 4: SH red 2, red 3, green 1, green 2. 5: SH green 3, blue 1, blue 2.
+Gpu::SplatGpu& splatGpu(const std::shared_ptr<const splat::Cloud>& cloud) {
+    auto found = gpu.splats.find(cloud.get());
+    if (found != gpu.splats.end()) return found->second;
+    const size_t n = cloud->size();
+    if (n == 0 || cloud->position.size() < n * 3 || cloud->scale.size() < n * 3 || cloud->rotation.size() < n * 4 ||
+        cloud->colour.size() < n * 3)
+        throw std::runtime_error("g3d: a splat cloud is empty or its arrays disagree");
+    if (n > 5000000) throw std::runtime_error("g3d: a splat cloud is limited to 5 million splats");
+    constexpr int WIDTH = 2048;
+    const size_t texels = n * 6;
+    const int rows = (int)((texels + WIDTH - 1) / WIDTH);
+    std::vector<float> data((size_t)WIDTH * (size_t)rows * 4, 0.f);
+    const bool sh = cloud->hasSH() && cloud->sh.size() >= n * 9;
+    for (size_t i = 0; i < n; i++) {
+        float cov[6];
+        cloud->covariance(i, cov);
+        const unsigned h = (unsigned)i * 2654435761u;
+        const float rnd = (float)((h >> 8) & 0xFFFF) / 65536.f;
+        const float* p = &cloud->position[i * 3];
+        const float* c = &cloud->colour[i * 3];
+        const float* k = sh ? &cloud->sh[i * 9] : nullptr;
+        auto s = [&](int j) { return k ? k[j] : 0.f; };
+        float* t = &data[i * 24];
+        const float texel[24] = { p[0], p[1], p[2], cloud->opacity[i],
+                                  cov[0], cov[1], cov[2], cov[3],
+                                  cov[4], cov[5], rnd, s(8),
+                                  c[0], c[1], c[2], s(0),
+                                  s(1), s(2), s(3), s(4),
+                                  s(5), s(6), s(7), 0.f };
+        std::copy(texel, texel + 24, t);
+    }
+    Gpu::SplatGpu g;
+    g.keep = cloud;
+    g.tex = rlLoadTexture(data.data(), WIDTH, rows, RL_PIXELFORMAT_UNCOMPRESSED_R32G32B32A32, 1);
+    rlTextureParameters(g.tex, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_NEAREST);
+    rlTextureParameters(g.tex, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_NEAREST);
+    // One quad (two triangles) per instance, and the instance order, sized for the whole cloud.
+    static const float quad[12] = { -1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1 };
+    g.vao = rlLoadVertexArray();
+    rlEnableVertexArray(g.vao);
+    g.cornerVbo = rlLoadVertexBuffer(quad, sizeof(quad), false);
+    rlEnableVertexBuffer(g.cornerVbo);
+    rlSetVertexAttribute((unsigned)gpu.P.corner, 2, RL_FLOAT, false, 0, 0);
+    rlEnableVertexAttribute((unsigned)gpu.P.corner);
+    g.indexVbo = rlLoadVertexBuffer(nullptr, (int)(n * sizeof(float)), true);
+    rlEnableVertexBuffer(g.indexVbo);
+    rlSetVertexAttribute((unsigned)gpu.P.index, 1, RL_FLOAT, false, 0, 0);
+    rlEnableVertexAttribute((unsigned)gpu.P.index);
+    rlSetVertexAttributeDivisor((unsigned)gpu.P.index, 1);
+    rlDisableVertexArray();
+    rlDisableVertexBuffer();
+    g.capacity = n;
+    return gpu.splats.emplace(cloud.get(), std::move(g)).first->second;
+}
+
+// Splat indices in drawing order, far to near, those that can show: in front of the camera and
+// inside the frustum (with each splat's reach). `mv` is object -> view space (raylib's order).
+void sortSplats(const splat::Cloud& c, const Matrix& mv, float tx, float ty, float reach, std::vector<unsigned>& order) {
+    const size_t n = c.size();
+    std::vector<unsigned> keys;
+    std::vector<unsigned> ids;
+    keys.reserve(n);
+    ids.reserve(n);
+    const float sx = std::sqrt(mv.m0 * mv.m0 + mv.m1 * mv.m1 + mv.m2 * mv.m2);          // the object's scale
+    for (size_t i = 0; i < n; i++) {
+        const float x = c.position[i * 3], y = c.position[i * 3 + 1], z = c.position[i * 3 + 2];
+        const float vx = mv.m0 * x + mv.m4 * y + mv.m8 * z + mv.m12;
+        const float vy = mv.m1 * x + mv.m5 * y + mv.m9 * z + mv.m13;
+        const float vz = mv.m2 * x + mv.m6 * y + mv.m10 * z + mv.m14;
+        const float depth = -vz;
+        if (depth < 0.05f) continue;
+        const float r = 3 * reach * sx * std::max({ c.scale[i * 3], c.scale[i * 3 + 1], c.scale[i * 3 + 2] });
+        if (std::fabs(vx) > depth * tx + r || std::fabs(vy) > depth * ty + r) continue;
+        unsigned bits;
+        std::memcpy(&bits, &depth, 4);
+        keys.push_back(~bits);                           // positive floats order as integers; far first
+        ids.push_back((unsigned)i);
+    }
+    // LSD radix sort, three passes of 11 bits.
+    std::vector<unsigned> keys2(keys.size()), ids2(ids.size());
+    for (int pass = 0; pass < 3; pass++) {
+        const int shift = pass * 11;
+        std::vector<unsigned> count(2049, 0);
+        for (unsigned k : keys) count[((k >> shift) & 2047) + 1]++;
+        for (size_t b = 0; b < 2048; b++) count[b + 1] += count[b];
+        for (size_t j = 0; j < keys.size(); j++) {
+            const unsigned slot = count[(keys[j] >> shift) & 2047]++;
+            keys2[slot] = keys[j];
+            ids2[slot] = ids[j];
+        }
+        keys.swap(keys2);
+        ids.swap(ids2);
+    }
+    order.swap(ids);
+}
+
+void drawSplats(const Scene& s, const Camera& cam, const std::vector<Emitting>& objs, const Matrix& view, const Matrix& proj,
+                int vw, int vh) {
+    struct Job { const Emitting* em; float depth; };
+    std::vector<Job> jobs;
+    const float aspect = (float)vw / (float)vh;
+    for (const Emitting& em : objs) {
+        if (!em.obj->splats || !em.obj->splats->cloud) continue;
+        const splat::Cloud& c = *em.obj->splats->cloud;
+        if (c.size() == 0) continue;
+        const Vector3 centre = Vector3Transform(c.centre, em.world);
+        const float scale = std::max({ Vector3Length({ em.world.m0, em.world.m1, em.world.m2 }), Vector3Length({ em.world.m4, em.world.m5, em.world.m6 }),
+                                       Vector3Length({ em.world.m8, em.world.m9, em.world.m10 }) });
+        const float reach = std::max(em.obj->splats->look.scale, 1.f) * (em.obj->splats->look.scatter > 0 ? 1.f : 1.f);
+        if (!visibleSphere(cam, aspect, centre, (c.radius + em.obj->splats->look.scatter) * scale * reach)) continue;
+        jobs.push_back({ &em, -Vector3Transform(centre, view).z });
+    }
+    if (jobs.empty()) return;
+    std::stable_sort(jobs.begin(), jobs.end(), [](const Job& a, const Job& b) { return a.depth > b.depth; });
+    rlDrawRenderBatchActive();
+    rlDisableDepthMask();
+    rlDisableBackfaceCulling();
+    rlSetBlendFactorsSeparate(RL_SRC_ALPHA, RL_ONE_MINUS_SRC_ALPHA, RL_ONE, RL_ONE_MINUS_SRC_ALPHA, RL_FUNC_ADD, RL_FUNC_ADD);
+    BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+    for (const Job& j : jobs) {
+        const Splats& sp = *j.em->obj->splats;
+        const splat::Cloud& c = *sp.cloud;
+        Gpu::SplatGpu& g = splatGpu(sp.cloud);
+        const Matrix mv = MatrixMultiply(j.em->world, view);
+        float key[16];
+        const float* mvf = &mv.m0;
+        std::copy(mvf, mvf + 16, key);
+        const float tx = 1.f / proj.m0, ty = 1.f / proj.m5;
+        if (!g.sorted || std::memcmp(key, g.lastView, sizeof(key)) != 0) {
+            std::vector<unsigned> order;
+            sortSplats(c, mv, tx, ty, std::max(sp.look.scale, 1.f), order);
+            std::vector<float> inst(order.size());
+            for (size_t i = 0; i < order.size(); i++) inst[i] = (float)order[i];
+            g.drawn = inst.size();
+            if (!inst.empty()) rlUpdateVertexBuffer(g.indexVbo, inst.data(), (int)(inst.size() * sizeof(float)), 0);
+            std::copy(key, key + 16, g.lastView);
+            g.sorted = true;
+        }
+        if (g.drawn == 0) continue;
+        const Matrix invWorld = MatrixInvert(j.em->world);
+        const Vector3 camObj = Vector3Transform(cam.position, invWorld);
+        const Vector2 viewport{ (float)vw, (float)vh };
+        const Vector3 cn = Vector3Length(sp.look.clipNormal) > 1e-6f ? Vector3Normalize(sp.look.clipNormal) : Vector3{ 1, 0, 0 };
+        const Vector4 plane{ cn.x, cn.y, cn.z, sp.look.clipOffset };
+        const int sh = c.hasSH() ? std::clamp(sp.look.shDegree, 0, 1) : 0;
+        rlEnableShader(gpu.splat.id);
+        SetShaderValueMatrix(gpu.splat, gpu.P.view, view);
+        SetShaderValueMatrix(gpu.splat, gpu.P.world, j.em->world);
+        SetShaderValueMatrix(gpu.splat, gpu.P.proj, proj);
+        SetShaderValue(gpu.splat, gpu.P.viewport, &viewport, SHADER_UNIFORM_VEC2);
+        SetShaderValue(gpu.splat, gpu.P.camObj, &camObj, SHADER_UNIFORM_VEC3);
+        SetShaderValue(gpu.splat, gpu.P.scaleMul, &sp.look.scale, SHADER_UNIFORM_FLOAT);
+        SetShaderValue(gpu.splat, gpu.P.opacityMul, &sp.look.opacity, SHADER_UNIFORM_FLOAT);
+        SetShaderValue(gpu.splat, gpu.P.shDegree, &sh, SHADER_UNIFORM_INT);
+        SetShaderValue(gpu.splat, gpu.P.clipPlane, &plane, SHADER_UNIFORM_VEC4);
+        SetShaderValue(gpu.splat, gpu.P.clipBand, &sp.look.clipBand, SHADER_UNIFORM_FLOAT);
+        SetShaderValue(gpu.splat, gpu.P.scatter, &sp.look.scatter, SHADER_UNIFORM_FLOAT);
+        bindUnit(SPLAT_SLOT, g.tex);
+        rlEnableShader(gpu.splat.id);
+        rlEnableVertexArray(g.vao);
+        rlDrawVertexArrayInstanced(0, 6, (int)g.drawn);
+        rlDisableVertexArray();
+        bindUnit(SPLAT_SLOT, 0);
+    }
+    rlDisableShader();
+    restoreBlend();
+    rlEnableDepthMask();
+}
+
 void drawParticles(const Scene& s, const Camera& cam, const std::vector<Emitting>& emitters, const Matrix& view, double t) {
     std::vector<Quad> blended, added;
-    for (const Emitting& em : emitters) particleQuads(s, cam, em, view, t, em.obj->emitter->additive ? added : blended);
+    for (const Emitting& em : emitters)
+        if (em.obj->emitter) particleQuads(s, cam, em, view, t, em.obj->emitter->additive ? added : blended);
     if (blended.empty() && added.empty()) return;
     std::sort(blended.begin(), blended.end(), [](const Quad& a, const Quad& b) { return a.depth > b.depth; });
     rlDrawRenderBatchActive();
@@ -1482,13 +2374,14 @@ void drawParticles(const Scene& s, const Camera& cam, const std::vector<Emitting
     rlEnableDepthMask();
 }
 
-void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target, float scale, int t) {
+void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target, float scale, int t, const Cull& cull) {
     ensureGpu();
     std::vector<Item> items;
     std::vector<Emitting> emitters;
     const double ft = frameTime(t);              // particles follow motion-blur subframes
     gpu.frame = t;
-    collect(s.objects, MatrixIdentity(), items, emitters, ft);
+    std::deque<std::vector<Matrix>> instanceStore;           // what the instanced items point into
+    collect(s.objects, MatrixIdentity(), items, emitters, ft, cull, instanceStore);
     const Texture2D envTex = s.sky.enabled ? renderSky(s, ft, target.id, target.texture.width, target.texture.height)
                                            : environmentTexture(s);
 
@@ -1549,11 +2442,20 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
         } else drawItem(it, Pass::Lit);
     }
     // Stable: at equal depth keep scene order, so coplanar layers do not swap between frames.
+    if (s.water.enabled) clear.push_back({ &waterObject(), MatrixIdentity(), std::numeric_limits<float>::max() });
     std::stable_sort(clear.begin(), clear.end(), [](const Item& a, const Item& b) { return a.viewDepth > b.viewDepth; });
     rlDisableDepthMask();
-    for (const Item& it : clear) drawItem(it, Pass::Lit);
+    for (const Item& it : clear) {
+        const bool surface = it.obj == gpu.waterObj.get();       // the sea's surface is its own mode of the lit shader
+        if (surface) { const int on = 1; SetShaderValue(gpu.lit, gpu.W.mode, &on, SHADER_UNIFORM_INT); }
+        drawItem(it, Pass::Lit);
+        if (surface) { const int off = 0; SetShaderValue(gpu.lit, gpu.W.mode, &off, SHADER_UNIFORM_INT); }
+    }
     rlEnableDepthMask();
-    if (!emitters.empty()) drawParticles(s, cam, emitters, view, ft);
+    if (!emitters.empty()) {
+        drawSplats(s, cam, emitters, rlGetMatrixModelview(), rlGetMatrixProjection(), vw, vh);
+        drawParticles(s, cam, emitters, view, ft);
+    }
 
     bindUnit(SHADOW_SLOT, 0);
     bindUnit(ENV_SLOT, 0);
@@ -1596,6 +2498,59 @@ Vector3 sunAt(float hour) {
     return Vector3Normalize({ std::cos(a), std::sin(a) * 0.85f, -0.45f - 0.2f * std::sin(a) });
 }
 } // namespace
+
+// ------------------------------------------------------------------ water
+namespace {
+// The shader's sum, in the same float arithmetic: height and slope at p.
+float waveSum(const PackedWaves& p, float x, float z, double seconds, Vector2* slope) {
+    float h = 0, gx = 0, gz = 0;
+    const float t = (float)seconds;
+    for (int i = 0; i < p.count; i++) {
+        const float s = p.a[i].z * (p.a[i].x * x + p.a[i].y * z) - p.b[i].x * t + p.b[i].y;
+        const float u = std::max(0.5f + 0.5f * std::sin(s), 1e-4f), sh = p.b[i].z;
+        h += p.a[i].w * (2 * std::pow(u, sh) - 1);
+        const float d = p.a[i].w * sh * std::pow(u, sh - 1) * std::cos(s) * p.a[i].z;
+        gx += d * p.a[i].x;
+        gz += d * p.a[i].y;
+    }
+    if (slope) *slope = { gx, gz };
+    return h;
+}
+} // namespace
+
+float Water::height(float x, float z, double seconds) const {
+    return level + waveSum(packWaves(*this), x, z, seconds, nullptr);
+}
+Vector2 Water::slope(float x, float z, double seconds) const {
+    Vector2 g;
+    waveSum(packWaves(*this), x, z, seconds, &g);
+    return g;
+}
+Water Water::calm() {
+    Water w;
+    w.enabled = true;
+    w.waves = { { 20, 7.0f, 0.045f, 1, 1 }, { -35, 3.1f, 0.03f, 1, 1 }, { 75, 1.7f, 0.022f, 1, 1 },
+                { -58, 1.05f, 0.014f, 1, 1 }, { 31, 0.72f, 0.009f, 1, 1 }, { 112, 0.52f, 0.0065f, 1, 1 },
+                { -17, 0.4f, 0.005f, 1, 1 }, { 152, 0.29f, 0.0035f, 1, 1 } };
+    w.foam = 0.2f;
+    return w;
+}
+Water Water::choppy() {
+    Water w;
+    w.enabled = true;
+    w.waves = { { 15, 14.0f, 0.16f, 1.6f, 1 }, { -30, 7.0f, 0.1f, 1.8f, 1 }, { 60, 3.3f, 0.06f, 1.5f, 1 },
+                { -75, 1.8f, 0.035f, 1, 1 }, { 5, 0.9f, 0.02f, 1, 1 }, { 120, 0.5f, 0.01f, 1, 1 } };
+    return w;
+}
+Water Water::storm() {
+    Water w;
+    w.enabled = true;
+    w.waves = { { 10, 34.0f, 0.7f, 2.4f, 1 }, { -25, 17.0f, 0.42f, 2.6f, 1 }, { 40, 9.0f, 0.24f, 2.2f, 1 },
+                { -60, 4.5f, 0.12f, 1.8f, 1 }, { 80, 2.3f, 0.06f, 1.4f, 1 }, { -5, 1.2f, 0.03f, 1, 1 } };
+    w.foam = 1;
+    w.deep = { 10, 52, 66, 255 };
+    return w;
+}
 
 Sky Sky::day() {
     Sky k;
@@ -1827,12 +2782,21 @@ int ModelAsset::animationIndex(const std::string& name) {
     for (int i = 0; i < animCount_; i++) if (name == anims_[i].name) return i;
     return -1;
 }
+void ModelAsset::poseBones(const Matrix* matrices, int count) {
+    ensure();
+    if (!model_.boneMatrices || !model_.skeleton.boneCount) throw std::runtime_error("g3d: poseBones: model has no skeleton: " + path_);
+    const int n = std::min<int>(count, (int)model_.skeleton.boneCount);
+    for (int i = 0; i < n; i++) model_.boneMatrices[i] = matrices[i];
+    overrideBones_ = true;
+}
+void ModelAsset::clearBones() { overrideBones_ = false; }
 int ModelAsset::animationFrames(int index) {
     ensure();
     return index >= 0 && index < animCount_ ? anims_[index].keyframeCount : 0;
 }
 void ModelAsset::pose(int animation, float frame) {
     ensure();
+    if (overrideBones_) return;
     if (!model_.boneMatrices) return;
     if (animation >= 0 && animation < animCount_) {
         UpdateModelAnimationBones(model_, anims_[animation], std::max(0.f, frame));
@@ -1863,6 +2827,17 @@ Object3D* Object3D::add(fx::Emitter3D e) {
 Object3D* Object3D::add(fx::Emitter3D e, GeometryPtr g, Material m) {
     Object3D* o = add(std::move(g), std::move(m));
     o->emitter = std::make_shared<const fx::Emitter3D>(std::move(e));
+    return o;
+}
+Object3D* Object3D::add(std::shared_ptr<Instances> i, Material m) {
+    Object3D* o = add();
+    o->instances = std::move(i);
+    o->material = std::move(m);
+    return o;
+}
+Object3D* Object3D::add(std::shared_ptr<Splats> s) {
+    Object3D* o = add();
+    o->splats = std::move(s);
     return o;
 }
 Object3D* Object3D::add() {
@@ -1908,6 +2883,22 @@ Object3D* Scene::add(fx::Emitter3D e, GeometryPtr g, Material m) {
     Object3D* o = add(std::move(g), std::move(m));
     o->emitter = std::make_shared<const fx::Emitter3D>(std::move(e));
     return o;
+}
+Object3D* Scene::add(std::shared_ptr<Instances> i, Material m) {
+    Object3D* o = add();
+    o->instances = std::move(i);
+    o->material = std::move(m);
+    return o;
+}
+Object3D* Scene::add(std::shared_ptr<Splats> s) {
+    Object3D* o = add();
+    o->splats = std::move(s);
+    return o;
+}
+Object3D* Scene::add(Object3D* object) {
+    if (!object) return nullptr;
+    objects.emplace_back(object);
+    return object;
 }
 Object3D* Scene::add() {
     objects.push_back(std::make_unique<Object3D>());
@@ -2004,15 +2995,34 @@ bool project(const Camera& cam, Vector3 p, Rectangle vp, Vector2& out) {
 
 void render(Scene& s, int t, const Ctx& c, Rectangle viewport, Camera* camera) {
     Camera& cam = camera ? *camera : s.camera;
+    // Draw what 2D work the caller has batched first: creating canvas render textures or
+    // uploading meshes below rebinds the framebuffer, and a later flush would send the
+    // pending vertices to the wrong one.
+    rlDrawRenderBatchActive();
     if (s.up) s.up(t, s);
     if (cam.up) cam.up(t, cam);
     for (Light& l : s.lights) if (l.up) l.up(t, l);
-    animate(s.objects, t);
+    Cull cull;
+    cull.cam = &cam;
+    cull.floorY = s.cullFloor;
+    {
+        const Vector2 cs = canvasSize();
+        cull.aspect = viewport.width > 0 && viewport.height > 0 ? viewport.width / viewport.height : cs.x / std::max(1.f, cs.y);
+        cull.on = cull.aspect > 0;
+        for (const Light& l : s.lights) {
+            if (!l.castShadow) continue;
+            if (l.type != Light::Type::Directional) { cull.on = false; break; }
+            const Vector3 d = Vector3Subtract(l.target, l.position);
+            if (Vector3Length(d) > 1e-6f) cull.shadowDirs.push_back(Vector3Normalize(d));
+        }
+    }
+    animate(s.objects, t, MatrixIdentity(), cull);
+    if (canvasSize().x > 0) drawCanvases(s.objects, t);
     drawOffscreen(c.a, [&](const RenderTexture& target, float scale) {
         Rectangle vp = viewport;
         if (vp.width <= 0 || vp.height <= 0) vp = { 0, 0, target.texture.width / scale, target.texture.height / scale };
         else vp = { c.o.x + vp.x * c.s, c.o.y + vp.y * c.s, vp.width * c.s, vp.height * c.s };
-        renderBody(s, cam, vp, target, scale, t);
+        renderBody(s, cam, vp, target, scale, t, cull);
     });
 }
 

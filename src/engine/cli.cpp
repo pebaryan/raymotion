@@ -27,6 +27,7 @@
 #include "rmtn/media.hpp"
 #include "rmtn/prefab.hpp"
 #include "rmtn/flags.hpp"
+#include "rmtn/rig.hpp"
 
 #ifdef _WIN32
 #define popen _popen
@@ -623,6 +624,7 @@ int runCli(int argc, const char** argv, const RegisterFn& registerAll){
 #endif
     icons::registerPrefabs();   // built-in prefabs first, so a project's own may replace them
     flags::registerPrefabs();
+    rig::registerPrefabs();
     try {
         std::vector<std::string> scripts;
         std::vector<const char*> args;
@@ -634,7 +636,6 @@ int runCli(int argc, const char** argv, const RegisterFn& registerAll){
             } else args.push_back(argv[i]);
         }
         // Retain script arguments for --jobs worker processes after option normalization.
-        // runMain accepts them as ordinary options and forwards them to children.
         for (const auto& path : scripts) { args.push_back("--script"); args.push_back(path.c_str()); }
         const int count = (int)args.size();
         args.push_back(nullptr);

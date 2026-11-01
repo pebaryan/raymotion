@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- A striped top with a star on the chest, short sleeves and rolled jeans, drawn on
+       the rig::Outfit layout (see outfit-template.svg). -->
+  <rect x="0" y="0" width="1024" height="320" fill="#f4f1e8"/>
+  <path d="M0 40 H1024 V64 H0 Z M0 104 H1024 V128 H0 Z M0 168 H1024 V192 H0 Z M0 232 H1024 V256 H0 Z M0 296 H1024 V320 H0 Z" fill="#2f4f8f"/>
+  <rect x="0" y="0" width="1024" height="14" fill="#2f4f8f"/>
+  <path d="M512 92 L527 132 L570 133 L536 158 L548 199 L512 175 L476 199 L488 158 L454 133 L497 132 Z" fill="#e8463c"/>
+  <rect x="0" y="320" width="1024" height="128" fill="#3c5d8f"/>
+  <rect x="0" y="320" width="1024" height="20" fill="#2a4370"/>
+  <rect x="502" y="340" width="20" height="108" fill="#2a4370"/>
+  <!-- sleeves to 40 %, then skin -->
+  <rect x="0" y="448" width="512" height="576" fill="#e2b48c"/>
+  <rect x="0" y="448" width="512" height="230" fill="#f4f1e8"/>
+  <path d="M0 488 H512 V508 H0 Z M0 548 H512 V568 H0 Z M0 608 H512 V628 H0 Z" fill="#2f4f8f"/>
+  <rect x="0" y="664" width="512" height="14" fill="#2f4f8f"/>
+  <!-- jeans to 85 %, a cuff, then skin -->
+  <rect x="512" y="448" width="512" height="576" fill="#e2b48c"/>
+  <rect x="512" y="448" width="512" height="490" fill="#3c5d8f"/>
+  <rect x="512" y="900" width="512" height="38" fill="#6f8fbf"/>
+  <path d="M640 448 V900 M896 448 V900" stroke="#2a4370" stroke-width="4" fill="none"/>
+</svg>
