@@ -122,8 +122,6 @@ target_include_directories(rmtn_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/inclu
 # Single-header decoders (stb_image, nanosvg), compiled privately into media.cpp.
 target_include_directories(rmtn_engine PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
 target_link_libraries(rmtn_engine PUBLIC raylib)
-# Source-build-only compile-on-demand runner for native composition files.
-include(cmake/NativeCpp.cmake)
 # Development fallback for bundled fonts; installed apps ship assets/ beside the executable.
 target_compile_definitions(rmtn_engine PRIVATE RMTN_BUNDLED_ASSETS="${CMAKE_CURRENT_SOURCE_DIR}/assets")
 
@@ -148,6 +146,9 @@ if(RAYMOTION_SCRIPTING)
   target_compile_definitions(rmtn_engine PRIVATE RMTN_ANGELSCRIPT=1)
   target_link_libraries(rmtn_engine PRIVATE angelscript)
 endif()
+# Source-build-only compile-on-demand runner for native composition files. After every
+# engine dependency exists, so the SDK export includes them (AngelScript among them).
+include(cmake/NativeCpp.cmake)
 
 # Small runtime host: no showcase compositions need to be compiled to run scripts.
 add_executable(raymotion_script src/script_main.cpp)
