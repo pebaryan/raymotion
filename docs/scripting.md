@@ -1002,6 +1002,10 @@ loops. Runaway callbacks abort with a diagnostic. This is a responsiveness guard
 not a security sandbox or a memory quota. Programs are used on the renderer thread,
 not concurrently.
 
+Scripts are trusted code, like the C++ compositions: they can load any path they name,
+write files with `writeText`, and use as much memory as they like. Run only scripts
+you would run as a program; raymotion does not sandbox them.
+
 ## Additional languages
 
 `include/rmtn/script.hpp` is independent of AngelScript. A backend implements:
