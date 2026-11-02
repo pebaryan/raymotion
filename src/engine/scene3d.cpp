@@ -2668,12 +2668,14 @@ const Mesh& Geometry::mesh() {
             if (auto g = self.lock()) { UnloadMesh(g->mesh_); g->mesh_ = Mesh{}; g->loaded_ = false; }
         });
     }
-    if (pending_) {
-        auto edit = std::move(pending_);
-        const unsigned buffers = pendingBuffers_;
-        pendingBuffers_ = 0;
-        pending_ = nullptr;
-        edit(mesh_);
+    if (!pending_.empty()) {
+        auto edits = std::move(pending_);
+        pending_.clear();
+        unsigned buffers = 0;
+        for (auto& [mask, edit] : edits) {
+            edit(mesh_);
+            buffers |= mask;
+        }
         // Geometry edits can change any fixed-topology CPU attribute, not only position
         // and normals. Keep each existing GPU buffer in step with the mesh returned here.
         // The script Geometry3D handle uses this path for UV, tangent, color and index edits.
@@ -2702,16 +2704,14 @@ void Geometry::update(std::function<void(Mesh&)> edit) {
 }
 
 void Geometry::update(std::function<void(Mesh&)> edit, unsigned buffers) {
-    if (pending_) {
-        auto previous = std::move(pending_);
-        pending_ = [previous = std::move(previous), edit = std::move(edit)](Mesh& mesh) {
-            previous(mesh);
-            edit(mesh);
-        };
-    } else {
-        pending_ = std::move(edit);
-    }
-    pendingBuffers_ |= buffers;
+    // One pending edit per buffer set: a geometry updated every frame while it is not drawn
+    // (culled, hidden) keeps only the latest edit instead of a growing chain of them.
+    for (auto& [mask, pending] : pending_)
+        if (mask == buffers) {
+            pending = std::move(edit);
+            return;
+        }
+    pending_.emplace_back(buffers, std::move(edit));
 }
 
 std::shared_ptr<Geometry> Geometry::box(float w, float h, float d) {

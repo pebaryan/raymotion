@@ -199,8 +199,8 @@ void apply(Comp& c, const Description& d, const std::shared_ptr<Program>& progra
             layer.motionBlur={scene.layerBlurSamples,scene.layerShutter}; layer.filters=scene.filters;
             if(!scene.maskFunction.empty()) {
                 auto maskFunction=scene.maskFunction;
-                layer.mask=[program,maskFunction,props,statementBudget](const Ctx& ctx,int t) {
-                    program->draw(maskFunction,ctx,t,props,statementBudget);
+                layer.mask=[program,maskFunction,drawProps,statementBudget](const Ctx& ctx,int t) {
+                    program->draw(maskFunction,ctx,t,drawProps,statementBudget);
                 };
             }
         }

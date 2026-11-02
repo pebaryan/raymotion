@@ -54,13 +54,12 @@ public:
     // the next draw, which re-uploads them. Safe to call from `up` callbacks every frame
     // (morphs, growing shapes); the latest edit wins.
     void update(std::function<void(Mesh&)> edit);
-    // Also synchronize the named fixed-topology GPU buffers after the edit. Multiple edits
-    // before the next draw are composed, and their masks are combined.
+    // Also synchronize the named fixed-topology GPU buffers after the edit. Before the next
+    // draw, the latest edit per buffer set wins; edits for different sets apply in order.
     void update(std::function<void(Mesh&)> edit, unsigned buffers);
 private:
     std::function<Mesh()> make_;
-    std::function<void(Mesh&)> pending_;
-    unsigned pendingBuffers_ = 0;
+    std::vector<std::pair<unsigned, std::function<void(Mesh&)>>> pending_;
     Mesh mesh_{};
     bool loaded_ = false;
 };

@@ -1932,7 +1932,8 @@ const txt::Text& cachedScriptText(const std::string& text,const Json& style,Colo
 int textMorphKept(const std::string& from,const std::string& to,float size,unsigned int color,const std::string& styleJson){
     if(!invocation().drawing)throw std::runtime_error("txt::morphKept is only available inside draw callbacks");
     if(!std::isfinite(size)||size<=0)throw std::runtime_error("txt::morphKept size must be finite and positive");const Json style=Json::parse(styleJson);if(!style.isObject())throw std::runtime_error("text style must be a JSON object");
-    const auto& a=cachedScriptText(from,style,mkColor(color),size);const auto& b=cachedScriptText(to,style,mkColor(color),size);return txt::Morph(a,b).kept();
+    // A copy: the second lookup can clear the cache and free what a reference would point to.
+    const auto a=cachedScriptText(from,style,mkColor(color),size);const auto& b=cachedScriptText(to,style,mkColor(color),size);return txt::Morph(a,b).kept();
 }
 struct ScriptTextStyler;
 struct ScriptTextLayout {
