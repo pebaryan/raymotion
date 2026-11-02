@@ -32,6 +32,11 @@ namespace g3d {
 // A mesh description; the GPU mesh is generated on first use and freed by shutdownGraphics.
 class Geometry : public std::enable_shared_from_this<Geometry> {
 public:
+    enum Buffer : unsigned {
+        PositionBuffer = 1u << 0, TexcoordBuffer = 1u << 1, NormalBuffer = 1u << 2,
+        ColorBuffer = 1u << 3, TangentBuffer = 1u << 4, Texcoord2Buffer = 1u << 5,
+        IndexBuffer = 1u << 6
+    };
     explicit Geometry(std::function<Mesh()> make) : make_(std::move(make)) {}
     ~Geometry();
     static std::shared_ptr<Geometry> box(float w, float h, float d);
@@ -49,9 +54,12 @@ public:
     // the next draw, which re-uploads them. Safe to call from `up` callbacks every frame
     // (morphs, growing shapes); the latest edit wins.
     void update(std::function<void(Mesh&)> edit);
+    // Also synchronize the named fixed-topology GPU buffers after the edit. Before the next
+    // draw, the latest edit per buffer set wins; edits for different sets apply in order.
+    void update(std::function<void(Mesh&)> edit, unsigned buffers);
 private:
     std::function<Mesh()> make_;
-    std::function<void(Mesh&)> pending_;
+    std::vector<std::pair<unsigned, std::function<void(Mesh&)>>> pending_;
     Mesh mesh_{};
     bool loaded_ = false;
 };
@@ -243,6 +251,7 @@ struct Object3D {
     Material material;
     ModelPtr model;                 // ...or a model file
     bool modelMaterials = true;     // model: keep the file's colours/textures (else `material`)
+    std::vector<Color> modelMaterialTints; // optional per-material RGBA multipliers, indexed by Model::materials
     int animation = -1;             // model: animation index to pose, -1 = bind pose
     float animationFrame = 0;       // model: keyframe (fractional ok)
     // Particles born in this object's space (fx::Emitter3D). With a `geometry` too, each

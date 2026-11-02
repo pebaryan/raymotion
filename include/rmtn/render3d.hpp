@@ -141,7 +141,7 @@ static inline ScreenResult project(const Cam&cam, int W,int H, V3 p){
 }
 
 struct TriG { std::array<float,6> p; double z; Color c; bool w; };
-static std::vector<TriG> gbuf;
+static thread_local std::vector<TriG> gbuf;
 static inline void frameBegin(){ gbuf.clear(); }
 static inline void frameEnd3D(int W,int H){
     (void)W;(void)H;

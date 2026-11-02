@@ -463,10 +463,27 @@ Vector2 canvasSize() {
 void presentFrame(Comp& c, int frame, Canvas& canvas) {
     currentFps = c.fps;
     if (c.render) {
-        BeginTextureMode(canvas.output());
-        rlDisableBackfaceCulling();   // hooks start in 2D state; 3D code enables what it needs
-        c.render(c, frame, canvas.output());
+        const RenderTexture target = canvas.output();
+        const size_t targetDepth = targets.size();
+        targets.push_back({ target, 1.f });  // custom renders target the resolved composition size
+        bindTarget(targets.back());
+        try {
+            c.render(c, frame, target);
+            if (targets.size() != targetDepth + 1)
+                throw std::runtime_error("custom renderer left an offscreen target unbalanced");
+        } catch (...) {
+            while (targets.size() > targetDepth) {
+                EndTextureMode();
+                const RenderTexture active = targets.back().rt;
+                targets.pop_back();
+                if (active.id != target.id) release(active);
+                if (targets.size() > targetDepth) bindTarget(targets.back());
+            }
+            rlEnableBackfaceCulling();
+            throw;
+        }
         EndTextureMode();
+        targets.pop_back();
         rlEnableBackfaceCulling();
         return;
     }

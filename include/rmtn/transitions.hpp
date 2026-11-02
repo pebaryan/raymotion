@@ -47,6 +47,14 @@ public:
     // The transition between the scene added last and the next add(). It overlaps both.
     TransitionSeries& transition(const Transition& t) { pending_ = std::make_unique<Transition>(t); return *this; }
 
+    // Connect two already-timed nodes. `overlap` must fit both nodes; their starts remain
+    // owned by the caller, which is useful for declarative timelines such as script backends.
+    void connect(TNode* exiting, TNode* entering, const Transition& t, int overlap) {
+        if (!exiting || !entering || overlap < 1 || overlap > exiting->dur || overlap > entering->dur)
+            throw std::invalid_argument("transition overlap must fit both timeline nodes");
+        link(exiting, entering, t, overlap);
+    }
+
     TNode* add(int duration) {
         int overlap = 0;
         if (pending_ && prev_) overlap = std::min({ pending_->frames, prev_->dur, duration });

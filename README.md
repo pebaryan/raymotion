@@ -123,6 +123,24 @@ build/raymotion prefabs                        # list prefabs and their default 
 
 ## Writing a project
 
+### Runtime scripts
+
+Use the embedded `.as` backend for quick 2D motion graphics without a native compiler:
+
+```sh
+cmake --build build --config Release --target raymotion_script
+build/raymotion_script list --script examples/scripts/lower_third.as
+build/raymotion_script preview lower-third --script examples/scripts/lower_third.as
+```
+
+The script API includes nested transforms, gradients, images, polygons, font choices,
+props and seeded animation. See [runtime scripting](docs/scripting.md) for the scope
+and available bindings. For 3D, audio, media timelines or other full engine features,
+use a normal CMake project. AngelScript is vendored; `-DRAYMOTION_SCRIPTING=OFF`
+disables that optional backend.
+
+### Native C++ projects
+
 The engine is the `raymotion::engine` library; a project registers compositions and
 hands them to the CLI. `examples/starter/main.cpp` is a complete one:
 

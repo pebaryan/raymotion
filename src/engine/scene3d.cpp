@@ -1576,13 +1576,18 @@ void drawItem(const Item& it, Pass pass) {
     const Matrix world = MatrixMultiply(model.transform, it.world);
     for (int i = 0; i < model.meshCount; i++) {
         const Mesh& mesh = model.meshes[i];
-        const ::Material& own = model.materials[model.meshMaterial[i]];
+        const int materialIndex = model.meshMaterial[i];
+        const ::Material& own = model.materials[materialIndex];
         if (o.modelMaterials) {
             mat.maps[MATERIAL_MAP_DIFFUSE].texture = own.maps[MATERIAL_MAP_DIFFUSE].texture.id
                 ? own.maps[MATERIAL_MAP_DIFFUSE].texture : whiteTexture();
             Color oc = own.maps[MATERIAL_MAP_DIFFUSE].color, tint = o.material.color;
-            mat.maps[MATERIAL_MAP_DIFFUSE].color = { (unsigned char)(oc.r * tint.r / 255), (unsigned char)(oc.g * tint.g / 255),
-                                                     (unsigned char)(oc.b * tint.b / 255), (unsigned char)(oc.a * tint.a / 255) };
+            const Color slotTint = materialIndex >= 0 && materialIndex < (int)o.modelMaterialTints.size()
+                ? o.modelMaterialTints[(size_t)materialIndex] : WHITE;
+            mat.maps[MATERIAL_MAP_DIFFUSE].color = { (unsigned char)(oc.r * tint.r * slotTint.r / (255 * 255)),
+                                                     (unsigned char)(oc.g * tint.g * slotTint.g / (255 * 255)),
+                                                     (unsigned char)(oc.b * tint.b * slotTint.b / (255 * 255)),
+                                                     (unsigned char)(oc.a * tint.a * slotTint.a / (255 * 255)) };
         } else {
             mat.maps[MATERIAL_MAP_DIFFUSE].texture = mapOf(o.material);
             mat.maps[MATERIAL_MAP_DIFFUSE].color = o.material.color;
@@ -2663,17 +2668,51 @@ const Mesh& Geometry::mesh() {
             if (auto g = self.lock()) { UnloadMesh(g->mesh_); g->mesh_ = Mesh{}; g->loaded_ = false; }
         });
     }
-    if (pending_) {
-        auto edit = std::move(pending_);
-        pending_ = nullptr;
-        edit(mesh_);
-        UpdateMeshBuffer(mesh_, 0, mesh_.vertices, mesh_.vertexCount * 3 * (int)sizeof(float), 0);
-        if (mesh_.normals) UpdateMeshBuffer(mesh_, 2, mesh_.normals, mesh_.vertexCount * 3 * (int)sizeof(float), 0);
+    if (!pending_.empty()) {
+        auto edits = std::move(pending_);
+        pending_.clear();
+        unsigned buffers = 0;
+        for (auto& [mask, edit] : edits) {
+            edit(mesh_);
+            buffers |= mask;
+        }
+        // Geometry edits can change any fixed-topology CPU attribute, not only position
+        // and normals. Keep each existing GPU buffer in step with the mesh returned here.
+        // The script Geometry3D handle uses this path for UV, tangent, color and index edits.
+        if (mesh_.vboId) {
+            const int vertices = mesh_.vertexCount;
+            auto update = [&](int slot, const void* data, int bytes) {
+                if (data && bytes > 0 && mesh_.vboId[slot] != 0)
+                    UpdateMeshBuffer(mesh_, slot, data, bytes, 0);
+            };
+            if (buffers & PositionBuffer) update(RL_DEFAULT_SHADER_ATTRIB_LOCATION_POSITION, mesh_.vertices, vertices * 3 * (int)sizeof(float));
+            if (buffers & TexcoordBuffer) update(RL_DEFAULT_SHADER_ATTRIB_LOCATION_TEXCOORD, mesh_.texcoords, vertices * 2 * (int)sizeof(float));
+            if (buffers & NormalBuffer) update(RL_DEFAULT_SHADER_ATTRIB_LOCATION_NORMAL, mesh_.normals, vertices * 3 * (int)sizeof(float));
+            if (buffers & ColorBuffer) update(RL_DEFAULT_SHADER_ATTRIB_LOCATION_COLOR, mesh_.colors, vertices * 4 * (int)sizeof(unsigned char));
+            if (buffers & TangentBuffer) update(RL_DEFAULT_SHADER_ATTRIB_LOCATION_TANGENT, mesh_.tangents, vertices * 4 * (int)sizeof(float));
+            if (buffers & Texcoord2Buffer) update(RL_DEFAULT_SHADER_ATTRIB_LOCATION_TEXCOORD2, mesh_.texcoords2, vertices * 2 * (int)sizeof(float));
+            if ((buffers & IndexBuffer) && mesh_.indices && mesh_.vboId[RL_DEFAULT_SHADER_ATTRIB_LOCATION_INDICES] != 0)
+                rlUpdateVertexBufferElements(mesh_.vboId[RL_DEFAULT_SHADER_ATTRIB_LOCATION_INDICES], mesh_.indices,
+                                             mesh_.triangleCount * 3 * (int)sizeof(unsigned short), 0);
+        }
     }
     return mesh_;
 }
 
-void Geometry::update(std::function<void(Mesh&)> edit) { pending_ = std::move(edit); }
+void Geometry::update(std::function<void(Mesh&)> edit) {
+    update(std::move(edit), PositionBuffer | NormalBuffer);
+}
+
+void Geometry::update(std::function<void(Mesh&)> edit, unsigned buffers) {
+    // One pending edit per buffer set: a geometry updated every frame while it is not drawn
+    // (culled, hidden) keeps only the latest edit instead of a growing chain of them.
+    for (auto& [mask, pending] : pending_)
+        if (mask == buffers) {
+            pending = std::move(edit);
+            return;
+        }
+    pending_.emplace_back(buffers, std::move(edit));
+}
 
 std::shared_ptr<Geometry> Geometry::box(float w, float h, float d) {
     return std::make_shared<Geometry>([=] { return GenMeshCube(w, h, d); });

@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(RAYMOTION_BUILD_EXAMPLES "Build the showcase and starter projects" ${PROJECT_IS_TOP_LEVEL})
+option(RAYMOTION_SCRIPTING "Enable embedded C++-like AngelScript compositions" ON)
 set(RAYMOTION_RAYLIB "auto" CACHE STRING "raylib source: auto, vendored (prebuilt MSVC lib), fetch (build 6.2 from source) or system (find_package)")
 set_property(CACHE RAYMOTION_RAYLIB PROPERTY STRINGS auto vendored fetch system)
 
@@ -55,6 +56,7 @@ endif()
 
 # ---------------------------------------------------------------- engine library
 add_library(rmtn_engine STATIC
+  src/engine/script.cpp
   src/engine/cli.cpp
   src/engine/frame_stream.cpp
   src/engine/fonts.cpp
@@ -122,6 +124,32 @@ target_include_directories(rmtn_engine PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/thir
 target_link_libraries(rmtn_engine PUBLIC raylib)
 # Development fallback for bundled fonts; installed apps ship assets/ beside the executable.
 target_compile_definitions(rmtn_engine PRIVATE RMTN_BUNDLED_ASSETS="${CMAKE_CURRENT_SOURCE_DIR}/assets")
+
+# Runtime scripting uses the same renderer and a language-neutral backend contract.
+if(RAYMOTION_SCRIPTING)
+  set(RMTN_ANGELSCRIPT_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/angelscript")
+  add_subdirectory("${RMTN_ANGELSCRIPT_SOURCE_DIR}/angelscript/projects/cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/angelscript-build" EXCLUDE_FROM_ALL)
+  if(MSVC)
+    # The script registration translation unit contains the complete AngelScript API surface.
+    set_source_files_properties(src/engine/script_angelscript.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
+  endif()
+  target_sources(rmtn_engine PRIVATE src/engine/script_angelscript.cpp
+    "${RMTN_ANGELSCRIPT_SOURCE_DIR}/add_on/scriptstdstring/scriptstdstring.cpp"
+    "${RMTN_ANGELSCRIPT_SOURCE_DIR}/add_on/scriptmath/scriptmath.cpp"
+    "${RMTN_ANGELSCRIPT_SOURCE_DIR}/add_on/scriptarray/scriptarray.cpp")
+  target_include_directories(rmtn_engine PRIVATE
+    "${RMTN_ANGELSCRIPT_SOURCE_DIR}/angelscript/include"
+    "${RMTN_ANGELSCRIPT_SOURCE_DIR}/add_on/scriptstdstring"
+    "${RMTN_ANGELSCRIPT_SOURCE_DIR}/add_on/scriptmath"
+    "${RMTN_ANGELSCRIPT_SOURCE_DIR}/add_on/scriptarray")
+  target_compile_definitions(rmtn_engine PRIVATE RMTN_ANGELSCRIPT=1)
+  target_link_libraries(rmtn_engine PRIVATE angelscript)
+endif()
+
+# Small runtime host: no showcase compositions need to be compiled to run scripts.
+add_executable(raymotion_script src/script_main.cpp)
+target_link_libraries(raymotion_script PRIVATE rmtn_engine)
 
 # ---------------------------------------------------------------- example projects
 if(RAYMOTION_BUILD_EXAMPLES)
@@ -204,6 +232,25 @@ endif()
 # ---------------------------------------------------------------- tests
 if(PROJECT_IS_TOP_LEVEL)
   include(CTest)
+endif()
+if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING)
+  add_executable(raymotion_script_tests tests/script_tests.cpp)
+  target_link_libraries(raymotion_script_tests PRIVATE rmtn_engine)
+  add_test(NAME script_backend_contract COMMAND raymotion_script_tests)
+  find_package(Python3 COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND)
+    if(RAYMOTION_SCRIPTING)
+      add_test(NAME script_runtime COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_script.py" "$<TARGET_FILE:raymotion_script>")
+      add_test(NAME script_rendering COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_script.py" "$<TARGET_FILE:raymotion_script>" --gl)
+      set_tests_properties(script_runtime PROPERTIES TIMEOUT 120)
+      set_tests_properties(script_rendering PROPERTIES TIMEOUT 180 LABELS gl)
+    endif()
+  endif()
+  if(RAYMOTION_SCRIPTING AND NOT Python3_Interpreter_FOUND)
+    message(STATUS "Python3 not found; runtime scripting tests are disabled")
+  endif()
 endif()
 if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   # Pure logic: runs anywhere.

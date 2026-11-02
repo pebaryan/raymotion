@@ -124,11 +124,11 @@ inline double interpolate(double x, std::initializer_list<double> inRange,
 }
 
 // Per-channel RGBA interpolation, clamped at both ends.
-inline Color interpolateColors(double x, std::initializer_list<double> inRange,
-                               std::initializer_list<Color> colors, Easing easing = ease::linear) {
-    const std::vector<double> in(inRange);
-    const std::vector<Color> cs(colors);
+inline Color interpolateColors(double x, const std::vector<double>& in, const std::vector<Color>& cs,
+                               Easing easing = ease::linear) {
     if (in.size() < 2 || cs.size() != in.size()) throw std::invalid_argument("interpolateColors: ranges need >= 2 equal-length entries");
+    for (size_t i = 1; i < in.size(); ++i)
+        if (!(in[i] > in[i - 1])) throw std::invalid_argument("interpolateColors: inputRange must be strictly increasing");
     x = std::min(std::max(x, in.front()), in.back());
     size_t seg = detail::segmentOf(x, in);
     double t = easing((x - in[seg - 1]) / (in[seg] - in[seg - 1]));
@@ -137,6 +137,10 @@ inline Color interpolateColors(double x, std::initializer_list<double> inRange,
         return (unsigned char)std::lround(std::min(255.0, std::max(0.0, r)));
     };
     return { channel(&Color::r), channel(&Color::g), channel(&Color::b), channel(&Color::a) };
+}
+inline Color interpolateColors(double x, std::initializer_list<double> inRange,
+                               std::initializer_list<Color> colors, Easing easing = ease::linear) {
+    return interpolateColors(x, std::vector<double>(inRange), std::vector<Color>(colors), std::move(easing));
 }
 
 // ------------------------------------------------------------------ spring

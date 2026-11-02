@@ -17,10 +17,17 @@ if (-not (Test-Path $exe)) { throw "missing $exe" }
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force (Join-Path $stage "licenses") | Out-Null
 Copy-Item $exe $stage
+$scriptExe = Join-Path $Build "raymotion_script.exe"
+if (Test-Path $scriptExe) {
+    Copy-Item $scriptExe $stage
+    New-Item -ItemType Directory -Force (Join-Path $stage "scripts") | Out-Null
+    Copy-Item (Join-Path $root "examples/scripts/hello.as") (Join-Path $stage "scripts")
+}
 Copy-Item -Recurse (Join-Path $root "assets") $stage
 Copy-Item (Join-Path $root "LICENSE") (Join-Path $stage "LICENSE.txt")
 Copy-Item (Join-Path $root "NOTICE") (Join-Path $stage "NOTICE.txt")
 Copy-Item (Join-Path $root "third_party/raylib/LICENSE") (Join-Path $stage "licenses/raylib-zlib.txt")
+Copy-Item (Join-Path $root "third_party/angelscript/LICENSE") (Join-Path $stage "licenses/angelscript-zlib.txt")
 Copy-Item (Join-Path $root "assets/fonts/Inter-OFL.txt") (Join-Path $stage "licenses/Inter-OFL.txt")
 Copy-Item (Join-Path $root "assets/fonts/JetBrainsMono-OFL.txt") (Join-Path $stage "licenses/JetBrainsMono-OFL.txt")
 Copy-Item (Join-Path $root "assets/fonts/LatinModernMath-GUST-FONT-LICENSE.txt") (Join-Path $stage "licenses/LatinModernMath-GUST-FONT-LICENSE.txt")
@@ -42,6 +49,8 @@ Try it
   raymotion preview raymotion-promo           play one in a window
   raymotion render raymotion-promo            render it to out/raymotion-promo.mp4
   raymotion                                   with no arguments, every command and option
+  raymotion_script preview hello-script --script scripts/hello.as
+                                              a runtime composition: edit it, run it again
 
 Keep the assets folder next to raymotion.exe.
 Source, docs and the intro video: https://github.com/pebaryan/raymotion

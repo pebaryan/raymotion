@@ -6,6 +6,8 @@ This product is licensed under the Apache License, Version 2.0 (see LICENSE).
 It includes or bundles third-party components under their own licenses:
 
 - raylib (third_party/raylib): zlib/libpng license, Copyright (c) Ramon Santamaria (@raysan5).
+- AngelScript 2.38.0 and SDK addons (optional runtime scripting): zlib license,
+  Copyright (c) 2003-2025 Andreas Jonsson (https://www.angelcode.com/angelscript/).
 - stb_image and stb_truetype (third_party/stb): public domain or MIT, Sean Barrett.
 - nanosvg (third_party/nanosvg): zlib license, Copyright (c) Mikko Mononen.
 - Inter font (assets/fonts): SIL Open Font License 1.1, The Inter Project Authors
