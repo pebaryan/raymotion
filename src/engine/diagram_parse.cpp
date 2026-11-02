@@ -1518,6 +1518,10 @@ Shape shapeName(const std::string& s) {
         { "parallelogram", Shape::Parallelogram }, { "trapezoid", Shape::Trapezoid }, { "cylinder", Shape::Cylinder },
         { "database", Shape::Cylinder }, { "subroutine", Shape::Subroutine }, { "flag", Shape::Flag }, { "note", Shape::Note },
         { "document", Shape::Document }, { "point", Shape::Point }, { "dot", Shape::Point }, { "text", Shape::Text },
+        { "parallelogramalt", Shape::ParallelogramAlt }, { "trapezoidalt", Shape::TrapezoidAlt },
+        { "startstate", Shape::StartState }, { "endstate", Shape::EndState }, { "task", Shape::Task },
+        { "event", Shape::Event }, { "gateway", Shape::Gateway }, { "dataobject", Shape::DataObject },
+        { "datastore", Shape::DataStore }, { "annotation", Shape::Annotation },
     };
     auto it = names.find(lower(s));
     return it == names.end() ? Shape::Rounded : it->second;
@@ -1561,6 +1565,7 @@ Graph jsonld(const Json& doc, const RdfOptions& options) { return JsonLd(options
 Graph json(const Json& doc) {
     Graph g;
     g.layout = LayoutKind::Force;
+    g.title = doc.str("title", "");
     const Json* nodes = &doc["nodes"];
     const Json* edges = doc.has("edges") ? &doc["edges"] : &doc["links"];
     Json cyNodes, cyEdges;
@@ -1580,7 +1585,8 @@ Graph json(const Json& doc) {
     }
     if (doc.has("directed")) g.directed = doc.flag("directed", true);
     if (doc.has("direction")) g.direction = directionOf(doc.str("direction", "TB"));
-    if (doc.has("layout")) {
+    const bool explicitLayout=doc.has("layout");
+    if (explicitLayout) {
         const std::string l = lower(doc.str("layout", "auto"));
         g.layout = l == "layered" ? LayoutKind::Layered : l == "tree" ? LayoutKind::Tree : l == "radial" ? LayoutKind::Radial :
                    l == "circle" ? LayoutKind::Circle : l == "none" ? LayoutKind::None : LayoutKind::Force;
@@ -1594,12 +1600,19 @@ Graph json(const Json& doc) {
             nd.label = cleanLabel(nd.label);
             nd.group = n.str("parent", n.str("group", ""));
             nd.kind = n.str("kind", n.str("type", ""));
+            nd.marker=n.str("marker",nd.marker);
+            const auto place=lower(n.str("labelPlace","inside"));nd.labelPlace=place=="below"?LabelPlace::Below:place=="above"?LabelPlace::Above:place=="right"?LabelPlace::Right:place=="left"?LabelPlace::Left:LabelPlace::Inside;
+            nd.labelAngle=(float)n.num("labelAngle",nd.labelAngle);
             if (n.has("color")) nd.style.fill = n.color("color", WHITE);
-            if (n.has("x") && n.has("y")) nd.pos = { (float)n.num("x", 0), (float)n.num("y", 0) };
+            if (n.has("strokeColor")) nd.style.stroke=n.color("strokeColor",BLACK);
+            if (n.has("textColor")) nd.style.text=n.color("textColor",BLACK);
+            if (n.has("strokeWidth")) nd.style.strokeWidth=(float)n.num("strokeWidth",2.5);
+            if (n.has("dash")){const auto dash=lower(n.str("dash","solid"));nd.style.dash=dash=="dashed"?Stroke::Dashed:dash=="dotted"?Stroke::Dotted:Stroke::Solid;}
+            if (n.has("x") && n.has("y")) {nd.pos = { (float)n.num("x", 0), (float)n.num("y", 0) };nd.fixed=n.flag("fixed",false);}
             else allPos = false;
             if (n.has("width")) nd.size.x = (float)n.num("width", 0);
             if (n.has("height")) nd.size.y = (float)n.num("height", 0);
-            nd.data = n;
+            nd.data = n.has("data") ? n["data"] : n;
         }
     // A node's "group" that is itself a node (Cytoscape compound) or a name becomes a group.
     for (Node& n : g.nodes) {
@@ -1609,8 +1622,20 @@ Graph json(const Json& doc) {
             g.addGroup(n.group, parentNode ? parentNode->label : n.group);
         }
     }
+    if(doc["groups"].isArray()) for(const Json& source:doc["groups"].asArray()) {
+        const auto id=source.str("id","");if(id.empty())throw std::runtime_error("json graph: a group has no id");
+        Group& gr=g.addGroup(id,source.str("label",id),source.str("parent",""));gr.label=source.str("label",id);gr.parent=source.str("parent","");
+        const auto kind=lower(source.str("kind","cluster"));gr.kind=kind=="pool"?Group::Kind::Pool:kind=="lane"?Group::Kind::Lane:Group::Kind::Cluster;
+        gr.horizontal=source.flag("horizontal",gr.horizontal);
+        if(source.has("x")&&source.has("y")&&source.has("width")&&source.has("height")){gr.rect={(float)source.num("x",0),(float)source.num("y",0),(float)source.num("width",0),(float)source.num("height",0)};gr.fixed=true;}
+        if(source.has("color"))gr.style.fill=source.color("color",WHITE);
+        if(source.has("strokeColor"))gr.style.stroke=source.color("strokeColor",BLACK);
+        if(source.has("textColor"))gr.style.text=source.color("textColor",BLACK);
+        if(source.has("strokeWidth"))gr.style.strokeWidth=(float)source.num("strokeWidth",gr.style.strokeWidth.value_or(2.5f));
+        if(source.has("dash")){const auto dash=lower(source.str("dash","solid"));gr.style.dash=dash=="dashed"?Stroke::Dashed:dash=="dotted"?Stroke::Dotted:Stroke::Solid;}
+    }
     g.nodes.erase(std::remove_if(g.nodes.begin(), g.nodes.end(), [&](const Node& n) { return g.group(n.id) != nullptr; }), g.nodes.end());
-    if (allPos) g.layout = LayoutKind::None;
+    if (allPos && !explicitLayout) g.layout = LayoutKind::None;
     if (edges->isArray())
         for (const Json& e : edges->asArray()) {
             auto end = [&](const char* a, const char* b) {
@@ -1623,7 +1648,27 @@ Graph json(const Json& doc) {
             if (!g.directed) ed.head = Arrow::None;
             if (e.has("id")) ed.id = e.str("id", ed.id);
             if (e.has("color")) ed.style.stroke = e.color("color", GRAY);
-            if (e.flag("dashed", false)) ed.stroke = Stroke::Dashed;
+            ed.width = (float)e.num("width", ed.width);
+            ed.minLength=e.integer("minLength",ed.minLength);
+            const auto stroke = lower(e.str("stroke", e.flag("dashed", false) ? "dashed" : "solid"));
+            ed.stroke = stroke == "dashed" ? Stroke::Dashed : stroke == "dotted" ? Stroke::Dotted : Stroke::Solid;
+            auto arrow = [&](const char* field, Arrow fallback) {
+                const auto name=lower(e.str(field, ""));
+                if(name.empty())return fallback;
+                if(name=="none")return Arrow::None;if(name=="normal")return Arrow::Normal;if(name=="open")return Arrow::Open;
+                if(name=="circle")return Arrow::Circle;if(name=="opencircle")return Arrow::OpenCircle;if(name=="cross")return Arrow::Cross;
+                if(name=="diamond")return Arrow::Diamond;if(name=="opendiamond")return Arrow::OpenDiamond;
+                throw std::runtime_error(std::string("json graph: unknown arrow kind '")+name+"'");
+            };
+            ed.head=arrow("head",ed.head);ed.tail=arrow("tail",ed.tail);
+            ed.curved=e.flag("curved",ed.curved);ed.fixed=e.flag("fixed",ed.fixed);
+            if(e.has("labelX")&&e.has("labelY"))ed.labelPos=Vector2{(float)e.num("labelX",0),(float)e.num("labelY",0)};
+            if(e["points"].isArray()){const auto& pts=e["points"];if(pts.size()%2||pts.size()>8192)throw std::runtime_error("json graph: edge points need at most 4096 x/y pairs");ed.points.clear();for(size_t p=0;p<pts.size();p+=2)ed.points.push_back({(float)pts[p].asNumber(),(float)pts[p+1].asNumber()});}
+            if(e.has("strokeColor"))ed.style.stroke=e.color("strokeColor",GRAY);
+            if(e.has("textColor"))ed.style.text=e.color("textColor",BLACK);
+            if(e.has("fillColor"))ed.style.fill=e.color("fillColor",WHITE);
+            if(e.has("strokeWidth"))ed.style.strokeWidth=(float)e.num("strokeWidth",ed.style.strokeWidth.value_or(1));
+            if(e.has("dash")){const auto dash=lower(e.str("dash","solid"));ed.style.dash=dash=="dashed"?Stroke::Dashed:dash=="dotted"?Stroke::Dotted:Stroke::Solid;}
             ed.kind = e.str("kind", e.str("type", ""));
         }
     return g;

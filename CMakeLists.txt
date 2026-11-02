@@ -130,6 +130,10 @@ if(RAYMOTION_SCRIPTING)
   set(RMTN_ANGELSCRIPT_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/angelscript")
   add_subdirectory("${RMTN_ANGELSCRIPT_SOURCE_DIR}/angelscript/projects/cmake"
     "${CMAKE_CURRENT_BINARY_DIR}/angelscript-build" EXCLUDE_FROM_ALL)
+  if(MSVC)
+    # The script registration translation unit contains the complete AngelScript API surface.
+    set_source_files_properties(src/engine/script_angelscript.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
+  endif()
   target_sources(rmtn_engine PRIVATE src/engine/script_angelscript.cpp
     "${RMTN_ANGELSCRIPT_SOURCE_DIR}/add_on/scriptstdstring/scriptstdstring.cpp"
     "${RMTN_ANGELSCRIPT_SOURCE_DIR}/add_on/scriptmath/scriptmath.cpp"
