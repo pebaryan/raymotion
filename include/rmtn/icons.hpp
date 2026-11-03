@@ -13,7 +13,8 @@
 //
 // Brands: x, youtube, github, instagram, tiktok, whatsapp, telegram, twitch, steam,
 // itchdotio, xbox, playstation, nintendoswitch, shopee, tokopedia, amazon, ebay,
-// vinted. Most glyphs use Simple Icons paths; Tokopedia is a compact adaptation.
+// willhaben, vinted. Most glyphs use Simple Icons paths; Tokopedia is a compact
+// adaptation, while willhaben uses artwork from its current official site.
 #pragma once
 #include <string>
 #include <vector>

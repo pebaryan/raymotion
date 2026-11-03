@@ -18,7 +18,7 @@ template <class F> static bool throws(F f) {
 }
 
 static void data() {
-    CHECK(icons::brands().size() == 18);
+    CHECK(icons::brands().size() == 19);
     CHECK(icons::languages().size() == 18);
     for (const std::string& b : icons::brands()) {
         const vg::Path& g = icons::glyph(b);
@@ -45,6 +45,7 @@ static void data() {
     CHECK(icons::title("tokopedia") == "Tokopedia");
     CHECK(icons::title("amazon") == "Amazon");
     CHECK(icons::title("ebay") == "eBay");
+    CHECK(icons::title("willhaben") == "willhaben");
     CHECK(icons::title("vinted") == "Vinted");
     const Color red = icons::brandColor("youtube");
     CHECK(red.r == 255 && red.g == 0 && red.b == 0);
@@ -65,7 +66,7 @@ static void prefabs() {
     CHECK(has("social-steam") && has("social-itchdotio") && has("social-xbox"));
     CHECK(has("social-playstation") && has("social-nintendoswitch"));
     CHECK(has("social-shopee") && has("social-tokopedia") && has("social-amazon"));
-    CHECK(has("social-ebay") && has("social-vinted"));
+    CHECK(has("social-ebay") && has("social-willhaben") && has("social-vinted"));
     flags::registerPrefabs();
     CHECK(flags::countries().size() == 29);
     const auto flagNames = prefab::names();
@@ -156,6 +157,11 @@ static void drawing() {
         CHECK(f.count([](Color c) { return near(c, WHITE, 25); }) > 100);
         UnloadImage(f.img);
     }
+    Frame willhaben = renderPrefab("social-willhaben", Json::parse(R"({"size": 200, "in": "none"})"), 1);
+    CHECK(willhaben.count([](Color c) { return near(c, mkColor(0x19afff), 8); }) > 100);
+    CHECK(willhaben.count([](Color c) { return near(c, mkColor(0x003796), 8); }) > 100);
+    CHECK(willhaben.count([](Color c) { return near(c, WHITE, 8); }) > 100);
+    UnloadImage(willhaben.img);
     for (const std::string& language : icons::languages()) {
         Frame f = renderPrefab("language-" + language, Json::parse(R"({"size": 200, "in": "none"})"), 1);
         CHECK(near(f.at(120, 120), icons::brandColor(language)));
