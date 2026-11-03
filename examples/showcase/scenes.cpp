@@ -66,6 +66,7 @@ void registerText(Registry& out);
 void registerMotionBlur(Registry& out);
 void registerSparql(Registry& out);
 void registerLowerThird(Registry& out);
+void registerParallella(Registry& out);
 void registerExpCpsOverload(Registry& out);
 void registerThreeLevelsCausality(Registry& out);
 #ifdef RMTN_LOCAL_COMPS
@@ -467,6 +468,7 @@ registerText(out);
 registerMotionBlur(out);
 registerSparql(out);
 registerLowerThird(out);
+registerParallella(out);
 registerExpCpsOverload(out);
 registerThreeLevelsCausality(out);
 #ifdef RMTN_LOCAL_COMPS
