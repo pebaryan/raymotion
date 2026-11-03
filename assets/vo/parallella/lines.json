@@ -1,0 +1,19 @@
+{
+  "ref": "D:/toolcache/voiceclone/clips/prompt_a.tight.wav",
+  "ref_text": "As a simulation tool, Biffrost is a co simulation",
+  "language": "English",
+  "atempo": 0.93,
+  "lines": [
+    { "file": "01-hook.wav", "text": "A ninety-nine dollar board from twenty twelve wrote this." },
+    { "file": "02-machine.wav", "text": "It's a Parallella. One chip with sixteen cores, each holding thirty-two kilobytes. Half a megabyte in all." },
+    { "file": "03-problem.wav", "text": "A small story model has fifteen million weights: sixty megabytes. It cannot fit, so the weights stream in for every word." },
+    { "file": "04-shrink.wav", "text": "So the model was trained with three values per weight: minus one, zero and one. Sixteen times smaller, and it still writes." },
+    { "file": "05-proof.wav", "text": "Every multiply runs on that chip. Checked word for word against a reference: identical." },
+    { "file": "06-bridge.wav", "text": "So it runs. How fast? On paper, sixty tokens a second." },
+    { "file": "07-arm.wav", "text": "The board's own ARM processor, for comparison, manages fourteen." },
+    { "file": "08-measure.wav", "text": "Measured on the chip: forty-nine. The cause was the transfer size. One-kilobyte chunks: fifty-nine." },
+    { "file": "09-twist.wav", "text": "But that was one matrix pass, not the model. The whole model runs at just under sixteen." },
+    { "file": "10-batch.wav", "text": "Batching shares the weights. Eight stories at once: forty. Two boards: eighty. Each story still waits a fifth of a second per token." },
+    { "file": "11-close.wav", "text": "Sixty was true, for a matrix pass. Measure the thing you ship." }
+  ]
+}

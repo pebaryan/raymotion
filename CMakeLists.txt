@@ -214,7 +214,8 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/text.cpp
     examples/showcase/motionblur.cpp
     examples/showcase/sparql.cpp
-    examples/showcase/lowerthird.cpp)
+    examples/showcase/lowerthird.cpp
+    examples/showcase/parallella.cpp)
   target_sources(raymotion PRIVATE examples/showcase/expcps_overload.cpp)
   target_sources(raymotion PRIVATE examples/showcase/three_levels_causality.cpp)
   # Machine-local compositions that stay out of the repository (see examples/local/local.cpp).
