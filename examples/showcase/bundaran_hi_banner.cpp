@@ -45,7 +45,7 @@ constexpr double HAUL0 = 14.15, HAUL1 = 15.2;               // the climbing rope
 // From OpenStreetMap (assets/data/bundaran-hi): the pool's edge is 33-46 m from the middle, the
 // roundabout's centre line 52-63 m; it is drawn here as circles. Buildings and roads are the OSM data.
 constexpr float POOL = 40.0f, PLANTER_OUT = 49.5f, RING_IN = 50.0f, RING_OUT = 65.5f;
-const char* const CITY = "assets/data/bundaran-hi/bundaran-hi.city.json";
+const char* const CITY = "data/bundaran-hi/bundaran-hi.city.json";   // under the assets root, so it resolves from any directory
 
 // ------------------------------------------------------------------ the monument and the banner
 // About 30 m in all: the figures 5 m (7 m to the raised hand) on a tall pedestal that is a hollow

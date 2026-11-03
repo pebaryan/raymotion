@@ -68,6 +68,9 @@ void registerSparql(Registry& out);
 void registerLowerThird(Registry& out);
 void registerExpCpsOverload(Registry& out);
 void registerThreeLevelsCausality(Registry& out);
+#ifdef RMTN_LOCAL_COMPS
+void registerLocal(Registry& out);   // examples/local/local.cpp, not in the repository
+#endif
 
 void register_scenes(Registry& out) {
 using namespace dr;
@@ -466,5 +469,8 @@ registerSparql(out);
 registerLowerThird(out);
 registerExpCpsOverload(out);
 registerThreeLevelsCausality(out);
+#ifdef RMTN_LOCAL_COMPS
+registerLocal(out);
+#endif
 } // register_scenes
 } // namespace rmtn
