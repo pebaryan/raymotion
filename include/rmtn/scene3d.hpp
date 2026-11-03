@@ -47,6 +47,9 @@ public:
     // Ring in the xy plane: `radius` to the tube's centre, `tube` the tube's radius.
     static std::shared_ptr<Geometry> torus(float radius, float tube, int radialSegs = 64, int sides = 24);
     // (p, q) torus knot, as Three.js's TorusKnotGeometry.
+    // A slab: a w x h rectangle with corners rounded to `radius` in the xy plane, d deep along
+    // z, centred (a phone, a tablet, a card, a window). Sharp front and back edges.
+    static std::shared_ptr<Geometry> roundedSlab(float w, float h, float d, float radius, int cornerSegments = 10);
     static std::shared_ptr<Geometry> knot(float radius, float tube, int tubularSegs = 256, int radialSegs = 24,
                                           int p = 2, int q = 3);
     const Mesh& mesh();
@@ -231,6 +234,92 @@ struct Splats {
     } look;
 };
 
+// ------------------------------------------------------------------ 2D surfaces
+// A 2D picture placed in the scene: a phone or laptop screen, a sign, a page, a diagram on a
+// wall, a label. It is drawn with the ordinary 2D calls (dr::, vg::, text, a timeline tree)
+// in its own design pixels, 0..pixels, on its own clock (frame - start), into a texture on
+// a flat rectangle `size` metres across, in the object's x-y plane and facing +z.
+//
+// The texture's resolution follows the camera: each frame the renderer measures how many
+// screen pixels one design pixel covers and draws the canvas at that density (in quarter-
+// octave steps, rounded up, between minResolution and maxResolution), so text stays sharp as
+// the camera pushes in and does not shimmer far away.
+//
+// By default it is unlit and casts no shadow, so a screen shows its own colours whatever the
+// lighting (set material.unlit = false for paper lit by the scene). A background with alpha
+// makes it see-through (drawn with the transparent objects, still hidden by what is in front).
+//
+// billboard = true turns it square to the camera every frame (a label); with pixelSize > 0
+// it also keeps a constant size on screen (pixelSize screen px per design px), and `lift`
+// moves it that many metres toward the camera so it clears what it labels. Unlike a 2D
+// overlay placed with project(), it is hidden by anything in front of it.
+//
+//     auto ui = std::make_shared<g3d::Surface>();
+//     ui->pixels = { 390, 844 };  ui->size = { 0.0715f, 0.1547f };
+//     ui->draw = [](const Ctx& c, int t) { dr::rect(c, 0, 0, 390, 844, WHITE); ... };
+//     scene->add(ui)->position = { 0, 1, 0 };
+//
+// To fly into it until it is the frame, see fillCamera and fillCtx below.
+struct Surface {
+    std::function<void(const Ctx& c, int t)> draw;  // paints design px; t = frame - start
+    Nodes nodes;                    // and/or a timeline tree, drawn after `draw` on the same clock
+    Vector2 pixels{ 1920, 1080 };   // design size
+    Vector2 size{ 1.6f, 0.9f };     // metres (read when added)
+    Vector2 anchor{ 0.5f, 0.5f };   // the point of the picture at the object's origin: 0,0 top-left (read when added)
+    int start = 0;                  // the scene frame at which the surface's own clock reads 0
+    Color background = BLANK;       // filled first; alpha < 255 makes the surface see-through
+    float sharpness = 1;            // texture px per screen px wanted (more for text seen at a slant)
+    float minResolution = 0.125f, maxResolution = 4;   // texture px per design px
+    bool billboard = false;
+    float pixelSize = 0;            // billboard: screen px per design px, whatever the distance (0 = metres)
+    float lift = 0;                 // metres toward the camera
+    float resolution = 1;           // set by the renderer each frame: texture px per design px
+};
+
+// ------------------------------------------------------------------ 3D lines
+// Strokes in the scene for diagrams: polylines, outlines, leaders and arrows. Points are in
+// the object's space (they move with it); the width is in composition px at any distance
+// (or metres with worldWidth). Round joins and caps, antialiased, unlit, fogged, and hidden
+// by whatever stands in front of them (onTop draws them over everything). They do not write
+// depth or cast shadows.
+//
+//     auto l = std::make_shared<g3d::Lines>();
+//     l->arrow({ 0, 0, 0 }, { 1, 0.5f, 0 }, TEAL, 4);                    // 4 px wide
+//     l->path({ { -1, 0, 0 }, { -1, 1, 0 }, { 0, 1, 0 } }, WHITE, 2).dash = 10;
+//     g3d::Object3D* o = scene->add(l);
+//     o->up = [l](int t, g3d::Object3D&) { l->paths[0].to = std::min(1.f, t / 30.f); };   // draws on
+//
+// Limits: a translucent colour shows darker spots where the round joins overlap the strokes.
+struct Lines {
+    enum class Head { None, End, Start, Both };
+    struct Path {
+        std::vector<Vector3> points;
+        Color color = WHITE;
+        float width = 3;            // composition px (metres with worldWidth)
+        bool closed = false;
+        float from = 0, to = 1;     // the part drawn, as fractions of the length (animate `to` to draw it on)
+        Head head = Head::None;     // arrowheads ride at the ends of the drawn part
+        float headSize = 4;         // arrowhead length, in widths (its width is 0.9 of its length)
+        float dash = 0, gap = 0;    // dashes along the screen, composition px (0 = solid; gap 0 = dash)
+        float dashOffset = 0;       // composition px; animate it for marching ants
+    };
+    std::vector<Path> paths;
+    bool worldWidth = false;
+    bool onTop = false;             // ignore depth: drawn over the whole scene
+    float lift = 0;                 // metres toward the camera, for lines drawn on a face
+
+    // Builders: each adds a path and returns it, so it can be tuned in place.
+    Path& path(std::vector<Vector3> points, Color color = WHITE, float width = 3, bool closed = false);
+    Path& line(Vector3 a, Vector3 b, Color color = WHITE, float width = 3);
+    Path& arrow(Vector3 from, Vector3 to, Color color = WHITE, float width = 3, Head head = Head::End);
+    // A circle (or an arc from a0 to a1 degrees) round `normal`; angle 0 lies along `start`
+    // (any vector not parallel to the normal; default: the one nearest world x).
+    Path& circle(Vector3 centre, Vector3 normal, float radius, Color color = WHITE, float width = 3,
+                 float a0 = 0, float a1 = 360, Vector3 start = { 0, 0, 0 }, int segments = 72);
+    // An axis-aligned box's 12 edges, as 6 paths.
+    void box(Vector3 min, Vector3 max, Color color = WHITE, float width = 3);
+};
+
 // ------------------------------------------------------------------ objects
 struct Object3D {
     std::string name;
@@ -261,6 +350,8 @@ struct Object3D {
     std::shared_ptr<const fx::Emitter3D> emitter;
     std::shared_ptr<Instances> instances;               // many copies of one baked mesh
     std::shared_ptr<Splats> splats;                     // a Gaussian splat cloud
+    std::shared_ptr<Surface> surface;                   // a 2D picture (with its own geometry and dynamicMap)
+    std::shared_ptr<Lines> lines;                       // strokes and arrows
 
     std::function<void(int t, Object3D& self)> up;      // animate from the local frame
     std::vector<std::unique_ptr<Object3D>> children;
@@ -271,6 +362,8 @@ struct Object3D {
     Object3D* add(fx::Emitter3D e, GeometryPtr g, Material m = {});   // mesh particles
     Object3D* add(std::shared_ptr<Instances> i, Material m = {});      // instanced bodies
     Object3D* add(std::shared_ptr<Splats> s);                          // a splat cloud
+    Object3D* add(std::shared_ptr<Surface> s);                         // a 2D picture
+    Object3D* add(std::shared_ptr<Lines> l);                           // strokes and arrows
     Object3D* add();                                   // empty group
 };
 
@@ -459,6 +552,8 @@ struct Scene {
     Object3D* add(fx::Emitter3D e, GeometryPtr g, Material m = {});
     Object3D* add(std::shared_ptr<Instances> i, Material m = {});
     Object3D* add(std::shared_ptr<Splats> s);
+    Object3D* add(std::shared_ptr<Surface> s);
+    Object3D* add(std::shared_ptr<g3d::Lines> l);    // strokes and arrows (not `lines`, the ink outlines)
     Object3D* add(Object3D* object); // takes ownership; supports procedural physics objects
     Object3D* add();
     Object3D* find(const std::string& name);         // depth-first, nullptr when absent
@@ -486,6 +581,21 @@ Camera cameraAt(const Camera& camera, int t);
 //     Vector2 at;
 //     if (g3d::project(cam, { 0, 80, 0 }, { 0, 0, 1920, 1080 }, at)) dr::text(..., at, ...);
 bool project(const Camera& camera, Vector3 world, Rectangle viewport, Vector2& out);
+
+// Flying into a Surface until it is the frame. fillCamera returns `base` moved square in front
+// of the surface (object `o`, anywhere in `scene`; it and its parents are posed for frame t by
+// running their `up`) at the distance where the surface just fills a frame of `aspect` (width / height),
+// centred, its top up; `margin` > 0 leaves that fraction of the frame around it. Blend toward
+// it over a push-in; on the frame the camera reaches it, the scene shows the surface pixel for
+// pixel as fillCtx would draw it directly, so a cut to the 2D layer there is invisible:
+//     Ctx d = g3d::fillCtx(*ui, 1920, 1080);       // design px -> composition px
+//     ui->draw(d, t - ui->start);
+Camera fillCamera(const Camera& base, Scene& scene, Object3D& o, int t, float aspect, float margin = 0);
+Ctx fillCtx(const Surface& s, float width, float height, float margin = 0);
+
+// A camera part way from `a` to `b` (u = 0..1): position, target, up, fov, planes and ortho
+// height blended; depth of field and `up` from `a`. For push-ins (ease u yourself).
+Camera mix(const Camera& a, const Camera& b, float u);
 
 // Euler angles for Object3D::rotation (degrees) that turn the object's front (+z) to
 // `forward` and its top (+y) as near to `up` as it can.

@@ -3,6 +3,7 @@
 #include "rmtn/render.hpp"
 #include "rmtn/media.hpp"
 #include "rmtn/splat.hpp"
+#include "rmtn/draw.hpp"
 #include <raymath.h>
 #include <rlgl.h>
 #include <algorithm>
@@ -648,6 +649,13 @@ void main() {
         float d = star5(vec2(p.x, -p.y), 1.0, 0.42);
         a = 1.0 - smoothstep(-aa, aa, d);
     } else if (shape == 6) a = 1.0 - smoothstep(0.12 - aa, 0.12 + aa, abs(r - 0.88));   // ring
+    else if (shape == 7) {                                                    // a line's stroke: soft only across
+        float w = max(fwidth(p.y), 1e-3);
+        a = 1.0 - smoothstep(1.0 - w, 1.0, abs(p.y));
+    } else if (shape == 8) {                                                  // an arrowhead, base at u = 0
+        float d = abs(p.y) - (1.0 - uv.x), w = max(fwidth(d), 1e-3);
+        a = 1.0 - smoothstep(-w, 0.0, d);
+    }
     if (fragColor.a * a <= 0.002) discard;
     finalColor = vec4(col, fragColor.a * a);
 }
@@ -1321,7 +1329,11 @@ struct Cull {
     const Camera* cam = nullptr;
     float aspect = 1, floorY = 0;
     std::vector<Vector3> shadowDirs;     // unit: the way the shadows of each shadowing light run
+    float screenH = 1080;                // canvas px the view covers, top to bottom (surfaces)
+    float compH = 1080;                  // composition px the view covers, top to bottom (line widths)
 };
+// A Surface object's world matrix: its own, or square to the camera for a billboard (see below).
+Matrix surfaceWorld(const Object3D& o, const Matrix& world, const Camera& cam, float screenH);
 // Seen, or casting a shadow that can fall into view. A shadow runs from the sphere along
 // each light's direction down to the floor (at most 80 m): the swept sphere is tested as a
 // string of spheres no further apart than its radius.
@@ -1396,6 +1408,7 @@ void collect(std::vector<std::unique_ptr<Object3D>>& list, const Matrix& parent,
     for (auto& o : list) {
         if (!o->visible || o->culled) continue;
         Matrix world = MatrixMultiply(localMatrix(*o), parent);
+        if (o->surface) world = surfaceWorld(*o, world, *k.cam, k.screenH);
         if (o->emitter && o->geometry) {
             fx::each(*o->emitter, t, [&](const fx::Particle3D& p) {
                 const float a = p.alpha * p.color.a / 255.f;
@@ -1411,6 +1424,7 @@ void collect(std::vector<std::unique_ptr<Object3D>>& list, const Matrix& parent,
             });
         } else if (o->emitter) emitters.push_back({ o.get(), world });
         else if (o->splats && o->splats->cloud) emitters.push_back({ o.get(), world });
+        else if (o->lines && !o->lines->paths.empty()) emitters.push_back({ o.get(), world });
         else if (o->instances && o->instances->mesh) {
             store.emplace_back();
             gatherInstances(*o, world, k, store.back());
@@ -1600,6 +1614,134 @@ void drawItem(const Item& it, Pass pass) {
 
 Vector3 safeUp(Vector3 dir, Vector3 up) {
     return std::fabs(Vector3DotProduct(Vector3Normalize(dir), Vector3Normalize(up))) > 0.999f ? Vector3{ 0, 0, 1 } : up;
+}
+
+// ---- 2D surfaces -----------------------------------------------------------------------
+// The rectangle in the surface's own space, metres: x0..x1 left to right, y0..y1 bottom to top.
+struct SurfaceRect { float x0, x1, y0, y1; };
+SurfaceRect surfaceRect(const Surface& s) {
+    const float x0 = -s.anchor.x * s.size.x, y1 = s.anchor.y * s.size.y;
+    return { x0, x0 + s.size.x, y1 - s.size.y, y1 };
+}
+Vector3 column(const Matrix& m, int i) {
+    return i == 0 ? Vector3{ m.m0, m.m1, m.m2 } : i == 1 ? Vector3{ m.m4, m.m5, m.m6 } : Vector3{ m.m8, m.m9, m.m10 };
+}
+
+Matrix surfaceWorld(const Object3D& o, const Matrix& world, const Camera& cam, float screenH) {
+    const Surface& s = *o.surface;
+    if (!s.billboard && s.lift == 0) return world;
+    const Vector3 look = Vector3Subtract(cam.target, cam.position);
+    const Vector3 f = Vector3Normalize(look);
+    Vector3 p{ world.m12, world.m13, world.m14 };
+    if (s.lift != 0) {                       // along the line of sight, so it stays where it was on screen
+        const Vector3 toward = cam.orthographic ? Vector3Negate(f) : Vector3Normalize(Vector3Subtract(cam.position, p));
+        p = Vector3Add(p, Vector3Scale(toward, s.lift));
+    }
+    Matrix m = world;
+    if (s.billboard) {
+        const Vector3 right = Vector3Normalize(Vector3CrossProduct(f, safeUp(look, cam.upVector)));
+        const Vector3 up = Vector3CrossProduct(right, f);
+        float k = Vector3Length(column(world, 1));
+        if (s.pixelSize > 0) {
+            const float depth = std::max(cam.nearPlane, Vector3DotProduct(Vector3Subtract(p, cam.position), f));
+            const float metresPerPx = cam.orthographic ? cam.orthoHeight / screenH
+                                                       : 2 * depth * std::tan(cam.fov * 0.5f * DEG2RAD) / screenH;
+            k = s.pixelSize * s.pixels.y * metresPerPx / std::max(1e-6f, s.size.y);
+        }
+        m = MatrixIdentity();
+        m.m0 = right.x * k; m.m1 = right.y * k; m.m2 = right.z * k;
+        m.m4 = up.x * k;    m.m5 = up.y * k;    m.m6 = up.z * k;
+        m.m8 = -f.x * k;    m.m9 = -f.y * k;    m.m10 = -f.z * k;
+    }
+    m.m12 = p.x; m.m13 = p.y; m.m14 = p.z;
+    return m;
+}
+
+// Screen px per design px where the surface is densest on screen (its nearest edge), or 0 when
+// a corner is behind the camera (the caller then takes the most it allows).
+float surfaceDensity(const Surface& s, const Matrix& m, const Camera& cam, float w, float h) {
+    const SurfaceRect r = surfaceRect(s);
+    const Vector3 local[4] = { { r.x0, r.y1, 0 }, { r.x1, r.y1, 0 }, { r.x1, r.y0, 0 }, { r.x0, r.y0, 0 } };
+    Vector2 q[4];
+    for (int i = 0; i < 4; i++)
+        if (!project(cam, Vector3Transform(local[i], m), { 0, 0, w, h }, q[i])) return 0;
+    const float across = std::max(Vector2Distance(q[0], q[1]), Vector2Distance(q[3], q[2])) / std::max(1.f, s.pixels.x);
+    const float down = std::max(Vector2Distance(q[0], q[3]), Vector2Distance(q[1], q[2])) / std::max(1.f, s.pixels.y);
+    return std::max(across, down);
+}
+
+// Each visible surface's texture size for this frame, from how large it shows.
+void sizeSurfaces(std::vector<std::unique_ptr<Object3D>>& list, const Matrix& parent, const Camera& cam, float w, float h) {
+    constexpr float MAX_TEXTURE = 8192;
+    for (auto& o : list) {
+        if (!o->visible || o->culled) continue;
+        Matrix world = MatrixMultiply(localMatrix(*o), parent);
+        if (o->surface && o->material.dynamicMap) {
+            Surface& s = *o->surface;
+            world = surfaceWorld(*o, world, cam, h);
+            const float hi = std::max(s.minResolution, s.maxResolution);
+            const float density = surfaceDensity(s, world, cam, w, h);
+            float res = density > 0 ? density * std::max(0.01f, s.sharpness) : hi;
+            res = std::exp2(std::ceil(std::log2(std::max(res, 1e-4f)) * 4 - 1e-3f) / 4);   // quarter octaves, rounded up
+            res = std::clamp(res, std::min(s.minResolution, hi), hi);
+            const float big = std::max(1.f, std::max(s.pixels.x, s.pixels.y));
+            const int ss = res >= 2 ? 1 : 2;     // a denser texture is already supersampled
+            res = std::min(res, MAX_TEXTURE / (big * (float)ss));
+            s.resolution = res;
+            DynamicTexture& tex = *o->material.dynamicMap;
+            tex.supersample = ss;
+            tex.width = std::max(1, (int)std::ceil(s.pixels.x * res - 1e-3f));
+            tex.height = std::max(1, (int)std::ceil(s.pixels.y * res - 1e-3f));
+        }
+        sizeSurfaces(o->children, world, cam, w, h);
+    }
+}
+
+// A quad facing +z with the picture's top-left at uv 0,0 (canvas textures run top-down).
+GeometryPtr surfaceQuad(const Surface& s) {
+    const SurfaceRect r = surfaceRect(s);
+    return std::make_shared<Geometry>([r] {
+        Mesh m{};
+        m.vertexCount = 4;
+        m.triangleCount = 2;
+        m.vertices = (float*)MemAlloc(12 * sizeof(float));
+        m.normals = (float*)MemAlloc(12 * sizeof(float));
+        m.texcoords = (float*)MemAlloc(8 * sizeof(float));
+        m.indices = (unsigned short*)MemAlloc(6 * sizeof(unsigned short));
+        const float v[12] = { r.x0, r.y1, 0, r.x1, r.y1, 0, r.x1, r.y0, 0, r.x0, r.y0, 0 };
+        const float uv[8] = { 0, 0, 1, 0, 1, 1, 0, 1 };
+        const unsigned short idx[6] = { 3, 2, 1, 3, 1, 0 };
+        for (int i = 0; i < 12; i++) { m.vertices[i] = v[i]; m.normals[i] = i % 3 == 2 ? 1.f : 0.f; }
+        for (int i = 0; i < 8; i++) m.texcoords[i] = uv[i];
+        for (int i = 0; i < 6; i++) m.indices[i] = idx[i];
+        UploadMesh(&m, false);
+        return m;
+    });
+}
+
+void makeSurface(Object3D& o, std::shared_ptr<Surface> sp) {
+    if (!sp) throw std::invalid_argument("g3d: add(Surface) needs a surface");
+    auto tex = std::make_shared<DynamicTexture>();
+    tex->width = std::max(1, (int)sp->pixels.x);
+    tex->height = std::max(1, (int)sp->pixels.y);
+    Surface* raw = sp.get();                 // the object owns the surface for as long as the texture
+    tex->draw = [raw](const Ctx& c, int t) {
+        Surface& s = *raw;
+        Ctx d = c;
+        d.s = c.s * s.resolution;
+        const int lt = t - s.start;
+        if (s.background.a > 0) dr::rect(d, 0, 0, s.pixels.x, s.pixels.y, s.background);
+        if (s.draw) s.draw(d, lt);
+        for (auto& n : s.nodes) stepNode(*n, lt, d);
+    };
+    o.geometry = surfaceQuad(*sp);
+    o.material = Material{};
+    o.material.unlit = true;
+    o.material.castShadow = false;
+    o.material.receiveShadow = false;
+    o.material.opacity = sp->background.a < 255 ? 0.999f : 1.f;
+    o.material.dynamicMap = std::move(tex);
+    o.surface = std::move(sp);
 }
 } // namespace
 
@@ -2050,7 +2192,7 @@ void compositeLines(const Scene& s, const Camera& cam, const DepthTarget& lt, co
 // One billboard (or oriented quad) of the particle pass, in world space.
 struct Quad { Vector3 c[4]; Color color; int shape; float depth; };
 
-enum Shape { DOT, GLOW, GLOW_HOT, STREAK, FLAT, STAR, RING };
+enum Shape { DOT, GLOW, GLOW_HOT, STREAK, FLAT, STAR, RING, STROKE, HEAD };
 
 // `v` turned and scaled by `m`, without its translation.
 Vector3 direction(Vector3 v, const Matrix& m) {
@@ -2160,6 +2302,167 @@ void particleQuads(const Scene& s, const Camera& cam, const Emitting& em, const 
             }
         }
     });
+}
+
+// ---- 3D lines: each stroke a camera-facing ribbon whose half-width is worked out at each end
+// from that end's depth (so it is the same number of px all along), round joins and caps as
+// discs, arrowheads as their own quads. Clipped to the near plane before anything else.
+void lineQuads(const Scene& s, const Camera& cam, const Emitting& em, const Matrix& view, float compH,
+               std::vector<Quad>& out) {
+    const Lines& L = *em.obj->lines;
+    const bool ortho = cam.orthographic;
+    const float tanHalf = std::tan(cam.fov * 0.5f * DEG2RAD);
+    const Vector3 forward = Vector3Normalize(Vector3Subtract(cam.target, cam.position));
+    const Vector3 right{ view.m0, view.m4, view.m8 }, up{ view.m1, view.m5, view.m9 };
+    auto depthOf = [&](Vector3 p) { return -Vector3Transform(p, view).z; };
+    auto perPx = [&](float d) { return ortho ? cam.orthoHeight / compH : 2 * d * tanHalf / compH; };   // metres a px
+    const float nearD = ortho ? -1e30f : cam.nearPlane * 1.01f;
+    auto toward = [&](Vector3 p) {                           // unit vector from p to the camera
+        return ortho ? Vector3Negate(forward) : Vector3Normalize(Vector3Subtract(cam.position, p));
+    };
+    auto screen = [&](Vector3 p) {                           // composition px from the view's centre
+        const Vector3 v = Vector3Transform(p, view);
+        const float k = ortho ? compH / cam.orthoHeight : compH * 0.5f / (tanHalf * -v.z);
+        return Vector2{ v.x * k, v.y * k };
+    };
+    for (const Lines::Path& path : L.paths) {
+        if (path.points.size() < 2 || path.color.a == 0 || path.width <= 0) continue;
+        const float w = path.width;
+        auto half = [&](float d) { return L.worldWidth ? w * 0.5f + 0.5f * perPx(d) : (w * 0.5f + 0.5f) * perPx(d); };
+        // world points, lifted, closed
+        std::vector<Vector3> pts;
+        for (const Vector3& p : path.points) {
+            Vector3 q = Vector3Transform(p, em.world);
+            if (L.lift != 0) q = Vector3Add(q, Vector3Scale(toward(q), L.lift));
+            pts.push_back(q);
+        }
+        if (path.closed) pts.push_back(pts.front());
+        // trim to [from, to] of the length
+        std::vector<float> acc{ 0 };
+        for (size_t i = 1; i < pts.size(); i++) acc.push_back(acc.back() + Vector3Distance(pts[i - 1], pts[i]));
+        const float total = acc.back();
+        if (total <= 1e-9f) continue;
+        const float f0 = std::clamp(std::min(path.from, path.to), 0.f, 1.f) * total;
+        const float f1 = std::clamp(std::max(path.from, path.to), 0.f, 1.f) * total;
+        if (f1 - f0 <= 1e-9f) continue;
+        auto at = [&](float d) {
+            size_t i = 1;
+            while (i + 1 < acc.size() && acc[i] < d) i++;
+            const float seg = acc[i] - acc[i - 1];
+            return Vector3Lerp(pts[i - 1], pts[i], seg > 0 ? (d - acc[i - 1]) / seg : 0.f);
+        };
+        // arrowheads: the stroke stops at the head's base; a head never outgrows the drawn part
+        const bool headEnd = path.head == Lines::Head::End || path.head == Lines::Head::Both;
+        const bool headStart = path.head == Lines::Head::Start || path.head == Lines::Head::Both;
+        const int heads = (int)headEnd + (int)headStart;
+        auto headLen = [&](Vector3 tip) {
+            const float len = L.worldWidth ? path.headSize * w : path.headSize * w * perPx(std::max(depthOf(tip), 1e-4f));
+            return std::min(len, heads ? (f1 - f0) / heads : len);
+        };
+        float s0 = f0, s1 = f1;
+        struct HeadAt { Vector3 tip, base; };
+        std::vector<HeadAt> headList;
+        if (headEnd) { const Vector3 tip = at(f1); s1 = f1 - headLen(tip); headList.push_back({ tip, at(s1) }); }
+        if (headStart) { const Vector3 tip = at(f0); s0 = f0 + headLen(tip); headList.push_back({ tip, at(s0) }); }
+        // the drawn polyline
+        std::vector<Vector3> line{ at(s0) };
+        for (size_t i = 1; i + 1 < acc.size(); i++) if (acc[i] > s0 && acc[i] < s1) line.push_back(pts[i]);
+        line.push_back(at(s1));
+
+        const Color col = path.color;
+        auto colourAt = [&](Vector3 p) { return fogged(s, col, cam.position, p, false); };
+        auto clip = [&](Vector3& a, Vector3& b) {             // to the near plane; false if all behind it
+            const float da = depthOf(a), db = depthOf(b);
+            if (da < nearD && db < nearD) return false;
+            if (da < nearD) a = Vector3Lerp(a, b, (nearD - da) / (db - da));
+            else if (db < nearD) b = Vector3Lerp(b, a, (nearD - db) / (da - db));
+            return true;
+        };
+        auto disc = [&](Vector3 p) {
+            const float d = depthOf(p);
+            if (d < nearD) return;
+            const float h = half(d);
+            const Vector3 r = Vector3Scale(right, h), u = Vector3Scale(up, h);
+            Quad q{};
+            q.color = colourAt(p);
+            q.shape = DOT;
+            q.depth = d;
+            q.c[0] = Vector3Subtract(Vector3Subtract(p, r), u);
+            q.c[1] = Vector3Subtract(Vector3Add(p, r), u);
+            q.c[2] = Vector3Add(Vector3Add(p, r), u);
+            q.c[3] = Vector3Add(Vector3Subtract(p, r), u);
+            out.push_back(q);
+        };
+        auto ribbon = [&](Vector3 a, Vector3 b, int shape, float ha, float hb) {
+            const Vector3 dir = Vector3Subtract(b, a);
+            if (Vector3Length(dir) < 1e-9f) return;
+            const Vector3 sideA = Vector3CrossProduct(dir, ortho ? forward : Vector3Subtract(a, cam.position));
+            const Vector3 sideB = Vector3CrossProduct(dir, ortho ? forward : Vector3Subtract(b, cam.position));
+            if (Vector3Length(sideA) < 1e-12f || Vector3Length(sideB) < 1e-12f) return;   // end-on: the discs cover it
+            const Vector3 sa = Vector3Scale(Vector3Normalize(sideA), ha), sb = Vector3Scale(Vector3Normalize(sideB), hb);
+            Quad q{};
+            q.color = colourAt(Vector3Lerp(a, b, 0.5f));
+            q.shape = shape;
+            q.depth = 0.5f * (depthOf(a) + depthOf(b));
+            q.c[0] = Vector3Subtract(a, sa);
+            q.c[1] = Vector3Subtract(b, sb);
+            q.c[2] = Vector3Add(b, sb);
+            q.c[3] = Vector3Add(a, sa);
+            out.push_back(q);
+        };
+        auto stroke = [&](Vector3 a, Vector3 b) { ribbon(a, b, STROKE, half(depthOf(a)), half(depthOf(b))); };
+
+        if (path.dash > 0) {
+            // A dash pattern measured on screen, carried across joints; each dash has round caps.
+            const float dash = path.dash, gap = path.gap > 0 ? path.gap : path.dash, period = dash + gap;
+            float run = std::fmod(path.dashOffset, period);
+            if (run < 0) run += period;
+            for (size_t i = 1; i < line.size(); i++) {
+                Vector3 a = line[i - 1], b = line[i];
+                if (!clip(a, b)) continue;
+                const float len = Vector2Distance(screen(a), screen(b));
+                const float za = depthOf(a), zb = depthOf(b);
+                auto worldAt = [&](float sf) {                // screen fraction -> point (perspective-correct)
+                    const float tf = ortho ? sf : sf * za / ((1 - sf) * zb + sf * za);
+                    return Vector3Lerp(a, b, tf);
+                };
+                float pos = 0;
+                while (pos < len) {
+                    const float phase = std::fmod(run + pos, period);
+                    if (phase < dash) {
+                        const float end = std::min(len, pos + (dash - phase));
+                        const Vector3 p = worldAt(len > 0 ? pos / len : 0), q = worldAt(len > 0 ? end / len : 1);
+                        stroke(p, q);
+                        disc(p);
+                        disc(q);
+                        pos = end;
+                    } else pos += period - phase;
+                }
+                run = std::fmod(run + len, period);
+            }
+        } else {
+            for (size_t i = 1; i < line.size(); i++) {
+                Vector3 a = line[i - 1], b = line[i];
+                if (clip(a, b)) stroke(a, b);
+            }
+            for (size_t i = 0; i < line.size(); i++) {         // joins, and caps where no head sits
+                if ((i == 0 && headStart) || (i + 1 == line.size() && headEnd)) continue;
+                disc(line[i]);
+            }
+        }
+        for (const HeadAt& h : headList) {
+            Vector3 base = h.base, tip = h.tip;
+            if (!clip(base, tip)) continue;
+            const float len = L.worldWidth ? path.headSize * w : path.headSize * w * perPx(std::max(depthOf(tip), 1e-4f));
+            const float k = Vector3Distance(base, tip) / std::max(len, 1e-9f);     // a shortened head stays in proportion
+            auto hw = [&](Vector3 p) {                        // the head's half-width, at p's depth
+                const float d = depthOf(p);
+                return L.worldWidth ? 0.45f * path.headSize * w * k + 0.5f * perPx(d)
+                                    : (0.45f * path.headSize * w * k + 0.5f) * perPx(d);
+            };
+            ribbon(base, tip, HEAD, hw(base), hw(tip));
+        }
+    }
 }
 
 void submit(const std::vector<Quad>& quads) {
@@ -2354,11 +2657,14 @@ void drawSplats(const Scene& s, const Camera& cam, const std::vector<Emitting>& 
     rlEnableDepthMask();
 }
 
-void drawParticles(const Scene& s, const Camera& cam, const std::vector<Emitting>& emitters, const Matrix& view, double t) {
-    std::vector<Quad> blended, added;
-    for (const Emitting& em : emitters)
+void drawParticles(const Scene& s, const Camera& cam, const std::vector<Emitting>& emitters, const Matrix& view, double t,
+                   float compH) {
+    std::vector<Quad> blended, added, top;
+    for (const Emitting& em : emitters) {
         if (em.obj->emitter) particleQuads(s, cam, em, view, t, em.obj->emitter->additive ? added : blended);
-    if (blended.empty() && added.empty()) return;
+        else if (em.obj->lines) lineQuads(s, cam, em, view, compH, em.obj->lines->onTop ? top : blended);
+    }
+    if (blended.empty() && added.empty() && top.empty()) return;
     std::sort(blended.begin(), blended.end(), [](const Quad& a, const Quad& b) { return a.depth > b.depth; });
     rlDrawRenderBatchActive();
     rlDisableDepthMask();
@@ -2373,6 +2679,14 @@ void drawParticles(const Scene& s, const Camera& cam, const std::vector<Emitting
         submit(added);
         rlDrawRenderBatchActive();
         restoreBlend();
+    }
+    if (!top.empty()) {                                       // lines over everything, in their own order
+        std::stable_sort(top.begin(), top.end(), [](const Quad& a, const Quad& b) { return a.depth > b.depth; });
+        rlDrawRenderBatchActive();
+        rlDisableDepthTest();
+        submit(top);
+        rlDrawRenderBatchActive();
+        rlEnableDepthTest();
     }
     EndShaderMode();
     rlSetTexture(0);
@@ -2459,7 +2773,7 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     rlEnableDepthMask();
     if (!emitters.empty()) {
         drawSplats(s, cam, emitters, rlGetMatrixModelview(), rlGetMatrixProjection(), vw, vh);
-        drawParticles(s, cam, emitters, view, ft);
+        drawParticles(s, cam, emitters, view, ft, cull.compH);
     }
 
     bindUnit(SHADOW_SLOT, 0);
@@ -2778,8 +3092,105 @@ Mesh torusKnot(float radius, float tube, int tubular, int radial, int p, int q) 
     UploadMesh(&m, false);
     return m;
 }
+
+// A plain torus in the xy plane. raylib's GenMeshTorus clamps tube / radius to 0.1..1, so
+// a thin ring (a dome's rib: 80 m round, 0.5 m thick) came out with an 8 m tube.
+// Built like torusKnot (same frame and winding) on a circle.
+Mesh ringTorus(float radius, float tube, int radSeg, int sides) {
+    radSeg = std::max(3, radSeg);
+    sides = std::max(3, sides);
+    while ((radSeg + 1) * (sides + 1) > 65535) radSeg /= 2;              // 16-bit indices
+    Mesh m{};
+    m.vertexCount = (radSeg + 1) * (sides + 1);
+    m.triangleCount = radSeg * sides * 2;
+    m.vertices = (float*)MemAlloc((unsigned)(m.vertexCount * 3 * sizeof(float)));
+    m.normals = (float*)MemAlloc((unsigned)(m.vertexCount * 3 * sizeof(float)));
+    m.texcoords = (float*)MemAlloc((unsigned)(m.vertexCount * 2 * sizeof(float)));
+    m.indices = (unsigned short*)MemAlloc((unsigned)(m.triangleCount * 3 * sizeof(unsigned short)));
+    int v = 0;
+    for (int j = 0; j <= radSeg; j++) {
+        const float u = (float)j / radSeg * 2 * PI, cu = std::cos(u), su = std::sin(u);
+        for (int i = 0; i <= sides; i++, v++) {
+            const float a = (float)i / sides * 2 * PI, cx = -std::cos(a), cy = std::sin(a);
+            const Vector3 nrm{ cx * cu, cx * su, -cy };                   // n = outward, b = -z
+            m.vertices[v * 3] = radius * cu + tube * nrm.x;
+            m.vertices[v * 3 + 1] = radius * su + tube * nrm.y;
+            m.vertices[v * 3 + 2] = tube * nrm.z;
+            m.normals[v * 3] = nrm.x; m.normals[v * 3 + 1] = nrm.y; m.normals[v * 3 + 2] = nrm.z;
+            m.texcoords[v * 2] = (float)j / radSeg; m.texcoords[v * 2 + 1] = (float)i / sides;
+        }
+    }
+    int k = 0;
+    for (int j = 1; j <= radSeg; j++)
+        for (int i = 1; i <= sides; i++) {
+            const unsigned short a = (unsigned short)((sides + 1) * (j - 1) + (i - 1)), b = (unsigned short)((sides + 1) * j + (i - 1));
+            const unsigned short c = (unsigned short)((sides + 1) * j + i), d = (unsigned short)((sides + 1) * (j - 1) + i);
+            const unsigned short tri[6] = { a, b, d, b, c, d };
+            for (unsigned short x : tri) m.indices[k++] = x;
+        }
+    UploadMesh(&m, false);
+    return m;
+}
 }
 
+namespace {
+Mesh slabMesh(float w, float h, float d, float radius, int seg) {
+    radius = std::clamp(radius, 0.f, 0.5f * std::min(w, h));
+    seg = radius > 0 ? std::max(1, seg) : 0;
+    struct P { float x, y, nx, ny; };
+    std::vector<P> ring;                                      // the outline, anticlockwise seen from +z
+    const float cx[4] = { w / 2 - radius, -w / 2 + radius, -w / 2 + radius, w / 2 - radius };
+    const float cy[4] = { h / 2 - radius, h / 2 - radius, -h / 2 + radius, -h / 2 + radius };
+    for (int c = 0; c < 4; c++)
+        for (int i = 0; i <= seg; i++) {
+            const float a = (c + (seg ? (float)i / seg : 0.5f)) * PI / 2;
+            const float nx = std::cos(a), ny = std::sin(a);
+            ring.push_back({ cx[c] + radius * nx, cy[c] + radius * ny, seg ? nx : (c == 0 || c == 3 ? 1.f : -1.f) * 0.7071f,
+                             seg ? ny : (c < 2 ? 1.f : -1.f) * 0.7071f });
+        }
+    const int n = (int)ring.size();
+    Mesh m{};
+    m.vertexCount = 2 * (n + 1) + 4 * n;
+    m.triangleCount = 2 * n + 2 * n;
+    m.vertices = (float*)MemAlloc((unsigned)(m.vertexCount * 3 * sizeof(float)));
+    m.normals = (float*)MemAlloc((unsigned)(m.vertexCount * 3 * sizeof(float)));
+    m.texcoords = (float*)MemAlloc((unsigned)(m.vertexCount * 2 * sizeof(float)));
+    m.indices = (unsigned short*)MemAlloc((unsigned)(m.triangleCount * 3 * sizeof(unsigned short)));
+    int v = 0, k = 0;
+    auto vert = [&](float x, float y, float z, float nx, float ny, float nz) {
+        m.vertices[v * 3] = x; m.vertices[v * 3 + 1] = y; m.vertices[v * 3 + 2] = z;
+        m.normals[v * 3] = nx; m.normals[v * 3 + 1] = ny; m.normals[v * 3 + 2] = nz;
+        m.texcoords[v * 2] = x / w + 0.5f; m.texcoords[v * 2 + 1] = 0.5f - y / h;
+        return (unsigned short)v++;
+    };
+    auto tri = [&](unsigned short a, unsigned short b, unsigned short c) { m.indices[k++] = a; m.indices[k++] = b; m.indices[k++] = c; };
+    for (int side = 0; side < 2; side++) {                    // the front (+z) and back faces, as fans
+        const float z = side ? -d / 2 : d / 2, nz = side ? -1.f : 1.f;
+        const unsigned short c = vert(0, 0, z, 0, 0, nz);
+        for (int i = 0; i < n; i++) vert(ring[i].x, ring[i].y, z, 0, 0, nz);
+        for (int i = 0; i < n; i++) {
+            const unsigned short a = (unsigned short)(c + 1 + i), b = (unsigned short)(c + 1 + (i + 1) % n);
+            if (side) tri(c, b, a); else tri(c, a, b);
+        }
+    }
+    for (int i = 0; i < n; i++) {                             // the rim, its own vertices for smooth or hard normals
+        const P& p = ring[i]; const P& q = ring[(i + 1) % n];
+        const bool flat = !seg || std::fabs(p.nx - q.nx) + std::fabs(p.ny - q.ny) < 1e-4f;
+        const float nx = flat ? (p.nx + q.nx) : p.nx, ny = flat ? (p.ny + q.ny) : p.ny;
+        const float l = std::sqrt(nx * nx + ny * ny), mx = flat ? q.nx + p.nx : q.nx, my = flat ? q.ny + p.ny : q.ny;
+        const float lm = std::sqrt(mx * mx + my * my);
+        const unsigned short f0 = vert(p.x, p.y, d / 2, nx / l, ny / l, 0), b0 = vert(p.x, p.y, -d / 2, nx / l, ny / l, 0);
+        const unsigned short f1 = vert(q.x, q.y, d / 2, mx / lm, my / lm, 0), b1 = vert(q.x, q.y, -d / 2, mx / lm, my / lm, 0);
+        tri(f0, b0, f1);
+        tri(f1, b0, b1);
+    }
+    UploadMesh(&m, false);
+    return m;
+}
+}
+std::shared_ptr<Geometry> Geometry::roundedSlab(float w, float h, float d, float radius, int segments) {
+    return std::make_shared<Geometry>([=] { return slabMesh(w, h, d, radius, segments); });
+}
 std::shared_ptr<Geometry> Geometry::cylinder(float r, float h, int slices) {
     return std::make_shared<Geometry>([=] { return centeredY(GenMeshCylinder(r, h, slices)); });
 }
@@ -2787,8 +3198,7 @@ std::shared_ptr<Geometry> Geometry::cone(float r, float h, int slices) {
     return std::make_shared<Geometry>([=] { return centeredY(GenMeshCone(r, h, slices)); });
 }
 std::shared_ptr<Geometry> Geometry::torus(float r, float tube, int radSeg, int sides) {
-    // raylib's parameters are (tube / major radius, 2 * major radius, tube segments, ring segments).
-    return std::make_shared<Geometry>([=] { return GenMeshTorus(tube / r, 2 * r, sides, radSeg); });
+    return std::make_shared<Geometry>([=] { return ringTorus(r, tube, radSeg, sides); });
 }
 std::shared_ptr<Geometry> Geometry::knot(float r, float tube, int tubular, int radial, int p, int q) {
     return std::make_shared<Geometry>([=] { return torusKnot(r, tube, tubular, radial, p, q); });
@@ -2879,6 +3289,56 @@ Object3D* Object3D::add(std::shared_ptr<Splats> s) {
     o->splats = std::move(s);
     return o;
 }
+Object3D* Object3D::add(std::shared_ptr<Surface> s) {
+    Object3D* o = add();
+    makeSurface(*o, std::move(s));
+    return o;
+}
+Lines::Path& Lines::path(std::vector<Vector3> points, Color color, float width, bool closed) {
+    Path p;
+    p.points = std::move(points);
+    p.color = color;
+    p.width = width;
+    p.closed = closed;
+    paths.push_back(std::move(p));
+    return paths.back();
+}
+Lines::Path& Lines::line(Vector3 a, Vector3 b, Color color, float width) { return path({ a, b }, color, width); }
+Lines::Path& Lines::arrow(Vector3 from, Vector3 to, Color color, float width, Head head) {
+    Path& p = path({ from, to }, color, width);
+    p.head = head;
+    return p;
+}
+Lines::Path& Lines::circle(Vector3 centre, Vector3 normal, float radius, Color color, float width, float a0, float a1,
+                           Vector3 start, int segments) {
+    const Vector3 n = Vector3Normalize(normal);
+    Vector3 s = start;
+    if (Vector3Length(Vector3CrossProduct(s, n)) < 1e-6f) s = std::fabs(n.x) < 0.9f ? Vector3{ 1, 0, 0 } : Vector3{ 0, 0, 1 };
+    const Vector3 e1 = Vector3Normalize(Vector3Subtract(s, Vector3Scale(n, Vector3DotProduct(s, n))));
+    const Vector3 e2 = Vector3CrossProduct(n, e1);
+    const bool full = std::fabs(a1 - a0) >= 360 - 1e-3f;
+    const int k = std::max(3, (int)std::ceil(segments * std::fabs(a1 - a0) / 360));
+    std::vector<Vector3> pts;
+    for (int i = 0; i < (full ? k : k + 1); i++) {
+        const float a = (a0 + (a1 - a0) * i / k) * DEG2RAD;
+        pts.push_back(Vector3Add(centre, Vector3Add(Vector3Scale(e1, radius * std::cos(a)), Vector3Scale(e2, radius * std::sin(a)))));
+    }
+    return path(std::move(pts), color, width, full);
+}
+void Lines::box(Vector3 a, Vector3 b, Color color, float width) {
+    path({ { a.x, a.y, a.z }, { b.x, a.y, a.z }, { b.x, a.y, b.z }, { a.x, a.y, b.z } }, color, width, true);   // bottom
+    path({ { a.x, b.y, a.z }, { b.x, b.y, a.z }, { b.x, b.y, b.z }, { a.x, b.y, b.z } }, color, width, true);   // top
+    line({ a.x, a.y, a.z }, { a.x, b.y, a.z }, color, width);                                                  // uprights
+    line({ b.x, a.y, a.z }, { b.x, b.y, a.z }, color, width);
+    line({ b.x, a.y, b.z }, { b.x, b.y, b.z }, color, width);
+    line({ a.x, a.y, b.z }, { a.x, b.y, b.z }, color, width);
+}
+
+Object3D* Object3D::add(std::shared_ptr<Lines> l) {
+    Object3D* o = add();
+    o->lines = std::move(l);
+    return o;
+}
 Object3D* Object3D::add() {
     children.push_back(std::make_unique<Object3D>());
     return children.back().get();
@@ -2932,6 +3392,16 @@ Object3D* Scene::add(std::shared_ptr<Instances> i, Material m) {
 Object3D* Scene::add(std::shared_ptr<Splats> s) {
     Object3D* o = add();
     o->splats = std::move(s);
+    return o;
+}
+Object3D* Scene::add(std::shared_ptr<Surface> s) {
+    Object3D* o = add();
+    makeSurface(*o, std::move(s));
+    return o;
+}
+Object3D* Scene::add(std::shared_ptr<g3d::Lines> l) {
+    Object3D* o = add();
+    o->lines = std::move(l);
     return o;
 }
 Object3D* Scene::add(Object3D* object) {
@@ -3032,6 +3502,69 @@ bool project(const Camera& cam, Vector3 p, Rectangle vp, Vector2& out) {
     return true;
 }
 
+namespace {
+// `o`'s world matrix at frame t, found by walking down from the scene's roots and running the
+// `up` of every object on the way (each is pure, so running it again changes nothing).
+bool worldOf(std::vector<std::unique_ptr<Object3D>>& list, const Object3D* o, int t, const Matrix& parent, Matrix& out) {
+    for (auto& c : list) {
+        if (c.get() != o && c->children.empty()) continue;
+        if (c->up) c->up(t, *c);
+        const Matrix world = MatrixMultiply(localMatrix(*c), parent);
+        if (c.get() == o) { out = world; return true; }
+        if (worldOf(c->children, o, t, world, out)) return true;
+    }
+    return false;
+}
+} // namespace
+
+Camera fillCamera(const Camera& base, Scene& scene, Object3D& o, int t, float aspect, float margin) {
+    if (!o.surface) throw std::invalid_argument("g3d::fillCamera: the object is not a Surface");
+    if (o.surface->billboard) throw std::invalid_argument("g3d::fillCamera: a billboard surface always faces the camera");
+    Matrix m;
+    if (!worldOf(scene.objects, &o, t, MatrixIdentity(), m)) throw std::invalid_argument("g3d::fillCamera: the object is not in the scene");
+    const Surface& s = *o.surface;
+    const SurfaceRect r = surfaceRect(s);
+    const Vector3 centre = Vector3Transform({ (r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2, 0 }, m);
+    const Vector3 X = column(m, 0), Y = column(m, 1), Z = column(m, 2);
+    const float w = Vector3Length(X) * s.size.x, h = Vector3Length(Y) * s.size.y;
+    const float fit = std::max(h, w / std::max(1e-3f, aspect));
+    const float shown = fit / std::max(0.05f, 1 - 2 * margin);       // the frame's height, metres
+    Camera c = base;
+    c.up = nullptr;
+    float d;
+    if (c.orthographic) {
+        c.orthoHeight = shown;
+        d = std::max(shown, 1.f);
+    } else {
+        d = shown * 0.5f / std::tan(c.fov * 0.5f * DEG2RAD);
+    }
+    c.position = Vector3Add(centre, Vector3Scale(Vector3Normalize(Z), d));
+    c.target = centre;
+    c.upVector = Vector3Normalize(Y);
+    if (c.nearPlane > d * 0.5f) c.nearPlane = d * 0.1f;
+    return c;
+}
+
+Camera mix(const Camera& a, const Camera& b, float u) {
+    Camera c = a;
+    c.position = Vector3Lerp(a.position, b.position, u);
+    c.target = Vector3Lerp(a.target, b.target, u);
+    const Vector3 up = Vector3Lerp(Vector3Normalize(a.upVector), Vector3Normalize(b.upVector), u);
+    c.upVector = Vector3Length(up) > 1e-4f ? Vector3Normalize(up) : b.upVector;
+    c.fov = Lerp(a.fov, b.fov, u);
+    c.orthoHeight = Lerp(a.orthoHeight, b.orthoHeight, u);
+    c.nearPlane = Lerp(a.nearPlane, b.nearPlane, u);
+    c.farPlane = Lerp(a.farPlane, b.farPlane, u);
+    c.orthographic = u < 0.5f ? a.orthographic : b.orthographic;
+    return c;
+}
+
+Ctx fillCtx(const Surface& s, float width, float height, float margin) {
+    const float room = std::max(0.05f, 1 - 2 * margin);
+    const float k = std::min(width * room / std::max(1.f, s.pixels.x), height * room / std::max(1.f, s.pixels.y));
+    return Ctx{ { (width - s.pixels.x * k) / 2, (height - s.pixels.y * k) / 2 }, k, 0, 1 };
+}
+
 void render(Scene& s, int t, const Ctx& c, Rectangle viewport, Camera* camera) {
     Camera& cam = camera ? *camera : s.camera;
     // Draw what 2D work the caller has batched first: creating canvas render textures or
@@ -3055,8 +3588,16 @@ void render(Scene& s, int t, const Ctx& c, Rectangle viewport, Camera* camera) {
             if (Vector3Length(d) > 1e-6f) cull.shadowDirs.push_back(Vector3Normalize(d));
         }
     }
+    {
+        const Vector2 cs = canvasSize();
+        cull.screenH = viewport.width > 0 && viewport.height > 0 ? viewport.height * c.s : std::max(1.f, cs.y);
+        cull.compH = viewport.width > 0 && viewport.height > 0 ? viewport.height : cull.screenH / std::max(1e-4f, c.s);
+    }
     animate(s.objects, t, MatrixIdentity(), cull);
-    if (canvasSize().x > 0) drawCanvases(s.objects, t);
+    if (canvasSize().x > 0) {
+        sizeSurfaces(s.objects, MatrixIdentity(), cam, cull.screenH * cull.aspect, cull.screenH);
+        drawCanvases(s.objects, t);
+    }
     drawOffscreen(c.a, [&](const RenderTexture& target, float scale) {
         Rectangle vp = viewport;
         if (vp.width <= 0 || vp.height <= 0) vp = { 0, 0, target.texture.width / scale, target.texture.height / scale };
