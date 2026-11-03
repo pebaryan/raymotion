@@ -419,6 +419,10 @@ node->fn = [](const Ctx& cx, int t) {
 // comp.motionBlur = { 8, 0.5f };               // the whole picture (not with a custom `render`)
 ```
 
+`frameTime(t)` counts **frames**: the `sin(frameTime(t) * 0.3)` above turns about 1.4 times a
+second at 30 fps. For a rate in seconds, divide first (`frameTime(t) / fps`). A slow sway
+written in seconds but fed frames becomes a shake.
+
 Only what reads `frameTime(t)` (or `t + subframe()`) moves between samples; `up` and
 `layerUp` run again at each sample. Camera tracks and `fx::fn` particles already use it.
 Each sample redraws the subtree: 8 to 16 is typical, 32 for whip pans. Blur the layer
