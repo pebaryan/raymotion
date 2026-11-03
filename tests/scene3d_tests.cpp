@@ -57,6 +57,9 @@ static void geometryExtents() {
     auto near = [](float a, float b) { return std::fabs(a - b) < 0.02f; };
     BoundingBox t = GetMeshBoundingBox(g3d::Geometry::torus(1, 0.25f)->mesh());
     CHECK(near(t.max.x, 1.25f) && near(t.min.y, -1.25f) && near(t.max.z, 0.25f));
+    // a thin ring keeps its tube (raylib's GenMeshTorus clamped tube / radius to >= 0.1)
+    BoundingBox thin = GetMeshBoundingBox(g3d::Geometry::torus(80, 0.5f, 64, 12)->mesh());
+    CHECK(near(thin.max.z, 0.5f) && std::fabs(thin.max.x - 80.5f) < 0.05f);
     BoundingBox cy = GetMeshBoundingBox(g3d::Geometry::cylinder(0.5f, 2)->mesh());
     CHECK(near(cy.min.y, -1) && near(cy.max.y, 1) && near(cy.max.x, 0.5f));
     BoundingBox co = GetMeshBoundingBox(g3d::Geometry::cone(0.5f, 2)->mesh());
@@ -1187,6 +1190,368 @@ static void waterTest() {
     }
 }
 
+// 3D lines: the same width in px near and far, hidden behind a box (not when onTop), trimmed
+// by from/to, arrowheads wider than the stroke, dashes measured on screen, and a line that
+// runs past the camera clipped rather than blown up.
+static void lines3d() {
+    // the run of lit pixels down column x, through y0
+    auto thickness = [](const Image& img, int x, int y0) {
+        int n = 0;
+        for (int y = std::max(0, y0 - 30); y < std::min(H, y0 + 30); y++) n += GetImageColor(img, x, y).g > 128;
+        return n;
+    };
+    for (float dist : { 4.f, 12.f }) {
+        auto s = std::make_shared<g3d::Scene>();
+        s->camera.position = { 0, 0, dist };
+        s->camera.target = { 0, 0, 0 };
+        auto l = std::make_shared<g3d::Lines>();
+        l->line({ -10, 0, 0 }, { 10, 0, 0 }, GREEN, 6);
+        s->add(l);
+        Comp c = sceneComp(s, BLACK);
+        Image img = render(c, 0);
+        const int t = thickness(img, W / 2, H / 2);
+        CHECK(t >= 5 && t <= 7);
+        if (t < 5 || t > 7) std::fprintf(stderr, "  line at %.0f m: %d px, want 6\n", dist, t);
+        UnloadImage(img);
+    }
+    {   // behind a box, then on top of it; trimmed; with a head
+        auto s = std::make_shared<g3d::Scene>();
+        s->camera.position = { 0, 0, 6 };
+        s->add(g3d::Geometry::box(1, 1, 1), unlit(RED))->position = { 0, 0, 1 };
+        auto l = std::make_shared<g3d::Lines>();
+        l->line({ -3, 0, 0 }, { 3, 0, 0 }, GREEN, 6);
+        s->add(l);
+        Comp c = sceneComp(s, BLACK);
+        Image img = render(c, 0);
+        const Vector2 mid = project(s->camera, { 0, 0, 1.5f }), side = project(s->camera, { -2, 0, 0 });
+        CHECK(close(px(img, mid), RED, 6));                  // the box hides it
+        CHECK(close(px(img, side), GREEN, 6));
+        UnloadImage(img);
+        l->onTop = true;
+        img = render(c, 0);
+        CHECK(close(px(img, mid), GREEN, 6));                // over everything
+        UnloadImage(img);
+        l->onTop = false;
+        l->paths[0].from = 0.5f;                              // only the right half
+        img = render(c, 0);
+        CHECK(close(px(img, side), BLACK, 6));
+        CHECK(close(px(img, project(s->camera, { 2, 0, 0 })), GREEN, 6));
+        UnloadImage(img);
+        l->paths[0].from = 0;
+        l->paths[0].head = g3d::Lines::Head::End;
+        l->paths[0].headSize = 4;
+        img = render(c, 0);
+        const Vector2 tip = project(s->camera, { 3, 0, 0 });
+        const int nearTip = thickness(img, (int)tip.x - 18, (int)tip.y), body = thickness(img, (int)side.x, (int)side.y);
+        CHECK(nearTip > body + 4);                            // the head is wider than the stroke
+        CHECK(close(px(img, { tip.x + 4, tip.y }), BLACK, 6)); // and stops at the tip
+        UnloadImage(img);
+    }
+    {   // dashes: 10 px on, 10 px off along a 200 px line gives about 10 dashes
+        auto s = std::make_shared<g3d::Scene>();
+        s->camera.position = { 0, 0, 5 };
+        auto l = std::make_shared<g3d::Lines>();
+        const Vector3 a{ -2, 0, 0 }, b{ 2, 0, 0 };
+        g3d::Lines::Path& p = l->line(a, b, GREEN, 3);
+        p.dash = 10;
+        p.gap = 10;
+        s->add(l);
+        Comp c = sceneComp(s, BLACK);
+        Image img = render(c, 0);
+        const Vector2 pa = project(s->camera, a), pb = project(s->camera, b);
+        int runs = 0;
+        bool on = false;
+        for (int x = (int)pa.x - 3; x <= (int)pb.x + 3; x++) {
+            const bool lit = GetImageColor(img, x, (int)pa.y).g > 128;
+            if (lit && !on) runs++;
+            on = lit;
+        }
+        const int want = (int)std::round((pb.x - pa.x) / 20);
+        CHECK(std::abs(runs - want) <= 1);
+        if (std::abs(runs - want) > 1) std::fprintf(stderr, "  dashes: %d, want %d\n", runs, want);
+        UnloadImage(img);
+    }
+    {   // a line running from in front of the camera to behind it: clipped, still drawn, sane width
+        auto s = std::make_shared<g3d::Scene>();
+        s->camera.position = { 0, 0, 5 };
+        auto l = std::make_shared<g3d::Lines>();
+        l->line({ 0, -0.5f, 0 }, { 0, -0.5f, 20 }, GREEN, 4);
+        s->add(l);
+        Comp c = sceneComp(s, BLACK);
+        Image img = render(c, 0);
+        int lit = 0;
+        for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) lit += GetImageColor(img, x, y).g > 128;
+        CHECK(lit > 50 && lit < W * H / 3);
+        UnloadImage(img);
+    }
+    if (const char* dir = std::getenv("RMTN_LINES_DUMP")) {   // a picture to look at, not a check
+        auto s = std::make_shared<g3d::Scene>();
+        s->camera.position = { 3.2f, 2.4f, 4.2f };
+        s->camera.target = { 0, 0.4f, 0 };
+        s->lights.push_back(g3d::Light::directional({ -2, 5, 3 }, WHITE, 1.4f, true));
+        g3d::Material grey;
+        grey.color = { 70, 76, 86, 255 };
+        s->add(g3d::Geometry::box(6, 0.1f, 6), grey)->position = { 0, -0.05f, 0 };
+        g3d::Material cube;
+        cube.color = { 230, 120, 60, 255 };
+        s->add(g3d::Geometry::box(0.8f, 0.8f, 0.8f), cube)->position = { 0.6f, 0.4f, 0.2f };
+        auto l = std::make_shared<g3d::Lines>();
+        l->box({ -1.2f, 0, -1.2f }, { -0.2f, 1, -0.2f }, { 120, 200, 255, 255 }, 2);
+        l->arrow({ 0, 0.01f, 0 }, { 1.6f, 0.01f, 0 }, { 240, 80, 80, 255 }, 4);
+        l->arrow({ 0, 0.01f, 0 }, { 0, 1.6f, 0 }, { 90, 220, 120, 255 }, 4);
+        l->arrow({ 0, 0.01f, 0 }, { 0, 0.01f, 1.6f }, { 90, 140, 255, 255 }, 4);
+        g3d::Lines::Path& orbit = l->circle({ 0.6f, 0.4f, 0.2f }, { 0, 1, 0 }, 0.9f, { 240, 240, 240, 255 }, 2);
+        orbit.dash = 10;
+        orbit.gap = 7;
+        l->arrow({ -1.6f, 1.5f, 1.2f }, { 0.6f, 0.4f, -0.3f }, { 255, 210, 80, 255 }, 3);   // a leader that runs behind the cube
+        s->add(l);
+        Comp c = longComp(s, 960, 540);
+        Image img = render(c, 0);
+        fs::create_directories(dir);
+        ExportImage(img, (fs::path(dir) / "lines.png").string().c_str());
+        UnloadImage(img);
+    }
+}
+
+// Device prefabs: the screen keeps its picture's proportions, the cut from a phone screen
+// filling the frame to the same drawing in 2D is invisible (rounded corners included), and a
+// closed laptop lid hides its screen.
+static void devices() {
+    auto app = [](const Ctx& c, int) {
+        dr::rect(c, 0, 0, 390, 844, { 238, 241, 245, 255 });
+        dr::rect(c, 0, 0, 390, 250, { 43, 108, 246, 255 });
+        dr::roundRect(c, 20, 300, 350, 200, 18, { 240, 164, 60, 255 });
+        dr::circle(c, { 195, 650 }, 80, { 20, 32, 43, 255 });
+    };
+    {
+        auto s = std::make_shared<g3d::Scene>();
+        s->lights.push_back(g3d::Light::directional({ 1, 2, 3 }, WHITE, 1, false));
+        auto ui = std::make_shared<g3d::Surface>();
+        ui->pixels = { 390, 844 };
+        ui->draw = app;
+        g3d::Device phone = g3d::addDevice(*s, g3d::DeviceKind::Phone, ui);
+        phone.root->position = { 0.1f, 0.2f, -0.3f };
+        phone.root->rotation = { -20, 15, 0 };
+        CHECK(std::fabs(ui->size.x - 0.0715f) < 1e-5f && std::fabs(ui->size.y / ui->size.x - 844.f / 390) < 1e-4f);
+        s->camera.fov = 40;
+        s->camera.nearPlane = 0.02f;
+        // At 960x540: in the 240x160 test frame the 844 px screen is drawn at 0.19x, where its
+        // one-px edges are a large share of the picture.
+        static constexpr int FW = 960, FH = 540;
+        s->camera = g3d::fillCamera(s->camera, *s, *phone.screen, 0, (float)FW / FH);
+        Comp c = longComp(s, FW, FH);
+        c.background = BLACK;
+        Image img = render(c, 0);
+        Comp flat;
+        flat.w = FW; flat.h = FH; flat.duration = 10; flat.background = BLACK;
+        addRoot(flat.roots, 0, 10)->fn = [ui](const Ctx& cx, int t) { ui->draw(g3d::fillCtx(*ui, FW, FH), t); };
+        Image ref = render(flat, 0);
+        // inside the screen's rectangle, less a 2 px border (outside it the 3D shows the phone's body)
+        const Ctx f = g3d::fillCtx(*ui, FW, FH);
+        long long sum = 0;
+        int n = 0;
+        for (int y = 2; y < FH - 2; y++)
+            for (int x = (int)f.o.x + 2; x < (int)(f.o.x + 390 * f.s) - 2; x++) {
+                const Color a = GetImageColor(img, x, y), b = GetImageColor(ref, x, y);
+                sum += std::max({ std::abs(a.r - b.r), std::abs(a.g - b.g), std::abs(a.b - b.b) });
+                n++;
+            }
+        const double mean = (double)sum / std::max(1, n);
+        CHECK(mean < 1.0);
+        if (mean >= 1.0) std::fprintf(stderr, "  phone fill vs direct: mean %.2f\n", mean);
+        if (const char* dir = std::getenv("RMTN_DEVICES_DUMP")) {
+            fs::create_directories(dir);
+            ExportImage(img, (fs::path(dir) / "phone3d.png").string().c_str());
+            ExportImage(ref, (fs::path(dir) / "phone2d.png").string().c_str());
+        }
+        // the top-left corner is the bezel's colour in both, not the app's blue
+        const Vector2 corner{ f.o.x + 3 * f.s, 3 * f.s };
+        CHECK(GetImageColor(ref, (int)corner.x, (int)corner.y).b < 40);
+        CHECK(GetImageColor(img, (int)corner.x, (int)corner.y).b < 40);
+        UnloadImage(img);
+        UnloadImage(ref);
+    }
+    {   // a laptop seen from above and in front: open, the screen shows; closed, it does not
+        auto s = std::make_shared<g3d::Scene>();
+        s->lights.push_back(g3d::Light::directional({ 1, 3, 2 }, WHITE, 1, false));
+        auto ui = std::make_shared<g3d::Surface>();
+        ui->pixels = { 1440, 900 };
+        ui->background = { 0, 255, 0, 255 };
+        g3d::Device lap = g3d::addDevice(*s, g3d::DeviceKind::Laptop, ui);
+        CHECK(lap.lid != nullptr && std::fabs(ui->size.y / ui->size.x - 900.f / 1440) < 1e-4f);
+        s->camera.position = { 0, 0.45f, 0.55f };
+        s->camera.target = { 0, 0.08f, -0.05f };
+        s->camera.nearPlane = 0.02f;
+        Comp c = sceneComp(s, BLACK);
+        auto green = [](const Image& img) {
+            int k = 0;
+            for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) { const Color p = GetImageColor(img, x, y); k += p.g > 200 && p.r < 60; }
+            return k;
+        };
+        Image open = render(c, 0);
+        lap.lid->rotation.x = 90;                             // closed
+        Image shut = render(c, 0);
+        CHECK(green(open) > W * H / 20);
+        CHECK(green(shut) == 0);
+        UnloadImage(open);
+        UnloadImage(shut);
+    }
+    if (const char* dir = std::getenv("RMTN_DEVICES_DUMP")) {   // a picture to look at, not a check
+        auto s = std::make_shared<g3d::Scene>();
+        s->ambient = 0.55f;
+        s->lights.push_back(g3d::Light::directional({ -1, 2.5f, 2 }, { 255, 240, 225, 255 }, 1.6f, true));
+        s->lights.back().shadowExtent = 1.2f;
+        s->add(g3d::Geometry::box(4, 0.02f, 3), [] { g3d::Material m; m.color = { 70, 56, 46, 255 }; m.roughness = 0.8f; return m; }())->position = { 0, -0.01f, 0 };
+        auto page = [](Vector2 px, Color top) {
+            auto u = std::make_shared<g3d::Surface>();
+            u->pixels = px;
+            u->draw = [px, top](const Ctx& c, int) {
+                dr::rect(c, 0, 0, px.x, px.y, { 245, 246, 248, 255 });
+                dr::rect(c, 0, 0, px.x, px.y * 0.22f, top);
+                for (int i = 0; i < 4; i++) dr::roundRect(c, px.x * 0.06f, px.y * (0.3f + i * 0.16f), px.x * 0.88f, px.y * 0.12f, px.y * 0.02f, { 222, 226, 233, 255 });
+            };
+            return u;
+        };
+        g3d::DeviceStyle silver;
+        silver.body = { 196, 199, 204, 255 };
+        g3d::Device mon = g3d::addDevice(*s, g3d::DeviceKind::Monitor, page({ 1920, 1080 }, { 43, 108, 246, 255 }), {});
+        mon.root->position = { -0.05f, 0, -0.45f };
+        g3d::Device lap = g3d::addDevice(*s, g3d::DeviceKind::Laptop, page({ 1440, 900 }, { 47, 196, 178, 255 }), silver);
+        lap.root->position = { 0.42f, 0, -0.05f };
+        lap.root->rotation = { 0, -25, 0 };
+        g3d::Device tab = g3d::addDevice(*s, g3d::DeviceKind::Tablet, page({ 834, 1194 }, { 240, 164, 60, 255 }), silver);
+        tab.root->position = { -0.42f, 0.0035f, 0.05f };
+        tab.root->rotation = { -90, 0, 20 };
+        g3d::Device ph = g3d::addDevice(*s, g3d::DeviceKind::Phone, page({ 390, 844 }, { 200, 70, 90, 255 }));
+        ph.root->position = { -0.12f, 0.004f, 0.18f };
+        ph.root->rotation = { -90, 0, -10 };
+        g3d::Device web = g3d::addDevice(*s, g3d::DeviceKind::Browser, page({ 1280, 800 }, { 20, 32, 43, 255 }));
+        web.root->position = { 0.62f, 0.42f, -0.55f };
+        web.root->rotation = { 0, -22, 0 };
+        web.root->scale = { 0.5f, 0.5f, 0.5f };
+        s->camera.position = { 0.15f, 0.65f, 1.15f };
+        s->camera.target = { 0, 0.18f, -0.1f };
+        s->camera.fov = 40;
+        s->camera.nearPlane = 0.02f;
+        Comp c = longComp(s, 1280, 720);
+        Image img = render(c, 0);
+        fs::create_directories(dir);
+        ExportImage(img, (fs::path(dir) / "devices.png").string().c_str());
+        UnloadImage(img);
+    }
+}
+
+// 2D surfaces: picture the right way up, the fill camera matching a direct 2D draw, texture
+// density following the camera, constant-size billboards hidden by what is in front,
+// see-through backgrounds and the surface's own clock.
+static void surfaces() {
+    auto picture = [](const Ctx& c, int) {
+        dr::rect(c, 0, 0, 120, 40, RED);
+        dr::rect(c, 0, 40, 60, 40, GREEN);
+        dr::rect(c, 60, 40, 60, 40, BLUE);
+        dr::circle(c, { 60, 40 }, 17, WHITE);
+    };
+    {
+        auto s = std::make_shared<g3d::Scene>();
+        auto ui = std::make_shared<g3d::Surface>();
+        ui->pixels = { 120, 80 };
+        ui->size = { 1.5f, 1.0f };
+        ui->draw = picture;
+        g3d::Object3D* holder = s->add();                                  // on a moving parent
+        holder->up = [](int t, g3d::Object3D& h) { h.rotation = { 0, 20.f + t, 0 }; h.position = { 0.2f, 0, 0 }; };
+        g3d::Object3D* o = holder->add(ui);
+        o->position = { 0.3f, 0.2f, -1 };
+        o->rotation = { 10, 5, 0 };
+        s->camera = g3d::fillCamera(s->camera, *s, *o, 0, (float)W / H);
+        Comp c = sceneComp(s, BLACK);
+        Image img = render(c, 0);
+        CHECK(close(px(img, { W * 0.25f, H * 0.2f }), RED, 6));          // top is up
+        CHECK(close(px(img, { W * 0.15f, H * 0.8f }), GREEN, 6));        // left is left
+        CHECK(close(px(img, { W * 0.85f, H * 0.8f }), BLUE, 6));
+        CHECK(std::fabs(ui->resolution - 2) < 0.01f);                     // 160 px tall for 80 design px
+        {
+            g3d::Camera far = s->camera;
+            far.position = Vector3Add(far.position, { 3, 2, 5 });
+            const g3d::Camera at1 = g3d::mix(far, s->camera, 1), half = g3d::mix(far, s->camera, 0.5f);
+            CHECK(Vector3Distance(at1.position, s->camera.position) < 1e-5f && Vector3Distance(at1.target, s->camera.target) < 1e-5f);
+            CHECK(Vector3Distance(half.position, Vector3Lerp(far.position, s->camera.position, 0.5f)) < 1e-5f);
+        }
+        // The same picture drawn straight into the frame, as the cut after a push-in would.
+        Comp flat;
+        flat.w = W; flat.h = H; flat.duration = 10; flat.background = BLACK;
+        addRoot(flat.roots, 0, 10)->fn = [ui, picture](const Ctx& c, int t) { picture(g3d::fillCtx(*ui, W, H), t); };
+        Image ref = render(flat, 0);
+        long long sum = 0;
+        int worst = 0;
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) {
+                const Color a = GetImageColor(img, x, y), b = GetImageColor(ref, x, y);
+                const int d = std::max({ std::abs(a.r - b.r), std::abs(a.g - b.g), std::abs(a.b - b.b) });
+                sum += d;
+                worst = std::max(worst, d);
+            }
+        const double mean = (double)sum / (W * H);
+        CHECK(mean < 1.0);
+        if (mean >= 1.0) std::fprintf(stderr, "  fill vs direct: mean %.2f, worst %d\n", mean, worst);
+        UnloadImage(ref);
+        UnloadImage(img);
+        // Further away it is drawn smaller.
+        s->camera.position = Vector3Add(s->camera.target, Vector3Scale(Vector3Subtract(s->camera.position, s->camera.target), 4));
+        img = render(c, 0);
+        CHECK(ui->resolution > 0.49f && ui->resolution < 0.6f);
+        UnloadImage(img);
+    }
+    {   // A label: square to the camera, the same size on screen near and far, hidden behind a box.
+        for (float dist : { 4.f, 12.f }) {
+            auto s = std::make_shared<g3d::Scene>();
+            s->camera.position = { 0, 0, dist };
+            auto label = std::make_shared<g3d::Surface>();
+            label->pixels = { 40, 20 };
+            label->size = { 1, 0.5f };
+            label->background = WHITE;
+            label->billboard = true;
+            label->pixelSize = 1;
+            s->add(label)->position = { -1, 0.5f, 0 };
+            s->add(g3d::Geometry::box(0.6f, 0.6f, 0.6f), unlit(RED))->position = { 1, -1, 1 };
+            auto hidden = std::make_shared<g3d::Surface>();
+            hidden->pixels = { 40, 20 };
+            hidden->size = { 1, 0.5f };
+            hidden->background = WHITE;
+            hidden->billboard = true;
+            hidden->pixelSize = 1;
+            s->add(hidden)->position = Vector3Add(s->camera.position, Vector3Scale(Vector3Subtract({ 1, -1, 1 }, s->camera.position), 1.6f));   // right behind the box
+            Comp c = sceneComp(s, BLACK);
+            Image img = render(c, 0);
+            const Vector2 at = project(s->camera, { -1, 0.5f, 0 });
+            int wide = 0;
+            for (int x = 0; x < W; x++) wide += GetImageColor(img, x, (int)at.y).r > 200;
+            CHECK(std::abs(wide - 40) <= 2);
+            if (std::abs(wide - 40) > 2) std::fprintf(stderr, "  label at %.0f m: %d px wide\n", dist, wide);
+            CHECK(close(px(img, project(s->camera, { 1, -1, 1 })), RED));    // the box hides the other label
+            UnloadImage(img);
+        }
+    }
+    {   // See-through background, and the surface's own clock.
+        auto s = std::make_shared<g3d::Scene>();
+        s->camera.position = { 0, 0, 4 };
+        s->add(g3d::Geometry::box(3, 3, 0.1f), unlit(RED))->position = { 0, 0, -1 };
+        auto ui = std::make_shared<g3d::Surface>();
+        ui->pixels = { 100, 100 };
+        ui->size = { 2, 2 };
+        ui->start = 5;
+        ui->draw = [](const Ctx& c, int t) { dr::rect(c, 30, 30, 40, 40, t == 0 ? GREEN : BLUE); };
+        s->add(ui);
+        Comp c = sceneComp(s, BLACK);
+        Image img = render(c, 5);
+        CHECK(close(px(img, { W / 2.f, H / 2.f }), GREEN, 6));               // local frame 0 at scene frame 5
+        CHECK(close(px(img, project(s->camera, { -0.8f, 0.8f, 0 })), RED, 6)); // the empty corner shows what is behind
+        UnloadImage(img);
+        img = render(c, 6);
+        CHECK(close(px(img, { W / 2.f, H / 2.f }), BLUE, 6));
+        UnloadImage(img);
+    }
+}
+
 int main() try {
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
@@ -1217,6 +1582,9 @@ int main() try {
     inkLines();
     models(dir);
     particles3d();
+    surfaces();
+    lines3d();
+    devices();
     shutdownGraphics();
     CloseWindow();
     std::error_code ec;

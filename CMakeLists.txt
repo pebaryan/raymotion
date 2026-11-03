@@ -66,6 +66,7 @@ add_library(rmtn_engine STATIC
   src/engine/layout.cpp
   src/engine/json.cpp
   src/engine/scene3d.cpp
+  src/engine/devices.cpp
   src/engine/media.cpp
   src/engine/prefab.cpp
   src/engine/diagram_layout.cpp
@@ -181,6 +182,7 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/zombie_horde.cpp
     examples/showcase/voxel_splats.cpp
     examples/showcase/bundaran_hi_banner.cpp
+    examples/showcase/screen_is_the_frame.cpp
     examples/showcase/tokens.cpp
     examples/showcase/own_compute.cpp
     examples/showcase/own_compute_v2.cpp

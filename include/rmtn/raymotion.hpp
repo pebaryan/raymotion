@@ -41,6 +41,7 @@
 #include "flags.hpp"
 #include "geo.hpp"
 #include "city.hpp"
+#include "devices.hpp"
 #include "globe.hpp"
 #include "geo3d.hpp"
 #include "calendar.hpp"
