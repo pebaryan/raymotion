@@ -217,6 +217,12 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/lowerthird.cpp)
   target_sources(raymotion PRIVATE examples/showcase/expcps_overload.cpp)
   target_sources(raymotion PRIVATE examples/showcase/three_levels_causality.cpp)
+  # Machine-local compositions that stay out of the repository (see examples/local/local.cpp).
+  file(GLOB RMTN_LOCAL_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/local/*.cpp")
+  if(RMTN_LOCAL_SOURCES)
+    target_sources(raymotion PRIVATE ${RMTN_LOCAL_SOURCES})
+    target_compile_definitions(raymotion PRIVATE RMTN_LOCAL_COMPS=1)
+  endif()
   target_link_libraries(raymotion PRIVATE rmtn_engine)
 
   add_executable(raymotion_halloween examples/halloween/main.cpp)
