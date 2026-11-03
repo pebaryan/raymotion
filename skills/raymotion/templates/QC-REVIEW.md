@@ -2,7 +2,9 @@
 
 > Copy to `out/<slug>-qc.md` or `docs/<slug>-qc.md` and fill it in. A score without
 > evidence is not a review. The reviewer must have opened the stills and watched the
-> draft, not just read the code.
+> draft, not just read the code. Statistics and captions find problems; they do not
+> approve frames. If a later pass finds a defect an earlier gate missed, reopen that gate
+> here and strike its scores.
 
 | | |
 | --- | --- |
@@ -30,6 +32,7 @@ Reviewer's restatement after viewing:
 | 1 Script and cue map | `pass / conditional / fail` | `<link>` |
 | 2 Stills | `pass / conditional / fail` | `<frames, contact sheet>` |
 | 2b Staged reveal & narration sync | `pass / conditional / fail` | `<scene ledger, sync audit, stale-binary check>` |
+| 2c Picture integrity | `pass / conditional / fail` | `<qc_sweep report on the final MP4, §5d sweep table, effect on/off diffs, camera clearance log>` |
 | 3 Draft (muted + sound) | `pass / conditional / fail` | `<timecoded notes>` |
 | 4 Final technical QA | `pass / conditional / fail` | `<ffprobe, decode, loudness, encoded frames>` |
 | 5 Authored test | `pass / conditional / fail` | `<mute, thumbnail, reskin, retiming, clean machine>` |
@@ -120,6 +123,40 @@ Check every one. Any checked box caps the verdict at Brief-complete (21).
 | `<scene>` | `<word>` | `<s>` | `<s>` | `<0.20-0.40>` | `pass / fail` |
 | | | | | | |
 
+## 5d. Picture integrity sweep (Gate 2c)
+
+Run `python tools/qc_sweep.py out/<slug>.mp4 --out out/qc/<slug>-sweep --report out/qc/<slug>-sweep.md`
+on the **final** encoded file. Paste the flags, then explain or fix each one.
+
+| Flag (type, timecode) | Cause | Fixed / reason it stays |
+| --- | --- | --- |
+| `<flat 0:45-0:48>` | `<camera inside dust layer>` | `<thinned; re-swept: gone>` |
+
+One line per sweep frame, written after opening the frame. "Looks fine" is not a line.
+
+| t (s) | What is in the frame | Matches the plan? |
+| --- | --- | --- |
+| 0 | `<street, title rising, sun glare upper left>` | `yes / no: ...` |
+
+Keyed effects, rendered off vs on (a zero diff is a dead effect):
+
+| Effect | Frame | Mean diff off→on | Live? |
+| --- | --- | --- | --- |
+| `<fog>` | `<f0300>` | `<12.4>` | `yes / DEAD` |
+
+- [ ] Camera clearance checked every frame (3D): `<min height / log path>`
+- [ ] Closest-approach stills of built objects: nothing floats or intersects; primitives keep their proportions
+- [ ] Payoff frame described by eye: `<frame, what is seen>`
+- [ ] Gradual ramps sampled every 0.5 s: no stalls, no pops
+
+## 5e. Who approved what
+
+Quote the owner's words; an agent's probe of a draft is not a watch.
+
+| Item | Approver | Artifact they saw | Their words |
+| --- | --- | --- | --- |
+| Final film | `<owner>` | `<out/slug.mp4, full size, real time>` | `"<quote>"` |
+
 ## 6. Packaging (Gate 7)
 
 Mode-appropriate checklist:
@@ -164,7 +201,9 @@ Name the two lowest criteria on each axis.
 
 ## 9. Decision
 
-- [ ] **Ship** — Authoredness ≥ 22 and Craft ≥ 13, no critical fail, Gates 0–7 passed.
+- [ ] **Ship** — Authoredness ≥ 22 and Craft ≥ 13, no critical fail, Gates 0–7 (with 2c)
+      passed, and the owner has watched the final file (§5e). An author-only review scores
+      criteria 10, 17 and 18 at most 2.
 - [ ] **Revise** — apply the fixes above and re-review. Keep: `<conceit/script/scenes>`.
 - [ ] **Rewrite** — no conceit/script, or the form is a template. Start from the brief.
 

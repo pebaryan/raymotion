@@ -34,6 +34,14 @@ Run `skills/raymotion/references/quality-control.md` and fill
   after the last approved change;
 - a final render checked with `ffprobe`, a full decode, loudness/true peak, and frames
   extracted from the encoded MP4;
+- Gate 2c on the final MP4: `python tools/qc_sweep.py out/<slug>.mp4 --out
+  out/qc/<slug>-sweep`. Every flag needs a fix or a written reason. Every sweep frame gets
+  a one-line description written after opening it. Every keyed effect is rendered off vs
+  on, and a 3D camera path is checked against the ground at every frame. Stills at the
+  anchors only are not enough;
+- approvals from evidence, not proxies: a statistic or a vision-model caption is not a
+  look, "user approved" needs the owner's quoted words, and an author-only review cannot
+  score Verification, Spec-to-screen or Revision above 2 or call a film release-ready;
 - Declare the story mode (explainer / narrative / promo / utility).
 - Authoredness ≥ 22 **and** Craft ≥ 13 with no critical fail and Gates 0–7 passed.
   A public or showcase cut should reach Authoredness ≥ 30 and Craft ≥ 16. The craft

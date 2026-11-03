@@ -58,6 +58,25 @@ choices, not in skipping the brief.
 pictures, it is brief-complete. If the form is inseparable from the subject, it is
 authored.
 
+### Self-certified (the failure this framework itself let through)
+
+The film is authored, the QC review is filled, every score is 3, and the picture is broken.
+One Sky rev 2 (`docs/one-sky-qc.md`) was signed "release-ready" while:
+
+- the camera went **under the ground for 1.5 s** (a Catmull-Rom spline overshot between
+  unevenly spaced keys). The stills sat at chapter points on either side of it;
+- the handheld sway fed **frames into a sine that expected seconds**, a 3 Hz shake;
+- **every fog key did nothing**, because the scene's fog mode was never switched on;
+- the payoff (a blue sun) was **30° out of frame** in the closing shot, but was "verified"
+  by a colour statistic near where the sun should have been;
+- roof parts floated a storey above the roofs, and a ring primitive was silently clamped
+  to 16x its thickness.
+
+Each defect was visible in an ordinary frame. They passed because the evidence was
+**sampled** (stills at anchors, contact sheets), **proxied** (pixel statistics, motion
+energy, a vision model's one-line caption) or **self-approved**. Gate 2c and the reviewer
+rules in §4 exist to close those three holes.
+
 ---
 
 ## 1b. Declare the story mode
@@ -154,6 +173,48 @@ scene at a time against its measured word onsets.
 **Fail:** a full layout at `t = 0`, visuals after the words, wrong semantic order,
 duplicate labels, a stale binary, or a full-film pass offered in place of scene review.
 
+### Gate 2c - Picture integrity (every frame, not just the anchors)
+
+Gates 2 and 2b check the frames the plan names. This gate checks the frames **between**
+them. It is mandatory for any film with a moving camera, a 3D scene, or a keyed parameter
+ramp; for flat 2D motion graphics, items 1, 2 and 7 still apply.
+
+1. **Sweep.** Run `python tools/qc_sweep.py out/<slug>.mp4 --out out/qc/<slug>-sweep` on
+   the encoded file. It flags flat frames, shake, pops and freezes, and writes one frame
+   per second. **Every flag** gets a fix or a written reason (a designed fade, a held
+   beat). Do not raise the thresholds to make a flag go away.
+2. **Look at every sweep frame.** Open each one at review size (not on a contact sheet)
+   and write one line per frame in the QC sweep table: what is in it, and whether it is
+   what the plan says should be there. A frame you cannot describe in one line, such as
+   "brown", "black" or "grey", is a defect unless the plan calls for it. Across a camera
+   move faster than about a frame-height a second, use `--step 0.5`.
+3. **Camera clearance (3D).** Evaluate the camera path at every frame (not every key) and
+   assert in code or in a log that it stays above the ground and outside solid geometry.
+   Keys with uneven spacing in time or distance need monotone interpolation; a plain
+   Catmull-Rom overshoots (see `3d.md`, "Camera and motion traps").
+4. **Steadiness.** No unplanned oscillation. A designed sway reverses at most about once
+   a second; the sweep's shake flag means a clock is in the wrong units.
+5. **Every keyed effect is live.** For each effect the film keys (fog, haze, glow, depth
+   of field, blur, a dust layer, a light), render one still with the effect at zero and
+   one as keyed, and diff them. A zero diff means the effect is dead: a mode never
+   enabled, a field the renderer ignores, or a layer hidden. Record the diff.
+6. **Contact and scale.** Put stills at the closest approach to each built object. Parts
+   that should rest on something (crowns, roof boxes, wheels, feet, benches) touch it;
+   primitives at extreme proportions (a thin ring, a long thin box) have the shape
+   asked for.
+7. **Payoff by eye.** The frame that carries the conceit shows the object, in frame and
+   recognisable, as described by someone looking at it. A statistic (colour delta, motion
+   energy, a histogram) or a vision-model caption can find candidates. It cannot pass the
+   payoff.
+8. **Gradual means gradual.** Sample a ramp that is meant to be gradual (a sky turning,
+   a city emerging, a fade) every 0.5 s. It progresses monotonically with no stalls at
+   the keys and no pops. Large structures emerge (through atmosphere, scale, opacity or
+   detail) rather than appear complete.
+
+**Fail:** any unexplained sweep flag, an undescribed sweep frame, the camera inside
+geometry, a dead keyed effect, unplanned shake, a floating part, or a payoff passed on a
+number.
+
 ### Gate 3 — Draft (motion and sound)
 
 Watch the draft twice:
@@ -182,6 +243,8 @@ notes.
   executable. Record both mtimes or a build hash.
 - The reviewed scene edit is present in the final file; `out/` is not an older render.
 - The SRT and thumbnail exist for a publishable cut.
+- The Gate 2c sweep is re-run on **this** encoded file, and its flags are unchanged or
+  explained. A sweep from an earlier render is not evidence for this one.
 
 Suggested commands:
 
@@ -271,7 +334,7 @@ Score each criterion 0–3. Total is 36. Use the anchors; do not award 3 for eff
 | 7 | **Chapter differentiation** | Same template every chapter | Only colour/text changes | Several custom scenes; some filler | Every chapter has a distinct visual idea; persistent frame unifies; no filler |
 | 8 | **Data & provenance** | Numbers unsourced | Some sources, inconsistent | Source ledger for most claims; exact vs illustrative | Complete ledger, code/data linkage, caveats, no false precision |
 | 9 | **Production pipeline** | Manual assets; fails on a clean machine | Committed assets; no generation/fallback | `c.assets`/lazy/fallback for some; `list` on a clean machine works | Script→voice→SRT/score→assets→thumbnail pipeline; clean-machine render works or fails clearly |
-| 10 | **Verification** | "It renders" | A few stills; no draft/final checks | Stills + draft + final render; no encoded-frame/audio checks | Stills, draft, final ffprobe/decode, encoded-frame check, loudness/peaks, sync/transcript, determinism |
+| 10 | **Verification** | "It renders" | A few stills; no draft/final checks | Stills + draft + final render; no encoded-frame/audio checks | Stills, draft, final ffprobe/decode, encoded-frame check, loudness/peaks, sync/transcript, determinism, and a Gate 2c sweep of the final file with every flag and frame accounted for |
 | 11 | **Memorability / thumbnail** | No image worth a thumbnail | One decent frame | A clear motif and a chosen thumbnail | Multiple iconic images; thumbnail chosen and tested at feed size; conceit visible in it |
 | 12 | **Specificity (reskin test)** | Could be reskinned by editing text | A few subject-specific assets, mostly template | Form partly shaped by subject; some chapters swappable | Form inseparable from the subject; reskinning requires a redesign |
 
@@ -341,7 +404,10 @@ Any one of these caps the verdict at **Brief-complete (21)** regardless of the t
 - a key scene fails Gate 2b: full layout at `t = 0`, a visual after its spoken word,
   wrong semantic order, duplicate diagram/key labels, or a stale binary render;
 - a central claim contradicts its source, or an illustrative value is presented as
-  exact.
+  exact;
+- the final file fails Gate 2c: the camera inside geometry, a dead keyed effect,
+  unplanned shake, an unexplained flat or frozen stretch, or a payoff that is not in the
+  frame.
 
 A sparse or absent score is not automatically critical if the brief declares silence and
 the visuals carry the argument. But a generic bed with no cues or design still caps
@@ -405,6 +471,19 @@ criterion 5 at 1.
 - Do not accept a still/render that came from a binary older than the source.
 - Do not accept a spec mismatch (network counts, model name, GPU, map route, a number)
   as "close enough"; that is a Gate 6 failure.
+- Do not accept a proxy as a look. Pixel statistics, motion energy, frame-diff curves and
+  vision-model captions locate problems; they do not approve a frame. Approval names what
+  is in the frame.
+- Do not accept sampled evidence for continuous picture. Stills at anchors say nothing
+  about the frames between them; that is what the Gate 2c sweep is for.
+- Do not accept "user approved" or "owner approved" unless the owner's words are quoted
+  with the artifact they saw. Agents watching drafts through probes have not watched them.
+- Do not accept a self-review alone for criteria 10, 17 and 18. The author may score them
+  at most 2 until a second reviewer or the owner has checked the final file. A scorecard
+  of all 3s that names no defect is not a review: every act lists what was searched for
+  and what was found, even if that is "nothing".
+- When a later pass finds a defect an earlier gate should have caught, that gate reopens
+  and its scores are struck, not footnoted. The QC review says so at the top.
 
 ---
 
@@ -506,6 +585,9 @@ Result: criteria 13-18 move.
   approved. Re-open the scene and approve it on its own.
 - If the binary is older than the source, re-build before making any judgment about the
   frame. A stale render is not evidence.
+- "Release-ready" needs the owner to have watched the final file at full size in real
+  time, and their words recorded. Until then the decision is "revise: awaiting owner
+  watch", however good the scores look.
 
 ---
 
@@ -545,6 +627,16 @@ Result: criteria 13-18 move.
 - Stills, draft, final decode, loudness, encoded frames and determinism were checked.
 - The thumbnail is chosen and readable at feed size.
 - A topic swap would require a redesign.
+
+### Self-certified scan (any one = reopen the review)
+
+- Every score is 3 and no defect is named.
+- A gate passes on "verified" with a statistic, a probe or a caption, not a described frame.
+- A one-shot or 3D camera film was reviewed only from stills at its anchors.
+- "User approved" appears with no quoted words.
+- The sweep was not run, is from an older render, or has unexplained flags.
+- A keyed effect was never rendered off-vs-on.
+- The same agent built, reviewed and approved the film.
 
 ### Craft scan (any two = revise)
 
@@ -600,6 +692,7 @@ so these older examples are not re-scored here.
 | `austria-journey` | 14–18 / Brief-complete | Good camera path and real map/chart data, but 11 repeated station cards, feature-coverage framing, fixed narration offsets, no encoded-frame/loudness log. |
 | `rotor-subword` (The Token Tax, external) | 29–33 / Authored–Improvised | Ten distinct scenes, data as geometry, typeset equations, VO + score + duck + SFX, accuracy ledger, verification log. Deductions for hardcoded VO ducking and assets not generated in `c.assets`. |
 | `asp-feed` v1 → v2 | 17 → 33 | Same topic and length. v1: a generic card per beat, no proof or source. v2: one map that is the problem and the answer, two answer sets, a constraint that removes one, a source line, a composed score. |
+| `one-sky` rev 2 | self-scored 36/36 + 18/18; actual: critical fail | The cautionary case for Gate 2c: underground camera, 3 Hz shake, dead fog, payoff out of frame, all behind "verified" probes and unquoted approvals (§1, Self-certified). |
 | `austria-time-travel` | 30–34 / Improvised | One artifact per chapter, timing from measured voice, phrase cues, custom score and ducking, source ledger, thumbnail. Deductions for the monolithic file and duplicated timing constants. |
 
 A reviewer who scores a 510-line station template above a 1,940-line artifact-driven film
