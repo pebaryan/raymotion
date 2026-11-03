@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 HOST = Path(sys.argv[1]).resolve()
@@ -16,6 +17,14 @@ GL = "--gl" in sys.argv[5:]
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "examples/starter/main.cpp"
 sys.argv[1:] = []
+
+
+def edit_after(built, path, text):
+    """Write `path` in a later second than `built`: make on macOS compares whole-second
+    timestamps, so an edit in the same second as the last build looks up to date."""
+    while int(time.time()) <= built.stat().st_mtime_ns // 1_000_000_000:
+        time.sleep(0.1)
+    path.write_text(text)
 
 
 class NativeCpp(unittest.TestCase):
@@ -49,10 +58,10 @@ class NativeCpp(unittest.TestCase):
         timestamp = binary.stat().st_mtime_ns
         self.assertIn("640x720", self.call("list", source=source))
         self.assertEqual(timestamp, binary.stat().st_mtime_ns)
-        header.write_text("#define FIXTURE_WIDTH 800\n")
+        edit_after(binary, header, "#define FIXTURE_WIDTH 800\n")
         self.assertIn("800x720", self.call("list", source=source))
         self.assertNotEqual(timestamp, binary.stat().st_mtime_ns)
-        source.write_text(source.read_text().replace("c.h = 720;", "c.h = 480;"))
+        edit_after(binary, source, source.read_text().replace("c.h = 720;", "c.h = 480;"))
         self.assertIn("800x480", self.call("list", source=source))
         for path, timestamp in unchanged.items():
             self.assertEqual(path.stat().st_mtime_ns, timestamp, f"unexpected rebuild: {path}")
