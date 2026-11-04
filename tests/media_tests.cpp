@@ -2,6 +2,7 @@
 // frame-accurate video decoding and the audio mixer (timing, trims, rates, loops, gain,
 // Loop/Freeze/nesting, soundtracks of videos). ffmpeg-made fixtures are skipped without it.
 #include "rmtn/raymotion.hpp"
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -9,6 +10,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 using namespace rmtn;
 namespace fs = std::filesystem;
@@ -214,6 +216,9 @@ static void video(const fs::path& dir) {
     bool exact = true;
     for (int i = 0; i < 30; i++) exact = exact && close(texel(dec.frameAt(i / 10.0)), frameColor(i), 1);
     CHECK(exact);                                                       // sequential
+    // Let the read-ahead reach the end of the file before seeking back: a stale `ended` used to
+    // spin take() holding the lock, so the restart never ran (an intermittent hang on Linux CI).
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
     for (int i : { 25, 3, 17, 29, 0, 28, 1 }) CHECK(close(texel(dec.frameAt(i / 10.0 + 0.05)), frameColor(i), 1));  // seeks
     CHECK(close(texel(dec.frameAt(9.0)), frameColor(29), 1));          // past the end: the last frame
     CHECK(close(texel(dec.frameAt(-1.0)), frameColor(0), 1));

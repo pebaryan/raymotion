@@ -693,8 +693,10 @@ struct VideoDecoder::State : GpuOwner {
                 restart = index;
             }
             cv.notify_all();
+            // `ended` belongs to the old pipe while a restart is pending: waking on it then
+            // would spin here holding the mutex, and the worker could never take the restart.
             cv.wait(lk, [&] {
-                return err || ended ||
+                return err || (ended && restart < 0) ||
                        (index < next && index >= next - (int)ready.size());
             });
         }
