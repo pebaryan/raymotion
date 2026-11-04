@@ -1,8 +1,17 @@
 name: CI
 
 on:
+  # Branch pushes build through their pull request; building on both ran every job twice.
   push:
+    branches: [main]
+    paths-ignore: ["docs/**", "**/*.md", "skills/**"]
   pull_request:
+    paths-ignore: ["docs/**", "**/*.md", "skills/**"]
+
+# A newer push to the same branch or PR cancels the run it replaces.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   linux:
@@ -51,9 +60,13 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v5
+      - name: Install Ninja
+        run: brew install ninja
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
       - name: Build
-        run: cmake --build build --parallel
+        # `--parallel` without a count ran make -j unbounded: every compile at once on a
+        # 3-core runner, which ran out of memory and took up to 2 hours. Ninja caps jobs.
+        run: cmake --build build --parallel "$(sysctl -n hw.ncpu)"
       - name: Test
         run: ctest --test-dir build -LE gl --output-on-failure
