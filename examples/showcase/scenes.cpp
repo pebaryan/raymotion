@@ -69,6 +69,7 @@ void registerLowerThird(Registry& out);
 void registerParallella(Registry& out);
 void registerExpCpsOverload(Registry& out);
 void registerThreeLevelsCausality(Registry& out);
+void registerScripts09(Registry& out);
 #ifdef RMTN_LOCAL_COMPS
 void registerLocal(Registry& out);   // examples/local/local.cpp, not in the repository
 #endif
@@ -471,6 +472,7 @@ registerLowerThird(out);
 registerParallella(out);
 registerExpCpsOverload(out);
 registerThreeLevelsCausality(out);
+registerScripts09(out);
 #ifdef RMTN_LOCAL_COMPS
 registerLocal(out);
 #endif

@@ -218,6 +218,7 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/parallella.cpp)
   target_sources(raymotion PRIVATE examples/showcase/expcps_overload.cpp)
   target_sources(raymotion PRIVATE examples/showcase/three_levels_causality.cpp)
+  target_sources(raymotion PRIVATE examples/showcase/scripts_09.cpp)
   # Machine-local compositions that stay out of the repository (see examples/local/local.cpp).
   file(GLOB RMTN_LOCAL_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/local/*.cpp")
   if(RMTN_LOCAL_SOURCES)
