@@ -48,9 +48,14 @@ else()
   include(FetchContent)
   set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
   set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
+  # DOWNLOAD_EXTRACT_TIMESTAMP is CMake 3.24+; older versions read its value as a second URL.
+  set(_raylib_timestamp)
+  if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
+    set(_raylib_timestamp DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+  endif()
   FetchContent_Declare(raylib
     URL https://github.com/raysan5/raylib/archive/refs/tags/6.2.tar.gz
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    ${_raylib_timestamp})
   FetchContent_MakeAvailable(raylib)
 endif()
 

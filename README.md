@@ -20,10 +20,17 @@ from their own file formats and animated step by step. A single native binary of
 
 ## Build
 
-**Windows binary:** each [release](https://github.com/pebaryan/raymotion/releases) has a
-`raymotion-<version>-windows-x64.zip` with the showcase executable and its assets; it needs
-ffmpeg on `PATH`, an OpenGL 3.3 driver and the Visual C++ runtime. To write your own
-compositions, build from source:
+**Binaries:** each [release](https://github.com/pebaryan/raymotion/releases) has the
+showcase executables and their assets for three platforms. Every one needs ffmpeg on `PATH`
+and an OpenGL 3.3 driver.
+
+| package | also needs |
+|---|---|
+| `raymotion-<version>-windows-x64.zip` | the Visual C++ runtime |
+| `raymotion-<version>-linux-x64.tar.gz` | glibc 2.35+ (Ubuntu 22.04, Debian 12, Fedora 36 or later) and an X11/XWayland session, or `xvfb-run` when headless |
+| `raymotion-<version>-macos-arm64.tar.gz` | macOS 11+ on Apple Silicon; the binaries are unsigned, so run `xattr -dr com.apple.quarantine` on the unpacked folder once |
+
+To write your own compositions, build from source:
 
 Needs CMake 3.21+, a C++17 compiler, and ffmpeg on `PATH` for MP4 output.
 
