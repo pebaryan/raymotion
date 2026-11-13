@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(RAYMOTION_BUILD_EXAMPLES "Build the showcase and starter projects" ${PROJECT_IS_TOP_LEVEL})
+option(RAYMOTION_STUDIO "Build raymotion_studio, the agentic editor (fetches CUI)" OFF)
 option(RAYMOTION_SCRIPTING "Enable embedded C++-like AngelScript compositions" ON)
 set(RAYMOTION_RAYLIB "auto" CACHE STRING "raylib source: auto, vendored (prebuilt MSVC lib), fetch (build 6.2 from source) or system (find_package)")
 set_property(CACHE RAYMOTION_RAYLIB PROPERTY STRINGS auto vendored fetch system)
@@ -160,6 +161,10 @@ include(cmake/NativeCpp.cmake)
 # Small runtime host: no showcase compositions need to be compiled to run scripts.
 add_executable(raymotion_script src/script_main.cpp)
 target_link_libraries(raymotion_script PRIVATE rmtn_engine)
+
+if(RAYMOTION_STUDIO)
+  include(cmake/Studio.cmake)
+endif()
 
 # ---------------------------------------------------------------- example projects
 if(RAYMOTION_BUILD_EXAMPLES)
