@@ -1,3 +1,6 @@
+// Function plots -- Curves, a parametric rose, polar lobes and a contour field from script functions.
+// Category: Charts
+
 uint contourColor(float t) {
     if (t < 0.5f) return 0x2457a6;
     return 0xf08a45;

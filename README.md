@@ -20,10 +20,17 @@ from their own file formats and animated step by step. A single native binary of
 
 ## Build
 
-**Windows binary:** each [release](https://github.com/pebaryan/raymotion/releases) has a
-`raymotion-<version>-windows-x64.zip` with the showcase executable and its assets; it needs
-ffmpeg on `PATH`, an OpenGL 3.3 driver and the Visual C++ runtime. To write your own
-compositions, build from source:
+**Binaries:** each [release](https://github.com/pebaryan/raymotion/releases) has the
+showcase executables and their assets for three platforms. Every one needs ffmpeg on `PATH`
+and an OpenGL 3.3 driver.
+
+| package | also needs |
+|---|---|
+| `raymotion-<version>-windows-x64.zip` | the Visual C++ runtime |
+| `raymotion-<version>-linux-x64.tar.gz` | glibc 2.35+ (Ubuntu 22.04, Debian 12, Fedora 36 or later) and an X11/XWayland session, or `xvfb-run` when headless |
+| `raymotion-<version>-macos-arm64.tar.gz` | macOS 11+ on Apple Silicon; the binaries are unsigned, so run `xattr -dr com.apple.quarantine` on the unpacked folder once |
+
+To write your own compositions, build from source:
 
 Needs CMake 3.21+, a C++17 compiler, and ffmpeg on `PATH` for MP4 output.
 
@@ -78,7 +85,7 @@ objects and house grammar against that mode.
 
 ```
 build/raymotion list
-build/raymotion preview <name>                 # live window; esc or close quits
+build/raymotion preview <name>                 # live window; esc or close quits; a --script reloads on save
 build/raymotion render  <name> [--crf N] [--draft] [--no-music] [--png-frames] [--ss N]
                                [--format mp4|prores|webm] [--alpha] [--jobs N]
 build/raymotion still   <name> --at FRAME [--png PATH] [--ss N] [--alpha]
@@ -137,7 +144,11 @@ The script API includes nested transforms, gradients, images, polygons, font cho
 props and seeded animation. See [runtime scripting](docs/scripting.md) for the scope
 and available bindings. For 3D, audio, media timelines or other full engine features,
 use a normal CMake project. AngelScript is vendored; `-DRAYMOTION_SCRIPTING=OFF`
-disables that optional backend.
+disables that optional backend. The preview window reloads a script when it is saved.
+
+[Raymotion Studio](docs/studio.md) is an experimental editor for these scripts, with an example
+gallery, a preview panel and an agent. It is opt-in (`-DRAYMOTION_STUDIO=ON`), Windows only so
+far, and not part of the release packages.
 
 ### Native C++ runtime helper
 
@@ -331,7 +342,9 @@ art->add(0, 300)->fn = g3d::draw(scene);      // 2D drawn in `art` gets the wash
   `inkEdges` (dark lines where colour or alpha changes) and `watercolor` (bleeding edges,
   darkened rims and pigment granulation, after Bousseau et al.) and `tiltShift` (a sharp
   band at `position` and `angle`, blurring and more saturated beyond it: a miniature in
-  2D, for any layer, not just 3D). Sizes are composition
+  2D, for any layer, not just 3D) and `film` (a camera's response in linear light: exposure,
+  light above a knee pushed past white and bloomed, an ACES shoulder so highlights roll off
+  instead of clipping, contrast, saturation, split toning, vignette, dither). Sizes are composition
   px and the patterns are fixed to the canvas, so a look holds at any supersampling and
   does not crawl between frames.
 
@@ -1052,6 +1065,52 @@ node->fn = [map](const Ctx& cx, int) {
 
 `maps` shows a turning globe, one world morphing through seven projections, Africa on
 an Albers conic with Kenya picked out by its ISO code, and the bundled cities.
+
+#### Drawing maps
+
+`rmtn/geomap.hpp` draws through any projection, so the same calls work on a flat map, a
+globe, and a view in flight. Everything takes a reveal `u` from 0 to 1, like `plot::`:
+
+```cpp
+auto world = geo::Projection::equalEarth().fit({ 60, 60, 1800, 960 }, geo::Sphere);
+const geo::Values gdp = { { "IDN", 1371 }, { "IND", 3550 }, { "DEU", 4456 } };   // by ISO code or name
+const std::vector<geo::LonLat> trip = { { 106.85, -6.21 }, { 55.27, 25.2 }, { 16.37, 48.21 } };
+node->fn = [=](const Ctx& cx, int t) {
+    geo::base(cx, world, {}, ramp(t, 0, 40));              // coastlines draw on, land fades in
+    geo::choropleth(cx, world, gdp, {}, ramp(t, 30, 70));
+    geo::colorbar(cx, { 80, 760, 24, 200 }, geo::Scale{}.over(gdp), {}, ramp(t, 40, 70));
+    geo::route(cx, world, trip, {}, ramp(t, 60, 120));     // along great circles, clipped like the map
+    geo::markers(cx, world, geo::places(geo::cities(), 12), {}, ramp(t, 90, 130));
+};
+```
+
+(`ramp(t, a, b)` stands for your own 0-to-1 ramp between two frames.)
+
+* `base` is the ocean, graticule, land and borders from the bundled data.
+* `choropleth` fills the features named in a `geo::Values` list from a `geo::Scale`
+  (`plot::viridis` unless you give colours; the range comes from the data unless you set
+  it), and `colorbar` draws its key. `geo::Series` holds values over time (from a
+  `plot::Table`, so from CSV): `series.at(2014.5)` blends between two columns and
+  `series.scale()` keeps one range for all of them.
+* `highlight` picks one region out: its outline draws on, its fill fades in, and `dim`
+  lays a veil over the rest.
+* `markers` are dots that pop in, sized by value if you ask, each with a label beside
+  it; `labels` are names on their own. A label that would run into one already placed
+  tries the other sides of its point and is then left out, so list the important ones
+  first. `places(layer, n)` and `names(layer, n)` make either from a layer.
+* `route(cx, map, stops, style, u)` draws itself on from the first stop, with a dot or an
+  arrowhead at `geo::along(stops, u)`. `route(map, stops, from, to)` is the path alone,
+  for your own stroke. Give it the fractions instead of trimming it: on a globe or across
+  the antimeridian it is in pieces.
+* `Projection::fly(a, b, t)` flies from one view to another: the scale changes by ratio,
+  the map zooms out on the way when the trip is long, and the centre moves at an even
+  speed on screen. `geo::focus(base, box, geometry, padding)` makes the views: a globe
+  turns to face the region, a world map keeps north up and only zooms.
+* Prefabs: `geo-route` and `geo-flyto` ([props](docs/geo-prefabs.md)).
+
+From scripts the same calls take JSON for values and styles; see
+`examples/scripts/map_choropleth.as`, `map_route.as`, `map_timeline.as` and
+`map_prefabs.as`.
 
 ### 3D city models
 

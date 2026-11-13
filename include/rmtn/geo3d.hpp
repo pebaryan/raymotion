@@ -29,6 +29,7 @@
 #include <utility>
 #include <vector>
 #include "geo.hpp"
+#include "geomap.hpp"
 #include "globe.hpp"
 #include "scene3d.hpp"
 
@@ -80,18 +81,11 @@ struct Datum {
     std::string key;                        // an id (byCountry: the code you gave)
     Color color = BLANK;                    // BLANK: from the scale
 };
-using Values = std::vector<std::pair<std::string, double>>;   // by ISO code (a2 or a3), id or name
+using geo::Values;                      // by ISO code (a2 or a3), id or name
 // A datum per value whose key `layer` knows, at its label point; unknown keys are skipped.
 std::vector<Datum> byCountry(const Values& values, const geo::Layer& layer = geo::countries());
 
-// Values to colours. min == max: from the data (from 0 when nothing is negative).
-struct Scale {
-    double min = 0, max = 0;
-    std::function<Color(float)> colors;     // default plot::viridis
-    Scale over(const std::vector<double>& values) const;   // with the range filled in
-    float t(double v) const;                // 0..1
-    Color operator()(double v) const;
-};
+using geo::Scale;                       // values to colours (rmtn/geomap.hpp)
 
 // ---- marks at places
 

@@ -1,7 +1,9 @@
 // geo_tests.cpp -- maps: the bundled Natural Earth layers and lookups, GeoJSON and
 // TopoJSON parsing, measures on the sphere, and projections (formulas, fit, clipping at
-// the antimeridian and the horizon, mixes). No window: the projected paths are measured.
+// the antimeridian and the horizon, mixes), and the map helpers that need no window
+// (flights, focus, scales and series, routes). The projected paths are measured.
 #include "rmtn/raymotion.hpp"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <stdexcept>
@@ -73,6 +75,18 @@ static void data() {
     CHECK(geo::contains(kenya.geometry, c));
     NEAR(c.lon, 37.8, 1.5);
     NEAR(kenya.labelPoint().lon, 37.9, 1.0);
+    // Away from the equator too (the latitude once came out near zero for any small area).
+    const geo::LonLat at = geo::centroid(world.get("AUT").geometry), au = geo::centroid(world.get("AUS").geometry);
+    NEAR(at.lon, 14.1, 1.0);
+    NEAR(at.lat, 47.6, 0.6);
+    CHECK(geo::contains(world.get("AUT").geometry, at));
+    NEAR(au.lat, -25.5, 2.0);
+    const geo::LonLat line = geo::centroid(geo::Geometry::line({ { 10, 60 }, { 20, 60 } }));
+    NEAR(line.lon, 15, 1e-6);
+    CHECK(line.lat > 60 && line.lat < 60.5);
+    geo::Geometry pts;
+    pts.points = { { 10, 50 }, { 10, 70 } };
+    NEAR(geo::centroid(pts).lat, 60, 1e-6);
     const geo::Bounds b = geo::bounds(kenya.geometry);
     CHECK(b.west > 33 && b.east < 42.5 && b.south > -5 && b.north < 5.7);
 }
@@ -289,6 +303,214 @@ static void mixing() {
     CHECK(std::fabs(r.width - box.width) < 1.5f || std::fabs(r.height - box.height) < 1.5f);
 }
 
+static double pathLength(const vg::Path& p) { return p.empty() ? 0 : p.length(); }
+
+static void flying() {
+    using geo::Projection;
+    const Rectangle box{ 0, 0, 1000, 600 };
+    const Projection a = Projection::orthographic().rotate({ 106.8, -6.2 }).scale(400).translate({ 500, 300 });
+    const Projection b = Projection::orthographic().rotate({ 16.4, 48.2 }).scale(1600).translate({ 500, 300 });
+    // The ends are the two views.
+    for (const geo::LonLat q : { geo::LonLat{ 100, 0 }, geo::LonLat{ 20, 45 } }) {
+        const Vector2 a0 = Projection::fly(a, b, 0)(q), b1 = Projection::fly(a, b, 1)(q);
+        NEAR(a0.x, a(q).x, 1e-2);
+        NEAR(a0.y, a(q).y, 1e-2);
+        NEAR(b1.x, b(q).x, 1e-2);
+        NEAR(b1.y, b(q).y, 1e-2);
+    }
+    // Halfway between two views of the same scale, told only to pan: the centre is
+    // halfway along the great circle.
+    const Projection b400 = Projection::orthographic().rotate({ 16.4, 48.2 }).scale(400).translate({ 500, 300 });
+    const Projection pan = Projection::fly(a, b400, 0.5, 1);
+    const geo::LonLat want = geo::interpolate({ 106.8, -6.2 }, { 16.4, 48.2 }, 0.5);
+    NEAR(pan.rotation().lon, want.lon, 1e-6);
+    NEAR(pan.rotation().lat, want.lat, 1e-6);
+    NEAR(pan.scaleValue(), 400, 1e-6);
+    NEAR(pan.translation().x, 500, 1e-3);
+    // A long trip zooms out on its own; the zoom can also be given.
+    const Projection mid = Projection::fly(a, b, 0.5);
+    CHECK(mid.scaleValue() < 800 - 1 && mid.scaleValue() >= 100 - 1e-6);
+    NEAR(Projection::fly(a, b, 0.5, 1).scaleValue(), 800, 1e-6);
+    NEAR(Projection::fly(a, b, 0.5, 4).scaleValue(), 200, 1e-6);
+    // Zooming in, most of the way is covered early (while still far out), and the centre
+    // only ever moves forward along the great circle.
+    const double whole = geo::angle({ 106.8, -6.2 }, { 16.4, 48.2 });
+    CHECK(geo::angle({ 106.8, -6.2 }, Projection::fly(a, b, 0.5, 1).rotation()) > whole * 0.55);
+    double gone = 0;
+    for (int i = 1; i <= 50; i++) {
+        const geo::LonLat c = Projection::fly(a, b, i / 50.0).rotation();
+        const double d = geo::angle({ 106.8, -6.2 }, c);
+        CHECK(d >= gone - 1e-9);
+        NEAR(d + geo::angle(c, { 16.4, 48.2 }), whole, 1e-6);
+        gone = d;
+    }
+    // Views that are not centred on their own middle (a region fitted in a box): the
+    // target ends in place and, halfway, the globe is still on screen.
+    const geo::Geometry& at = geo::countries().get("AUT").geometry;
+    const geo::Geometry& id = geo::countries().get("IDN").geometry;
+    const Projection fa = geo::focus(Projection::orthographic(), box, id, 100), fb = geo::focus(Projection::orthographic(), box, at, 200);
+    for (int i = 0; i <= 20; i++) {
+        const Projection v = Projection::fly(fa, fb, i / 20.0);
+        const Rectangle disc = v.outline().bounds();
+        CHECK(disc.x < 700 && disc.x + disc.width > 300 && disc.y < 450 && disc.y + disc.height > 150);
+    }
+    const Vector2 e1 = Projection::fly(fa, fb, 1)(geo::centroid(at)), e2 = fb(geo::centroid(at));
+    NEAR(e1.x, e2.x, 1e-2);
+    NEAR(e1.y, e2.y, 1e-2);
+    // A short hop does not zoom out.
+    const Projection near = Projection::orthographic().rotate({ 107.5, -6.5 }).scale(400).translate({ 500, 300 });
+    NEAR(Projection::fly(a, near, 0.5).scaleValue(), 400, 1e-6);
+    // The scale never jumps between frames.
+    double prev = a.scaleValue();
+    for (int i = 1; i <= 100; i++) {
+        const double k = Projection::fly(a, b, i / 100.0).scaleValue();
+        CHECK(std::fabs(std::log(k / prev)) < 0.12);
+        prev = k;
+    }
+    // Different kinds blend as mix() does, and still draw.
+    const Projection flat = Projection::equalEarth().fit(box, geo::Sphere);
+    const Projection across = Projection::fly(a, flat, 0.5);
+    CHECK(!across.path(geo::land().merged()).empty());
+    NEAR(Projection::fly(a, flat, 1)({ 10, 10 }).x, flat({ 10, 10 }).x, 1e-2);
+
+    // focus: a globe turns to face the region, a world map keeps north up and only zooms.
+    const geo::Geometry& austria = geo::countries().get("AUT").geometry;
+    const geo::LonLat mid2 = geo::centroid(austria);
+    const Projection g = geo::focus(a, box, austria, 40);
+    NEAR(g.rotation().lon, mid2.lon, 1e-9);
+    NEAR(g.rotation().lat, mid2.lat, 1e-9);
+    const Rectangle gb = g.path(austria).bounds();
+    CHECK(gb.x >= 39 && gb.y >= 39 && gb.x + gb.width <= 961 && gb.y + gb.height <= 561);
+    CHECK(std::fabs(gb.width - 920) < 2 || std::fabs(gb.height - 520) < 2);
+    const Projection f = geo::focus(flat, box, austria, 40);
+    NEAR(f.rotation().lon, 0, 1e-12);
+    NEAR(f.rotation().lat, 0, 1e-12);
+    CHECK(f.scaleValue() > flat.scaleValue() * 10);
+    const Projection conic = geo::focus(Projection::conicEqualArea().rotate({ 0, 0 }), box, austria);
+    NEAR(conic.rotation().lon, mid2.lon, 1e-9);
+    NEAR(conic.rotation().lat, 0, 1e-12);
+}
+
+static void mapData() {
+    // Scale: the range from the data, from zero when nothing is negative.
+    const geo::Values v = { { "IDN", 3 }, { "IND", 9 }, { "DEU", 6 } };
+    const geo::Scale s = geo::Scale{}.over(v);
+    NEAR(s.min, 0, 1e-12);
+    NEAR(s.max, 9, 1e-12);
+    NEAR(s.t(4.5), 0.5, 1e-6);
+    geo::Scale fixed;
+    fixed.min = 2;
+    fixed.max = 4;
+    fixed.colors = [](float t) { return Color{ (unsigned char)(t * 255), 0, 0, 255 }; };
+    CHECK(fixed.over(v).max == 4 && fixed(3).r == 127 && fixed(99).r == 255);
+
+    // Series: from a table, blended between columns, held outside them.
+    const plot::Table t = plot::Table::parseCsv("code,2000,2010,2020\nIDN,214,244,274\nIND,1060,1240,1400\n");
+    const geo::Series se = geo::Series::from(t);
+    CHECK(se.times.size() == 3 && se.times[1] == 2010 && se.rows.size() == 2 && se.rows[0].first == "IDN");
+    NEAR(se.at(2005)[0].second, 229, 1e-9);
+    NEAR(se.at(2015)[1].second, 1320, 1e-9);
+    NEAR(se.at(1900)[0].second, 214, 1e-9);
+    NEAR(se.at(2100)[1].second, 1400, 1e-9);
+    NEAR(se.at(2010)[0].second, 244, 1e-9);
+    NEAR(se.scale().max, 1400, 1e-9);
+    const plot::Table named = plot::Table::parseCsv("code,before,after\nIDN,1,3\n");
+    const geo::Series ns = geo::Series::from(named);
+    CHECK(ns.times[0] == 0 && ns.times[1] == 1);
+    NEAR(ns.at(0.5)[0].second, 2, 1e-9);
+    CHECK(geo::Series{}.at(1).empty());
+
+    // Markers and labels from layers.
+    const auto big = geo::places(geo::cities(), 5);
+    CHECK(big.size() == 5 && !big[0].label.empty() && big[0].value >= big[4].value && big[0].value > 1e6);
+    const geo::Feature& first = geo::cities().features[0];
+    NEAR(big[0].at.lon, first.geometry.points[0].lon, 1e-12);
+    CHECK(geo::places(geo::cities()).size() == geo::cities().size());
+    const auto nm = geo::names(geo::countries(), 3);
+    CHECK(nm.size() == 3 && nm[0].text == geo::countries().features[0].name());
+    NEAR(nm[0].at.lat, geo::countries().features[0].labelPoint().lat, 1e-12);
+}
+
+static void routes() {
+    using geo::Projection;
+    const geo::LonLat jakarta{ 106.8, -6.2 }, dubai{ 55.3, 25.3 }, vienna{ 16.4, 48.2 };
+    const std::vector<geo::LonLat> trip = { jakarta, dubai, vienna };
+    const double d1 = geo::distance(jakarta, dubai), d2 = geo::distance(dubai, vienna);
+    NEAR(geo::length(trip), d1 + d2, 1e-6);
+    CHECK(geo::length({ jakarta }) == 0 && geo::length({}) == 0);
+
+    // along: by distance, through the stops, with the heading.
+    double heading = -1;
+    geo::LonLat p = geo::along(trip, 0, &heading);
+    NEAR(p.lon, jakarta.lon, 1e-9);
+    NEAR(heading, geo::bearing(jakarta, dubai), 1e-6);
+    p = geo::along(trip, d1 / (d1 + d2));
+    NEAR(p.lon, dubai.lon, 1e-6);
+    NEAR(p.lat, dubai.lat, 1e-6);
+    p = geo::along(trip, 1, &heading);
+    NEAR(p.lon, vienna.lon, 1e-9);
+    CHECK(heading > 270 && heading < 320);                       // arriving west-north-west
+    p = geo::along(trip, 0.5 * d1 / (d1 + d2));
+    NEAR(geo::distance(jakarta, p), d1 / 2, 1e-6);
+    p = geo::along(trip, 7);
+    NEAR(p.lat, vienna.lat, 1e-9);
+    CHECK(geo::along({ dubai }, 0.3).lon == dubai.lon);
+
+    // route: grows with the fraction, ends where along() says, and a part is a part.
+    const Projection flat = Projection::equirectangular().fit({ 0, 0, 1000, 500 }, geo::Sphere);
+    const vg::Path whole = geo::route(flat, trip), half = geo::route(flat, trip, 0, 0.5), back = geo::route(flat, trip, 0.5, 1);
+    CHECK(whole.contours.size() == 1 && !whole.contours[0].closed);
+    CHECK(pathLength(half) > 0 && pathLength(half) < pathLength(whole));
+    NEAR(pathLength(half) + pathLength(back), pathLength(whole), 0.5);
+    const Vector2 end = half.pointAt(1), want = flat(geo::along(trip, 0.5));
+    NEAR(end.x, want.x, 0.05);
+    NEAR(end.y, want.y, 0.05);
+    CHECK(geo::route(flat, trip, 0.6, 0.6).empty() && geo::route(flat, { jakarta }).empty() && geo::route(flat, trip, 0.8, 0.2).empty());
+    // A great circle, not a straight line on the map: Tokyo to Los Angeles bows north.
+    const geo::LonLat tokyo{ 139.7, 35.7 }, la{ -118.2, 34.1 };
+    const Projection pacific = Projection::equirectangular().rotate({ 180, 0 }).fit({ 0, 0, 1000, 500 }, geo::Sphere);
+    const vg::Path arc = geo::route(pacific, { tokyo, la });
+    CHECK(arc.contours.size() == 1);
+    CHECK(arc.bounds().y < pacific(tokyo).y - 20);
+    // Across the antimeridian on an unrotated map it is cut in two, not drawn across the world.
+    const vg::Path cut = geo::route(flat, { tokyo, la });
+    CHECK(cut.contours.size() == 2);
+    CHECK(pathLength(cut) < 400);
+    // On a globe, the part round the back is clipped away.
+    const Projection globe = Projection::orthographic().rotate(jakarta).fit({ 0, 0, 600, 600 }, geo::Sphere);
+    const vg::Path seen = geo::route(globe, { jakarta, la });
+    CHECK(!seen.empty());
+    Vector2 hidden;
+    CHECK(!globe.project(la, hidden));
+    const Rectangle disc = globe.outline().bounds(), sb = seen.bounds();
+    CHECK(sb.x >= disc.x - 1 && sb.y >= disc.y - 1 && sb.x + sb.width <= disc.x + disc.width + 1 && sb.y + sb.height <= disc.y + disc.height + 1);
+}
+
+static void prefabs() {
+    using geo::Projection;
+    CHECK(Projection::named("equalEarth").kind() == geo::Kind::EqualEarth);
+    CHECK(Projection::named("conicConformal").kind() == geo::Kind::ConicConformal);
+    CHECK(throws([] { Projection::named("flat"); }));
+
+    geo::registerPrefabs();
+    geo::registerPrefabs();                                      // twice is fine
+    const auto names = prefab::names();
+    auto has = [&](const std::string& n) { return std::find(names.begin(), names.end(), n) != names.end(); };
+    CHECK(has("geo-route") && has("geo-flyto"));
+    Nodes roots;
+    TNode* route = prefab::use(roots, 0, 90, "geo-route", Json::parse(R"({"stops": [[106.85, -6.21], [55.27, 25.2], [16.37, 48.21]],
+        "labels": ["Jakarta", "Dubai", "Vienna"], "projection": "orthographic", "box": [100, 100, 800, 600]})"));
+    CHECK(route && route->fn);
+    TNode* fly = prefab::use(roots, 0, 90, "geo-flyto", Json::parse(R"({"from": "IDN", "to": "Austria", "projection": "orthographic"})"));
+    CHECK(fly && fly->fn);
+    CHECK(prefab::use(roots, 0, 30, "geo-route")->fn && prefab::use(roots, 0, 30, "geo-flyto")->fn);   // the defaults
+    CHECK(throws([&] { prefab::use(roots, 0, 30, "geo-route", Json::parse(R"({"stops": [[10, 10]]})")); }));
+    CHECK(throws([&] { prefab::use(roots, 0, 30, "geo-route", Json::parse(R"({"projection": "flat"})")); }));
+    CHECK(throws([&] { prefab::use(roots, 0, 30, "geo-route", Json::parse(R"({"fit": "tight"})")); }));
+    CHECK(throws([&] { prefab::use(roots, 0, 30, "geo-route", Json::parse(R"({"box": [0, 0, 0, 100]})")); }));
+    CHECK(throws([&] { prefab::use(roots, 0, 30, "geo-flyto", Json::parse(R"({"to": "Atlantis"})")); }));
+}
+
 int main() {
     data();
     parsing();
@@ -297,6 +519,10 @@ int main() {
     fitting();
     clipping();
     mixing();
+    flying();
+    mapData();
+    routes();
+    prefabs();
     if (failures) std::fprintf(stderr, "%d geo check(s) failed\n", failures);
     else std::printf("geo: all checks passed\n");
     return failures ? 1 : 0;

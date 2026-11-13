@@ -1,13 +1,24 @@
 name: Release
 
-# Pushing a v* tag builds the Windows package and attaches it to that tag's release,
-# creating the release (with generated notes) if it does not exist yet.
+# Pushing a v* tag builds the Windows, Linux and macOS packages and attaches them to that
+# tag's release, creating the release (with generated notes) if it does not exist yet.
+# A pull request that changes the packaging, or a run by hand (workflow_dispatch), is a dry
+# run: the packages are kept as workflow artifacts and nothing is published.
 on:
   push:
     tags: ["v*"]
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "tools/package-*"
+  workflow_dispatch:
 
 permissions:
   contents: write
+
+env:
+  # A tag push names the package after the tag; a dry run after the commit.
+  VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.sha) }}
 
 jobs:
   windows:
@@ -23,13 +34,110 @@ jobs:
         run: ctest --test-dir build -C Release -LE gl --output-on-failure
       - name: Package
         shell: pwsh
-        run: ./tools/package-windows.ps1 -Build build/Release -Version $env:GITHUB_REF_NAME -Out dist
+        run: ./tools/package-windows.ps1 -Build build/Release -Version $env:VERSION -Out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/*.zip
+
+  linux:
+    # 22.04, not 24.04: the binary needs the glibc it was linked against or newer, so the
+    # older runner widens the distros it runs on. libstdc++ and libgcc are linked in.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build g++ python3 ffmpeg xvfb \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+            libgl1-mesa-dev libgl1-mesa-dri
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: xvfb-run -a -s "-screen 0 1920x1080x24" ctest --test-dir build --output-on-failure
+      - name: Package
+        run: bash tools/package-unix.sh build "$VERSION" linux-x64 dist
+      - name: Smoke test the package
+        # From the unpacked package only: the source tree's assets are moved away, so the
+        # build-tree fallback path cannot hide a package that misses its assets.
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: |
+          mv assets assets.off
+          mkdir -p /tmp/pkg /tmp/elsewhere
+          tar -C /tmp/pkg -xzf dist/raymotion-*-linux-x64.tar.gz
+          bin=$(echo /tmp/pkg/raymotion-*-linux-x64)
+          ldd "$bin/raymotion"
+          cd /tmp/elsewhere
+          "$bin/raymotion" list | head -5
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$bin/raymotion" still lowerthird --at 60 --png lt.png
+          xvfb-run -a -s "-screen 0 1920x1080x24" "$bin/raymotion_script" still hello-script --script "$bin/scripts/hello.as" --at 30 --png hello.png
+          test -s lt.png && test -s hello.png
+          cd - && mv assets.off assets
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: dist/*.tar.gz
+
+  macos:
+    # Apple Silicon only: a universal build would assemble AngelScript's arm64 call
+    # thunks (.S) for x86_64 too.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Ninja
+        run: brew install ninja
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+      - name: Build
+        # Ninja caps the jobs; `--parallel` without a count under make ran out of memory.
+        run: cmake --build build --parallel "$(sysctl -n hw.ncpu)"
+      - name: Test
+        # GL tests need a display session, which hosted runners do not give.
+        run: ctest --test-dir build -LE gl --output-on-failure
+      - name: Package
+        run: bash tools/package-unix.sh build "$VERSION" macos-arm64 dist
+      - name: Smoke test the package
+        # No window server here, so only commands that open no window: `list` and `props`.
+        run: |
+          mv assets assets.off
+          mkdir -p /tmp/pkg /tmp/elsewhere
+          tar -C /tmp/pkg -xzf dist/raymotion-*-macos-arm64.tar.gz
+          bin=$(echo /tmp/pkg/raymotion-*-macos-arm64)
+          otool -L "$bin/raymotion"
+          vtool -show-build "$bin/raymotion" | grep -i minos
+          cd /tmp/elsewhere
+          "$bin/raymotion" list | head -5
+          cd - && mv assets.off assets
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: dist/*.tar.gz
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [windows, linux, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
       - name: Publish
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = $env:GITHUB_REF_NAME
-          gh release view $tag *> $null
-          if ($LASTEXITCODE -ne 0) { gh release create $tag --verify-tag --title $tag --generate-notes }
-          gh release upload $tag (Get-ChildItem dist/*.zip).FullName --clobber
+          tag="$GITHUB_REF_NAME"
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --verify-tag --title "$tag" --generate-notes
+          gh release upload "$tag" dist/*.zip dist/*.tar.gz --clobber

@@ -1,3 +1,6 @@
+// World camera from a function -- The same camera, with the shot returned by a script function each frame.
+// Category: Motion
+
 string movingShot(int frame) {
     array<float> from = { 640, 360, 1.0f, 0 };
     array<float> to = { 860, 355, 1.8f, 0 };

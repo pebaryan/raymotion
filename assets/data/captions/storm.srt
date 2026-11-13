@@ -1,0 +1,11 @@
+1
+00:00:00,400 --> 00:00:02,300
+The storm has a memory.
+
+2
+00:00:02,600 --> 00:00:05,200
+It remembers every light that went out.
+
+3
+00:00:05,600 --> 00:00:08,400
+And it comes back for the ones still on.

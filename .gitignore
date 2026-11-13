@@ -15,6 +15,11 @@ third_party/vs-libs/
 .zcode/
 # Local render scratch: probe stills at the root, draft renders, working notes
 /*.png
+/*.log
+/Testing/
+# Film working folders: source papers and per-film QC evidence
+/papers/
+/qc/
 output/
 project/
 tmp/

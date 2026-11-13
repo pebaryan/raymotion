@@ -1,3 +1,6 @@
+// Calendar -- Date maths, a month grid and a tear-off day page.
+// Category: Text
+
 void configure(Composition &inout c) {
     c.name = "calendar-authoring";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 120;

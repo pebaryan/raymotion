@@ -103,7 +103,26 @@ l.maskMode = MaskMode::Luma; l.invertMask = true;
 l.filters = { Filter::watercolor(6), Filter::paperGrain() };
 // Filter::posterize(levels), halftone(cell, angle, colored), paperGrain(strength, scale),
 // inkEdges(width, ink, threshold), watercolor(bleed, edgeDarkening, granulation),
-// tiltShift(position from the top, band half-height, blur px, angle, saturation)
+// tiltShift(position from the top, band half-height, blur px, angle, saturation),
+// film(exposure stops, bloom, glow radius px, knee) + .contrast .saturation .shadows
+// .highlights .toning .vignette .glow
+```
+
+`Filter::film` is the camera's response, for a graded 3D (or any opaque) layer. It works in
+linear light inside one pass: light above the knee is pushed past white and spread as a
+bloom, then an ACES shoulder rolls highlights off instead of clipping them, so a sunset sky
+keeps its gradient into the sun (an HDR look from 8-bit content). Then contrast, saturation,
+split toning, a vignette and dither against sky banding. Put it on a parent of a
+motion-blurred node, so it runs once per frame, not once per blur sample:
+
+```cpp
+TNode* film = addRoot(c.roots, 0, c.duration);
+Filter f = Filter::film(0.25f, 0.75f, 190, 0.58f);
+f.contrast = 1.18f; f.saturation = 1.12f; f.vignette = 0.5f;
+film->isolate().filters = { f };
+TNode* view = film->add(0, c.duration);
+view->fn = g3d::draw(scene);
+view->isolate().motionBlur = { 8, 0.7f };   // ups read frameTime(t) to take part
 ```
 
 Each layer costs an offscreen pass; use them for effects, not for every node.
@@ -645,6 +664,17 @@ auto globe = geo::Projection::orthographic().rotate({ 37, 0 }).fit({ 560, 140, 8
   smoothly into a flat map.
 - `geo::distance` (km), `angle` (deg), `interpolate(a, b, t)` (great circle),
   `bearing`, `centroid`, `bounds`, `area` (km^2), `contains`.
+- Ready-made map drawing (`rmtn/geomap.hpp`), each with a style struct and a reveal
+  `u` = 0..1, through any projection: `geo::base(cx, map, style, u)` (ocean, graticule,
+  land, borders), `choropleth(cx, map, values, style, u)` with `colorbar(cx, box,
+  scale, style, u)`, `highlight(cx, map, geometry, style, u)`, `markers` and `labels`
+  (labels that collide are left out, earliest wins), `route(cx, map, stops, style, u)`
+  along great circles with `along(stops, u)` for the traveller. `geo::Values` is
+  `{ { "IDN", 12 }, ... }` by ISO code or name; `geo::Series` holds values over time.
+- Views: `geo::focus(base, box, geometry, padding)` frames a region (a globe turns to
+  it, a world map only zooms); `Projection::fly(a, b, t)` flies between two views and
+  zooms out on a long trip. Ease `t` yourself.
+- Prefabs `geo-route` and `geo-flyto`: `docs/geo-prefabs.md`.
 
 ## 3D city models (`city::`, `rmtn/city.hpp`)
 

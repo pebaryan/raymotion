@@ -1,3 +1,6 @@
+// Lower third -- A complete name strap built from transforms, a mask and timed reveals.
+// Category: Start here
+//
 // A small 2D composition using the quick-motion-graphics bindings.
 void configure(Composition &inout c) {
     c.name = "lower-third";

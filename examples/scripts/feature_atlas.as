@@ -1,3 +1,6 @@
+// Feature atlas -- One frame that touches text, paths, charts, diagrams, chemistry, maps and 3D.
+// Category: Start here
+
 void configure(Composition &inout c) {
     c.name = "feature-atlas";
     c.w = 1280;

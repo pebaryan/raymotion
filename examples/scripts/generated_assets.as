@@ -1,3 +1,6 @@
+// Generated assets -- assets() writes an SVG and a pixel grid before the build; draw() uses them.
+// Category: Drawing
+
 void configure(Composition &inout c) {
     c.name = "generated-assets";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 30;

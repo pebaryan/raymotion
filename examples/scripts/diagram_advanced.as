@@ -1,3 +1,6 @@
+// Diagrams -- A Mermaid graph that builds, traces an edge and highlights a node.
+// Category: Charts
+
 void configure(Composition &inout c) {
     c.name = "diagram-advanced";
     c.w = 960; c.h = 540; c.fps = 30; c.duration = 90;

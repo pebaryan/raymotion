@@ -1,3 +1,6 @@
+// Images -- One picture drawn contained, then cover-fitted, aligned and tinted.
+// Category: Drawing
+
 void configure(Composition &inout c) {
     c.name = "image-style-card";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 30;

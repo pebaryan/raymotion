@@ -1,3 +1,6 @@
+// Chemistry -- Benzene from SMILES as a lit 3D ball-and-stick model with its formula.
+// Category: Charts
+
 void configure(Composition &inout c) {
     c.name = "chemistry-scene";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90;

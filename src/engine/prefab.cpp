@@ -34,7 +34,8 @@ std::vector<std::string> names() {
 
 void apply(TNode* node, const std::string& name, Json props) {
     const Prefab& pf = get(name);
-    pf.build(*node, pf.defaultProps.merged(props));
+    // No props given is a null Json, which would replace the defaults rather than merge.
+    pf.build(*node, props.isNull() ? pf.defaultProps : pf.defaultProps.merged(props));
 }
 
 TNode* use(TNode* parent, int from, int dur, const std::string& name, Json props) {

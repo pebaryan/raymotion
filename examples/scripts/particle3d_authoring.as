@@ -1,3 +1,6 @@
+// 3D particles -- An emitter in a 3D scene, configured from the script.
+// Category: Physics and particles
+
 void configure(Composition &inout c) {
     c.name = "particle3d-authoring";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90;

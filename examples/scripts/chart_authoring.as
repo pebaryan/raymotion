@@ -1,3 +1,6 @@
+// Distributions -- Violin and Tukey box plots from a data table.
+// Category: Charts
+
 void configure(Composition &inout c) {
     c.name = "chart-authoring";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90;

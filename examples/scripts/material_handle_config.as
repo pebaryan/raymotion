@@ -1,3 +1,6 @@
+// Material handles -- One material configured through its handle: rim light and a clip plane.
+// Category: 3D
+
 void configure(Composition &inout c) {
     c.name = "material-handle-config";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90;

@@ -1,3 +1,6 @@
+// Space maths -- Surfaces, rotations and projections computed in the script.
+// Category: 3D
+
 uint meshFaceColor(float x, float y, float z) {
     if (z > 0.45f) return 0xf2a65a;
     if (x < 0) return 0x38b7c3;

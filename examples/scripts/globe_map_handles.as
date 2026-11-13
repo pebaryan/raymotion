@@ -1,3 +1,6 @@
+// Globe textures -- assets() paints the map, a heat field and the weather; draw() wraps them on a sphere.
+// Category: Maps
+//
 // A procedural globe texture built once with the scriptable GlobeMap API.
 void configure(Composition &inout c) {
     c.name = "globe-map-handles";

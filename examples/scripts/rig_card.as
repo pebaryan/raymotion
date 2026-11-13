@@ -1,3 +1,6 @@
+// Rigs -- A 2D puppet and a 3D figure with builds, gaze and speech.
+// Category: Characters
+
 uint sampleOutfit(int region, float u, float v) {
     if (region == 0 && abs(u - 0.5f) < 0.035f) return 0xf2c14e;
     if (region == 0 && (v < 0.16f || v > 0.84f)) return 0x26324a;

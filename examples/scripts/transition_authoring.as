@@ -1,3 +1,6 @@
+// Transitions -- Two scenes joined by a wipe whose easing is a script function.
+// Category: Motion
+
 void configure(Composition &inout c) {
     c.name = "transition-authoring";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 100;

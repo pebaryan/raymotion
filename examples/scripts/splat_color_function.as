@@ -1,3 +1,6 @@
+// Splat colours -- A splat sphere whose colours come from a script function of position.
+// Category: 3D
+
 uint tintSplat(float x, float y, float z, int index) {
     if (y > 0.2f) return 0xffbf69ff;
     if (y < -0.2f) return 0x4c91cfff;

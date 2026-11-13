@@ -1,3 +1,6 @@
+// Map -- A country highlighted on an orthographic globe, with distance and bearing.
+// Category: Maps
+
 void configure(Composition &inout c) {
     c.name = "map-card";
     c.w = 1280;

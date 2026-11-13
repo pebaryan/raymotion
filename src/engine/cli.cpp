@@ -28,6 +28,7 @@
 #include "rmtn/media.hpp"
 #include "rmtn/prefab.hpp"
 #include "rmtn/flags.hpp"
+#include "rmtn/geomap.hpp"
 #include "rmtn/rig.hpp"
 
 #ifdef _WIN32
@@ -287,7 +288,9 @@ void prepare(Comp& c, const Json& overrides, bool drawing) {
 void usage() {
     puts("usage:");
     puts("  raymotion list                                  list compositions");
-    puts("  raymotion preview <name> [--mute]               play with sound in a live window (esc quits)");
+    puts("  raymotion preview <name> [--mute]               play with sound in a live window (esc quits);");
+    puts("                        with --script, the window reloads when the script is saved");
+    puts("                        (--no-reload turns that off)");
     puts("  raymotion render  <name> [--crf N] [--encoder NAME] [--preset NAME]");
     puts("                        [--draft] [--mute] [--png-frames]");
     puts("                        render every frame via raylib, pipe to ffmpeg -> mp4");
@@ -339,9 +342,10 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
 
     const char* crfArg = nullptr, *ffArg = nullptr, *atArg = nullptr, *pngArg = nullptr, *ssArg = nullptr, *propsArg = nullptr,
                *encoderArg = nullptr, *presetArg = nullptr, *formatArg = nullptr, *rangeArg = nullptr, *chunkArg = nullptr;
-    bool draft = false, noMusic = false, pngFrames = false, alpha = false;
+    bool draft = false, noMusic = false, pngFrames = false, alpha = false, noReload = false;
     int jobs = 1;
     std::vector<std::string> childArgs = { "render", argv[2] };   // what a --jobs child is given
+    std::vector<std::string> watched;                             // files a preview reloads on: scripts, a props file
     for (int i = 3; i < argc; i++) {
         const int from = i;
         if (!strcmp(argv[i], "--crf") && i+1 < argc) crfArg = argv[++i];
@@ -352,13 +356,14 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
         else if (!strcmp(argv[i], "--png") && i+1 < argc) pngArg = argv[++i];
         else if (!strcmp(argv[i], "--ss") && i+1 < argc) ssArg = argv[++i];
         else if (!strcmp(argv[i], "--props") && i+1 < argc) propsArg = argv[++i];
-        else if (!strcmp(argv[i], "--script") && i+1 < argc) ++i; // loaded by runCli; forward to workers
+        else if (!strcmp(argv[i], "--script") && i+1 < argc) watched.emplace_back(argv[++i]); // loaded by runCli; forward to workers
         else if (!strcmp(argv[i], "--draft")) draft = true;
         else if (!strcmp(argv[i], "--mute") || !strcmp(argv[i], "--no-music")) noMusic = true;
         else if (!strcmp(argv[i], "--png-frames")) pngFrames = true;
         else if (!strcmp(argv[i], "--format") && i+1 < argc) formatArg = argv[++i];
         else if (!strcmp(argv[i], "--alpha")) alpha = true;
         else if (!strcmp(argv[i], "--jobs") && i+1 < argc) { jobs = atoi(argv[++i]); continue; }
+        else if (!strcmp(argv[i], "--no-reload")) { noReload = true; continue; }
         else if (!strcmp(argv[i], "--range") && i+1 < argc) { rangeArg = argv[++i]; continue; }   // internal: a --jobs child
         else if (!strcmp(argv[i], "--chunk") && i+1 < argc) { chunkArg = argv[++i]; continue; }
         else continue;
@@ -434,12 +439,121 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
             fprintf(stderr, "no audio device: previewing without sound\n");
         double playhead = 0, speed = 1.0;
         bool paused = false;
+        // Live reload: when a script (or a --props @file) is saved, the composition is
+        // loaded again in this window and the playhead stays where it is. A script that
+        // does not compile, or throws while drawing, is reported in the window and on
+        // stderr; the last good version keeps playing until the next save.
+        if (propsArg && propsArg[0] == '@') watched.emplace_back(propsArg + 1);
+        if (noReload) watched.clear();
+        auto stamps = [&watched] {
+            std::vector<std::filesystem::file_time_type> out;
+            for (const std::string& file : watched) {
+                std::error_code ec;
+                out.push_back(std::filesystem::last_write_time(std::filesystem::u8path(file), ec));
+                if (ec) out.back() = {};                    // being replaced by the editor: looks changed, then settles
+            }
+            return out;
+        };
+        std::vector<std::filesystem::file_time_type> loaded = stamps(), seen = loaded;
+        double nextPoll = 0, reloadedAt = -10;
+        std::string problem;                                 // shown until a reload succeeds, or (a drawing error) a frame draws
+        bool loadFailed = false;                             // `problem` is from a reload: drawing the old version does not clear it
+        int canvasFactor = canvasScale(*comp, ssArg, draft);
+        const char* testSeconds = getenv("RAYMOTION_PREVIEW_SECONDS");   // tests: quit after this long
+        std::string testShot = getenv("RAYMOTION_PREVIEW_SHOT") ? getenv("RAYMOTION_PREVIEW_SHOT") : "";
+        std::string printed;                                 // the last message on stderr: a frame that keeps failing says so once
+        auto report = [&problem, &printed](const std::string& what) {
+            problem = what;
+            if (what == printed) return;
+            printed = what;
+            fprintf(stderr, "raymotion: %s\n", what.c_str());
+            fflush(stderr);
+        };
+        auto reload = [&] {
+            try {
+                Registry fresh;
+                registerAll(fresh);
+                Comp* found = nullptr;
+                for (auto& c : fresh) if (c.name == want) found = &c;
+                if (!found) throw std::runtime_error("composition '" + want + "' is no longer registered (was c.name changed?)");
+                prepare(*found, propsArg ? loadProps(propsArg) : Json(), true);
+                if (alpha) found->background = BLANK;
+                const int factor = canvasScale(*found, ssArg, draft);
+                const bool resized = found->w != comp->w || found->h != comp->h;
+                const double seconds = std::fmod(playhead, (double)comp->duration) / comp->fps;
+                audio.stop();
+                if (resized || factor != canvasFactor) {
+                    canvas.unload();
+                    if (!canvas.load(found->w, found->h, factor)) throw std::runtime_error("cannot allocate the canvas for the new size");
+                    canvasFactor = factor;
+                }
+                const size_t index = (size_t)(found - fresh.data());
+                comps = std::move(fresh);                    // frees the previous program after the new one is ready
+                comp = &comps[index];
+                if (resized) {
+                    const Rectangle fit = fitCanvas(comp->w, comp->h, GetScreenWidth(), GetScreenHeight());
+                    SetWindowSize(std::max(240, (int)fit.width), std::max(240, (int)fit.height));
+                }
+                playhead = std::fmod(seconds * comp->fps, (double)comp->duration);
+                if (!noMusic && media::hasAudio(*comp) && audio.start(media::mixAudio(*comp, AUDIO_RATE))) audio.seek(playhead / comp->fps);
+                problem.clear();
+                printed.clear();
+                loadFailed = false;
+                reloadedAt = GetTime();
+                printf("reloaded %s (%dx%d, %d frames)\n", comp->name.c_str(), comp->w, comp->h, comp->duration);
+                fflush(stdout);
+            } catch (const std::exception& e) {
+                loadFailed = true;
+                report(e.what());
+            }
+        };
         while (!WindowShouldClose()) {   // esc (raylib's exit key) or the window's close button
+            if (testSeconds && GetTime() > atof(testSeconds)) break;
+            if (!watched.empty() && GetTime() >= nextPoll) {
+                nextPoll = GetTime() + 0.25;
+                // Reload once the file has stopped changing: two polls with the same time.
+                const auto now = stamps();
+                if (now != loaded && now == seen) { loaded = now; reload(); }
+                seen = now;
+            }
+            const int frame = (int)playhead % comp->duration;
             BeginDrawing();
-            drawFrame(*comp, (int)playhead % comp->duration,canvas);
-            char hud[96]; snprintf(hud, sizeof hud, "[%04d/%04d] x%.2f [%s]",
-                (int)playhead % comp->duration, comp->duration, speed, paused ? "PAUSED" : "PLAY");
+            try {
+                presentFrame(*comp, frame, canvas);
+                if (!loadFailed) problem.clear();            // it draws: an earlier drawing error is over
+            } catch (const std::exception& e) {
+                recoverFromDrawError();
+                if (!loadFailed) report(e.what());
+            }
+            ClearBackground(BLACK);
+            DrawTexturePro(canvas.output().texture, { 0, 0, (float)comp->w, -(float)comp->h },
+                           fitCanvas(comp->w, comp->h, GetScreenWidth(), GetScreenHeight()), { 0, 0 }, 0, WHITE);
+            char hud[128]; snprintf(hud, sizeof hud, "[%04d/%04d] x%.2f [%s]%s",
+                frame, comp->duration, speed, paused ? "PAUSED" : "PLAY", GetTime() - reloadedAt < 1.5 ? "  RELOADED" : "");
             DrawText(hud, 12, 12, 18, Color{ (unsigned char)240, (unsigned char)240, (unsigned char)255, (unsigned char)180 });
+            if (!problem.empty()) {
+                // The message on a band along the bottom, wrapped to the window, four lines at most.
+                const int size = 16, perLine = std::max(20, (GetScreenWidth() - 24) / 9);
+                std::vector<std::string> lines;
+                for (size_t at = 0; at < problem.size() && lines.size() < 4; ) {
+                    size_t end = std::min(problem.size(), at + (size_t)perLine);
+                    const size_t nl = problem.find('\n', at);
+                    if (nl != std::string::npos && nl < end) end = nl;
+                    lines.push_back(problem.substr(at, end - at));
+                    at = end + (end < problem.size() && problem[end] == '\n' ? 1 : 0);
+                }
+                const int bandH = (int)lines.size() * (size + 4) + 16, top = GetScreenHeight() - bandH;
+                DrawRectangle(0, top, GetScreenWidth(), bandH, Color{ (unsigned char)120, (unsigned char)24, (unsigned char)24, (unsigned char)230 });
+                for (size_t i = 0; i < lines.size(); i++)
+                    DrawText(lines[i].c_str(), 12, top + 8 + (int)i * (size + 4), size, Color{ (unsigned char)255, (unsigned char)236, (unsigned char)230, (unsigned char)255 });
+            }
+            if (testSeconds && !testShot.empty() && GetTime() > atof(testSeconds) - 0.4) {   // tests: what the window showed
+                rlDrawRenderBatchActive();
+                Image shot = LoadImageFromScreen();
+                ExportImage(shot, testShot.c_str());
+                UnloadImage(shot);
+                testShot.clear();
+            }
             EndDrawing();
             if (IsKeyDown(KEY_RIGHT)) speed = 2.0; else if (IsKeyDown(KEY_LEFT)) speed = 0.25; else speed = 1.0;
             int kp = GetKeyPressed();
@@ -628,6 +742,7 @@ int runCli(int argc, const char** argv, const RegisterFn& registerAll){
 #endif
     icons::registerPrefabs();   // built-in prefabs first, so a project's own may replace them
     flags::registerPrefabs();
+    geo::registerPrefabs();
     rig::registerPrefabs();
     try {
         // A .cpp script runs in its own compiled executable, which handles any .as scripts.

@@ -1,3 +1,6 @@
+// Audio analysis -- Level, bands and beats of a track driving the picture.
+// Category: Audio and video
+
 void configure(Composition &inout c) {
     c.name = "audio-analysis-card";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90;

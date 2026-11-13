@@ -1,3 +1,6 @@
+// Materials -- Metal, glass and rough surfaces over water under a sky.
+// Category: 3D
+
 void configure(Composition &inout c) {
     c.name = "material-controls";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90;

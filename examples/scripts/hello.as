@@ -1,4 +1,5 @@
-// hello.as -- a runtime composition: edit and rerun, no rebuild.
+// Hello -- Two overlapping scenes, props, easing and seeded randomness: the place to start.
+// Category: Start here
 //
 //   raymotion_script list               --script examples/scripts/hello.as
 //   raymotion_script preview hello-script --script examples/scripts/hello.as

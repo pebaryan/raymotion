@@ -1,3 +1,6 @@
+// Space geometry -- A sheet that rolls into a torus on 3D axes.
+// Category: 3D
+
 void configure(Composition &inout c) {
     c.name = "space-card";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90;

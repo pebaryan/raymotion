@@ -197,6 +197,10 @@ struct Filter {
         Watercolor,   // bleeding edges (`size` px), edge darkening (`strength`), pigment granulation
         TiltShift,    // a sharp band (`position`, `band`, `angle`), blur up to `size` px beyond it
                       // (reached `falloff` further out), saturation raised by `strength`: a miniature
+        Film,         // a camera's response, in linear light: `exposure` stops, light above `threshold`
+                      // pushed past white and spread as a `bloom` glow `size` px wide, a filmic (ACES)
+                      // shoulder, `contrast`, `saturation`, split toning (`shadows`/`highlights` by
+                      // `toning`), a `vignette` and dither against banding. Meant for an opaque layer.
     };
     Type type = Type::Posterize;
     int levels = 4;
@@ -211,6 +215,14 @@ struct Filter {
     float position = 0.5f;                // tilt-shift: the sharp line, a fraction of the layer's height from the top
     float band = 0.08f;                   // tilt-shift: half-height of the sharp band (fraction of the height)
     float falloff = 0.3f;                 // tilt-shift: how much further out the blur is full
+    float exposure = 0;                   // film: stops before the curve
+    float bloom = 0;                      // film: glow strength (0: none); `threshold` is its knee, `size` its radius
+    Color glow{ 255, 255, 255, 255 };     // film: colour of the glow
+    float contrast = 1, saturation = 1;   // film: after the curve; 1 = unchanged
+    Color shadows{ 128, 128, 128, 255 };  // film: split toning, grey = neutral
+    Color highlights{ 128, 128, 128, 255 };
+    float toning = 0;                     // film: split-toning amount
+    float vignette = 0;                   // film: corner darkening, 0..1
 
     static Filter posterize(int levels = 4) { Filter f; f.type = Type::Posterize; f.levels = levels; return f; }
     static Filter halftone(float cell = 8, float angle = 45, bool colored = false) {
@@ -229,6 +241,10 @@ struct Filter {
                             float saturation = 0.25f) {
         Filter f; f.type = Type::TiltShift; f.position = position; f.band = band; f.size = blur; f.angle = angle;
         f.strength = saturation; return f;
+    }
+    static Filter film(float exposure = 0, float bloom = 0.6f, float radius = 120, float threshold = 0.6f) {
+        Filter f; f.type = Type::Film; f.exposure = exposure; f.bloom = bloom; f.size = radius;
+        f.threshold = threshold; return f;
     }
 };
 

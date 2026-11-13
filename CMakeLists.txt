@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(RAYMOTION_BUILD_EXAMPLES "Build the showcase and starter projects" ${PROJECT_IS_TOP_LEVEL})
+option(RAYMOTION_STUDIO "Build raymotion_studio, the agentic editor (fetches CUI)" OFF)
 option(RAYMOTION_SCRIPTING "Enable embedded C++-like AngelScript compositions" ON)
 set(RAYMOTION_RAYLIB "auto" CACHE STRING "raylib source: auto, vendored (prebuilt MSVC lib), fetch (build 6.2 from source) or system (find_package)")
 set_property(CACHE RAYMOTION_RAYLIB PROPERTY STRINGS auto vendored fetch system)
@@ -48,9 +49,14 @@ else()
   include(FetchContent)
   set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
   set(BUILD_GAMES OFF CACHE BOOL "" FORCE)
+  # DOWNLOAD_EXTRACT_TIMESTAMP is CMake 3.24+; older versions read its value as a second URL.
+  set(_raylib_timestamp)
+  if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
+    set(_raylib_timestamp DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+  endif()
   FetchContent_Declare(raylib
     URL https://github.com/raysan5/raylib/archive/refs/tags/6.2.tar.gz
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    ${_raylib_timestamp})
   FetchContent_MakeAvailable(raylib)
 endif()
 
@@ -114,6 +120,7 @@ add_library(rmtn_engine STATIC
   src/engine/icons.cpp
   src/engine/flags.cpp
   src/engine/geo.cpp
+  src/engine/geomap.cpp
   src/engine/city.cpp
   src/engine/globe.cpp
   src/engine/geo3d.cpp
@@ -154,6 +161,10 @@ include(cmake/NativeCpp.cmake)
 # Small runtime host: no showcase compositions need to be compiled to run scripts.
 add_executable(raymotion_script src/script_main.cpp)
 target_link_libraries(raymotion_script PRIVATE rmtn_engine)
+
+if(RAYMOTION_STUDIO)
+  include(cmake/Studio.cmake)
+endif()
 
 # ---------------------------------------------------------------- example projects
 if(RAYMOTION_BUILD_EXAMPLES)

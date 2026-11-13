@@ -1,3 +1,6 @@
+// Code -- A syntax-coloured code block that types itself in.
+// Category: Text
+
 void configure(Composition &inout c) {
     c.name = "code-card";
     c.w = 1280;

@@ -1,3 +1,6 @@
+// Custom rig part -- A body part made from primitives by a script factory.
+// Category: Characters
+//
 // Custom rig::PartDef.make factory expressed as bounded native primitive records.
 void scriptLantern(const rig::RigBuild@ build, int side, float softness, array<float> &out fields, array<string> &out strings) {
     fields.resize(35);

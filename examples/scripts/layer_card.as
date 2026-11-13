@@ -1,3 +1,6 @@
+// Layers and filters -- An isolated layer with a mask and a stack of filters.
+// Category: Motion
+
 void configure(Composition &inout c) {
     c.name = "layer-card";
     c.w = 960; c.h = 540; c.fps = 30; c.duration = 60;

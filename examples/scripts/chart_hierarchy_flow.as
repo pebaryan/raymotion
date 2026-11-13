@@ -1,3 +1,6 @@
+// Hierarchy and flow -- Sunburst, treemap, chord and Sankey diagrams.
+// Category: Charts
+
 void configure(Composition &inout c) {
     c.name = "chart-hierarchy-flow";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90;

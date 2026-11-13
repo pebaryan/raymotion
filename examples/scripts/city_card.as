@@ -1,3 +1,6 @@
+// City model -- A CityJSON town that rises from the ground under a fitted camera.
+// Category: Maps
+
 void configure(Composition &inout c) {
     c.name = "city-card";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90;
