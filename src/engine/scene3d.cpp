@@ -382,7 +382,7 @@ uniform int lightCount;
 uniform int lightType[8]; uniform vec3 lightPos[8]; uniform vec3 lightDir[8]; uniform vec3 lightColor[8];
 uniform float lightRange[8]; uniform float lightCosInner[8]; uniform float lightCosOuter[8];
 uniform int lightShadow[8]; uniform float lightBias[8];
-uniform float roughness; uniform float metalness; uniform vec3 emissive; uniform int unlit; uniform float opacity;
+uniform float roughness; uniform float metalness; uniform float reflection; uniform vec3 emissive; uniform int unlit; uniform float opacity;
 uniform int receiveShadow;
 uniform sampler2D shadowAtlas; uniform float atlasTexel;
 uniform mat4 shadowVP[16]; uniform vec4 shadowRect[16]; uniform vec4 shadowParams[16];
@@ -590,7 +590,7 @@ void main() {
             // Blur by mip level, stopping where the image is still about 16 x 8: smaller mips
             // average the whole sky and ground together.
             float blurLod = max(envMaxLod - 4.0, 0.0);
-            color = diffColor * env(n, blurLod) + env(r, rough * blurLod) * envBRDF(specColor, rough, ndv);
+            color = diffColor * env(n, blurLod) + env(r, rough * blurLod) * envBRDF(specColor, rough, ndv) * reflection;
         } else color = mix(groundColor, skyColor, n.y * 0.5 + 0.5) * albedo;
 
         float shininess = exp2(10.0 * (1.0 - rough) + 1.0);
@@ -882,7 +882,7 @@ struct LitLocs {
         envLinear, envMaxLod, envIntensity, envRotation, skybox, fogColor, fogNear, fogFar, fogMode, fogDensity,
         fogHeight, fogFalloff, fogSky, backdropScale, skinned, bones,
         shading, pxScale, toonBands, toonSoftness, toonHighlight, toonHighlightSize, rimColor, rimWidth,
-        goochWarm, goochCool, hatchInk, hatchSpacing, hatchAngle, hatchWeight;
+        goochWarm, goochCool, hatchInk, hatchSpacing, hatchAngle, hatchWeight, reflection;
 };
 struct WaterLocs { int on, mode, level, eye, time, centre, count, waveA, waveB, absorb, scatter, caustics, foam,
                    open, invAmp, glint, band; };
@@ -1019,7 +1019,7 @@ void ensureGpu() {
               loc("fogHeight"), loc("fogFalloff"), loc("fogSky"), loc("backdropScale"), loc("skinned"), loc("boneMatrices"),
               loc("shading"), loc("pxScale"), loc("toonBands"), loc("toonSoftness"), loc("toonHighlight"),
               loc("toonHighlightSize"), loc("rimColor"), loc("rimWidth"), loc("goochWarm"), loc("goochCool"),
-              loc("hatchInk"), loc("hatchSpacing"), loc("hatchAngle"), loc("hatchWeight") };
+              loc("hatchInk"), loc("hatchSpacing"), loc("hatchAngle"), loc("hatchWeight"), loc("reflection") };
     gpu.W = { loc("waterOn"), loc("waterMode"), loc("waterLevel"), loc("waterEye"), loc("waterTime"), loc("waterCentre"),
               loc("waveCount"), loc("waveA"), loc("waveB"), loc("waterAbsorb"), loc("waterScatter"), loc("waterCaustics"),
               loc("waterFoam"), loc("waterOpen"), loc("waterInvAmp"), loc("waterGlint"), loc("waterBand") };
@@ -1454,6 +1454,7 @@ void setMaterial(const g3d::Material& m) {
     Vector3 em = linear(m.emissive);
     SetShaderValue(sh, gpu.L.roughness, &m.roughness, SHADER_UNIFORM_FLOAT);
     SetShaderValue(sh, gpu.L.metalness, &m.metalness, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(sh, gpu.L.reflection, &m.reflection, SHADER_UNIFORM_FLOAT);
     SetShaderValue(sh, gpu.L.emissive, &em, SHADER_UNIFORM_VEC3);
     SetShaderValue(sh, gpu.L.unlit, &unlit, SHADER_UNIFORM_INT);
     SetShaderValue(sh, gpu.L.opacity, &m.opacity, SHADER_UNIFORM_FLOAT);

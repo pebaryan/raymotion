@@ -134,6 +134,8 @@ struct Material {
     Color color = WHITE;            // base colour (multiplies the texture and vertex colours)
     float roughness = 0.5f;         // 0 = mirror-sharp highlights, 1 = matte
     float metalness = 0.0f;         // tints highlights with the base colour, darkens diffuse
+    float reflection = 1.0f;        // scales the sky/environment mirrored in it (not its diffuse
+                                    // sky light): glass that reflects a dusk sky under a low sky.lighting
     Color emissive = BLACK;         // added light, unaffected by lighting
     float opacity = 1.0f;           // < 1: drawn after opaque objects, back to front
     bool unlit = false;             // flat base colour (no lights, shadows or fog)

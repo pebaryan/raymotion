@@ -326,6 +326,33 @@ static void filters() {
     EXPECT_PX(tv, 50, 50, WHITE);
     UnloadImage(tv);
 
+    // Film: the ramp stays in order, black stays black, white rolls off below 255 (the
+    // shoulder) without clipping a band of the ramp to one value.
+    Image fr = filtered({ Filter::film(0, 0) }, ramp);
+    int prev = -1, ordered = 0, top = 0;
+    for (int x = 0; x < 100; x++) {
+        const int v = GetImageColor(fr, x, 50).r;
+        ordered += v >= prev - 1;
+        prev = v;
+        top += v >= 250;
+    }
+    CHECK(ordered == 100);
+    CHECK(GetImageColor(fr, 0, 50).r <= 3 && GetImageColor(fr, 99, 50).r > 200 && top <= 2);
+    UnloadImage(fr);
+    // Bloom spreads light past a bright patch's edge; without it the dark stays dark. The
+    // glow is the same picture every render, and its reach holds at 2x supersampling.
+    auto patch = rect(35, 35, 30, 30, WHITE);
+    Image noGlow = filtered({ Filter::film(0, 0, 30) }, patch);
+    Image glow = filtered({ Filter::film(0, 1, 30, 0.5f) }, patch);
+    Image again = filtered({ Filter::film(0, 1, 30, 0.5f) }, patch);
+    Image glow2 = filtered({ Filter::film(0, 1, 30, 0.5f) }, patch, BLACK, 2);
+    const int g70 = GetImageColor(glow, 50, 70).r, g78 = GetImageColor(glow, 50, 78).r, g78ss = GetImageColor(glow2, 50, 78).r;
+    CHECK(GetImageColor(noGlow, 50, 70).r <= 3);
+    CHECK(g70 > 20 && g78 > 6 && g78 < g70);
+    CHECK(std::memcmp(glow.data, again.data, 100 * 100 * 4) == 0);
+    CHECK(std::abs(g78 - g78ss) <= 3);
+    UnloadImage(noGlow); UnloadImage(glow); UnloadImage(again); UnloadImage(glow2);
+
     // Filters chain in order and hold at 2x supersampling (sizes are composition px).
     Image one = filtered({ Filter::posterize(4), Filter::inkEdges(3, RED) }, rect(30, 30, 40, 40, WHITE));
     Image two = filtered({ Filter::posterize(4), Filter::inkEdges(3, RED) }, rect(30, 30, 40, 40, WHITE), BLACK, 2);
