@@ -118,10 +118,21 @@ public:
     static Projection conicConformal();       // Lambert
     static Projection conicEquidistant();
     static Projection make(Kind kind);
+    // By name, as the factories are spelt ("equalEarth", "orthographic", "conicEqualArea", ...);
+    // throws std::runtime_error for a name it does not know.
+    static Projection named(const std::string& name);
     // Projections in between: every point moves on a straight line from where `a` puts it
     // to where `b` does (a globe unrolling into a flat map). The clipping widens from a's
     // to b's as t goes from 0 to 1, and the rotation, scale and position blend too.
     static Projection mix(const Projection& a, const Projection& b, double t);
+    // A flight from view `a` to view `b` (ease t yourself). The scale changes by ratio
+    // rather than by difference, and halfway the map is `zoomOut` times further out than
+    // that, to show where it is going: 0 picks it from how far the trip is on screen (none
+    // for a short hop), 1 is a plain pan and zoom. The centre travels the great circle
+    // between the two at an even speed on screen, so it covers most of the way while
+    // zoomed out and settles gently on a close view. Different kinds of projection are
+    // blended as in mix().
+    static Projection fly(const Projection& a, const Projection& b, double t, double zoomOut = 0);
 
     // Spins the globe: `centre` moves to the middle of the projection (and to the front of
     // a globe); `roll` turns it about that point, degrees.

@@ -1,3 +1,6 @@
+// Icons and flags -- Brand marks and country flags from the built-in catalogues.
+// Category: Drawing
+
 void configure(Composition &inout c) {
     c.name = "icon-flag-catalog";
     c.w = 960; c.h = 540; c.fps = 30; c.duration = 90;

@@ -30,6 +30,10 @@ private:
 // composition has one, otherwise the timeline tree (in composition coordinates,
 // supersampled when the canvas scale is > 1).
 void presentFrame(Comp& c, int frame, Canvas& canvas);
+// After presentFrame threw (a script error mid-frame, say): unwinds the render targets,
+// blend, shader, scissor and matrix state it may have left set, so the next frame can be
+// drawn. Best effort, for a live preview; a render should stop on the error instead.
+void recoverFromDrawError();
 
 // A canvas cleared to a transparent background (Comp::background with alpha 0) holds
 // premultiplied colour. Video codecs and PNG want straight alpha: this converts `pixels`

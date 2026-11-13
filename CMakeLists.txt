@@ -119,6 +119,7 @@ add_library(rmtn_engine STATIC
   src/engine/icons.cpp
   src/engine/flags.cpp
   src/engine/geo.cpp
+  src/engine/geomap.cpp
   src/engine/city.cpp
   src/engine/globe.cpp
   src/engine/geo3d.cpp

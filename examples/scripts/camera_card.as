@@ -1,3 +1,6 @@
+// 2D camera -- Fit, track and seeded shake on a canvas while a HUD stays fixed.
+// Category: Motion
+
 void configure(Composition &inout c) {
     c.name = "camera-card";
     c.w = 1280;

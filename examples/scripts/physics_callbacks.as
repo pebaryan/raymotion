@@ -1,3 +1,6 @@
+// Physics callbacks -- Cloth pins moved by a script function of time.
+// Category: Physics and particles
+
 void configure(Composition &inout c) {
     c.name = "physics-callbacks";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90;

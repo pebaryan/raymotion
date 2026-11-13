@@ -1,3 +1,6 @@
+// Voxel animation -- Voxel frames held and looped.
+// Category: 3D
+
 void configure(Composition &inout c) {
     c.name = "voxel-animation";
     c.w = 960; c.h = 540; c.fps = 30; c.duration = 96;

@@ -1,3 +1,6 @@
+// Calculus plots -- A vector field, a scatter, a Riemann sum and a tangent line.
+// Category: Charts
+
 void configure(Composition &inout c) {
     c.name = "plot-calculus";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90;

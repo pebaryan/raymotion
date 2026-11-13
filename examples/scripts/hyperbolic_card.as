@@ -1,3 +1,6 @@
+// Hyperbolic tiling -- A tiling of the Poincare disk with a geodesic.
+// Category: 3D
+
 void configure(Composition &inout c) {
     c.name = "hyperbolic-card";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90;

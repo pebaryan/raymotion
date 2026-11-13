@@ -1,3 +1,6 @@
+// Charts on a map -- A choropleth, marks, extrusions and flows on a globe that unrolls into a map.
+// Category: Maps
+
 void configure(Composition &inout c) {
     c.name = "geo3d-card";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90;

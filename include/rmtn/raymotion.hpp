@@ -40,6 +40,7 @@
 #include "icons.hpp"
 #include "flags.hpp"
 #include "geo.hpp"
+#include "geomap.hpp"
 #include "city.hpp"
 #include "devices.hpp"
 #include "globe.hpp"

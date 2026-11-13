@@ -1,3 +1,6 @@
+// Subtitle tracks -- An SRT built in the script, queried by cue and drawn as captions.
+// Category: Text
+
 string sourceSrt() {
     return "1\n00:00:00,300 --> 00:00:02,200\n<i>The storm has a memory.</i>\n\n2\n00:00:02,400 --> 00:00:05,100\nIt remembers every light\nthat went out.\n";
 }

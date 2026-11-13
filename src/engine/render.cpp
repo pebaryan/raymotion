@@ -460,6 +460,23 @@ Vector2 canvasSize() {
     return { t.rt.texture.width / t.scale, t.rt.texture.height / t.scale };
 }
 
+void recoverFromDrawError() {
+    rlDrawRenderBatchActive();
+    // Offscreen targets taken for layers are dropped, not returned to the pool: which of
+    // them is the canvas is not known here, and a few lost per error is harmless.
+    targets.clear();
+    sampleOffset = 0;
+    EndTextureMode();
+    EndShaderMode();
+    EndBlendMode();
+    EndScissorMode();
+    rlMatrixMode(RL_MODELVIEW);
+    for (int i = 0; i < 64; i++) rlPopMatrix();          // a pop on an empty stack does nothing
+    rlLoadIdentity();
+    rlDisableDepthTest();
+    rlEnableBackfaceCulling();
+}
+
 void presentFrame(Comp& c, int frame, Canvas& canvas) {
     currentFps = c.fps;
     if (c.render) {

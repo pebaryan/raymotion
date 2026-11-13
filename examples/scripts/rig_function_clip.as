@@ -1,3 +1,6 @@
+// Rig clip from a function -- A pose written as a pure function of clip time.
+// Category: Characters
+//
 // Arbitrary rig::Clip expressed as a pure function of clip-local seconds.
 void proceduralPose(const rig::RigBuild@ build, double seconds, array<float> &out values) {
     values.resize(3 + build.jointCount() * 3);

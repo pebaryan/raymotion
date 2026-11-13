@@ -1,3 +1,6 @@
+// Synth -- A score made of notes, partials and envelopes, with no audio file.
+// Category: Audio and video
+
 void configure(Composition &inout c) {
     c.name = "synth-card";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90;

@@ -465,16 +465,17 @@ LonLat centroid(const Geometry& g) {
             sum = sum + ringCentroid(r, w);
             total += w;
         }
-    if (std::fabs(total) > 1e-12) return toLonLat(sum);
+    // The sums are not unit vectors: normalise before reading the latitude off z.
+    if (std::fabs(total) > 1e-12 && norm(sum) > 1e-300) return toLonLat(unit(sum * (total < 0 ? -1.0 : 1.0)));
     sum = {};
     for (const auto& l : g.lines)
         for (size_t i = 0; i + 1 < l.size(); i++) {
             const V3 a = toV3(l[i]), b = toV3(l[i + 1]);
             sum = sum + unit(a + b) * norm(b - a);
         }
-    if (norm(sum) > 1e-12) return toLonLat(sum);
+    if (norm(sum) > 1e-12) return toLonLat(unit(sum));
     for (const LonLat& p : g.points) sum = sum + toV3(p);
-    return norm(sum) > 1e-12 ? toLonLat(sum) : LonLat{};
+    return norm(sum) > 1e-12 ? toLonLat(unit(sum)) : LonLat{};
 }
 
 Bounds bounds(const Geometry& g) {
@@ -650,6 +651,19 @@ Projection Projection::make(Kind kind) {
     p.kind_ = kind;
     return p;
 }
+Projection Projection::named(const std::string& name) {
+    static const std::pair<const char*, Kind> kinds[] = {
+        { "equirectangular", Kind::Equirectangular }, { "mercator", Kind::Mercator }, { "equalEarth", Kind::EqualEarth },
+        { "naturalEarth", Kind::NaturalEarth }, { "robinson", Kind::Robinson }, { "mollweide", Kind::Mollweide },
+        { "orthographic", Kind::Orthographic }, { "stereographic", Kind::Stereographic },
+        { "azimuthalEquidistant", Kind::AzimuthalEquidistant }, { "azimuthalEqualArea", Kind::AzimuthalEqualArea },
+        { "gnomonic", Kind::Gnomonic }, { "conicEqualArea", Kind::ConicEqualArea }, { "conicConformal", Kind::ConicConformal },
+        { "conicEquidistant", Kind::ConicEquidistant },
+    };
+    for (const auto& k : kinds)
+        if (name == k.first) return make(k.second);
+    throw std::runtime_error("geo: unknown projection \"" + name + "\"");
+}
 Projection Projection::equirectangular() { return make(Kind::Equirectangular); }
 Projection Projection::mercator() { return make(Kind::Mercator); }
 Projection Projection::equalEarth() { return make(Kind::EqualEarth); }
@@ -678,6 +692,53 @@ Projection Projection::mix(const Projection& a, const Projection& b, double t) {
     m.roll_ = a.roll_ + (b.roll_ - a.roll_) * m.t_;
     m.precision_ = std::min(a.precision_, b.precision_);
     return m;
+}
+
+Projection Projection::fly(const Projection& a, const Projection& b, double t, double zoomOut) {
+    t = std::clamp(t, 0.0, 1.0);
+    if (a.a_ || b.a_) return mix(a, b, t);          // a mix has no single scale to fly
+    const double sa = std::max(1e-9, a.scale_), sb = std::max(1e-9, b.scale_), mean = std::sqrt(sa * sb);
+    const double w = geo::angle(a.rotate_, b.rotate_) * RAD;
+    // What each view shows at the anchor, as an offset from its own centre in map units.
+    // The anchor is where the wider view puts its centre: a view framed on a small region
+    // is rarely centred exactly, and that offset in px means nothing once zoomed out.
+    const Vector2 anchor = sa <= sb ? a.translate_ : b.translate_;
+    const double ax = (anchor.x - a.translate_.x) / sa, ay = (anchor.y - a.translate_.y) / sa;
+    const double bx = (anchor.x - b.translate_.x) / sb, by = (anchor.y - b.translate_.y) / sb;
+    if (zoomOut <= 0) {
+        // Far enough out that the trip is about 700 px long on screen halfway, at most 8x.
+        const double px = std::hypot(w, bx - ax, by - ay) * mean;
+        zoomOut = std::clamp(px / 700.0, 1.0, 8.0);
+    }
+    zoomOut = std::max(1.0, zoomOut);
+    auto scaleAt = [&](double x) {
+        const double bump = std::sin(kPi * x);
+        return std::exp(std::log(sa) * (1 - x) + std::log(sb) * x) * std::pow(zoomOut, -bump * bump);
+    };
+    // How far along the pan is: it moves at an even speed on screen, so most of the
+    // distance is covered while the map is zoomed out, and it settles gently when close.
+    auto travelled = [&](double x) {
+        const int n = 64;
+        double sum = 0;
+        for (int i = 0; i < n; i++) sum += 1 / scaleAt(x * (i + 0.5) / n);
+        return sum * x / n;
+    };
+    const double g = t <= 0 ? 0 : t >= 1 ? 1 : std::clamp(travelled(t) / travelled(1), 0.0, 1.0);
+    auto at = [&](Projection p) {
+        p.rotate_ = w > 1e-9 ? geo::interpolate(a.rotate_, b.rotate_, g) : b.rotate_;
+        p.roll_ = a.roll_ + (b.roll_ - a.roll_) * g;
+        p.scale_ = t <= 0 ? a.scale_ : t >= 1 ? b.scale_ : scaleAt(t);
+        p.translate_ = { (float)(anchor.x - p.scale_ * (ax + (bx - ax) * g)), (float)(anchor.y - p.scale_ * (ay + (by - ay) * g)) };
+        p.precision_ = std::min(a.precision_, b.precision_);
+        return p;
+    };
+    if (a.kind_ != b.kind_) return mix(at(a), at(b), t);
+    Projection p = at(t < 0.5 ? a : b);
+    p.p1_ = a.p1_ + (b.p1_ - a.p1_) * t;
+    p.p2_ = a.p2_ + (b.p2_ - a.p2_) * t;
+    p.clip_ = (a.cutAngle() + (b.cutAngle() - a.cutAngle()) * t) * DEG;
+    if (a.clip_ <= 0 && b.clip_ <= 0) p.clip_ = 0;
+    return p;
 }
 
 Projection& Projection::rotate(LonLat centre, double roll) {

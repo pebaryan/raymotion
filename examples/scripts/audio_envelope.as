@@ -1,3 +1,6 @@
+// Audio envelope -- A cue that fades in, holds and fades out.
+// Category: Audio and video
+
 void configure(Composition &inout c) {
     c.name = "audio-envelope";
     c.w = 1280;

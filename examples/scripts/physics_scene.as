@@ -1,3 +1,6 @@
+// Rope and cloth -- A cloth hung from a rope, simulated the same on every render.
+// Category: Physics and particles
+
 void configure(Composition &inout c) {
     c.name = "physics-scene";
     c.w = 1280;

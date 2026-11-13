@@ -1,3 +1,6 @@
+// Animation curves -- Easing presets, a custom bezier, colour interpolation and a spring, side by side.
+// Category: Motion
+
 void configure(Composition &inout c) {
     c.name = "animation-curves";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90;

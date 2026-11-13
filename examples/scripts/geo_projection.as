@@ -1,3 +1,6 @@
+// Projections -- A globe blended into Equal Earth, with visibility tests.
+// Category: Maps
+
 void configure(Composition &inout c) {
     c.name = "geo-projection";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90;
@@ -39,6 +42,6 @@ void draw(int frame) {
     array<double> customBounds;
     custom.bounds(customBounds);
     vg::stroke(view.lines(custom), 0x8ce0bf, 2.2f);
-    draw::text("CUSTOM AREA KM²: " + triangle.area() + "  BOUNDS: " + customBounds[0] + ".." + customBounds[2], 56, 684, 14, 0x9eabbd);
+    draw::text("CUSTOM AREA KMÂ²: " + triangle.area() + "  BOUNDS: " + customBounds[0] + ".." + customBounds[2], 56, 684, 14, 0x9eabbd);
     draw::text("PROJECTION VISIBLE: " + visible + "  BACK SIDE VISIBLE: " + backSideVisible, 56, 660, 16, 0x9eabbd);
 }

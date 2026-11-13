@@ -1,3 +1,6 @@
+// Audio gain from a function -- The same fade, with the gain returned by a script function.
+// Category: Audio and video
+
 float cueGain(int localFrame) {
     if (localFrame < 12) return float(localFrame) / 12.0f;
     if (localFrame < 72) return 1.0f;

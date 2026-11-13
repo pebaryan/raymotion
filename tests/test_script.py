@@ -44,7 +44,8 @@ class Scripts(unittest.TestCase):
     def run_cli(self, *args, ok=True, timeout=45):
         result = subprocess.run([EXE, *map(str, args)], cwd=self.cwd,
                                 text=True, capture_output=True, timeout=timeout)
-        self.assertEqual(result.returncode, 0 if ok else 2, result.stdout + result.stderr)
+        if ok is not None:
+            self.assertEqual(result.returncode, 0 if ok else 2, result.stdout + result.stderr)
         return result.stdout + result.stderr
 
     def test_list_from_other_directory(self):
@@ -84,6 +85,100 @@ void second(int t) { }
         output = self.run_cli("list", "--script", self.path, "--script", other)
         self.assertIn("fixture", output)
         self.assertIn("other", output)
+
+    def test_every_shipped_example(self):
+        # Each example compiles, configures from another directory, is UTF-8, and opens with
+        # the two header lines the Studio's gallery reads: "// Title -- what it shows." and
+        # "// Category: Name".
+        examples = sorted(SAMPLE.parent.glob("*.as"))
+        self.assertGreater(len(examples), 50)
+        for example in examples:
+            with self.subTest(example=example.name):
+                lines = example.read_bytes().decode("utf-8").splitlines()
+                self.assertRegex(lines[0], r"^// \S.* -- \S.*[.)]$")
+                self.assertRegex(lines[1], r"^// Category: \S")
+                self.assertIn("fps", self.run_cli("list", "--script", example))
+
+    def test_app_exception_keeps_its_message(self):
+        # A C++ exception from a bound function used to reach the user as
+        # "Caught an exception from the application".
+        self.path.write_text(CONFIG.replace('scene(0, 2, "first");', 'media::resolve("no such file.png");'))
+        output = self.run_cli("list", "--script", self.path, ok=False)
+        self.assertIn("file not found", output)
+        self.assertNotIn("Caught an exception", output)
+
+    @unittest.skipUnless(GL, "needs OpenGL")
+    def test_splat_color_function_in_draw(self):
+        example = SAMPLE.parent / "splat_color_function.as"
+        self.run_cli("still", "splat-color-function", "--script", example, "--at", 10, "--ss", 1, "--png", "splat.png")
+        self.assertGreater((self.cwd / "splat.png").stat().st_size, 1000)
+
+    @unittest.skipUnless(GL, "needs OpenGL")
+    def test_map_helpers_draw(self):
+        # geo::base, choropleth, colorbar, labels, highlight, markers, route, fly, focus,
+        # valuesAt and the geo-route / geo-flyto prefabs: every frame sampled must draw.
+        for stem, name, frames in (("map_choropleth", "map-choropleth", (20, 149)), ("map_route", "map-route", (10, 95, 179)),
+                                   ("map_timeline", "map-timeline", (100,)), ("map_prefabs", "map-prefabs", (45, 150))):
+            for frame in frames:
+                png = f"{stem}-{frame}.png"
+                self.run_cli("still", name, "--script", SAMPLE.parent / f"{stem}.as", "--at", frame, "--ss", 1, "--png", png)
+                self.assertGreater((self.cwd / png).stat().st_size, 20000, png)
+
+    @unittest.skipUnless(GL, "needs OpenGL")
+    def test_preview_reloads_on_save(self):
+        # The preview window picks up a saved script, survives one that does not compile
+        # and one that throws while drawing, and takes the next good save.
+        import os, time
+        env = dict(os.environ, RAYMOTION_PREVIEW_SECONDS="13", RAYMOTION_PREVIEW_SHOT="shot.png")
+        proc = subprocess.Popen([EXE, "preview", "fixture", "--script", str(self.path), "--mute"], cwd=self.cwd,
+                                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        try:
+            time.sleep(3)
+            self.path.write_text(SOURCE.replace("c.h = 32", "c.h = 48").replace("c.duration = 4", "c.duration = 6")
+                                 .replace('scene(2, 2, "second")', 'scene(2, 4, "second")'))
+            time.sleep(2.5)
+            self.path.write_text(SOURCE.replace("draw::rect(0, 0, 64, 32, 0xff0000);", "this is not angelscript;"))
+            time.sleep(2.5)
+            self.path.write_text(SOURCE.replace("draw::rect(0, 0, 64, 32, 0xff0000);", "array<int> a; a[3] = 1;"))
+            time.sleep(2.5)
+            out, err = proc.communicate(timeout=30)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+        self.assertEqual(proc.returncode, 0, out + err)
+        self.assertIn("reloaded fixture (64x48, 6 frames)", out)
+        self.assertIn("reloaded fixture (64x32, 4 frames)", out)       # the last save compiles; it throws when drawn
+        self.assertRegex(err, r"scene with spaces\.as:\d+:\d+: ")       # the compile error, with its place
+        self.assertIn("out of bounds", err.lower())
+        self.assertEqual(err.lower().count("out of bounds"), 1, err)   # reported once, not every frame
+        self.assertGreater((self.cwd / "shot.png").stat().st_size, 500)
+
+    def test_preview_no_reload_flag(self):
+        self.assertIn("--no-reload", self.run_cli("help", ok=None))
+
+    def test_map_helper_errors(self):
+        head = CONFIG.replace('scene(0, 2, "first"); scene(2, 2, "second");', '')
+        # Drawing calls belong in draw callbacks; data helpers work anywhere.
+        self.path.write_text(head.replace('c.name = "fixture";', 'c.name = "fixture"; geo::base(geo::projection("equalEarth"));'))
+        self.assertIn("geo::base is only available inside draw callbacks", self.run_cli("list", "--script", self.path, ok=False))
+        self.path.write_text(head.replace('c.name = "fixture";', '''c.name = "fixture";
+    array<double> stops = {0, 0, 90, 0};
+    array<double> at;
+    geo::along(stops, 0.5, at);
+    if (abs(at[0] - 45) > 1e-6 || abs(at[2] - 90) > 1e-6 || abs(geo::length(stops) - 10007.5) > 1) { int zero = 0; int bad = 1 / zero; }
+    if (geo::valuesAt("code,2000,2010\\nIDN,10,20\\n", 2005) != "{\\"IDN\\":15}") { int zero = 0; int bad = 1 / zero; }
+    if (geo::layer("countries").count() != 177) { int zero = 0; int bad = 1 / zero; }
+    geo::GeoProjection@ a = geo::projection("orthographic");
+    geo::GeoProjection@ b = geo::projection("orthographic");
+    b.rotate(90, 0);
+    if (abs(geo::fly(a, b, 0.5, 1).centerLongitude() - 45) > 1e-6) { int zero = 0; int bad = 1 / zero; }
+    scene(0, 4, "first");''') + "void first(int t) {}\n")
+        self.assertIn("64x32", self.run_cli("list", "--script", self.path))
+        for call, message in (('geo::layer("moon")', "unknown geographic layer"),
+                              ('array<double> one = {1, 2, 3}; geo::length(one)', "lon/lat pairs"),
+                              ('geo::fly(null, null, 0.5)', "needs two projections")):
+            self.path.write_text(head.replace('c.name = "fixture";', f'c.name = "fixture"; {call};'))
+            self.assertIn(message, self.run_cli("list", "--script", self.path, ok=False))
 
     def test_compile_diagnostics(self):
         self.path.write_text("void configure(Composition &inout c) { unknown(); }")

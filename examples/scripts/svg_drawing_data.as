@@ -1,3 +1,6 @@
+// SVG data -- Shapes read from an SVG file, restyled and drawn on.
+// Category: Drawing
+
 void configure(Composition &inout c) {
     c.name = "svg-drawing-data";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90;

@@ -1,3 +1,6 @@
+// Gauge and parallel coordinates -- A radial gauge beside a multivariate profile.
+// Category: Charts
+
 void configure(Composition &inout c) {
     c.name = "chart-extended";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90;

@@ -1,3 +1,6 @@
+// Prefabs -- People, a room and props placed from the prefab library.
+// Category: Characters
+
 void configure(Composition &inout c) {
     c.name = "prefab-card";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90;

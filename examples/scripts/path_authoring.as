@@ -1,3 +1,6 @@
+// Paths -- A vector path that morphs, smooths, dashes and trims, warped by a script function.
+// Category: Drawing
+
 string pathWarp(double x, double y) {
     return "[" + (x + 12.0 * sin(y / 35.0)) + "," + (y + 8.0 * sin(x / 28.0)) + "]";
 }

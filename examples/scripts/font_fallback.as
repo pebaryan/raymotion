@@ -1,3 +1,6 @@
+// Font fallback -- Mixed scripts drawn intact through an ordered fallback list.
+// Category: Text
+
 void configure(Composition &inout c) {
     c.name = "font-fallback";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90;

@@ -1,3 +1,6 @@
+// Crowd -- Agents with goals that flee a threat, the same on every render.
+// Category: Characters
+
 void configure(Composition &inout c) {
     c.name = "crowd-card";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90;
@@ -17,7 +20,7 @@ void draw(int frame) {
     string obstacleInfo = simulation.obstacleInfoJson(0);
     g3d::draw(json, frame, 0, 0, 1280, 720);
     if (hasGoal)
-        draw::text("QUERY • " + simulation.groupName(0) + " / " + simulation.size() + " agents • goal " + goal[0] + ", " + goal[2] + " • " + simulation.predatorName(0) + " " + threat[0] + ", " + threat[2], 40, 642, 13, 0xe2bd82);
+        draw::text("QUERY â€¢ " + simulation.groupName(0) + " / " + simulation.size() + " agents â€¢ goal " + goal[0] + ", " + goal[2] + " â€¢ " + simulation.predatorName(0) + " " + threat[0] + ", " + threat[2], 40, 642, 13, 0xe2bd82);
     draw::text("SAMPLED CROWD SIM â€¢ DETERMINISTIC GOALS + FLEE RESPONSE", 40, 675, 18, 0xb8c6cc);
 }
 

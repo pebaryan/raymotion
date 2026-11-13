@@ -1,3 +1,6 @@
+// Voxels and splats -- A voxel model beside a seeded splat cloud.
+// Category: 3D
+
 void configure(Composition &inout c) {
     c.name = "voxel-splat-scene";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90;

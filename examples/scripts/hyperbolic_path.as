@@ -1,3 +1,6 @@
+// Hyperbolic path -- A geodesic mapped into a clipped vector path by a script function.
+// Category: 3D
+
 string projectDiskPoint(double x, double y) {
     return "[" + (640.0 + x * 250.0) + "," + (360.0 - y * 250.0) + "]";
 }

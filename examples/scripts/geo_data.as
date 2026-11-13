@@ -1,3 +1,6 @@
+// Geo data -- GeoJSON features measured: bounds, area, centroid and a great-circle route.
+// Category: Maps
+
 void configure(Composition &inout c) {
     c.name = "geo-data";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90;

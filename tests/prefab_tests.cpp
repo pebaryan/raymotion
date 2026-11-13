@@ -36,6 +36,8 @@ static void testPropsMerge() {
     prefab::use(roots, 0, 30, "merge", Json::parse(R"({"title": "custom"})"));
     drawTree(roots, 0);
     CHECK(got == "custom:5");                              // instance wins, default survives
+    prefab::use(roots, 0, 30, "merge");
+    CHECK(got == "default:5");                             // no props at all: the defaults, not nothing
 }
 
 static void testTiming() {

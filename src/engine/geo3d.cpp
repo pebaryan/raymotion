@@ -266,27 +266,6 @@ std::vector<Datum> byCountry(const Values& values, const geo::Layer& layer) {
     return out;
 }
 
-Scale Scale::over(const std::vector<double>& values) const {
-    Scale s = *this;
-    if (s.min == s.max) {
-        double lo = 0, hi = 0;
-        bool any = false;
-        for (double v : values)
-            if (std::isfinite(v)) {
-                lo = any ? std::min(lo, v) : v;
-                hi = any ? std::max(hi, v) : v;
-                any = true;
-            }
-        s.min = std::min(0.0, lo);
-        s.max = hi > s.min ? hi : s.min + 1;
-    }
-    return s;
-}
-
-float Scale::t(double v) const { return max > min ? clamp01((float)((v - min) / (max - min))) : 0.f; }
-
-Color Scale::operator()(double v) const { return colors ? colors(t(v)) : plot::viridis(t(v)); }
-
 // ================================================================ marks
 
 g3d::Object3D* marks(g3d::Object3D& parent, SurfacePtr s, const std::vector<Datum>& data, const MarkStyle& st) {

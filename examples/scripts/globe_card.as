@@ -1,3 +1,6 @@
+// Globe -- A lit globe with routes and a cyclone in the cloud layer.
+// Category: Maps
+
 void configure(Composition &inout c) {
     c.name = "globe-card";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 90;

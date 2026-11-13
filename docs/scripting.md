@@ -34,8 +34,14 @@ On multi-configuration Windows builds use `build/Release/raymotion_script.exe`.
 The showcase and other applications using `runCli` accept the same `--script` option.
 Repeat the option to load multiple files; composition names must be unique.
 Relative paths resolve from the current working directory, including worker processes.
-Each invocation reads the current source. Restart preview after an edit; live reload
-inside an open window is not implemented.
+Each invocation reads the current source. An open `preview` window reloads when a script
+(or a `--props @file.json`) is saved: the composition is loaded again in the same window
+and the playhead stays where it is, also when the size, duration or soundtrack changed.
+A script that does not compile, or throws while drawing, is reported on a band in the
+window and on stderr; the last version that loaded keeps playing until the next save.
+`--no-reload` turns this off. Changed images, fonts and other assets are not picked up
+(they are cached by path); restart the preview for those. A native `.cpp` composition is
+compiled once and does not reload.
 
 The first backend uses [AngelScript 2.38.0](https://www.angelcode.com/angelscript/),
 an embedded, statically typed language with C++-like syntax. Scripts compile to VM
@@ -878,6 +884,32 @@ then use `measure(text, size, spacing)` for width, `measureBounds(text, size, sp
 `draw::imageStyled` exposes native image fitting (`fill`, `contain`, `cover`, `none`),
 alignment, tint, opacity, and frame time for animated GIFs; the shorter `draw::image`
 keeps its compact default form.
+Map drawing helpers take a projection, a reveal `progress` (0..1) and a style as JSON whose
+keys are the native style fields (`rmtn/geomap.hpp`). They are only available inside draw
+callbacks, except the data helpers (`layer`, `fly`, `focus`, `along`, `length`,
+`routePath`, `places`, `names`, `valuesAt`):
+
+| Call | What it draws or returns |
+| --- | --- |
+| `geo::layer(name)` | A bundled layer: `countries`, `land`, `lakes`, `rivers`, `cities`. |
+| `geo::base(map, progress, style)` | Ocean, graticule, land, borders. Style: `ocean`, `land`, `coast`, `border`, `graticule`, their widths, `graticuleStep`. |
+| `geo::choropleth(map, valuesJson, progress, style, layer)` | Fills features by value. `valuesJson` is `{"IDN": 12, "Kenya": 3}`. Style: `min`, `max`, `colors` (two or more `"#rrggbb"` stops) or `colorFunction`, `missing`, `border`, `borderWidth`, `stagger`. |
+| `geo::colorbar(x, y, w, h, valuesJson, progress, style)` | The key. Give it the same `min`, `max` and `colors`; also `title`, `suffix`, `decimals`, `textSize`. |
+| `geo::valuesAt(csv, time)` | Values at one time from a table of `code,2000,2010,...` rows, blended between columns, as `valuesJson`. |
+| `geo::highlight(map, geometry, progress, style)` | One region picked out. Style: `fill`, `stroke`, `width`, `dim`. |
+| `geo::markers(map, itemsJson, progress, style)` | Dots with labels. Items: `{"lon", "lat", "label", "value", "color"}`. Style: `radius`, `sized`, `color`, `ring`, `ringWidth`, `labels`, `textSize`, `textColor`, `halo`, `bold`, `stagger`. |
+| `geo::labels(map, itemsJson, progress, style)` | Names that keep clear of each other, earliest first. Items: `{"lon", "lat", "text"}`. Style: `size`, `color`, `halo`, `bold`, `offset`, `margin`, `stagger`. |
+| `geo::places(layer, limit, valueProperty)`, `geo::names(layer, limit)` | Items JSON for `markers` and `labels` from a layer. |
+| `geo::route(map, lonLatPairs, progress, style)` | A great-circle route that draws itself on. Style: `color`, `width`, `dash`, `ghost`, `head`, `arrow`, `headColor`, `stops`, `tail`. |
+| `geo::routePath(map, lonLatPairs, from, to)` | The same route as a `Path`, clipped to the map. |
+| `geo::along(lonLatPairs, progress, out)`, `geo::length(lonLatPairs)` | `[lon, lat, bearing]` at a fraction of the route; its length in km. |
+| `geo::fly(a, b, progress, zoomOut)` | The view between two projections: great-circle pan, zoom by ratio, a zoom-out on long trips (`zoomOut` 0 picks it, 1 turns it off). |
+| `geo::focus(base, geometry, x, y, w, h, padding)` | `base` reframed on a geometry in a box (padding in px). |
+
+`geo-route` and `geo-flyto` are prefabs for `prefab::use`; their props are in
+[geo-prefabs.md](geo-prefabs.md). Examples: `map_choropleth.as`, `map_route.as`,
+`map_timeline.as`, `map_prefabs.as`.
+
 `geo::drawWorld` draws bundled countries, land, lakes, rivers or city layers, or a
 GeoJSON/TopoJSON file using `file:path`, with any native map projection, a rotating globe
 center, graticules and optional feature highlight. `geo::distance`, `bearing` and `angle` provide great-circle measurements in
@@ -978,7 +1010,9 @@ whose output supplies the mask. `layerFilter(sceneIndex, filterJson)` appends a 
 to that scene's isolated layer; pass one JSON object per call. Supported types are `posterize`
 (`levels`), `halftone` (`size`, `angle`, `colored`, `paper`), `paper` (`size`, `strength`),
 `inkEdges` (`size`, `ink`, `threshold`), `watercolor` (`size`, `strength`, `granulation`), and
-`tiltShift` (`position`, `band`, `size`, `angle`, `strength`, `falloff`). Layers allow up to 16 filters.
+`tiltShift` (`position`, `band`, `size`, `angle`, `strength`, `falloff`), and `film` (`exposure`,
+`bloom`, `size`, `threshold`, `glow`, `contrast`, `saturation`, `shadows`, `highlights`, `toning`,
+`vignette`). Layers allow up to 16 filters.
 `sceneAnimate(sceneIndex, stateFunction)` attaches a `string stateFunction(int frame)` callback to animate a scene node without creating an isolated layer. Return `{"node":{"x":...,"y":...,"scale":...,"rotation":...,"opacity":...}}`; omitted node fields use the scene base values. The callback is evaluated from the scene-local remapped frame and resets from base values each frame. `layerAnimate(sceneIndex, stateFunction)` attaches a frame callback declared as
 `string stateFunction(int frame)`. Return a JSON object with optional `opacity`, `offset`,
 `blend`, `maskMode`, `invertMask`, `enabled`, `blurSamples`, `shutter`, `filters`, or

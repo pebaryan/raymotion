@@ -1,3 +1,6 @@
+// Timeline -- A looped scene, a freeze frame and composition-wide motion blur.
+// Category: Motion
+
 void configure(Composition &inout c) {
     c.name = "timeline-card";
     c.w = 1280; c.h = 720; c.fps = 30; c.duration = 105;
