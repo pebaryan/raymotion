@@ -32,7 +32,7 @@ The Studio reopens the script, brief, frame and panel layout you had last time.
 | Panel | What it does |
 | --- | --- |
 | Code | The gallery, then the editor. Below it: Problems and the host's raw Output. The grid button (Ctrl E) goes back to the gallery. A shipped example shows a "Save a copy" banner, so the repository's copy stays as it is. |
-| Preview | The frame under the scrubber, rendered at full size whenever the script is saved or the frame changes (switch **Auto** off to render only on request, Ctrl R). Zoom with the wheel; double-click fits. Play uses a silent half-size draft of the whole film, rendered once per save; while it renders, playback and scrubbing use the frames that exist. The arrow button opens the normal raymotion window, with sound (F5). |
+| Preview | The frame under the scrubber, rendered at full size whenever the script is saved or the frame changes (switch **Auto** off to render only on request, Ctrl R). Zoom with the wheel; double-click fits. Play uses a silent half-size draft of the whole film, rendered once per save; while it renders, playback and scrubbing use the frames that exist. The arrow button opens the normal raymotion window, with sound (F5), paused on the scrubber's frame. There is one live window: F5 again closes it and opens a new one at the current frame. Quitting the Studio leaves it open. |
 | Brief | `docs/*-brief.md`: read or edit. New copies `skills/raymotion/templates/BRIEF.md`. |
 | Assets | A filterable list of `assets/`, image previews, copy the path as scripts write it, "Mention in chat". |
 | Chat | The agent. Tool calls show as rows you can open. Its suggestions follow what is open (for example "Fix the problems" when the script does not compile). |

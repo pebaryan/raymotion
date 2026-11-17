@@ -150,21 +150,63 @@ ProcResult runCapture(const std::vector<std::string>& args, const std::string& c
     return r;
 }
 
-bool spawnDetached(const std::vector<std::string>& args, const std::string& cwd) {
-    if (args.empty()) return false;
+Spawned& Spawned::operator=(Spawned&& o) noexcept {
+    if (this != &o) {
+#ifdef _WIN32
+        if (handle_) CloseHandle((HANDLE)handle_);
+#endif
+        handle_ = o.handle_; pid_ = o.pid_;
+        o.handle_ = nullptr; o.pid_ = 0;
+    }
+    return *this;
+}
+
+Spawned::~Spawned() {
+#ifdef _WIN32
+    if (handle_) CloseHandle((HANDLE)handle_);   // the process keeps running
+#else
+    if (pid_) { int st; waitpid((pid_t)pid_, &st, WNOHANG); }
+#endif
+}
+
+bool Spawned::running() {
+    if (!pid_) return false;
+#ifdef _WIN32
+    return WaitForSingleObject((HANDLE)handle_, 0) == WAIT_TIMEOUT;
+#else
+    int st;
+    return waitpid((pid_t)pid_, &st, WNOHANG) == 0;   // also reaps it once it has exited
+#endif
+}
+
+void Spawned::stop() {
+    if (!running()) return;
+#ifdef _WIN32
+    TerminateProcess((HANDLE)handle_, 0);
+    WaitForSingleObject((HANDLE)handle_, 2000);
+#else
+    kill((pid_t)pid_, SIGTERM);
+    int st;
+    for (int i = 0; i < 40 && waitpid((pid_t)pid_, &st, WNOHANG) == 0; ++i) usleep(50000);
+#endif
+}
+
+Spawned spawn(const std::vector<std::string>& args, const std::string& cwd) {
+    Spawned s;
+    if (args.empty()) return s;
 #ifdef _WIN32
     STARTUPINFOW si{}; si.cb = sizeof si;
     PROCESS_INFORMATION pi{};
     std::wstring cmd = commandLine(args), wcwd = widen(cwd);
     if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, 0, nullptr,
-                        wcwd.empty() ? nullptr : wcwd.c_str(), &si, &pi)) return false;
-    CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
-    return true;
+                        wcwd.empty() ? nullptr : wcwd.c_str(), &si, &pi)) return s;
+    CloseHandle(pi.hThread);
+    s.handle_ = pi.hProcess;
+    s.pid_ = (long)pi.dwProcessId;
 #else
     pid_t pid = fork();
-    if (pid < 0) return false;
+    if (pid < 0) return s;
     if (pid == 0) {
-        if (fork() != 0) _exit(0);              // double fork: no zombie
         if (!cwd.empty() && chdir(cwd.c_str()) != 0) _exit(127);
         std::vector<char*> argv;
         for (const auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
@@ -172,9 +214,9 @@ bool spawnDetached(const std::vector<std::string>& args, const std::string& cwd)
         execvp(argv[0], argv.data());
         _exit(127);
     }
-    int st = 0; waitpid(pid, &st, 0);
-    return true;
+    s.pid_ = (long)pid;
 #endif
+    return s;
 }
 
 } // namespace studio

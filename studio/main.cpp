@@ -414,6 +414,7 @@ struct App {
         });
     }
     Json session;                            // what was open last time
+    Spawned live;                            // the live window F5 started (left open when the Studio quits)
     void loadSettings() {
         std::string text;
         if (readText(settingsPath(), text)) {
@@ -902,8 +903,10 @@ struct App {
         if (codeDirty) { saveCode(); check(); }
         std::vector<std::string> a = { findHost(hostSettings(), root), "preview" };
         if (!curComp().empty()) a.push_back(curComp());
-        a.insert(a.end(), { "--script", toUtf8(codePath) });
-        if (!spawnDetached(a, toUtf8(root))) toast("Could not start the live window", CUI_TONE_DANGER, "Is raymotion_script built? See Settings.");
+        a.insert(a.end(), { "--script", toUtf8(codePath), "--at", std::to_string((int)frame) });
+        live.stop();                         // one live window: the new one replaces it, at this frame
+        live = spawn(a, toUtf8(root));
+        if (!live) toast("Could not start the live window", CUI_TONE_DANGER, "Is raymotion_script built? See Settings.");
     }
     void exportVideo() {
         if (codePath.empty() || exporting || !checkOk) return;

@@ -2,6 +2,7 @@
 #pragma once
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace studio {
@@ -14,8 +15,27 @@ struct ProcResult {
 // Runs args[0] with the rest as arguments, in `cwd` (empty = inherit). Blocks.
 ProcResult runCapture(const std::vector<std::string>& args, const std::string& cwd = {});
 
-// Starts a process and returns immediately (the live preview window). False on failure.
-bool spawnDetached(const std::vector<std::string>& args, const std::string& cwd = {});
+// A process started by spawn() (the live preview window). It keeps running when this object
+// goes away; stop() ends it. Move-only.
+class Spawned {
+public:
+    Spawned() = default;
+    Spawned(Spawned&& o) noexcept { *this = std::move(o); }
+    Spawned& operator=(Spawned&& o) noexcept;
+    Spawned(const Spawned&) = delete;
+    Spawned& operator=(const Spawned&) = delete;
+    ~Spawned();
+    explicit operator bool() const { return pid_ != 0; }
+    bool running();
+    void stop();
+private:
+    friend Spawned spawn(const std::vector<std::string>&, const std::string&);
+    void* handle_ = nullptr;   // Windows: held so the process id cannot be reused under us
+    long pid_ = 0;
+};
+
+// Starts a process and returns immediately; an empty Spawned on failure.
+Spawned spawn(const std::vector<std::string>& args, const std::string& cwd = {});
 
 // Directory holding the running executable ("" when unknown).
 std::string exeDir();
