@@ -118,9 +118,18 @@ build/raymotion prefabs                        # list prefabs and their default 
   muxes the soundtrack once. Frames carry no state, so the result is the same video
   (ProRes chunks join bit for bit). It pays off when the CPU is the limit: PNG
   sequences (3.5x faster with 4 jobs on a 12-core machine), VP9/WebM, CPU-heavy
-  compositions. A plain H.264 render is usually limited by moving 1080p RGBA frames
-  from the GPU into ffmpeg, which processes share, so extra jobs gain little there;
-  hardware encoders also cap concurrent sessions.
+  compositions. A composition that draws quickly gains little from extra jobs, since
+  each process pays its own start-up; hardware encoders also cap concurrent sessions.
+* **YUV on the GPU.** For 8-bit 4:2:0 output (H.264 and opaque VP9) the frame is
+  converted to yuv420p in a shader before it is read back, so less than half the bytes
+  leave the GPU and ffmpeg does no colour conversion. A light 1080p composition of 600
+  frames rendered in 3.9 s instead of 7.4 s on the development machine (4.6 s instead
+  of 7.5 s with `--jobs 4`). Chroma is averaged over 2x2 pixels. `--alpha` and ProRes
+  keep RGBA frames, and `--cpu-yuv` turns the GPU conversion off.
+* **Colour.** Every video is BT.709 in limited range and tagged as such (matrix,
+  primaries, transfer and range), whichever path made it, so players and editors show
+  the colours the engine drew instead of guessing BT.601 for an untagged stream.
+  ProRes has no range field; it is limited range by definition.
 * ffmpeg lookup: `--ffmpeg PATH`, `RAYMOTION_FFMPEG`, a winget Gyan.FFmpeg install,
   `C:/Program Files/ffmpeg`, `C:/ffmpeg`, then `PATH`.
 * Output is exactly the composition size regardless of the desktop. `--draft` renders

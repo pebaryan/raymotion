@@ -153,6 +153,9 @@ std::string formatArgs(Format f, bool alpha, int crf) {
            (alpha ? " -pix_fmt yuva420p -auto-alt-ref 0" : " -pix_fmt yuv420p");
 }
 
+// The colour description written into every encoded video (and declared on GPU YUV input).
+const char* const COLOR_TAGS = " -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv";
+
 std::string audioArgs(Format f) {
     return f == Format::ProRes ? " -c:a pcm_s16le" : f == Format::WebM ? " -c:a libopus -b:a 160k" : " -c:a aac -b:a 192k";
 }
@@ -308,6 +311,8 @@ void usage() {
     puts("                          --png-frames; prores is the default with --alpha)");
     puts("                        --jobs N render N chunks of frames in parallel processes,");
     puts("                          then join them without re-encoding");
+    puts("                        --cpu-yuv send RGBA frames and let ffmpeg convert them; by");
+    puts("                          default 4:2:0 output is converted to YUV on the GPU");
     puts("  raymotion still   <name> --at FRAME [--png PATH] write one PNG frame");
     puts("                        --alpha  transparent background (an RGBA PNG)");
     puts("  raymotion props   <name>                        print the default props (JSON)");
@@ -344,7 +349,7 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
 
     const char* crfArg = nullptr, *ffArg = nullptr, *atArg = nullptr, *pngArg = nullptr, *ssArg = nullptr, *propsArg = nullptr,
                *encoderArg = nullptr, *presetArg = nullptr, *formatArg = nullptr, *rangeArg = nullptr, *chunkArg = nullptr;
-    bool draft = false, noMusic = false, pngFrames = false, alpha = false, noReload = false;
+    bool draft = false, noMusic = false, pngFrames = false, alpha = false, noReload = false, cpuYuv = false;
     int jobs = 1;
     std::vector<std::string> childArgs = { "render", argv[2] };   // what a --jobs child is given
     std::vector<std::string> watched;                             // files a preview reloads on: scripts, a props file
@@ -364,6 +369,7 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
         else if (!strcmp(argv[i], "--png-frames")) pngFrames = true;
         else if (!strcmp(argv[i], "--format") && i+1 < argc) formatArg = argv[++i];
         else if (!strcmp(argv[i], "--alpha")) alpha = true;
+        else if (!strcmp(argv[i], "--cpu-yuv")) cpuYuv = true;
         else if (!strcmp(argv[i], "--jobs") && i+1 < argc) { jobs = atoi(argv[++i]); continue; }
         else if (!strcmp(argv[i], "--no-reload")) { noReload = true; continue; }
         else if (!strcmp(argv[i], "--range") && i+1 < argc) { rangeArg = argv[++i]; continue; }   // internal: a --jobs child
@@ -681,18 +687,59 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
             return 0;
         }
 
+        if (child) SetConfigFlags(FLAG_WINDOW_HIDDEN);   // one window for a --jobs render, not one per chunk
+        InitWindow(W, H, ("raymotion render - " + comp->name).c_str());
+        Canvas canvas;
+        if (!canvas.load(comp->w,comp->h,canvasScale(*comp,ssArg,draft))){ CloseWindow(); return 2; }
+        // Drafts are downscaled on the GPU: an exact 2:1 bilinear draw is a 2x2 box filter.
+        RenderTexture scaled{};
+        const bool resize = W != comp->w || H != comp->h;
+        FrameStream stream;
+        // An 8-bit 4:2:0 encoder gets its frames as yuv420p, converted on the GPU: less than
+        // half the bytes to read back and pipe, and no conversion in the encoder process,
+        // which matters most when --jobs runs several of them. Alpha and ProRes 4444 keep
+        // RGBA, as does a GPU that cannot build the conversion pass.
+        bool yuv = !pngFrames && !cpuYuv && !alpha && format != Format::ProRes && W % 2 == 0 && H % 2 == 0;
         FILE* pipe = nullptr;
         if (!pngFrames) {
+            if (resize) {
+                scaled = LoadRenderTexture(W, H);
+                SetTextureFilter(canvas.output().texture, TEXTURE_FILTER_BILINEAR);
+            }
+            // The sink runs on the writer thread, so making alpha straight costs no drawing
+            // time. It is given the pipe below, once the frame format is known and before
+            // any frame is pushed.
+            auto out = std::make_shared<FILE*>(nullptr);
+            std::vector<unsigned char> straight;
+            auto sink = [out, alpha, straight](const unsigned char* pixels, size_t bytes) mutable {
+                if (!alpha) return fwrite(pixels, 1, bytes, *out) == bytes;
+                straight.assign(pixels, pixels + bytes);
+                unpremultiply(straight.data(), bytes / 4);
+                return fwrite(straight.data(), 1, bytes, *out) == bytes;
+            };
+            if (yuv && !stream.open(W, H, sink, 3, FrameStream::Pixels::Yuv420)) {
+                fprintf(stderr, "note: GPU YUV conversion is not available here; sending RGBA frames\n");
+                yuv = false;
+            }
+            if (!yuv && !stream.open(W, H, sink)) { fprintf(stderr, "cannot start frame readback\n"); closeCanvas(canvas); return 3; }
             int crf = crfArg ? atoi(crfArg) : 19;
+            // Every output is BT.709 (the HD standard; sRGB shares its primaries) in limited
+            // range, and says so in its tags, so players do not guess BT.601 from an untagged
+            // stream. GPU YUV frames already are that; RGBA frames are converted to it here.
             std::string cmd = quote(ff) + " -y -hide_banner -loglevel warning"
-                " -f rawvideo -pix_fmt rgba -s " + std::to_string(W) + "x" + std::to_string(H) +
-                " -framerate " + std::to_string(comp->fps) + " -i -";
+                " -f rawvideo -pix_fmt " + (yuv ? "yuv420p" : "rgba") + " -s " + std::to_string(W) + "x" + std::to_string(H) +
+                " -framerate " + std::to_string(comp->fps) + (yuv ? std::string(COLOR_TAGS) : std::string()) + " -i -";
             if (!wav.empty()) cmd += " -i " + quote(wav);
             cmd += " -frames:v " + std::to_string(last - first);
-            cmd += " -vf vflip";            // frames arrive bottom-up, straight from GL
+            // RGBA frames arrive bottom-up, straight from GL. The frames that leave a filter
+            // carry their own colour properties, which win over the output options, so they
+            // are set here too.
+            if (!yuv) cmd += " -vf vflip,scale=out_color_matrix=bt709:out_range=tv,"
+                             "setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv";
             if (format == Format::Mp4) {
                 cmd += videoCodecArgs(encoderArg ? encoderArg : "h264", presetArg, crf) + " -movflags +faststart";
             } else cmd += formatArgs(format, alpha, crf);
+            cmd += COLOR_TAGS;
             if (!wav.empty()) cmd += audioArgs(format) + " -shortest";
             cmd += " " + quote(mp4);
             if (getenv("RAYMOTION_DEBUG_CMD")) printf("[CMD] %s\n", cmd.c_str());
@@ -701,30 +748,8 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
 #else
             pipe = popen(shellLine(cmd).c_str(), "w");    // POSIX pipes are always binary
 #endif
-            if (!pipe) { fprintf(stderr, "cannot start ffmpeg: %s\n", ff.c_str()); return 3; }
-        }
-
-        if (child) SetConfigFlags(FLAG_WINDOW_HIDDEN);   // one window for a --jobs render, not one per chunk
-        InitWindow(W, H, ("raymotion render - " + comp->name).c_str());
-        Canvas canvas;
-        if (!canvas.load(comp->w,comp->h,canvasScale(*comp,ssArg,draft))){ if (pipe) pclose(pipe); CloseWindow(); return 2; }
-        // Drafts are downscaled on the GPU: an exact 2:1 bilinear draw is a 2x2 box filter.
-        RenderTexture scaled{};
-        const bool resize = W != comp->w || H != comp->h;
-        FrameStream stream;
-        if (pipe) {
-            if (resize) {
-                scaled = LoadRenderTexture(W, H);
-                SetTextureFilter(canvas.output().texture, TEXTURE_FILTER_BILINEAR);
-            }
-            // Runs on the writer thread, so making alpha straight costs no drawing time.
-            std::vector<unsigned char> straight;
-            if (!stream.open(W, H, [pipe, alpha, straight](const unsigned char* rgba, size_t bytes) mutable {
-                    if (!alpha) return fwrite(rgba, 1, bytes, pipe) == bytes;
-                    straight.assign(rgba, rgba + bytes);
-                    unpremultiply(straight.data(), bytes / 4);
-                    return fwrite(straight.data(), 1, bytes, pipe) == bytes;
-                })) { fprintf(stderr, "cannot start frame readback\n"); pclose(pipe); closeCanvas(canvas); return 3; }
+            if (!pipe) { fprintf(stderr, "cannot start ffmpeg: %s\n", ff.c_str()); stream.close(); closeCanvas(canvas); return 3; }
+            *out = pipe;
         }
         double t0 = GetTime();
         bool ok = true;
