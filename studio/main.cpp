@@ -414,7 +414,7 @@ struct App {
         });
     }
     Json session;                            // what was open last time
-    Spawned live;                            // the live window F5 started (left open when the Studio quits)
+    Spawned live;                            // the live window F5 started (closed when the Studio quits)
     void loadSettings() {
         std::string text;
         if (readText(settingsPath(), text)) {
@@ -2051,6 +2051,7 @@ int main(int argc, char** argv) {
         ++n;
     }
     if (!fresh && clicks.empty() && typed.empty() && keys.empty()) app.writeSettingsFile();   // remember what was open
+    app.live.stop();                         // the live window belongs to this Studio window
     if (app.still) cui_image_destroy(app.ctx, app.still);
     cui_app_destroy(gApp);
     { std::error_code ec; fs::remove_all(sessionDir(app.root), ec); }   // a render still running keeps what it holds open
