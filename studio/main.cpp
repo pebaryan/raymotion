@@ -259,6 +259,7 @@ struct App {
     bool showSettings = false, showPalette = false, showNewScript = false, showNewBrief = false, showConfirm = false;
     std::function<void()> afterConfirm;      // what the unsaved-changes dialog was guarding
     char newName[64] = "";
+    int selectName = 0;                      // counts down to a Ctrl+A in the name field, so typing replaces a suggested name
     int newFrom = 0;                         // 0 blank, 1 a copy of the open script
     std::string newError;
 
@@ -715,6 +716,7 @@ struct App {
         newFrom = copyOpen && !codePath.empty() ? 1 : 0;
         copyTo(newName, sizeof newName, newFrom ? toUtf8(codePath.stem()) + "-copy" : "");
         newError.clear(); showNewScript = true;
+        if (newName[0]) selectName = 4;
     }
 
     // ---- check / render ----------------------------------------------------------
@@ -1888,8 +1890,30 @@ int main(int argc, char** argv) {
     app.loadSettings();
     std::string openArg;
     bool hidden = false, fresh = false;
-    struct Click { int at; float x, y; };
-    std::vector<Click> clicks;               // --click FRAME:X:Y, for screenshots of states behind a click
+    // Scripted input for screenshots of states behind an interaction; none of it is saved to the session.
+    struct Click { int at; float x, y; bool twice; };
+    std::vector<Click> clicks;               // --click FRAME:X:Y, --dclick FRAME:X:Y
+    struct Typed { int at; std::string text; };
+    std::vector<Typed> typed;                // --type FRAME:text
+    struct Key { int at; cui_key key; int mods; };
+    std::vector<Key> keys;                   // --press FRAME:[ctrl+][shift+][alt+]name, e.g. 120:ctrl+s
+    auto parseKey = [](std::string s, Key& k) {
+        static const std::pair<const char*, cui_key> names[] = {
+            { "tab", CUI_KEY_TAB }, { "enter", CUI_KEY_ENTER }, { "escape", CUI_KEY_ESCAPE }, { "backspace", CUI_KEY_BACKSPACE },
+            { "delete", CUI_KEY_DELETE }, { "space", CUI_KEY_SPACE }, { "left", CUI_KEY_LEFT }, { "right", CUI_KEY_RIGHT },
+            { "up", CUI_KEY_UP }, { "down", CUI_KEY_DOWN }, { "home", CUI_KEY_HOME }, { "end", CUI_KEY_END },
+            { "pageup", CUI_KEY_PAGE_UP }, { "pagedown", CUI_KEY_PAGE_DOWN }, { "comma", CUI_KEY_COMMA } };
+        k.mods = 0;
+        for (size_t p; (p = s.find('+')) != std::string::npos; s.erase(0, p + 1)) {
+            std::string m = s.substr(0, p);
+            if (m == "ctrl") k.mods |= CUI_MOD_PRIMARY; else if (m == "shift") k.mods |= CUI_MOD_SHIFT; else if (m == "alt") k.mods |= CUI_MOD_ALT; else return false;
+        }
+        for (const auto& nm : names) if (s == nm.first) { k.key = nm.second; return true; }
+        if (s.size() == 1 && s[0] >= 'a' && s[0] <= 'z') { k.key = (cui_key)(CUI_KEY_A + (s[0] - 'a')); return true; }
+        if (s.size() == 1 && s[0] >= '0' && s[0] <= '9') { k.key = (cui_key)(CUI_KEY_0 + (s[0] - '0')); return true; }
+        if (s.size() >= 2 && s[0] == 'f') { int f = atoi(s.c_str() + 1); if (f >= 1 && f <= 12) { k.key = (cui_key)(CUI_KEY_F1 + f - 1); return true; } }
+        return false;
+    };
     for (int i = 1; i < argc; ++i) {
         bool more = i + 1 < argc;
         if (!strcmp(argv[i], "--workspace") && more) app.root = fs::weakly_canonical(fromUtf8(argv[++i]));
@@ -1901,6 +1925,14 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--hidden")) hidden = true;
         else if (!strcmp(argv[i], "--fresh")) fresh = true;          // ignore the last session
         else if (!strcmp(argv[i], "--click") && more) { Click c{}; if (sscanf(argv[++i], "%d:%f:%f", &c.at, &c.x, &c.y) == 3) clicks.push_back(c); }
+        else if (!strcmp(argv[i], "--dclick") && more) { Click c{}; c.twice = true; if (sscanf(argv[++i], "%d:%f:%f", &c.at, &c.x, &c.y) == 3) clicks.push_back(c); }
+        else if ((!strcmp(argv[i], "--type") || !strcmp(argv[i], "--press")) && more) {
+            bool press = argv[i][2] == 'p';
+            const char* v = argv[++i]; const char* colon = strchr(v, ':');
+            if (!colon) { fprintf(stderr, "%s wants FRAME:value\n", argv[i - 1]); return 1; }
+            if (!press) typed.push_back({ atoi(v), colon + 1 });
+            else { Key k{}; k.at = atoi(v); if (!parseKey(colon + 1, k)) { fprintf(stderr, "unknown key %s\n", colon + 1); return 1; } keys.push_back(k); }
+        }
         else if (argv[i][0] != '-' && openArg.empty()) openArg = argv[i];
     }
     app.syncBuffers();
@@ -1955,15 +1987,27 @@ int main(int argc, char** argv) {
     while (true) {
         if (!cui_app_frame(gApp)) break;
         cui_ctx* ui = cui_app_ui(gApp);
+        if (app.selectName > 0) {            // as input, because CUI has no call that selects a field's text
+            --app.selectName;
+            if (app.selectName == 1) cui_input_key(ui, CUI_KEY_A, true, CUI_MOD_PRIMARY);
+            if (app.selectName == 0) { cui_input_key(ui, CUI_KEY_A, false, 0); cui_input_key(ui, CUI_KEY_NONE, false, 0); }
+        }
         for (const auto& c : clicks) {       // after the frame began, so this frame sees them
             if (n == c.at) cui_input_mouse_move(ui, c.x, c.y);
             if (n == c.at + 2) cui_input_mouse_button(ui, CUI_MOUSE_LEFT, true);
             if (n == c.at + 4) cui_input_mouse_button(ui, CUI_MOUSE_LEFT, false);
+            if (c.twice && n == c.at + 6) cui_input_mouse_button(ui, CUI_MOUSE_LEFT, true);
+            if (c.twice && n == c.at + 8) cui_input_mouse_button(ui, CUI_MOUSE_LEFT, false);
+        }
+        for (const auto& t : typed) if (n == t.at) cui_input_text(ui, t.text.c_str());
+        for (const auto& k : keys) {
+            if (n == k.at) cui_input_key(ui, k.key, true, k.mods);
+            if (n == k.at + 1) { cui_input_key(ui, k.key, false, 0); cui_input_key(ui, CUI_KEY_NONE, false, 0); }   // the second call clears the held modifiers
         }
         frame(ui, &app);
         ++n;
     }
-    if (!fresh && clicks.empty()) app.writeSettingsFile();   // remember what was open
+    if (!fresh && clicks.empty() && typed.empty() && keys.empty()) app.writeSettingsFile();   // remember what was open
     if (app.still) cui_image_destroy(app.ctx, app.still);
     cui_app_destroy(gApp);
     app.ctx = nullptr;

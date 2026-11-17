@@ -35,6 +35,24 @@ std::string lastError(const char* what) {
     return msg + buf;
 }
 
+// Why a TLS handshake was refused: WinHTTP only says so through a status callback.
+void CALLBACK onSecureFailure(HINTERNET, DWORD_PTR context, DWORD status, LPVOID info, DWORD length) {
+    if (status == WINHTTP_CALLBACK_STATUS_SECURE_FAILURE && context && info && length >= sizeof(DWORD))
+        *(DWORD*)context = *(DWORD*)info;
+}
+std::string secureFailure(DWORD flags) {
+    std::string why;
+    auto add = [&](DWORD bit, const char* text) { if (flags & bit) why += (why.empty() ? "" : ", ") + std::string(text); };
+    add(WINHTTP_CALLBACK_STATUS_FLAG_CERT_REV_FAILED, "its revocation could not be checked");
+    add(WINHTTP_CALLBACK_STATUS_FLAG_INVALID_CERT, "the certificate is invalid");
+    add(WINHTTP_CALLBACK_STATUS_FLAG_CERT_REVOKED, "the certificate was revoked");
+    add(WINHTTP_CALLBACK_STATUS_FLAG_INVALID_CA, "its issuer is not trusted");
+    add(WINHTTP_CALLBACK_STATUS_FLAG_CERT_CN_INVALID, "it is for another host name");
+    add(WINHTTP_CALLBACK_STATUS_FLAG_CERT_DATE_INVALID, "it has expired or is not valid yet");
+    add(WINHTTP_CALLBACK_STATUS_FLAG_SECURITY_CHANNEL_ERROR, "the secure channel failed (protocol or cipher mismatch)");
+    return why.empty() ? "" : ": " + why;
+}
+
 struct Handle {
     HINTERNET h = nullptr;
     ~Handle() { if (h) WinHttpCloseHandle(h); }
@@ -63,6 +81,13 @@ HttpResponse httpRequest(const std::string& method, const std::string& url, cons
     session.h = WinHttpOpen(L"raymotion-studio/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) session.h = WinHttpOpen(L"raymotion-studio/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!session) { out.error = lastError("WinHttpOpen"); return out; }
+    // WinHTTP leaves TLS 1.3 off unless asked, and a server that speaks nothing older then
+    // fails the handshake. Windows versions without TLS 1.3 refuse the flag: keep their default.
+#ifndef WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3
+#define WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3 0x00002000
+#endif
+    DWORD protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
+    WinHttpSetOption(session.h, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols, sizeof protocols);
     int ms = timeoutSeconds > 0 ? timeoutSeconds * 1000 : 300000;
     WinHttpSetTimeouts(session.h, 10000, 10000, ms, ms);
 
@@ -73,12 +98,16 @@ HttpResponse httpRequest(const std::string& method, const std::string& url, cons
     req.h = WinHttpOpenRequest(conn.h, widen(method).c_str(), path.c_str(), nullptr, WINHTTP_NO_REFERER,
                                WINHTTP_DEFAULT_ACCEPT_TYPES, secure ? WINHTTP_FLAG_SECURE : 0);
     if (!req) { out.error = lastError("open request"); return out; }
+    DWORD tlsFlags = 0;
+    DWORD_PTR tlsContext = (DWORD_PTR)&tlsFlags;
+    WinHttpSetStatusCallback(req.h, onSecureFailure, WINHTTP_CALLBACK_FLAG_SECURE_FAILURE, 0);
+    WinHttpSetOption(req.h, WINHTTP_OPTION_CONTEXT_VALUE, &tlsContext, sizeof tlsContext);
 
     std::wstring hdr;
     for (const auto& h : headers) hdr += widen(h.first + ": " + h.second) + L"\r\n";
     if (!WinHttpSendRequest(req.h, hdr.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : hdr.c_str(), (DWORD)-1L,
                             body.empty() ? WINHTTP_NO_REQUEST_DATA : (LPVOID)body.data(), (DWORD)body.size(), (DWORD)body.size(), 0)) {
-        out.error = lastError("send");
+        out.error = lastError("send") + secureFailure(tlsFlags);
         return out;
     }
     if (!WinHttpReceiveResponse(req.h, nullptr)) { out.error = lastError("receive"); return out; }
