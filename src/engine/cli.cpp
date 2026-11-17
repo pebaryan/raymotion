@@ -288,7 +288,9 @@ void prepare(Comp& c, const Json& overrides, bool drawing) {
 void usage() {
     puts("usage:");
     puts("  raymotion list                                  list compositions");
-    puts("  raymotion preview <name> [--mute]               play with sound in a live window (esc quits);");
+    puts("  raymotion preview <name> [--mute] [--at FRAME]  play with sound in a live window (esc quits);");
+    puts("                        space pauses; drag the bar to seek; , and . step a frame");
+    puts("                        (shift: a second); home and end; --at opens paused there;");
     puts("                        with --script, the window reloads when the script is saved");
     puts("                        (--no-reload turns that off)");
     puts("  raymotion render  <name> [--crf N] [--encoder NAME] [--preset NAME]");
@@ -439,6 +441,15 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
             fprintf(stderr, "no audio device: previewing without sound\n");
         double playhead = 0, speed = 1.0;
         bool paused = false;
+        // The seek bar: drag it, or step with , and . (shift: one second), Home and End.
+        // It shows while paused, while dragging and for two seconds after the pointer moves.
+        Scrubber bar;
+        bool dragging = false, barShown = false;
+        double pointerMovedAt = -10;
+        if (atArg) {                                         // --at FRAME: open paused on that frame
+            playhead = std::clamp(atoi(atArg), 0, comp->duration - 1);
+            paused = true;
+        }
         // Live reload: when a script (or a --props @file) is saved, the composition is
         // loaded again in this window and the playhead stays where it is. A script that
         // does not compile, or throws while drawing, is reported in the window and on
@@ -531,6 +542,7 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
             char hud[128]; snprintf(hud, sizeof hud, "[%04d/%04d] x%.2f [%s]%s",
                 frame, comp->duration, speed, paused ? "PAUSED" : "PLAY", GetTime() - reloadedAt < 1.5 ? "  RELOADED" : "");
             DrawText(hud, 12, 12, 18, Color{ (unsigned char)240, (unsigned char)240, (unsigned char)255, (unsigned char)180 });
+            int bandH = 0;
             if (!problem.empty()) {
                 // The message on a band along the bottom, wrapped to the window, four lines at most.
                 const int size = 16, perLine = std::max(20, (GetScreenWidth() - 24) / 9);
@@ -542,10 +554,29 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
                     lines.push_back(problem.substr(at, end - at));
                     at = end + (end < problem.size() && problem[end] == '\n' ? 1 : 0);
                 }
-                const int bandH = (int)lines.size() * (size + 4) + 16, top = GetScreenHeight() - bandH;
+                bandH = (int)lines.size() * (size + 4) + 16;
+                const int top = GetScreenHeight() - bandH;
                 DrawRectangle(0, top, GetScreenWidth(), bandH, Color{ (unsigned char)120, (unsigned char)24, (unsigned char)24, (unsigned char)230 });
                 for (size_t i = 0; i < lines.size(); i++)
                     DrawText(lines[i].c_str(), 12, top + 8 + (int)i * (size + 4), size, Color{ (unsigned char)255, (unsigned char)236, (unsigned char)230, (unsigned char)255 });
+            }
+            bar = scrubber(GetScreenWidth(), GetScreenHeight(), bandH);
+            const Vector2 pointer = GetMousePosition(), moved = GetMouseDelta();
+            if (moved.x != 0 || moved.y != 0) pointerMovedAt = GetTime();
+            barShown = paused || dragging || GetTime() - pointerMovedAt < 2.0;
+            if (barShown) {
+                const Color ink{ (unsigned char)240, (unsigned char)240, (unsigned char)255, (unsigned char)235 };
+                DrawRectangleRec(bar.strip, Color{ (unsigned char)0, (unsigned char)0, (unsigned char)0, (unsigned char)160 });
+                const std::string when = timecode(frame, comp->fps) + " / " + timecode(comp->duration, comp->fps);
+                DrawText(when.c_str(), (int)bar.track.x, (int)bar.strip.y + 7, 16, ink);
+                DrawRectangleRec(bar.track, Color{ (unsigned char)255, (unsigned char)255, (unsigned char)255, (unsigned char)60 });
+                const float x = scrubX(bar.track, frame, comp->duration);
+                DrawRectangleRec({ bar.track.x, bar.track.y, x - bar.track.x, bar.track.height }, ink);
+                for (const auto& root : comp->roots)         // where each top-level scene starts
+                    if (root->start > 0 && root->start < comp->duration)
+                        DrawRectangleRec({ scrubX(bar.track, root->start, comp->duration) - 1, bar.track.y - 4, 2, bar.track.height + 8 },
+                                         Color{ (unsigned char)255, (unsigned char)255, (unsigned char)255, (unsigned char)150 });
+                DrawCircleV({ x, bar.track.y + bar.track.height / 2 }, dragging ? 9.f : 7.f, ink);
             }
             if (testSeconds && !testShot.empty() && GetTime() > atof(testSeconds) - 0.4) {   // tests: what the window showed
                 rlDrawRenderBatchActive();
@@ -558,15 +589,28 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
             if (IsKeyDown(KEY_RIGHT)) speed = 2.0; else if (IsKeyDown(KEY_LEFT)) speed = 0.25; else speed = 1.0;
             int kp = GetKeyPressed();
             if (kp == KEY_SPACE) paused = !paused;   // rare spurious repeats; acceptable for a preview
+            auto seekTo = [&](int to) {
+                playhead = std::clamp(to, 0, comp->duration - 1);
+                if (audio.active()) audio.seek(playhead / comp->fps);
+            };
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && barShown && CheckCollisionPointRec(pointer, bar.strip)) dragging = true;
+            if (dragging && !IsMouseButtonDown(MOUSE_BUTTON_LEFT)) dragging = false;
+            if (dragging) seekTo(scrubFrame(bar.track, pointer.x, comp->duration));
+            auto pressed = [](int key) { return IsKeyPressed(key) || IsKeyPressedRepeat(key); };
+            const int stride = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT) ? comp->fps : 1;
+            if (pressed(KEY_PERIOD)) { paused = true; seekTo(frame + stride); }
+            if (pressed(KEY_COMMA)) { paused = true; seekTo(frame - stride); }
+            if (IsKeyPressed(KEY_HOME)) seekTo(0);
+            if (IsKeyPressed(KEY_END)) { paused = true; seekTo(comp->duration - 1); }
             // Sound plays at normal speed only; then the audio clock drives the playhead.
-            bool audible = audio.active() && !paused && speed == 1.0;
+            bool audible = audio.active() && !paused && !dragging && speed == 1.0;
             if (audible) {
                 if (!audio.playing()) audio.seek(std::fmod(playhead, (double)comp->duration) / comp->fps);
                 audio.play(true);
                 playhead = audio.seconds() * comp->fps;
             } else {
                 audio.play(false);
-                if (!paused) playhead += comp->fps * GetFrameTime() * speed;
+                if (!paused && !dragging) playhead += comp->fps * GetFrameTime() * speed;
             }
         }
         audio.stop();

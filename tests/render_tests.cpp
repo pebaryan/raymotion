@@ -41,6 +41,22 @@ int main() {
        std::fabs(landscape.y-123.75f)>0.01f){
         std::fprintf(stderr,"FAIL: landscape preview not centered\n"); return 1;
     }
+    // The preview's seek bar: the track's ends are the first and last frames, a pointer
+    // past an end stays there, and frame -> x -> frame comes back to the same frame.
+    {
+        const rmtn::Scrubber bar=rmtn::scrubber(640,480,20);
+        bool good=std::fabs(bar.strip.y+bar.strip.height-460)<0.01f && bar.track.x>0 &&
+                  bar.track.x+bar.track.width<640 && bar.track.y>bar.strip.y;
+        good=good && rmtn::scrubFrame(bar.track,bar.track.x,150)==0 &&
+             rmtn::scrubFrame(bar.track,bar.track.x+bar.track.width,150)==149 &&
+             rmtn::scrubFrame(bar.track,-500,150)==0 && rmtn::scrubFrame(bar.track,5000,150)==149 &&
+             rmtn::scrubFrame(bar.track,bar.track.x+bar.track.width/2,151)==75 &&
+             rmtn::scrubFrame(bar.track,100,1)==0 && rmtn::scrubFrame({},100,150)==0;
+        for(int f=0;f<150 && good;f++) good=rmtn::scrubFrame(bar.track,rmtn::scrubX(bar.track,f,150),150)==f;
+        good=good && rmtn::timecode(0,30)=="0:00.00" && rmtn::timecode(96,30)=="0:03.06" &&
+             rmtn::timecode(3725,60)=="1:02.05" && rmtn::timecode(-4,30)=="0:00.00" && rmtn::timecode(10,0)=="0:00.00";
+        if(!good){ std::fprintf(stderr,"FAIL: preview seek bar maps frames wrongly\n"); return 1; }
+    }
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
     InitWindow(320, 240, "raymotion regression");

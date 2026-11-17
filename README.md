@@ -85,7 +85,8 @@ objects and house grammar against that mode.
 
 ```
 build/raymotion list
-build/raymotion preview <name>                 # live window; esc or close quits; a --script reloads on save
+build/raymotion preview <name> [--at FRAME]    # live window; esc or close quits; a --script reloads on save
+                                               # space pauses; drag the bar to seek; , and . step a frame
 build/raymotion render  <name> [--crf N] [--draft] [--no-music] [--png-frames] [--ss N]
                                [--format mp4|prores|webm] [--alpha] [--jobs N]
 build/raymotion still   <name> --at FRAME [--png PATH] [--ss N] [--alpha]

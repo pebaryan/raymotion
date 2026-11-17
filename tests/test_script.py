@@ -153,6 +153,17 @@ void second(int t) { }
         self.assertEqual(err.lower().count("out of bounds"), 1, err)   # reported once, not every frame
         self.assertGreater((self.cwd / "shot.png").stat().st_size, 500)
 
+    @unittest.skipUnless(GL, "needs OpenGL")
+    def test_preview_opens_paused_at_a_frame(self):
+        # --at opens the window paused on that frame, with the seek bar showing.
+        import os
+        env = dict(os.environ, RAYMOTION_PREVIEW_SECONDS="2", RAYMOTION_PREVIEW_SHOT="at.png")
+        done = subprocess.run([EXE, "preview", "fixture", "--script", str(self.path), "--mute", "--at", "3"], cwd=self.cwd,
+                              text=True, capture_output=True, env=env, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertGreater((self.cwd / "at.png").stat().st_size, 500)
+        self.assertIn("--at FRAME", self.run_cli("help", ok=None))
+
     def test_preview_no_reload_flag(self):
         self.assertIn("--no-reload", self.run_cli("help", ok=None))
 
