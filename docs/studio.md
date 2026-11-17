@@ -50,7 +50,10 @@ check result (click it to see the problems) and the agent's model.
 - **View**: Command palette (Ctrl K: every command, script and brief), panels, Reset layout, theme.
 
 Settings is a dialog: base URL, API key, model with **Load models**, workspace, renderer
-path, theme. It says whether the renderer was found.
+path, theme. It says whether the renderer was found. It is saved to
+`%APPDATA%\raymotion-studio\settings.json` (`~/.config/raymotion-studio/` elsewhere). An exe in a
+folder labelled Low integrity (some sandboxes label the workspace) cannot write there, so the
+Studio then uses `%USERPROFILE%\AppData\LocalLow\raymotion-studio\` instead. A failed save says why.
 
 ## Example headers
 

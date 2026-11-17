@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -23,6 +24,7 @@
 #include <regex>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -55,13 +57,18 @@ bool readText(const fs::path& p, std::string& out) {
     out = ss.str();
     return true;
 }
-bool writeText(const fs::path& p, const std::string& s) {
+// On failure, `why` (when given) gets the system's reason.
+bool writeText(const fs::path& p, const std::string& s, std::string* why = nullptr) {
     std::error_code ec;
     fs::create_directories(p.parent_path(), ec);
+    if (ec) { if (why) *why = "cannot create the folder: " + ec.message(); return false; }
+    errno = 0;
     std::ofstream f(p, std::ios::binary);
-    if (!f) return false;
+    if (!f) { if (why) *why = errno ? std::generic_category().message(errno) : "cannot open the file"; return false; }
     f << s;
-    return (bool)f;
+    f.close();
+    if (!f) { if (why) *why = "write failed (disk full?)"; return false; }
+    return true;
 }
 std::string lower(std::string s) {
     for (auto& c : s) c = (char)tolower((unsigned char)c);
@@ -104,11 +111,27 @@ std::string seconds(int frame, int fps) {
     return b;
 }
 
+#ifdef _WIN32
+// A program started at low integrity (an exe in a folder labelled Low, as some sandboxes label a
+// workspace) cannot write to AppData\Roaming. AppData\LocalLow is the folder Windows gives it.
+fs::path lowSettingsPath() {
+    const char* local = std::getenv("LOCALAPPDATA");
+    return local ? fs::path(local).parent_path() / "LocalLow" / "raymotion-studio" / "settings.json" : fs::path();
+}
+#endif
+
+// Roaming, unless only a LocalLow copy exists (writeSettingsFile falls back to LocalLow).
 fs::path settingsPath() {
     const char* base = nullptr;
 #ifdef _WIN32
     base = std::getenv("APPDATA");
-    if (base) return fs::path(base) / "raymotion-studio" / "settings.json";
+    if (base) {
+        fs::path roaming = fs::path(base) / "raymotion-studio" / "settings.json";
+        fs::path low = lowSettingsPath();
+        std::error_code ec;
+        if (!fs::exists(roaming, ec) && !low.empty() && fs::exists(low, ec)) return low;
+        return roaming;
+    }
 #endif
     base = std::getenv("XDG_CONFIG_HOME");
     if (base) return fs::path(base) / "raymotion-studio" / "settings.json";
@@ -419,7 +442,7 @@ struct App {
         stepsF = (float)set.maxSteps;
     }
     // Writes the applied settings (not what is being typed in the dialog) and the session.
-    bool writeSettingsFile() {
+    bool writeSettingsFile(std::string* why = nullptr) {
         Json j;
         j.set("baseUrl", set.baseUrl); j.set("apiKey", set.apiKey); j.set("model", set.model);
         j.set("host", set.host); j.set("maxSteps", set.maxSteps); j.set("dark", set.darkTheme);
@@ -434,7 +457,13 @@ struct App {
         if (ctx && cui_dock_save(ctx, "main", layout, sizeof layout) > 0 && strlen(layout) + 1 < sizeof layout) s.set("layout", std::string(layout));
         else if (!savedLayout.empty()) s.set("layout", savedLayout);
         j.set("session", s);
-        return writeText(settingsPath(), j.dump());
+        std::string text = j.dump();
+        if (writeText(settingsPath(), text, why)) return true;
+#ifdef _WIN32
+        fs::path low = lowSettingsPath();
+        if (!low.empty() && low != settingsPath() && writeText(low, text)) return true;
+#endif
+        return false;
     }
     void saveSettings() {
         // The folder field may have been typed into without pressing Enter.
@@ -445,8 +474,9 @@ struct App {
         }
         set.baseUrl = urlBuf; set.apiKey = keyBuf; set.model = modelBuf; set.host = hostBuf;
         set.maxSteps = (int)stepsF; set.darkTheme = themeIdx == 1;
-        settingsNoteError = !writeSettingsFile();
-        settingsNote = settingsNoteError ? "Could not write " + toUtf8(settingsPath()) : "Saved";
+        std::string why;
+        settingsNoteError = !writeSettingsFile(&why);
+        settingsNote = settingsNoteError ? "Could not write " + toUtf8(settingsPath()) + " (" + why + ")" : "Saved";
     }
     void restoreSession() {
         savedLayout = session.str("layout", "");
@@ -1587,9 +1617,14 @@ void dialogs(cui_ctx* ui, App& a) {
         cui_dialog_opts dopt{}; dopt.width = 580; dopt.description = "Agent endpoint, workspace and appearance.";
         if (cui_dialog_begin(ui, "Settings", &a.showSettings, &dopt)) {
             settingsForm(ui, a);
+            // An error is long (it holds the path and the reason), so it gets its own line above the buttons.
+            if (a.settingsNoteError && !a.settingsNote.empty()) {
+                cui_text_opts nt{}; nt.color = CUI_COLOR_DANGER;
+                cui_text_ex(ui, a.settingsNote.c_str(), &nt);
+            }
             cui_dialog_footer_begin(ui);
-            if (!a.settingsNote.empty()) {
-                cui_text_opts nt{}; nt.color = a.settingsNoteError ? CUI_COLOR_DANGER : CUI_COLOR_TEXT_MUTED;
+            if (!a.settingsNoteError && !a.settingsNote.empty()) {
+                cui_text_opts nt{}; nt.color = CUI_COLOR_TEXT_MUTED;
                 cui_text_ex(ui, a.settingsNote.c_str(), &nt);
             }
             cui_spacer(ui);
