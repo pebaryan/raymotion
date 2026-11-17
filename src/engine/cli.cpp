@@ -300,6 +300,8 @@ void usage() {
     puts("                        [--draft] [--mute] [--png-frames]");
     puts("                        render every frame via raylib, pipe to ffmpeg -> mp4");
     puts("                        --png-frames writes a PNG sequence instead (no ffmpeg)");
+    puts("                        --frames-dir DIR  where --png-frames (and the working");
+    puts("                          files of a render) go; default out/<name>_frames");
     puts("                        --encoder NAME any ffmpeg encoder (default h264 = libx264;");
     puts("                          h264_nvenc, hevc_nvenc, h264_qsv, h264_amf are hardware)");
     puts("                        --preset NAME encoder speed: ultrafast..veryslow for x264,");
@@ -348,7 +350,8 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
     const std::string want = argv[2];
 
     const char* crfArg = nullptr, *ffArg = nullptr, *atArg = nullptr, *pngArg = nullptr, *ssArg = nullptr, *propsArg = nullptr,
-               *encoderArg = nullptr, *presetArg = nullptr, *formatArg = nullptr, *rangeArg = nullptr, *chunkArg = nullptr;
+               *encoderArg = nullptr, *presetArg = nullptr, *formatArg = nullptr, *rangeArg = nullptr, *chunkArg = nullptr,
+               *framesDirArg = nullptr;
     bool draft = false, noMusic = false, pngFrames = false, alpha = false, noReload = false, cpuYuv = false;
     int jobs = 1;
     std::vector<std::string> childArgs = { "render", argv[2] };   // what a --jobs child is given
@@ -370,6 +373,7 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
         else if (!strcmp(argv[i], "--format") && i+1 < argc) formatArg = argv[++i];
         else if (!strcmp(argv[i], "--alpha")) alpha = true;
         else if (!strcmp(argv[i], "--cpu-yuv")) cpuYuv = true;
+        else if (!strcmp(argv[i], "--frames-dir") && i+1 < argc) framesDirArg = argv[++i];
         else if (!strcmp(argv[i], "--jobs") && i+1 < argc) { jobs = atoi(argv[++i]); continue; }
         else if (!strcmp(argv[i], "--no-reload")) { noReload = true; continue; }
         else if (!strcmp(argv[i], "--range") && i+1 < argc) { rangeArg = argv[++i]; continue; }   // internal: a --jobs child
@@ -633,7 +637,7 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
         }
         const bool child = rangeArg != nullptr;
         jobs = std::max(1, std::min(jobs, comp->duration / 15));   // a chunk of at least half a second or so
-        std::string dir = "out/" + comp->name + (draft ? "_draft_frames" : "_frames");
+        std::string dir = framesDirArg ? std::string(framesDirArg) : "out/" + comp->name + (draft ? "_draft_frames" : "_frames");
         std::filesystem::create_directories(dir);
         // Remove only generated numbered frames, never unrelated directory contents.
         if (!child) for (const auto& entry : std::filesystem::directory_iterator(dir)){

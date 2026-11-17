@@ -242,6 +242,12 @@ void second(int t) { }
         for frame in range(4):
             self.assertEqual((self.cwd / f"f{frame}.png").read_bytes(),
                              (self.cwd / f"out/fixture_frames/f{frame:05}.png").read_bytes())
+        # --frames-dir moves the sequence (the workers' frames too) and leaves the default alone.
+        self.run_cli("render", "fixture", "--script", self.path, "--png-frames", "--jobs", 2, "--frames-dir", "elsewhere/seq")
+        for frame in range(4):
+            self.assertEqual((self.cwd / f"f{frame}.png").read_bytes(),
+                             (self.cwd / f"elsewhere/seq/f{frame:05}.png").read_bytes())
+        self.assertIn("--frames-dir", self.run_cli("help", ok=None))
         self.run_cli("still", "fixture", "--script", self.path, "--props", '{"width":80}', "--png", "props.png")
         self.assertEqual(png_size(self.cwd / "props.png"), (80, 32))
         self.path.write_text(SOURCE.replace('draw::circle(8 + 8*t, 16, 3, 0xffffff);',

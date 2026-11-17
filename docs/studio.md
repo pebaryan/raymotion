@@ -70,9 +70,12 @@ Pictures are rendered in the background on first use and cached in `out/studio/t
 - The studio does not link the renderer. Checks, stills, draft frames, the video and the live
   window are `raymotion_script` child processes, so a crashing script cannot take the editor
   down. The host is found next to the studio, then in `build/`, or set it in Settings.
-- Stills go to `out/studio/frames/` and are dropped when the script changes. The draft is the
-  host's own `render --draft --png-frames`, so it lands in `out/<name>_draft_frames/` and
-  replaces what was there.
+- Each Studio window keeps its stills, its draft and the agent's frames in its own folder,
+  `out/studio/sessions/<process id>/`, so several windows can share a workspace. Stills
+  are dropped when the script changes. The draft is the host's own
+  `render --draft --png-frames --frames-dir <that folder>`. The folder is removed when the
+  window closes, and one left behind by a crash is removed by the next Studio started in
+  that workspace.
 - The agent speaks OpenAI-style `/chat/completions` with tools, through WinHTTP on Windows (system proxy and
   certificate store, no child process, nothing written to disk, so the key stays in memory) and `curl` elsewhere.
   Any compatible server works, including local ones. Settings has **Load models**, which calls

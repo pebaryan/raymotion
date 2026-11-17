@@ -723,8 +723,10 @@ struct App {
     std::string curComp() const { return comps.empty() ? "" : comps[(size_t)std::clamp(compIdx, 0, (int)comps.size() - 1)].name; }
     CompInfo* comp() { return comps.empty() ? nullptr : &comps[(size_t)std::clamp(compIdx, 0, (int)comps.size() - 1)]; }
     int maxFrame() { CompInfo* c = comp(); return c ? std::max(0, c->frames - 1) : 0; }
-    fs::path framesDir() const { return root / "out" / "studio" / "frames"; }
-    fs::path draftDir(const std::string& name) const { return root / "out" / (name + "_draft_frames"); }
+    // This window's own folders (see sessionDir), so a second Studio on the workspace
+    // neither overwrites these frames nor deletes them when it clears its own.
+    fs::path framesDir() const { return sessionDir(root) / "stills"; }
+    fs::path draftDir(const std::string& name) const { return sessionDir(root) / "drafts" / name; }
     fs::path draftFrame(const std::string& name, int f) const {
         char b[32]; snprintf(b, sizeof b, "f%05d.png", f);
         return draftDir(name) / b;
@@ -827,7 +829,9 @@ struct App {
         async([this, s, r, script, dir, name, ver]() -> std::function<void()> {
             std::error_code ec;
             fs::remove_all(dir, ec);                               // frames of an older version
-            ProcResult p = runCapture({ findHost(s, r), "render", name, "--script", toUtf8(script), "--draft", "--png-frames" }, toUtf8(r));
+            // Relative to the workspace, where the host runs.
+            ProcResult p = runCapture({ findHost(s, r), "render", name, "--script", toUtf8(script), "--draft", "--png-frames",
+                                        "--frames-dir", toUtf8(dir.lexically_relative(r)) }, toUtf8(r));
             return [this, p, name, ver] {
                 drafting = false;
                 if (ver != cacheVer || name != draftComp) { draftReady = 0; return; }   // stale: Play renders it again
@@ -1936,6 +1940,7 @@ int main(int argc, char** argv) {
         else if (argv[i][0] != '-' && openArg.empty()) openArg = argv[i];
     }
     app.syncBuffers();
+    removeStaleSessions(app.root);           // frames left by Studio windows that have closed
     app.rescan();
 
     // Headless: `raymotion_studio --agent "prompt"` runs one agent turn and prints the events.
@@ -2010,6 +2015,7 @@ int main(int argc, char** argv) {
     if (!fresh && clicks.empty() && typed.empty() && keys.empty()) app.writeSettingsFile();   // remember what was open
     if (app.still) cui_image_destroy(app.ctx, app.still);
     cui_app_destroy(gApp);
+    { std::error_code ec; fs::remove_all(sessionDir(app.root), ec); }   // a render still running keeps what it holds open
     app.ctx = nullptr;
     gApp = nullptr;
     return 0;

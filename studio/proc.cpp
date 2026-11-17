@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <string>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -10,6 +11,7 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <cerrno>
 #endif
 
@@ -23,6 +25,45 @@ std::string exeDir() {
     std::error_code ec;
     return std::filesystem::read_symlink("/proc/self/exe", ec).parent_path().string();
 #endif
+}
+
+namespace {
+unsigned long currentPid() {
+#ifdef _WIN32
+    return (unsigned long)GetCurrentProcessId();
+#else
+    return (unsigned long)getpid();
+#endif
+}
+bool processRunning(unsigned long pid) {
+#ifdef _WIN32
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+    if (!h) return GetLastError() == ERROR_ACCESS_DENIED;   // exists, but not ours to open
+    DWORD code = 0;
+    const bool alive = GetExitCodeProcess(h, &code) && code == STILL_ACTIVE;
+    CloseHandle(h);
+    return alive;
+#else
+    return kill((pid_t)pid, 0) == 0 || errno == EPERM;
+#endif
+}
+} // namespace
+
+std::filesystem::path sessionDir(const std::filesystem::path& root) {
+    return root / "out" / "studio" / "sessions" / std::to_string(currentPid());
+}
+
+void removeStaleSessions(const std::filesystem::path& root) {
+    std::error_code ec;
+    const std::filesystem::path all = root / "out" / "studio" / "sessions";
+    for (const auto& entry : std::filesystem::directory_iterator(all, ec)) {
+        const std::string name = entry.path().filename().string();
+        if (name.empty() || name.find_first_not_of("0123456789") != std::string::npos || name.size() > 10) continue;
+        const unsigned long pid = std::stoul(name);
+        if (pid == currentPid() || processRunning(pid)) continue;
+        std::error_code rm;
+        std::filesystem::remove_all(entry.path(), rm);
+    }
 }
 
 namespace {

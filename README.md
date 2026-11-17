@@ -101,7 +101,8 @@ build/raymotion prefabs                        # list prefabs and their default 
   thread, so drawing, readback and encoding overlap. `--encoder NAME` picks any ffmpeg
   encoder (default `h264`, i.e. libx264; `h264_nvenc`/`hevc_nvenc` on NVIDIA GPUs) and
   `--preset NAME` its speed; `--crf N` maps to each encoder's own quality setting.
-  `--png-frames` writes `out/<name>_frames/fNNNNN.png` instead and needs no ffmpeg.
+  `--png-frames` writes `out/<name>_frames/fNNNNN.png` instead and needs no ffmpeg;
+  `--frames-dir DIR` puts them (and a render's working files) elsewhere.
 * **Transparent video for editors.** `--alpha` renders with a transparent background
   (whatever the composition's `background`) into ProRes 4444 with alpha,
   `out/<name>.mov`, which Premiere, Resolve and Final Cut import as a clip with
