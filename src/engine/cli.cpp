@@ -153,6 +153,9 @@ std::string formatArgs(Format f, bool alpha, int crf) {
            (alpha ? " -pix_fmt yuva420p -auto-alt-ref 0" : " -pix_fmt yuv420p");
 }
 
+// The colour description written into every encoded video (and declared on GPU YUV input).
+const char* const COLOR_TAGS = " -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv";
+
 std::string audioArgs(Format f) {
     return f == Format::ProRes ? " -c:a pcm_s16le" : f == Format::WebM ? " -c:a libopus -b:a 160k" : " -c:a aac -b:a 192k";
 }
@@ -288,13 +291,17 @@ void prepare(Comp& c, const Json& overrides, bool drawing) {
 void usage() {
     puts("usage:");
     puts("  raymotion list                                  list compositions");
-    puts("  raymotion preview <name> [--mute]               play with sound in a live window (esc quits);");
+    puts("  raymotion preview <name> [--mute] [--at FRAME]  play with sound in a live window (esc quits);");
+    puts("                        space pauses; drag the bar to seek; , and . step a frame");
+    puts("                        (shift: a second); home and end; --at opens paused there;");
     puts("                        with --script, the window reloads when the script is saved");
     puts("                        (--no-reload turns that off)");
     puts("  raymotion render  <name> [--crf N] [--encoder NAME] [--preset NAME]");
     puts("                        [--draft] [--mute] [--png-frames]");
     puts("                        render every frame via raylib, pipe to ffmpeg -> mp4");
     puts("                        --png-frames writes a PNG sequence instead (no ffmpeg)");
+    puts("                        --frames-dir DIR  where --png-frames (and the working");
+    puts("                          files of a render) go; default out/<name>_frames");
     puts("                        --encoder NAME any ffmpeg encoder (default h264 = libx264;");
     puts("                          h264_nvenc, hevc_nvenc, h264_qsv, h264_amf are hardware)");
     puts("                        --preset NAME encoder speed: ultrafast..veryslow for x264,");
@@ -306,6 +313,8 @@ void usage() {
     puts("                          --png-frames; prores is the default with --alpha)");
     puts("                        --jobs N render N chunks of frames in parallel processes,");
     puts("                          then join them without re-encoding");
+    puts("                        --cpu-yuv send RGBA frames and let ffmpeg convert them; by");
+    puts("                          default 4:2:0 output is converted to YUV on the GPU");
     puts("  raymotion still   <name> --at FRAME [--png PATH] write one PNG frame");
     puts("                        --alpha  transparent background (an RGBA PNG)");
     puts("  raymotion props   <name>                        print the default props (JSON)");
@@ -341,8 +350,9 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
     const std::string want = argv[2];
 
     const char* crfArg = nullptr, *ffArg = nullptr, *atArg = nullptr, *pngArg = nullptr, *ssArg = nullptr, *propsArg = nullptr,
-               *encoderArg = nullptr, *presetArg = nullptr, *formatArg = nullptr, *rangeArg = nullptr, *chunkArg = nullptr;
-    bool draft = false, noMusic = false, pngFrames = false, alpha = false, noReload = false;
+               *encoderArg = nullptr, *presetArg = nullptr, *formatArg = nullptr, *rangeArg = nullptr, *chunkArg = nullptr,
+               *framesDirArg = nullptr;
+    bool draft = false, noMusic = false, pngFrames = false, alpha = false, noReload = false, cpuYuv = false;
     int jobs = 1;
     std::vector<std::string> childArgs = { "render", argv[2] };   // what a --jobs child is given
     std::vector<std::string> watched;                             // files a preview reloads on: scripts, a props file
@@ -362,6 +372,8 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
         else if (!strcmp(argv[i], "--png-frames")) pngFrames = true;
         else if (!strcmp(argv[i], "--format") && i+1 < argc) formatArg = argv[++i];
         else if (!strcmp(argv[i], "--alpha")) alpha = true;
+        else if (!strcmp(argv[i], "--cpu-yuv")) cpuYuv = true;
+        else if (!strcmp(argv[i], "--frames-dir") && i+1 < argc) framesDirArg = argv[++i];
         else if (!strcmp(argv[i], "--jobs") && i+1 < argc) { jobs = atoi(argv[++i]); continue; }
         else if (!strcmp(argv[i], "--no-reload")) { noReload = true; continue; }
         else if (!strcmp(argv[i], "--range") && i+1 < argc) { rangeArg = argv[++i]; continue; }   // internal: a --jobs child
@@ -439,6 +451,15 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
             fprintf(stderr, "no audio device: previewing without sound\n");
         double playhead = 0, speed = 1.0;
         bool paused = false;
+        // The seek bar: drag it, or step with , and . (shift: one second), Home and End.
+        // It shows while paused, while dragging and for two seconds after the pointer moves.
+        Scrubber bar;
+        bool dragging = false, barShown = false;
+        double pointerMovedAt = -10;
+        if (atArg) {                                         // --at FRAME: open paused on that frame
+            playhead = std::clamp(atoi(atArg), 0, comp->duration - 1);
+            paused = true;
+        }
         // Live reload: when a script (or a --props @file) is saved, the composition is
         // loaded again in this window and the playhead stays where it is. A script that
         // does not compile, or throws while drawing, is reported in the window and on
@@ -531,6 +552,7 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
             char hud[128]; snprintf(hud, sizeof hud, "[%04d/%04d] x%.2f [%s]%s",
                 frame, comp->duration, speed, paused ? "PAUSED" : "PLAY", GetTime() - reloadedAt < 1.5 ? "  RELOADED" : "");
             DrawText(hud, 12, 12, 18, Color{ (unsigned char)240, (unsigned char)240, (unsigned char)255, (unsigned char)180 });
+            int bandH = 0;
             if (!problem.empty()) {
                 // The message on a band along the bottom, wrapped to the window, four lines at most.
                 const int size = 16, perLine = std::max(20, (GetScreenWidth() - 24) / 9);
@@ -542,10 +564,29 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
                     lines.push_back(problem.substr(at, end - at));
                     at = end + (end < problem.size() && problem[end] == '\n' ? 1 : 0);
                 }
-                const int bandH = (int)lines.size() * (size + 4) + 16, top = GetScreenHeight() - bandH;
+                bandH = (int)lines.size() * (size + 4) + 16;
+                const int top = GetScreenHeight() - bandH;
                 DrawRectangle(0, top, GetScreenWidth(), bandH, Color{ (unsigned char)120, (unsigned char)24, (unsigned char)24, (unsigned char)230 });
                 for (size_t i = 0; i < lines.size(); i++)
                     DrawText(lines[i].c_str(), 12, top + 8 + (int)i * (size + 4), size, Color{ (unsigned char)255, (unsigned char)236, (unsigned char)230, (unsigned char)255 });
+            }
+            bar = scrubber(GetScreenWidth(), GetScreenHeight(), bandH);
+            const Vector2 pointer = GetMousePosition(), moved = GetMouseDelta();
+            if (moved.x != 0 || moved.y != 0) pointerMovedAt = GetTime();
+            barShown = paused || dragging || GetTime() - pointerMovedAt < 2.0;
+            if (barShown) {
+                const Color ink{ (unsigned char)240, (unsigned char)240, (unsigned char)255, (unsigned char)235 };
+                DrawRectangleRec(bar.strip, Color{ (unsigned char)0, (unsigned char)0, (unsigned char)0, (unsigned char)160 });
+                const std::string when = timecode(frame, comp->fps) + " / " + timecode(comp->duration, comp->fps);
+                DrawText(when.c_str(), (int)bar.track.x, (int)bar.strip.y + 7, 16, ink);
+                DrawRectangleRec(bar.track, Color{ (unsigned char)255, (unsigned char)255, (unsigned char)255, (unsigned char)60 });
+                const float x = scrubX(bar.track, frame, comp->duration);
+                DrawRectangleRec({ bar.track.x, bar.track.y, x - bar.track.x, bar.track.height }, ink);
+                for (const auto& root : comp->roots)         // where each top-level scene starts
+                    if (root->start > 0 && root->start < comp->duration)
+                        DrawRectangleRec({ scrubX(bar.track, root->start, comp->duration) - 1, bar.track.y - 4, 2, bar.track.height + 8 },
+                                         Color{ (unsigned char)255, (unsigned char)255, (unsigned char)255, (unsigned char)150 });
+                DrawCircleV({ x, bar.track.y + bar.track.height / 2 }, dragging ? 9.f : 7.f, ink);
             }
             if (testSeconds && !testShot.empty() && GetTime() > atof(testSeconds) - 0.4) {   // tests: what the window showed
                 rlDrawRenderBatchActive();
@@ -558,15 +599,28 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
             if (IsKeyDown(KEY_RIGHT)) speed = 2.0; else if (IsKeyDown(KEY_LEFT)) speed = 0.25; else speed = 1.0;
             int kp = GetKeyPressed();
             if (kp == KEY_SPACE) paused = !paused;   // rare spurious repeats; acceptable for a preview
+            auto seekTo = [&](int to) {
+                playhead = std::clamp(to, 0, comp->duration - 1);
+                if (audio.active()) audio.seek(playhead / comp->fps);
+            };
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && barShown && CheckCollisionPointRec(pointer, bar.strip)) dragging = true;
+            if (dragging && !IsMouseButtonDown(MOUSE_BUTTON_LEFT)) dragging = false;
+            if (dragging) seekTo(scrubFrame(bar.track, pointer.x, comp->duration));
+            auto pressed = [](int key) { return IsKeyPressed(key) || IsKeyPressedRepeat(key); };
+            const int stride = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT) ? comp->fps : 1;
+            if (pressed(KEY_PERIOD)) { paused = true; seekTo(frame + stride); }
+            if (pressed(KEY_COMMA)) { paused = true; seekTo(frame - stride); }
+            if (IsKeyPressed(KEY_HOME)) seekTo(0);
+            if (IsKeyPressed(KEY_END)) { paused = true; seekTo(comp->duration - 1); }
             // Sound plays at normal speed only; then the audio clock drives the playhead.
-            bool audible = audio.active() && !paused && speed == 1.0;
+            bool audible = audio.active() && !paused && !dragging && speed == 1.0;
             if (audible) {
                 if (!audio.playing()) audio.seek(std::fmod(playhead, (double)comp->duration) / comp->fps);
                 audio.play(true);
                 playhead = audio.seconds() * comp->fps;
             } else {
                 audio.play(false);
-                if (!paused) playhead += comp->fps * GetFrameTime() * speed;
+                if (!paused && !dragging) playhead += comp->fps * GetFrameTime() * speed;
             }
         }
         audio.stop();
@@ -583,7 +637,7 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
         }
         const bool child = rangeArg != nullptr;
         jobs = std::max(1, std::min(jobs, comp->duration / 15));   // a chunk of at least half a second or so
-        std::string dir = "out/" + comp->name + (draft ? "_draft_frames" : "_frames");
+        std::string dir = framesDirArg ? std::string(framesDirArg) : "out/" + comp->name + (draft ? "_draft_frames" : "_frames");
         std::filesystem::create_directories(dir);
         // Remove only generated numbered frames, never unrelated directory contents.
         if (!child) for (const auto& entry : std::filesystem::directory_iterator(dir)){
@@ -637,18 +691,59 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
             return 0;
         }
 
+        if (child) SetConfigFlags(FLAG_WINDOW_HIDDEN);   // one window for a --jobs render, not one per chunk
+        InitWindow(W, H, ("raymotion render - " + comp->name).c_str());
+        Canvas canvas;
+        if (!canvas.load(comp->w,comp->h,canvasScale(*comp,ssArg,draft))){ CloseWindow(); return 2; }
+        // Drafts are downscaled on the GPU: an exact 2:1 bilinear draw is a 2x2 box filter.
+        RenderTexture scaled{};
+        const bool resize = W != comp->w || H != comp->h;
+        FrameStream stream;
+        // An 8-bit 4:2:0 encoder gets its frames as yuv420p, converted on the GPU: less than
+        // half the bytes to read back and pipe, and no conversion in the encoder process,
+        // which matters most when --jobs runs several of them. Alpha and ProRes 4444 keep
+        // RGBA, as does a GPU that cannot build the conversion pass.
+        bool yuv = !pngFrames && !cpuYuv && !alpha && format != Format::ProRes && W % 2 == 0 && H % 2 == 0;
         FILE* pipe = nullptr;
         if (!pngFrames) {
+            if (resize) {
+                scaled = LoadRenderTexture(W, H);
+                SetTextureFilter(canvas.output().texture, TEXTURE_FILTER_BILINEAR);
+            }
+            // The sink runs on the writer thread, so making alpha straight costs no drawing
+            // time. It is given the pipe below, once the frame format is known and before
+            // any frame is pushed.
+            auto out = std::make_shared<FILE*>(nullptr);
+            std::vector<unsigned char> straight;
+            auto sink = [out, alpha, straight](const unsigned char* pixels, size_t bytes) mutable {
+                if (!alpha) return fwrite(pixels, 1, bytes, *out) == bytes;
+                straight.assign(pixels, pixels + bytes);
+                unpremultiply(straight.data(), bytes / 4);
+                return fwrite(straight.data(), 1, bytes, *out) == bytes;
+            };
+            if (yuv && !stream.open(W, H, sink, 3, FrameStream::Pixels::Yuv420)) {
+                fprintf(stderr, "note: GPU YUV conversion is not available here; sending RGBA frames\n");
+                yuv = false;
+            }
+            if (!yuv && !stream.open(W, H, sink)) { fprintf(stderr, "cannot start frame readback\n"); closeCanvas(canvas); return 3; }
             int crf = crfArg ? atoi(crfArg) : 19;
+            // Every output is BT.709 (the HD standard; sRGB shares its primaries) in limited
+            // range, and says so in its tags, so players do not guess BT.601 from an untagged
+            // stream. GPU YUV frames already are that; RGBA frames are converted to it here.
             std::string cmd = quote(ff) + " -y -hide_banner -loglevel warning"
-                " -f rawvideo -pix_fmt rgba -s " + std::to_string(W) + "x" + std::to_string(H) +
-                " -framerate " + std::to_string(comp->fps) + " -i -";
+                " -f rawvideo -pix_fmt " + (yuv ? "yuv420p" : "rgba") + " -s " + std::to_string(W) + "x" + std::to_string(H) +
+                " -framerate " + std::to_string(comp->fps) + (yuv ? std::string(COLOR_TAGS) : std::string()) + " -i -";
             if (!wav.empty()) cmd += " -i " + quote(wav);
             cmd += " -frames:v " + std::to_string(last - first);
-            cmd += " -vf vflip";            // frames arrive bottom-up, straight from GL
+            // RGBA frames arrive bottom-up, straight from GL. The frames that leave a filter
+            // carry their own colour properties, which win over the output options, so they
+            // are set here too.
+            if (!yuv) cmd += " -vf vflip,scale=out_color_matrix=bt709:out_range=tv,"
+                             "setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv";
             if (format == Format::Mp4) {
                 cmd += videoCodecArgs(encoderArg ? encoderArg : "h264", presetArg, crf) + " -movflags +faststart";
             } else cmd += formatArgs(format, alpha, crf);
+            cmd += COLOR_TAGS;
             if (!wav.empty()) cmd += audioArgs(format) + " -shortest";
             cmd += " " + quote(mp4);
             if (getenv("RAYMOTION_DEBUG_CMD")) printf("[CMD] %s\n", cmd.c_str());
@@ -657,30 +752,8 @@ int runMain(int argc, const char** argv, const RegisterFn& registerAll) {
 #else
             pipe = popen(shellLine(cmd).c_str(), "w");    // POSIX pipes are always binary
 #endif
-            if (!pipe) { fprintf(stderr, "cannot start ffmpeg: %s\n", ff.c_str()); return 3; }
-        }
-
-        if (child) SetConfigFlags(FLAG_WINDOW_HIDDEN);   // one window for a --jobs render, not one per chunk
-        InitWindow(W, H, ("raymotion render - " + comp->name).c_str());
-        Canvas canvas;
-        if (!canvas.load(comp->w,comp->h,canvasScale(*comp,ssArg,draft))){ if (pipe) pclose(pipe); CloseWindow(); return 2; }
-        // Drafts are downscaled on the GPU: an exact 2:1 bilinear draw is a 2x2 box filter.
-        RenderTexture scaled{};
-        const bool resize = W != comp->w || H != comp->h;
-        FrameStream stream;
-        if (pipe) {
-            if (resize) {
-                scaled = LoadRenderTexture(W, H);
-                SetTextureFilter(canvas.output().texture, TEXTURE_FILTER_BILINEAR);
-            }
-            // Runs on the writer thread, so making alpha straight costs no drawing time.
-            std::vector<unsigned char> straight;
-            if (!stream.open(W, H, [pipe, alpha, straight](const unsigned char* rgba, size_t bytes) mutable {
-                    if (!alpha) return fwrite(rgba, 1, bytes, pipe) == bytes;
-                    straight.assign(rgba, rgba + bytes);
-                    unpremultiply(straight.data(), bytes / 4);
-                    return fwrite(straight.data(), 1, bytes, pipe) == bytes;
-                })) { fprintf(stderr, "cannot start frame readback\n"); pclose(pipe); closeCanvas(canvas); return 3; }
+            if (!pipe) { fprintf(stderr, "cannot start ffmpeg: %s\n", ff.c_str()); stream.close(); closeCanvas(canvas); return 3; }
+            *out = pipe;
         }
         double t0 = GetTime();
         bool ok = true;

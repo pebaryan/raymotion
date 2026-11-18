@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -23,6 +24,7 @@
 #include <regex>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -55,13 +57,18 @@ bool readText(const fs::path& p, std::string& out) {
     out = ss.str();
     return true;
 }
-bool writeText(const fs::path& p, const std::string& s) {
+// On failure, `why` (when given) gets the system's reason.
+bool writeText(const fs::path& p, const std::string& s, std::string* why = nullptr) {
     std::error_code ec;
     fs::create_directories(p.parent_path(), ec);
+    if (ec) { if (why) *why = "cannot create the folder: " + ec.message(); return false; }
+    errno = 0;
     std::ofstream f(p, std::ios::binary);
-    if (!f) return false;
+    if (!f) { if (why) *why = errno ? std::generic_category().message(errno) : "cannot open the file"; return false; }
     f << s;
-    return (bool)f;
+    f.close();
+    if (!f) { if (why) *why = "write failed (disk full?)"; return false; }
+    return true;
 }
 std::string lower(std::string s) {
     for (auto& c : s) c = (char)tolower((unsigned char)c);
@@ -104,11 +111,27 @@ std::string seconds(int frame, int fps) {
     return b;
 }
 
+#ifdef _WIN32
+// A program started at low integrity (an exe in a folder labelled Low, as some sandboxes label a
+// workspace) cannot write to AppData\Roaming. AppData\LocalLow is the folder Windows gives it.
+fs::path lowSettingsPath() {
+    const char* local = std::getenv("LOCALAPPDATA");
+    return local ? fs::path(local).parent_path() / "LocalLow" / "raymotion-studio" / "settings.json" : fs::path();
+}
+#endif
+
+// Roaming, unless only a LocalLow copy exists (writeSettingsFile falls back to LocalLow).
 fs::path settingsPath() {
     const char* base = nullptr;
 #ifdef _WIN32
     base = std::getenv("APPDATA");
-    if (base) return fs::path(base) / "raymotion-studio" / "settings.json";
+    if (base) {
+        fs::path roaming = fs::path(base) / "raymotion-studio" / "settings.json";
+        fs::path low = lowSettingsPath();
+        std::error_code ec;
+        if (!fs::exists(roaming, ec) && !low.empty() && fs::exists(low, ec)) return low;
+        return roaming;
+    }
 #endif
     base = std::getenv("XDG_CONFIG_HOME");
     if (base) return fs::path(base) / "raymotion-studio" / "settings.json";
@@ -259,6 +282,7 @@ struct App {
     bool showSettings = false, showPalette = false, showNewScript = false, showNewBrief = false, showConfirm = false;
     std::function<void()> afterConfirm;      // what the unsaved-changes dialog was guarding
     char newName[64] = "";
+    int selectName = 0;                      // counts down to a Ctrl+A in the name field, so typing replaces a suggested name
     int newFrom = 0;                         // 0 blank, 1 a copy of the open script
     std::string newError;
 
@@ -390,6 +414,7 @@ struct App {
         });
     }
     Json session;                            // what was open last time
+    Spawned live;                            // the live window F5 started (closed when the Studio quits)
     void loadSettings() {
         std::string text;
         if (readText(settingsPath(), text)) {
@@ -418,7 +443,7 @@ struct App {
         stepsF = (float)set.maxSteps;
     }
     // Writes the applied settings (not what is being typed in the dialog) and the session.
-    bool writeSettingsFile() {
+    bool writeSettingsFile(std::string* why = nullptr) {
         Json j;
         j.set("baseUrl", set.baseUrl); j.set("apiKey", set.apiKey); j.set("model", set.model);
         j.set("host", set.host); j.set("maxSteps", set.maxSteps); j.set("dark", set.darkTheme);
@@ -433,7 +458,13 @@ struct App {
         if (ctx && cui_dock_save(ctx, "main", layout, sizeof layout) > 0 && strlen(layout) + 1 < sizeof layout) s.set("layout", std::string(layout));
         else if (!savedLayout.empty()) s.set("layout", savedLayout);
         j.set("session", s);
-        return writeText(settingsPath(), j.dump());
+        std::string text = j.dump();
+        if (writeText(settingsPath(), text, why)) return true;
+#ifdef _WIN32
+        fs::path low = lowSettingsPath();
+        if (!low.empty() && low != settingsPath() && writeText(low, text)) return true;
+#endif
+        return false;
     }
     void saveSettings() {
         // The folder field may have been typed into without pressing Enter.
@@ -444,8 +475,9 @@ struct App {
         }
         set.baseUrl = urlBuf; set.apiKey = keyBuf; set.model = modelBuf; set.host = hostBuf;
         set.maxSteps = (int)stepsF; set.darkTheme = themeIdx == 1;
-        settingsNoteError = !writeSettingsFile();
-        settingsNote = settingsNoteError ? "Could not write " + toUtf8(settingsPath()) : "Saved";
+        std::string why;
+        settingsNoteError = !writeSettingsFile(&why);
+        settingsNote = settingsNoteError ? "Could not write " + toUtf8(settingsPath()) + " (" + why + ")" : "Saved";
     }
     void restoreSession() {
         savedLayout = session.str("layout", "");
@@ -715,14 +747,17 @@ struct App {
         newFrom = copyOpen && !codePath.empty() ? 1 : 0;
         copyTo(newName, sizeof newName, newFrom ? toUtf8(codePath.stem()) + "-copy" : "");
         newError.clear(); showNewScript = true;
+        if (newName[0]) selectName = 4;
     }
 
     // ---- check / render ----------------------------------------------------------
     std::string curComp() const { return comps.empty() ? "" : comps[(size_t)std::clamp(compIdx, 0, (int)comps.size() - 1)].name; }
     CompInfo* comp() { return comps.empty() ? nullptr : &comps[(size_t)std::clamp(compIdx, 0, (int)comps.size() - 1)]; }
     int maxFrame() { CompInfo* c = comp(); return c ? std::max(0, c->frames - 1) : 0; }
-    fs::path framesDir() const { return root / "out" / "studio" / "frames"; }
-    fs::path draftDir(const std::string& name) const { return root / "out" / (name + "_draft_frames"); }
+    // This window's own folders (see sessionDir), so a second Studio on the workspace
+    // neither overwrites these frames nor deletes them when it clears its own.
+    fs::path framesDir() const { return sessionDir(root) / "stills"; }
+    fs::path draftDir(const std::string& name) const { return sessionDir(root) / "drafts" / name; }
     fs::path draftFrame(const std::string& name, int f) const {
         char b[32]; snprintf(b, sizeof b, "f%05d.png", f);
         return draftDir(name) / b;
@@ -825,7 +860,9 @@ struct App {
         async([this, s, r, script, dir, name, ver]() -> std::function<void()> {
             std::error_code ec;
             fs::remove_all(dir, ec);                               // frames of an older version
-            ProcResult p = runCapture({ findHost(s, r), "render", name, "--script", toUtf8(script), "--draft", "--png-frames" }, toUtf8(r));
+            // Relative to the workspace, where the host runs.
+            ProcResult p = runCapture({ findHost(s, r), "render", name, "--script", toUtf8(script), "--draft", "--png-frames",
+                                        "--frames-dir", toUtf8(dir.lexically_relative(r)) }, toUtf8(r));
             return [this, p, name, ver] {
                 drafting = false;
                 if (ver != cacheVer || name != draftComp) { draftReady = 0; return; }   // stale: Play renders it again
@@ -866,8 +903,10 @@ struct App {
         if (codeDirty) { saveCode(); check(); }
         std::vector<std::string> a = { findHost(hostSettings(), root), "preview" };
         if (!curComp().empty()) a.push_back(curComp());
-        a.insert(a.end(), { "--script", toUtf8(codePath) });
-        if (!spawnDetached(a, toUtf8(root))) toast("Could not start the live window", CUI_TONE_DANGER, "Is raymotion_script built? See Settings.");
+        a.insert(a.end(), { "--script", toUtf8(codePath), "--at", std::to_string((int)frame) });
+        live.stop();                         // one live window: the new one replaces it, at this frame
+        live = spawn(a, toUtf8(root));
+        if (!live) toast("Could not start the live window", CUI_TONE_DANGER, "Is raymotion_script built? See Settings.");
     }
     void exportVideo() {
         if (codePath.empty() || exporting || !checkOk) return;
@@ -1581,9 +1620,14 @@ void dialogs(cui_ctx* ui, App& a) {
         cui_dialog_opts dopt{}; dopt.width = 580; dopt.description = "Agent endpoint, workspace and appearance.";
         if (cui_dialog_begin(ui, "Settings", &a.showSettings, &dopt)) {
             settingsForm(ui, a);
+            // An error is long (it holds the path and the reason), so it gets its own line above the buttons.
+            if (a.settingsNoteError && !a.settingsNote.empty()) {
+                cui_text_opts nt{}; nt.color = CUI_COLOR_DANGER;
+                cui_text_ex(ui, a.settingsNote.c_str(), &nt);
+            }
             cui_dialog_footer_begin(ui);
-            if (!a.settingsNote.empty()) {
-                cui_text_opts nt{}; nt.color = a.settingsNoteError ? CUI_COLOR_DANGER : CUI_COLOR_TEXT_MUTED;
+            if (!a.settingsNoteError && !a.settingsNote.empty()) {
+                cui_text_opts nt{}; nt.color = CUI_COLOR_TEXT_MUTED;
                 cui_text_ex(ui, a.settingsNote.c_str(), &nt);
             }
             cui_spacer(ui);
@@ -1888,8 +1932,30 @@ int main(int argc, char** argv) {
     app.loadSettings();
     std::string openArg;
     bool hidden = false, fresh = false;
-    struct Click { int at; float x, y; };
-    std::vector<Click> clicks;               // --click FRAME:X:Y, for screenshots of states behind a click
+    // Scripted input for screenshots of states behind an interaction; none of it is saved to the session.
+    struct Click { int at; float x, y; bool twice; };
+    std::vector<Click> clicks;               // --click FRAME:X:Y, --dclick FRAME:X:Y
+    struct Typed { int at; std::string text; };
+    std::vector<Typed> typed;                // --type FRAME:text
+    struct Key { int at; cui_key key; int mods; };
+    std::vector<Key> keys;                   // --press FRAME:[ctrl+][shift+][alt+]name, e.g. 120:ctrl+s
+    auto parseKey = [](std::string s, Key& k) {
+        static const std::pair<const char*, cui_key> names[] = {
+            { "tab", CUI_KEY_TAB }, { "enter", CUI_KEY_ENTER }, { "escape", CUI_KEY_ESCAPE }, { "backspace", CUI_KEY_BACKSPACE },
+            { "delete", CUI_KEY_DELETE }, { "space", CUI_KEY_SPACE }, { "left", CUI_KEY_LEFT }, { "right", CUI_KEY_RIGHT },
+            { "up", CUI_KEY_UP }, { "down", CUI_KEY_DOWN }, { "home", CUI_KEY_HOME }, { "end", CUI_KEY_END },
+            { "pageup", CUI_KEY_PAGE_UP }, { "pagedown", CUI_KEY_PAGE_DOWN }, { "comma", CUI_KEY_COMMA } };
+        k.mods = 0;
+        for (size_t p; (p = s.find('+')) != std::string::npos; s.erase(0, p + 1)) {
+            std::string m = s.substr(0, p);
+            if (m == "ctrl") k.mods |= CUI_MOD_PRIMARY; else if (m == "shift") k.mods |= CUI_MOD_SHIFT; else if (m == "alt") k.mods |= CUI_MOD_ALT; else return false;
+        }
+        for (const auto& nm : names) if (s == nm.first) { k.key = nm.second; return true; }
+        if (s.size() == 1 && s[0] >= 'a' && s[0] <= 'z') { k.key = (cui_key)(CUI_KEY_A + (s[0] - 'a')); return true; }
+        if (s.size() == 1 && s[0] >= '0' && s[0] <= '9') { k.key = (cui_key)(CUI_KEY_0 + (s[0] - '0')); return true; }
+        if (s.size() >= 2 && s[0] == 'f') { int f = atoi(s.c_str() + 1); if (f >= 1 && f <= 12) { k.key = (cui_key)(CUI_KEY_F1 + f - 1); return true; } }
+        return false;
+    };
     for (int i = 1; i < argc; ++i) {
         bool more = i + 1 < argc;
         if (!strcmp(argv[i], "--workspace") && more) app.root = fs::weakly_canonical(fromUtf8(argv[++i]));
@@ -1901,9 +1967,18 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--hidden")) hidden = true;
         else if (!strcmp(argv[i], "--fresh")) fresh = true;          // ignore the last session
         else if (!strcmp(argv[i], "--click") && more) { Click c{}; if (sscanf(argv[++i], "%d:%f:%f", &c.at, &c.x, &c.y) == 3) clicks.push_back(c); }
+        else if (!strcmp(argv[i], "--dclick") && more) { Click c{}; c.twice = true; if (sscanf(argv[++i], "%d:%f:%f", &c.at, &c.x, &c.y) == 3) clicks.push_back(c); }
+        else if ((!strcmp(argv[i], "--type") || !strcmp(argv[i], "--press")) && more) {
+            bool press = argv[i][2] == 'p';
+            const char* v = argv[++i]; const char* colon = strchr(v, ':');
+            if (!colon) { fprintf(stderr, "%s wants FRAME:value\n", argv[i - 1]); return 1; }
+            if (!press) typed.push_back({ atoi(v), colon + 1 });
+            else { Key k{}; k.at = atoi(v); if (!parseKey(colon + 1, k)) { fprintf(stderr, "unknown key %s\n", colon + 1); return 1; } keys.push_back(k); }
+        }
         else if (argv[i][0] != '-' && openArg.empty()) openArg = argv[i];
     }
     app.syncBuffers();
+    removeStaleSessions(app.root);           // frames left by Studio windows that have closed
     app.rescan();
 
     // Headless: `raymotion_studio --agent "prompt"` runs one agent turn and prints the events.
@@ -1955,17 +2030,31 @@ int main(int argc, char** argv) {
     while (true) {
         if (!cui_app_frame(gApp)) break;
         cui_ctx* ui = cui_app_ui(gApp);
+        if (app.selectName > 0) {            // as input, because CUI has no call that selects a field's text
+            --app.selectName;
+            if (app.selectName == 1) cui_input_key(ui, CUI_KEY_A, true, CUI_MOD_PRIMARY);
+            if (app.selectName == 0) { cui_input_key(ui, CUI_KEY_A, false, 0); cui_input_key(ui, CUI_KEY_NONE, false, 0); }
+        }
         for (const auto& c : clicks) {       // after the frame began, so this frame sees them
             if (n == c.at) cui_input_mouse_move(ui, c.x, c.y);
             if (n == c.at + 2) cui_input_mouse_button(ui, CUI_MOUSE_LEFT, true);
             if (n == c.at + 4) cui_input_mouse_button(ui, CUI_MOUSE_LEFT, false);
+            if (c.twice && n == c.at + 6) cui_input_mouse_button(ui, CUI_MOUSE_LEFT, true);
+            if (c.twice && n == c.at + 8) cui_input_mouse_button(ui, CUI_MOUSE_LEFT, false);
+        }
+        for (const auto& t : typed) if (n == t.at) cui_input_text(ui, t.text.c_str());
+        for (const auto& k : keys) {
+            if (n == k.at) cui_input_key(ui, k.key, true, k.mods);
+            if (n == k.at + 1) { cui_input_key(ui, k.key, false, 0); cui_input_key(ui, CUI_KEY_NONE, false, 0); }   // the second call clears the held modifiers
         }
         frame(ui, &app);
         ++n;
     }
-    if (!fresh && clicks.empty()) app.writeSettingsFile();   // remember what was open
+    if (!fresh && clicks.empty() && typed.empty() && keys.empty()) app.writeSettingsFile();   // remember what was open
+    app.live.stop();                         // the live window belongs to this Studio window
     if (app.still) cui_image_destroy(app.ctx, app.still);
     cui_app_destroy(gApp);
+    { std::error_code ec; fs::remove_all(sessionDir(app.root), ec); }   // a render still running keeps what it holds open
     app.ctx = nullptr;
     gApp = nullptr;
     return 0;

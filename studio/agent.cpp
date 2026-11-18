@@ -312,7 +312,8 @@ void Agent::run(Settings s, fs::path root) {
                         } else if (name == "render_still") {
                             if (!resolve(root, args.str("script", ""), false, p, err)) { ok = false; out = err; }
                             else {
-                                fs::path png = root / "out" / "studio" / "preview.png";
+                                fs::path png = sessionDir(root) / "agent.png";   // this window's own; Studio copies it into its stills
+                                std::error_code mk; fs::create_directories(png.parent_path(), mk);
                                 int frame = args.integer("frame", 0);
                                 HostResult h = hostStill(s, root, toUtf8(p), args.str("composition", ""), frame, toUtf8(png));
                                 ok = h.ok; out = clip(h.output);

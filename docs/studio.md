@@ -32,7 +32,7 @@ The Studio reopens the script, brief, frame and panel layout you had last time.
 | Panel | What it does |
 | --- | --- |
 | Code | The gallery, then the editor. Below it: Problems and the host's raw Output. The grid button (Ctrl E) goes back to the gallery. A shipped example shows a "Save a copy" banner, so the repository's copy stays as it is. |
-| Preview | The frame under the scrubber, rendered at full size whenever the script is saved or the frame changes (switch **Auto** off to render only on request, Ctrl R). Zoom with the wheel; double-click fits. Play uses a silent half-size draft of the whole film, rendered once per save; while it renders, playback and scrubbing use the frames that exist. The arrow button opens the normal raymotion window, with sound (F5). |
+| Preview | The frame under the scrubber, rendered at full size whenever the script is saved or the frame changes (switch **Auto** off to render only on request, Ctrl R). Zoom with the wheel; double-click fits. Play uses a silent half-size draft of the whole film, rendered once per save; while it renders, playback and scrubbing use the frames that exist. The arrow button opens the normal raymotion window, with sound (F5), paused on the scrubber's frame. There is one live window: F5 again closes it and opens a new one at the current frame. Quitting the Studio closes it. |
 | Brief | `docs/*-brief.md`: read or edit. New copies `skills/raymotion/templates/BRIEF.md`. |
 | Assets | A filterable list of `assets/`, image previews, copy the path as scripts write it, "Mention in chat". |
 | Chat | The agent. Tool calls show as rows you can open. Its suggestions follow what is open (for example "Fix the problems" when the script does not compile). |
@@ -50,7 +50,10 @@ check result (click it to see the problems) and the agent's model.
 - **View**: Command palette (Ctrl K: every command, script and brief), panels, Reset layout, theme.
 
 Settings is a dialog: base URL, API key, model with **Load models**, workspace, renderer
-path, theme. It says whether the renderer was found.
+path, theme. It says whether the renderer was found. It is saved to
+`%APPDATA%\raymotion-studio\settings.json` (`~/.config/raymotion-studio/` elsewhere). An exe in a
+folder labelled Low integrity (some sandboxes label the workspace) cannot write there, so the
+Studio then uses `%USERPROFILE%\AppData\LocalLow\raymotion-studio\` instead. A failed save says why.
 
 ## Example headers
 
@@ -70,9 +73,12 @@ Pictures are rendered in the background on first use and cached in `out/studio/t
 - The studio does not link the renderer. Checks, stills, draft frames, the video and the live
   window are `raymotion_script` child processes, so a crashing script cannot take the editor
   down. The host is found next to the studio, then in `build/`, or set it in Settings.
-- Stills go to `out/studio/frames/` and are dropped when the script changes. The draft is the
-  host's own `render --draft --png-frames`, so it lands in `out/<name>_draft_frames/` and
-  replaces what was there.
+- Each Studio window keeps its stills, its draft and the agent's frames in its own folder,
+  `out/studio/sessions/<process id>/`, so several windows can share a workspace. Stills
+  are dropped when the script changes. The draft is the host's own
+  `render --draft --png-frames --frames-dir <that folder>`. The folder is removed when the
+  window closes, and one left behind by a crash is removed by the next Studio started in
+  that workspace.
 - The agent speaks OpenAI-style `/chat/completions` with tools, through WinHTTP on Windows (system proxy and
   certificate store, no child process, nothing written to disk, so the key stays in memory) and `curl` elsewhere.
   Any compatible server works, including local ones. Settings has **Load models**, which calls
@@ -101,5 +107,6 @@ ignores and does not write the session, and `--click FRAME:X:Y` (repeatable) cli
 - The API key is plain text in the settings file. Prefer `OPENAI_API_KEY`.
 - Stop takes effect between requests and tool calls; an in-flight HTTP call finishes first.
 - Replies are not streamed; the typing indicator shows until the full reply arrives.
-- Windows only so far: the POSIX branches (process code, `curl` fallback) are unbuilt. The HTTPS path is untested against a real server (only http://127.0.0.1 mocks).
+- Windows only so far: the POSIX branches (process code, `curl` fallback) are unbuilt. The agent has been run over HTTPS (TLS 1.3) against one real
+  OpenAI-compatible server; other servers are untested.
 - `CUI_RENDERER=software` forces CUI's CPU renderer if OpenGL misbehaves.

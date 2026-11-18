@@ -37,6 +37,13 @@ Relative paths resolve from the current working directory, including worker proc
 Each invocation reads the current source. An open `preview` window reloads when a script
 (or a `--props @file.json`) is saved: the composition is loaded again in the same window
 and the playhead stays where it is, also when the size, duration or soundtrack changed.
+
+The window has a seek bar along its bottom edge, shown while paused and for two seconds
+after the pointer moves: drag it to seek, with a tick where each top-level scene starts.
+`Space` pauses, `,` and `.` step one frame (with Shift, one second), `Home` and `End` jump
+to the first and last frame, and holding `Left` or `Right` plays at quarter or double
+speed. `--at FRAME` opens the window paused on that frame.
+
 A script that does not compile, or throws while drawing, is reported on a band in the
 window and on stderr; the last version that loaded keeps playing until the next save.
 `--no-reload` turns this off. Changed images, fonts and other assets are not picked up

@@ -41,6 +41,22 @@ int main() {
        std::fabs(landscape.y-123.75f)>0.01f){
         std::fprintf(stderr,"FAIL: landscape preview not centered\n"); return 1;
     }
+    // The preview's seek bar: the track's ends are the first and last frames, a pointer
+    // past an end stays there, and frame -> x -> frame comes back to the same frame.
+    {
+        const rmtn::Scrubber bar=rmtn::scrubber(640,480,20);
+        bool good=std::fabs(bar.strip.y+bar.strip.height-460)<0.01f && bar.track.x>0 &&
+                  bar.track.x+bar.track.width<640 && bar.track.y>bar.strip.y;
+        good=good && rmtn::scrubFrame(bar.track,bar.track.x,150)==0 &&
+             rmtn::scrubFrame(bar.track,bar.track.x+bar.track.width,150)==149 &&
+             rmtn::scrubFrame(bar.track,-500,150)==0 && rmtn::scrubFrame(bar.track,5000,150)==149 &&
+             rmtn::scrubFrame(bar.track,bar.track.x+bar.track.width/2,151)==75 &&
+             rmtn::scrubFrame(bar.track,100,1)==0 && rmtn::scrubFrame({},100,150)==0;
+        for(int f=0;f<150 && good;f++) good=rmtn::scrubFrame(bar.track,rmtn::scrubX(bar.track,f,150),150)==f;
+        good=good && rmtn::timecode(0,30)=="0:00.00" && rmtn::timecode(96,30)=="0:03.06" &&
+             rmtn::timecode(3725,60)=="1:02.05" && rmtn::timecode(-4,30)=="0:00.00" && rmtn::timecode(10,0)=="0:00.00";
+        if(!good){ std::fprintf(stderr,"FAIL: preview seek bar maps frames wrongly\n"); return 1; }
+    }
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
     InitWindow(320, 240, "raymotion regression");
@@ -158,6 +174,58 @@ int main() {
         failing.open(320,240,[&](const unsigned char*,size_t){ return ++delivered<2; },2);
         for(int k=0;k<20 && !refused;++k){ paint(k); refused=!failing.push(rt); }
         expect(!failing.close() && delivered==2,"frame stream reports a failed sink");
+        UnloadRenderTexture(rt);
+    }
+
+    // FrameStream as Yuv420: planar yuv420p, rows top-down, BT.709 limited range, chroma
+    // the mean of 2x2 pixels. The size is even but not a multiple of four in either
+    // direction, so readback rows are unpadded and chroma rows straddle target rows.
+    {
+        const int W=322,H=242;
+        RenderTexture rt=LoadRenderTexture(W,H);
+        auto paint=[&](int k){
+            BeginTextureMode(rt); ClearBackground(Color{12,30,70,255});
+            DrawRectangle(7*k+3,21,91,77,Color{(unsigned char)(200-9*k),40,90,255});
+            DrawRectangle(150,5*k+1,63,131,Color{20,(unsigned char)(120+11*k),230,255});
+            DrawRectangle(0,H-9,W,9,Color{255,255,255,255});
+            DrawRectangle(W-5,0,5,H,Color{0,0,0,255});
+            EndTextureMode();
+        };
+        std::vector<std::vector<unsigned char>> want, got;
+        rmtn::FrameStream stream;
+        const bool opened=stream.open(W,H,[&](const unsigned char* p,size_t n){ got.emplace_back(p,p+n); return true; },3,rmtn::FrameStream::Pixels::Yuv420);
+        expect(opened,"yuv frame stream opens");
+        for(int k=0;k<5 && opened;++k){
+            paint(k);
+            Image ref=LoadImageFromTexture(rt.texture);   // GL order: row 0 is the picture's bottom row
+            const unsigned char* px=(const unsigned char*)ref.data;
+            auto rgb=[&](int x,int row,int ch){ return (double)px[((size_t)(H-1-row)*W+x)*4+ch]/255.0; };
+            std::vector<unsigned char> yuv((size_t)W*H*3/2);
+            for(int row=0;row<H;++row) for(int x=0;x<W;++x)
+                yuv[(size_t)row*W+x]=(unsigned char)std::lround(16+46.559*rgb(x,row,0)+156.629*rgb(x,row,1)+15.812*rgb(x,row,2));
+            for(int cy=0;cy<H/2;++cy) for(int cx=0;cx<W/2;++cx){
+                double c[3];
+                for(int ch=0;ch<3;++ch) c[ch]=(rgb(2*cx,2*cy,ch)+rgb(2*cx+1,2*cy,ch)+rgb(2*cx,2*cy+1,ch)+rgb(2*cx+1,2*cy+1,ch))/4;
+                const size_t at=(size_t)cy*(W/2)+cx;
+                yuv[(size_t)W*H+at]=(unsigned char)std::lround(128-25.664*c[0]-86.336*c[1]+112.0*c[2]);
+                yuv[(size_t)W*H+(size_t)(W/2)*(H/2)+at]=(unsigned char)std::lround(128+112.0*c[0]-101.730*c[1]-10.270*c[2]);
+            }
+            UnloadImage(ref);
+            want.push_back(std::move(yuv));
+            expect(stream.push(rt),"yuv frame stream accepts frames");
+        }
+        expect(stream.close(),"yuv frame stream drains");
+        expect(got.size()==want.size(),"yuv frame stream delivers every frame");
+        int worst=0; bool sized=true;
+        for(size_t k=0;k<got.size() && k<want.size();++k){
+            if(got[k].size()!=want[k].size()){ sized=false; continue; }
+            for(size_t i=0;i<got[k].size();++i) worst=std::max(worst,std::abs((int)got[k][i]-(int)want[k][i]));
+        }
+        expect(sized,"yuv frames are w*h*3/2 bytes");
+        if(worst>2) std::fprintf(stderr,"yuv frame stream: worst difference from the reference is %d levels\n",worst);
+        expect(worst<=2,"gpu yuv matches the BT.709 reference within two levels");   // rounding differs by GPU
+        rmtn::FrameStream odd;
+        expect(!odd.open(321,240,[](const unsigned char*,size_t){ return true; },3,rmtn::FrameStream::Pixels::Yuv420),"yuv frame stream refuses an odd width");
         UnloadRenderTexture(rt);
     }
 

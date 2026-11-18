@@ -153,6 +153,17 @@ void second(int t) { }
         self.assertEqual(err.lower().count("out of bounds"), 1, err)   # reported once, not every frame
         self.assertGreater((self.cwd / "shot.png").stat().st_size, 500)
 
+    @unittest.skipUnless(GL, "needs OpenGL")
+    def test_preview_opens_paused_at_a_frame(self):
+        # --at opens the window paused on that frame, with the seek bar showing.
+        import os
+        env = dict(os.environ, RAYMOTION_PREVIEW_SECONDS="2", RAYMOTION_PREVIEW_SHOT="at.png")
+        done = subprocess.run([EXE, "preview", "fixture", "--script", str(self.path), "--mute", "--at", "3"], cwd=self.cwd,
+                              text=True, capture_output=True, env=env, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertGreater((self.cwd / "at.png").stat().st_size, 500)
+        self.assertIn("--at FRAME", self.run_cli("help", ok=None))
+
     def test_preview_no_reload_flag(self):
         self.assertIn("--no-reload", self.run_cli("help", ok=None))
 
@@ -231,6 +242,12 @@ void second(int t) { }
         for frame in range(4):
             self.assertEqual((self.cwd / f"f{frame}.png").read_bytes(),
                              (self.cwd / f"out/fixture_frames/f{frame:05}.png").read_bytes())
+        # --frames-dir moves the sequence (the workers' frames too) and leaves the default alone.
+        self.run_cli("render", "fixture", "--script", self.path, "--png-frames", "--jobs", 2, "--frames-dir", "elsewhere/seq")
+        for frame in range(4):
+            self.assertEqual((self.cwd / f"f{frame}.png").read_bytes(),
+                             (self.cwd / f"elsewhere/seq/f{frame:05}.png").read_bytes())
+        self.assertIn("--frames-dir", self.run_cli("help", ok=None))
         self.run_cli("still", "fixture", "--script", self.path, "--props", '{"width":80}', "--png", "props.png")
         self.assertEqual(png_size(self.cwd / "props.png"), (80, 32))
         self.path.write_text(SOURCE.replace('draw::circle(8 + 8*t, 16, 3, 0xffffff);',
