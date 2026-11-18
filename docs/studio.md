@@ -107,5 +107,6 @@ ignores and does not write the session, and `--click FRAME:X:Y` (repeatable) cli
 - The API key is plain text in the settings file. Prefer `OPENAI_API_KEY`.
 - Stop takes effect between requests and tool calls; an in-flight HTTP call finishes first.
 - Replies are not streamed; the typing indicator shows until the full reply arrives.
-- Windows only so far: the POSIX branches (process code, `curl` fallback) are unbuilt. The HTTPS path is untested against a real server (only http://127.0.0.1 mocks).
+- Windows only so far: the POSIX branches (process code, `curl` fallback) are unbuilt. The agent has been run over HTTPS (TLS 1.3) against one real
+  OpenAI-compatible server; other servers are untested.
 - `CUI_RENDERER=software` forces CUI's CPU renderer if OpenGL misbehaves.
