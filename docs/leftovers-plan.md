@@ -26,6 +26,29 @@ six faces.
   that face's colour, edges between faces must have no seams, and lighting must match the
   same sky given as an equirectangular image.
 
+**Done 2026-11-19.** `Scene::environmentFaces` (six files, or one cross) is converted on the CPU
+into an equirectangular image, cached with the other textures. Sky packs are labelled for
+left-handed engines, so the ±x faces swap sides, as three.js does; that keeps the sky
+unmirrored and continuous. Script: `"environment": {"faces": [...]}` or `{"cross": ...}`.
+Example: `cube_skybox.as`, with six 512 px faces under `assets/textures/skybox-example/`.
+
+Tests (`scene3d_tests`, `cubeSkybox`):
+- Each axis shows its face: exact colours.
+- Mirroring: asymmetric markers land on the left and right as drawn on all four side faces,
+  and the top and bottom faces meet +z.
+- Seams: across 18 views, mean 0.12 levels and worst max 2 against the same sky as an
+  equirectangular image. Lighting differs by a mean of 0.03.
+- The cross equals the six files.
+- HDR faces stay linear above 1.
+- Errors name the problem.
+
+`test_script.py`: `test_environment_faces`.
+
+**Found:** `prepareTexture` repeats every texture in v. So straight up or down, an
+equirectangular environment file or generated environment blends its top and bottom rows
+(the cube path clamps v). Fix this in L9 with a test. The texture cache is shared with
+material maps, so the clamp must apply only to environment use.
+
 ## L2. Impostors seen from above
 
 Today impostors turn only about the vertical, so from above they read as side views.

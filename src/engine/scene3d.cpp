@@ -1519,8 +1519,145 @@ Texture2D renderSky(const Scene& s, double frame, unsigned int callerFbo, int fb
     return gpu.skyTarget.texture;
 }
 
+// ---- cube-face environments: six faces (or a horizontal cross) resampled to equirectangular.
+// The OpenGL cube-map table: for a direction r, the major axis picks the face and
+// (sc, tc, ma) give s = (sc / |ma| + 1) / 2, t = (tc / |ma| + 1) / 2 with t counted down the
+// image. Face order +x, -x, +y, -y, +z, -z. The engine is right-handed, so cubeToEquirect
+// looks a world direction up with x negated, as three.js does (flipEnvMap).
+bool isFloatFormat(int format);
+
+struct CubeFace {
+    int n = 0;
+    bool isFloat = false;
+    std::vector<float> px;      // n * n * 4, RGBA; 8-bit faces stay in 0..255
+};
+
+CubeFace cubeFaceFromImage(Image img, const std::string& what) {
+    if (!img.data) throw std::runtime_error("g3d: cannot load environment face " + what);
+    if (img.width != img.height)
+        throw std::runtime_error("g3d: environment faces must be square: " + what + " is " +
+                                 std::to_string(img.width) + "x" + std::to_string(img.height));
+    CubeFace f;
+    f.n = img.width;
+    f.isFloat = isFloatFormat(img.format);
+    ImageFormat(&img, f.isFloat ? PIXELFORMAT_UNCOMPRESSED_R32G32B32A32 : PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+    const size_t count = (size_t)f.n * f.n * 4;
+    f.px.resize(count);
+    if (f.isFloat) std::memcpy(f.px.data(), img.data, count * sizeof(float));
+    else for (size_t i = 0; i < count; ++i) f.px[i] = ((const unsigned char*)img.data)[i];
+    return f;
+}
+
+// The face and its (s, t) in 0..1 for a direction, by the OpenGL table.
+int cubeFaceLookup(float rx, float ry, float rz, float& s, float& t) {
+    const float ax = std::fabs(rx), ay = std::fabs(ry), az = std::fabs(rz);
+    int face;
+    float sc, tc, ma;
+    if (ax >= ay && ax >= az) {
+        face = rx > 0 ? 0 : 1; ma = ax; sc = rx > 0 ? -rz : rz; tc = -ry;
+    } else if (ay >= az) {
+        face = ry > 0 ? 2 : 3; ma = ay; sc = rx; tc = ry > 0 ? rz : -rz;
+    } else {
+        face = rz > 0 ? 4 : 5; ma = az; sc = rz > 0 ? rx : -rx; tc = -ry;
+    }
+    s = (sc / ma + 1.f) * 0.5f;
+    t = (tc / ma + 1.f) * 0.5f;
+    return face;
+}
+
+// Bilinear inside a face (clamped at its border).
+void cubeFaceSample(const CubeFace& f, float s, float t, float out[4]) {
+    const float fx = std::clamp(s * f.n - 0.5f, 0.f, (float)(f.n - 1));
+    const float fy = std::clamp(t * f.n - 0.5f, 0.f, (float)(f.n - 1));
+    const int x0 = (int)fx, y0 = (int)fy, x1 = std::min(x0 + 1, f.n - 1), y1 = std::min(y0 + 1, f.n - 1);
+    const float ax = fx - x0, ay = fy - y0;
+    for (int c = 0; c < 4; ++c) {
+        auto at = [&](int x, int y) { return f.px[((size_t)y * f.n + x) * 4 + c]; };
+        out[c] = (at(x0, y0) * (1 - ax) + at(x1, y0) * ax) * (1 - ay) + (at(x0, y1) * (1 - ax) + at(x1, y1) * ax) * ay;
+    }
+}
+
+Image cubeToEquirect(const std::vector<CubeFace>& faces) {
+    const int n = faces[0].n;
+    const bool isFloat = faces[0].isFloat;
+    int w = std::min(4 * n, 4096);
+    w -= w % 2;
+    const int h = w / 2;
+    Image img{};
+    img.width = w; img.height = h; img.mipmaps = 1;
+    img.format = isFloat ? PIXELFORMAT_UNCOMPRESSED_R32G32B32A32 : PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+    img.data = RL_CALLOC((size_t)w * h, isFloat ? 16 : 4);
+    for (int y = 0; y < h; ++y) {
+        const float theta = (y + 0.5f) / h * PI, sy = std::sin(theta), ry = std::cos(theta);
+        for (int x = 0; x < w; ++x) {
+            const float phi = ((x + 0.5f) / w - 0.5f) * 2 * PI;     // the shader's u = atan(z, x) / 2pi + 0.5
+            float s, t, rgba[4];
+            // x is negated: packs are labelled for left-handed engines (see Scene::environmentFaces)
+            const int face = cubeFaceLookup(-std::cos(phi) * sy, ry, std::sin(phi) * sy, s, t);
+            cubeFaceSample(faces[face], s, t, rgba);
+            const size_t i = ((size_t)y * w + x) * 4;
+            for (int c = 0; c < 4; ++c) {
+                if (isFloat) ((float*)img.data)[i + c] = rgba[c];
+                else ((unsigned char*)img.data)[i + c] = (unsigned char)std::clamp((int)(rgba[c] + 0.5f), 0, 255);
+            }
+        }
+    }
+    return img;
+}
+
+// Loads the six faces, or the one cross, and returns the equirectangular image. Throws
+// std::runtime_error naming the problem.
+Image loadEnvironmentFaces(const std::vector<std::string>& files) {
+    std::vector<CubeFace> faces;
+    if (files.size() == 6) {
+        for (const auto& f : files) {
+            if (f.empty()) throw std::runtime_error("g3d: environment face path is empty");
+            faces.push_back(cubeFaceFromImage(media::loadImage(f), f));
+        }
+    } else if (files.size() == 1) {
+        Image img = media::loadImage(files[0]);
+        if (!img.data) throw std::runtime_error("g3d: cannot load environment cross " + files[0]);
+        const int n = img.width / 4;
+        if (n < 1 || img.width != 4 * n || img.height != 3 * n) {
+            const std::string size = std::to_string(img.width) + "x" + std::to_string(img.height);
+            UnloadImage(img);
+            throw std::runtime_error("g3d: environment cross must be a 4x3 grid of square faces: " + files[0] + " is " + size);
+        }
+        // columns/rows of +x, -x, +y, -y, +z, -z in the horizontal cross
+        const int col[6] = { 2, 0, 1, 1, 1, 3 }, row[6] = { 1, 1, 0, 2, 1, 1 };
+        for (int i = 0; i < 6; ++i) {
+            Image tile = ImageFromImage(img, Rectangle{ (float)(col[i] * n), (float)(row[i] * n), (float)n, (float)n });
+            faces.push_back(cubeFaceFromImage(tile, files[0]));
+            UnloadImage(tile);
+        }
+        UnloadImage(img);
+    } else {
+        throw std::runtime_error("g3d: environmentFaces needs six face files (+x -x +y -y +z -z) or one cross image, got " +
+                                 std::to_string(files.size()));
+    }
+    for (const auto& f : faces)
+        if (f.n != faces[0].n || f.isFloat != faces[0].isFloat)
+            throw std::runtime_error("g3d: environment faces must all have the same size and kind (8-bit or HDR)");
+    return cubeToEquirect(faces);
+}
+
 Texture2D environmentTexture(const Scene& s) {
     if (!s.environment.empty()) return texture(s.environment);
+    if (!s.environmentFaces.empty()) {
+        std::string key = "cube:";
+        for (const auto& f : s.environmentFaces) key += f + "|";
+        auto it = gpu.textures.find(key);
+        if (it != gpu.textures.end()) return it->second;
+        Image img = loadEnvironmentFaces(s.environmentFaces);
+        Texture2D tex = LoadTextureFromImage(img);
+        UnloadImage(img);
+        if (!IsTextureValid(tex)) throw std::runtime_error("g3d: cannot make the environment from its faces");
+        prepareTexture(tex);
+        // No wrap over the poles: repeating in v would blend the top row into the bottom one.
+        rlTextureParameters(tex.id, RL_TEXTURE_WRAP_T, RL_TEXTURE_WRAP_CLAMP);
+        gpu.textures[key] = tex;
+        return tex;
+    }
     if (!s.environmentGenerator) return Texture2D{};
     auto it = gpu.generated.find(&s);
     if (it != gpu.generated.end()) return it->second;

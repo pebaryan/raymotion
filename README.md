@@ -352,6 +352,11 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   equirectangular PNG/JPG/HDR) or `environmentGenerator` (e.g. `g3d::studioEnvironment`,
   a gradient with soft light boxes) lights diffuse surfaces from its blurred mips and
   gives reflections that blur with roughness; `showEnvironment` draws it as a skybox.
+* A cube skybox: `scene->environmentFaces` takes six face files (+x, -x, +y, -y, +z, -z) or
+  one horizontal-cross image, as skybox packs ship them (the +x and -x faces swap sides
+  for the right-handed world, as in three.js, so the sky is not mirrored). The faces are resampled
+  once to an equirectangular image, so lighting, `showEnvironment`, `environmentRotation` and
+  `fogFromSky` work unchanged. In scripts: `"environment": {"faces": [...]}` or `{"cross": "sky.png"}`.
 * A procedural sky (`scene->sky`): a gradient from zenith to horizon to ground, a sun
   disc and glow (`sunLight` points it along a light), stars that twinkle, and fbm clouds
   that drift. It is remade each frame, so all of it can be animated, and it is also the

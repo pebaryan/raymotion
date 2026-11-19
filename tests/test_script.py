@@ -372,6 +372,94 @@ void draw(int frame) { g3d::draw("''' + literal + '''", frame, 0, 0, 160, 90); }
         self.assertIn("[west, south, east, north]", self.run_cli("still", "green", "--script", self.path, "--png", "x.png", ok=False))
 
     @unittest.skipUnless(GL, "needs OpenGL")
+    def test_environment_faces(self):
+        # A skybox from six cube faces (and from one cross): looking along +x, -z and -x shows
+        # the -x, -z and +x faces; a bad descriptor says what is wrong.
+        import struct
+        import zlib
+
+        def chunk(tag, data):
+            return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
+
+        def write_png(path, w, h, rgb_at):
+            raw = b"".join(b"\0" + b"".join(bytes(rgb_at(x, y)) for x in range(w)) for y in range(h))
+            path.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) +
+                             chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+        def read_pixel(path, px, py):
+            data = path.read_bytes()
+            pos, idat, header = 8, b"", None
+            while pos < len(data):
+                size, tag = struct.unpack(">I4s", data[pos:pos + 8])
+                body = data[pos + 8:pos + 8 + size]
+                if tag == b"IHDR":
+                    header = struct.unpack(">IIBBBBB", body)
+                elif tag == b"IDAT":
+                    idat += body
+                pos += 12 + size
+            w, h, depth, ctype = header[:4]
+            self.assertEqual((depth, header[6]), (8, 0))
+            bpp = {2: 3, 6: 4}[ctype]
+            raw, stride, rows, prev = zlib.decompress(idat), w * bpp, [], bytearray(w * bpp)
+            for y in range(h):
+                kind, line = raw[y * (stride + 1)], bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+                for i in range(stride):
+                    a = line[i - bpp] if i >= bpp else 0
+                    b = prev[i]
+                    c = prev[i - bpp] if i >= bpp else 0
+                    if kind == 1: line[i] = (line[i] + a) & 255
+                    elif kind == 2: line[i] = (line[i] + b) & 255
+                    elif kind == 3: line[i] = (line[i] + ((a + b) >> 1)) & 255
+                    elif kind == 4:
+                        p = a + b - c
+                        pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                        line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+                prev = line
+                rows.append(line)
+            return tuple(rows[py][px * bpp:px * bpp + 3])
+
+        colours = [(220, 40, 40), (40, 200, 200), (40, 200, 40), (200, 40, 200), (40, 40, 220), (220, 220, 40)]
+        names = ["px", "nx", "py", "ny", "pz", "nz"]
+        for name, rgb in zip(names, colours):
+            write_png(self.cwd / f"{name}.png", 16, 16, lambda x, y, rgb=rgb: rgb)
+        # the same six faces as a cross: row 0 +y, row 1 -x +z +x -z, row 2 -y
+        spots = {"py": (1, 0), "nx": (0, 1), "pz": (1, 1), "px": (2, 1), "nz": (3, 1), "ny": (1, 2)}
+        by_name = dict(zip(names, colours))
+        def cross_at(x, y):
+            for name, (cx, cy) in spots.items():
+                if cx == x // 16 and cy == y // 16:
+                    return by_name[name]
+            return (0, 0, 0)
+        write_png(self.cwd / "cross.png", 64, 48, cross_at)
+
+        def draw(environment, target):
+            world = json.dumps({"camera": {"position": [0, 0, 0], "target": target, "fov": 60},
+                                "environment": environment, "showEnvironment": True})
+            literal = world.replace("\\", "\\\\").replace('"', '\\"')
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "cube"; c.w = 64; c.h = 36; c.fps = 30; c.duration = 1; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) { g3d::draw("''' + literal + '''", frame, 0, 0, 64, 36); }
+''')
+            (self.cwd / "sky.png").unlink(missing_ok=True)
+            return self.run_cli("still", "cube", "--script", self.path, "--at", 0, "--ss", 1, "--png", "sky.png", ok=None)
+
+        def near(a, b):
+            return all(abs(x - y) <= 8 for x, y in zip(a, b))
+        files = [f"{n}.png" for n in names]
+        # the faces labelled +x and -x swap sides (packs are left-handed, the engine is not)
+        for target, index in (([1, 0, 0], 1), ([0, 0, -1], 5), ([-1, 0, 0], 0)):
+            draw({"faces": files}, target)
+            self.assertTrue(near(read_pixel(self.cwd / "sky.png", 32, 18), colours[index]), (target, index))
+            draw({"cross": "cross.png"}, target)
+            self.assertTrue(near(read_pixel(self.cwd / "sky.png", 32, 18), colours[index]), ("cross", target))
+        self.assertIn("six files", draw({"faces": files[:5]}, [1, 0, 0]))
+        self.assertIn("exactly one of", draw({"faces": files, "cross": "cross.png"}, [1, 0, 0]))
+        self.assertIn("exactly one of", draw({}, [1, 0, 0]))
+        self.assertIn("file not found", draw({"faces": files[:5] + ["missing.png"]}, [1, 0, 0]))
+
+    @unittest.skipUnless(GL, "needs OpenGL")
     def test_flora_prefabs(self):
         # Each flora prefab draws, changes as it grows, and refuses unknown trees and grass.
         def write(name, props):

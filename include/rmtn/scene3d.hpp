@@ -609,7 +609,24 @@ struct Scene {
     // radiance). It replaces the hemisphere: diffuse from its blurred mips, reflections
     // sharp to blurry with roughness.
     std::string environment;
-    std::function<Image()> environmentGenerator;    // used when `environment` is empty; called once
+    // A skybox given as cube faces instead of one equirectangular image. Either six files in
+    // the order +x, -x, +y, -y, +z, -z, or ONE file holding a horizontal cross (a 4x3 grid of
+    // square faces: row 0 has +y in column 1; row 1 is -x, +z, +x, -z; row 2 has -y in column 1).
+    // Skybox packs are labelled for left-handed engines (OpenGL cube maps); raymotion is
+    // right-handed. So the +x and -x faces swap sides, as in three.js: the face labelled +x
+    // appears in the world -x direction and the face labelled -x at world +x, while +y, -y,
+    // +z and -z stay where they are. This keeps every face unmirrored on screen (a camera with
+    // +y up sees its image left on the screen's left and top at the top for the four side
+    // faces) and the sky continuous across the seams. +y's image bottom edge meets +z, and
+    // -y's image top edge meets +z. Faces must be square and equal in size and kind
+    // (8-bit PNG/JPG, or all HDR for linear radiance). They are converted once on the CPU to
+    // an equirectangular image (4 x face width, at most 4096) with bilinear sampling inside
+    // each face, which image-based lighting, showEnvironment, environmentRotation and
+    // fogFromSky then use unchanged. Any other count, a non-square or mismatched face, or a
+    // missing file throws std::runtime_error. Precedence: `environment` (a file) wins over
+    // `environmentFaces`, which wins over `environmentGenerator`.
+    std::vector<std::string> environmentFaces;
+    std::function<Image()> environmentGenerator;    // used when no file or faces are set; called once
     float environmentIntensity = 1;
     float environmentRotation = 0;  // degrees about +y
     bool showEnvironment = false;   // also draw it as the backdrop

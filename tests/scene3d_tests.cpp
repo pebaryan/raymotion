@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -375,6 +376,322 @@ static void environment(const fs::path& dir) {
     Color mt = px(img, project(r->camera, { 0, 0.9f, 0.4f }));
     CHECK(mt.r > mt.b + 40);
     UnloadImage(img);
+}
+
+// ---- cube-face skybox (L1)
+namespace cube {
+using DirFn = std::function<Color(Vector3)>;
+// The direction through face `f` at (s, t) in 0..1 by the OpenGL cube-map table.
+static Vector3 faceDirGl(int f, float s, float t) {
+    const float sc = 2 * s - 1, tc = 2 * t - 1;
+    Vector3 d;
+    switch (f) {
+    case 0: d = { 1, -tc, -sc }; break;
+    case 1: d = { -1, -tc, sc }; break;
+    case 2: d = { sc, 1, tc }; break;
+    case 3: d = { sc, -1, -tc }; break;
+    case 4: d = { sc, -tc, 1 }; break;
+    default: d = { -sc, -tc, -1 }; break;
+    }
+    return Vector3Normalize(d);
+}
+// The WORLD direction: x negated, because raymotion is right-handed (the +x face lies toward -x).
+static Vector3 faceDir(int f, float s, float t) {
+    Vector3 d = faceDirGl(f, s, t);
+    d.x = -d.x;
+    return d;
+}
+static Image faceImage(int f, int n, const DirFn& fn) {
+    Image img = GenImageColor(n, n, BLACK);
+    for (int y = 0; y < n; y++)
+        for (int x = 0; x < n; x++) ImageDrawPixel(&img, x, y, fn(faceDir(f, (x + 0.5f) / n, (y + 0.5f) / n)));
+    return img;
+}
+static std::vector<std::string> writeFaces(const fs::path& dir, const std::string& name, int n, const DirFn& fn) {
+    static const char* tags[6] = { "px", "nx", "py", "ny", "pz", "nz" };
+    std::vector<std::string> files;
+    for (int f = 0; f < 6; f++) {
+        Image img = faceImage(f, n, fn);
+        files.push_back((dir / (name + "-" + tags[f] + ".png")).string());
+        ExportImage(img, files.back().c_str());
+        UnloadImage(img);
+    }
+    return files;
+}
+static std::string writeCross(const fs::path& dir, const std::string& name, int n, const DirFn& fn) {
+    const int col[6] = { 2, 0, 1, 1, 1, 3 }, row[6] = { 1, 1, 0, 2, 1, 1 };
+    Image cross = GenImageColor(4 * n, 3 * n, BLACK);
+    for (int f = 0; f < 6; f++) {
+        Image img = faceImage(f, n, fn);
+        for (int y = 0; y < n; y++)
+            for (int x = 0; x < n; x++) ImageDrawPixel(&cross, col[f] * n + x, row[f] * n + y, GetImageColor(img, x, y));
+        UnloadImage(img);
+    }
+    const std::string path = (dir / (name + "-cross.png")).string();
+    ExportImage(cross, path.c_str());
+    UnloadImage(cross);
+    return path;
+}
+// The same function as an equirectangular image, in the shader's mapping.
+static std::string writeEquirect(const fs::path& dir, const std::string& name, int w, const DirFn& fn) {
+    Image img = GenImageColor(w, w / 2, BLACK);
+    for (int y = 0; y < w / 2; y++)
+        for (int x = 0; x < w; x++) {
+            const float phi = ((x + 0.5f) / w - 0.5f) * 2 * PI, theta = (y + 0.5f) / (w / 2) * PI;
+            ImageDrawPixel(&img, x, y, fn({ std::cos(phi) * std::sin(theta), std::cos(theta), std::sin(phi) * std::sin(theta) }));
+        }
+    const std::string path = (dir / (name + "-eq.png")).string();
+    ExportImage(img, path.c_str());
+    UnloadImage(img);
+    return path;
+}
+static Color gradient(Vector3 d) {
+    auto q = [](float v) { return (unsigned char)std::clamp((int)(128 + 120 * v + 0.5f), 0, 255); };
+    return { q(d.x), q(d.y), q(d.z), 255 };
+}
+// A camera at the origin looking along `dir`.
+static std::shared_ptr<g3d::Scene> skyScene(Vector3 dir) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = { 0, 0, 0 };
+    s->camera.target = Vector3Normalize(dir);
+    s->camera.upVector = std::fabs(dir.y) > 0.9f * Vector3Length(dir) ? Vector3{ 0, 0, 1 } : Vector3{ 0, 1, 0 };
+    s->camera.fov = 60;
+    s->showEnvironment = true;
+    return s;
+}
+struct Diff { double mean = 0; int max = 0, bandMax = 0; };
+// Mean and maximum absolute difference of two images; bandMax over the centre 5 columns and rows.
+static Diff diff(const Image& a, const Image& b) {
+    Diff d;
+    long long sum = 0;
+    for (int y = 0; y < a.height; y++)
+        for (int x = 0; x < a.width; x++) {
+            Color p = GetImageColor(a, x, y), q = GetImageColor(b, x, y);
+            const int m = std::max({ std::abs(p.r - q.r), std::abs(p.g - q.g), std::abs(p.b - q.b) });
+            sum += std::abs(p.r - q.r) + std::abs(p.g - q.g) + std::abs(p.b - q.b);
+            d.max = std::max(d.max, m);
+            if (std::abs(x - a.width / 2) <= 2 || std::abs(y - a.height / 2) <= 2) d.bandMax = std::max(d.bandMax, m);
+        }
+    d.mean = sum / (3.0 * a.width * a.height);
+    return d;
+}
+static Image look(std::shared_ptr<g3d::Scene> s) { Comp c = sceneComp(s); return render(c, 0); }
+
+static std::string errorOf(std::shared_ptr<g3d::Scene> s) {
+    try { Image i = look(s); UnloadImage(i); } catch (const std::runtime_error& e) { return e.what(); }
+    return "";
+}
+} // namespace cube
+
+static void cubeSkybox(const fs::path& dir) {
+    using namespace cube;
+    // 1. Six solid colours: each axis shows its face's colour at the centre.
+    const Color solid[6] = { { 220, 40, 40, 255 }, { 40, 200, 200, 255 }, { 40, 200, 40, 255 },
+                             { 200, 40, 200, 255 }, { 40, 40, 220, 255 }, { 220, 220, 40, 255 } };
+    const Vector3 axes[6] = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
+    const char* names[6] = { "+x", "-x", "+y", "-y", "+z", "-z" };
+    std::vector<std::string> solidFiles;
+    for (int f = 0; f < 6; f++) {
+        Image img = GenImageColor(64, 64, solid[f]);
+        solidFiles.push_back((dir / (std::string("cube-solid") + std::to_string(f) + ".png")).string());
+        ExportImage(img, solidFiles.back().c_str());
+        UnloadImage(img);
+    }
+    for (int f = 0; f < 6; f++) {
+        auto s = skyScene(axes[f]);
+        s->environmentFaces = solidFiles;
+        Image img = look(s);
+        Color c = GetImageColor(img, W / 2, H / 2);
+        const int face = f < 2 ? 1 - f : f;         // the faces labelled +x and -x swap sides
+        std::printf("[scene3d] cube world %s shows face %s: centre rgb %d %d %d (face colour %d %d %d)\n", names[f], names[face],
+                    c.r, c.g, c.b, solid[face].r, solid[face].g, solid[face].b);
+        CHECK(close(c, solid[face], 6));
+        UnloadImage(img);
+    }
+
+    // 1b. Orientation: the four side faces carry a left-third red / right-third blue marker and
+    // must show red on the screen's left, blue on its right (unmirrored). +y has a red band along
+    // its image bottom (the edge that meets +z), -y along its image top (also meets +z).
+    {
+        auto marked = [&](int f, int n) {
+            Image img = GenImageColor(n, n, Color{ 128, 128, 128, 255 });
+            for (int y = 0; y < n; y++)
+                for (int x = 0; x < n; x++) {
+                    Color c = { 128, 128, 128, 255 };
+                    if (f < 2 || f > 3) { if (x < n / 3) c = RED; else if (x >= n - n / 3) c = BLUE; }
+                    else if (f == 2 && y >= n - n / 6) c = RED;
+                    else if (f == 3 && y < n / 6) c = RED;
+                    ImageDrawPixel(&img, x, y, c);
+                }
+            return img;
+        };
+        static const char* tags[6] = { "px", "nx", "py", "ny", "pz", "nz" };
+        std::vector<std::string> files;
+        for (int f = 0; f < 6; f++) {
+            Image img = marked(f, 96);
+            files.push_back((dir / (std::string("cube-mark-") + tags[f] + ".png")).string());
+            ExportImage(img, files.back().c_str());
+            UnloadImage(img);
+        }
+        auto centroid = [](const Image& img, bool wantRed, float& cx, float& cy) {
+            double sx = 0, sy = 0; int n = 0;
+            for (int y = 0; y < img.height; y++)
+                for (int x = 0; x < img.width; x++) {
+                    Color c = GetImageColor(img, x, y);
+                    const bool hit = wantRed ? (c.r > 200 && c.g < 60 && c.b < 60) : (c.b > 200 && c.r < 60 && c.g < 150);
+                    if (hit) { sx += x; sy += y; n++; }
+                }
+            cx = n ? (float)(sx / n) : -1; cy = n ? (float)(sy / n) : -1;
+            return n;
+        };
+        const int sides[4] = { 0, 1, 4, 5 };
+        for (int f : sides) {
+            auto s = skyScene(f == 0 ? Vector3{ -1, 0, 0 } : f == 1 ? Vector3{ 1, 0, 0 } : axes[f]);   // where each face lies
+            s->environmentFaces = files;
+            Image img = look(s);
+            float rx, ry, bx, by;
+            const int nr = centroid(img, true, rx, ry), nb = centroid(img, false, bx, by);
+            std::printf("[scene3d] cube face %s: red x %.1f (%d px), blue x %.1f (%d px), screen centre %d\n", names[f], rx, nr, bx, nb, W / 2);
+            CHECK(nr > 100 && nb > 100 && rx < W / 2 - 10 && bx > W / 2 + 10);
+            UnloadImage(img);
+        }
+        for (int f : { 2, 3 }) {
+            auto s = skyScene({ 0, f == 2 ? 1.f : -1.f, 0.6f });
+            s->environmentFaces = files;
+            Image img = look(s);
+            float rx, ry;
+            const int nr = centroid(img, true, rx, ry);
+            std::printf("[scene3d] cube face %s tilted toward +z: red band y %.1f (%d px), screen centre %d; expected %s\n", names[f], ry, nr, H / 2,
+                        f == 2 ? "below centre (+z is down the screen when looking up)" : "above centre (+z is up the screen when looking down)");
+            CHECK(nr > 100);
+            CHECK(f == 2 ? ry > H / 2 + 10 : ry < H / 2 - 10);
+            UnloadImage(img);
+        }
+    }
+
+    // 1c. HDR faces stay linear: a Radiance .hdr face of 4.0 (rgbe 128,128,128,131) at
+    // intensity 0.15 shows 0.6 linear (about 203 in sRGB); clamped to 1 first it would be ~107.
+    {
+        std::vector<std::string> hdr;
+        for (int f = 0; f < 6; f++) {
+            const std::string path = (dir / (std::string("cube-hdr") + std::to_string(f) + ".hdr")).string();
+            std::ofstream out(path, std::ios::binary);
+            out << "#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 4 +X 4\n";
+            for (int i = 0; i < 16; i++) { const unsigned char px4[4] = { 128, 128, 128, 131 }; out.write((const char*)px4, 4); }
+            hdr.push_back(path);
+        }
+        auto s = skyScene({ 0, 0, 1 });
+        s->environmentFaces = hdr;
+        s->environmentIntensity = 0.15f;
+        Image img = look(s);
+        Color c = GetImageColor(img, W / 2, H / 2);
+        std::printf("[scene3d] cube HDR face 4.0 at intensity 0.15: centre rgb %d %d %d\n", c.r, c.g, c.b);
+        CHECK(c.r > 170 && c.r < 235 && std::abs(c.r - c.g) <= 3);
+        UnloadImage(img);
+    }
+
+    // 2. A smooth sky as faces vs as an equirectangular image of the same detail: no seams.
+    const int n = 256;
+    auto faces = writeFaces(dir, "cube-grad", n, gradient);
+    const std::string eq = writeEquirect(dir, "cube-grad", 4 * n, gradient);
+    const Vector3 views[] = { { 1, 0, 0 }, { 0, 0, -1 }, { 0, 1, 0 }, { 0, -1, 0 }, { 1, 0, 1 }, { -1, 0, 1 }, { 1, 0, -1 }, { -1, 0, -1 },
+                              { 1, 1, 0 }, { 0, 1, 1 }, { -1, -1, 0 }, { 0, -1, -1 }, { 1, 1, 1 }, { -1, 1, 1 }, { 1, -1, -1 }, { -1, -1, 1 },
+                              { 0.9f, 0.2f, 0.3f }, { -0.3f, 0.5f, -0.8f } };
+    double meanSum = 0;
+    int worstMax = 0, worstBand = 0, count = 0;
+    for (const Vector3& v : views) {
+        auto a = skyScene(v), b = skyScene(v);
+        a->environmentFaces = faces;
+        b->environment = eq;
+        Image ia = look(a), ib = look(b);
+        Diff d = diff(ia, ib);
+        meanSum += d.mean; worstMax = std::max(worstMax, d.max); worstBand = std::max(worstBand, d.bandMax); count++;
+        UnloadImage(ia); UnloadImage(ib);
+    }
+    std::printf("[scene3d] cube seams: %d views, mean abs diff %.3f levels, worst max %d, worst centre-band max %d\n",
+                count, meanSum / count, worstMax, worstBand);
+    CHECK(meanSum / count < 1.5);
+    CHECK(worstBand <= 8);          // no seam spike where the view crosses an edge or corner
+    CHECK(worstMax <= 10);
+
+    // 3. A matte sphere lit by the sky: faces vs equirectangular.
+    double litDiff = 0;
+    for (float yaw : { 0.f, 70.f, 200.f }) {
+        Diff d;
+        Image imgs[2];
+        for (int k = 0; k < 2; k++) {
+            auto s = std::make_shared<g3d::Scene>();
+            s->camera.position = { 0, 0.5f, 4 };
+            if (k == 0) s->environmentFaces = faces; else s->environment = eq;
+            s->environmentRotation = yaw;
+            g3d::Material m;
+            m.color = Color{ 200, 200, 200, 255 };
+            m.roughness = 1;
+            s->add(g3d::Geometry::sphere(1, 48, 64), m);
+            imgs[k] = look(s);
+        }
+        d = diff(imgs[0], imgs[1]);
+        litDiff = std::max(litDiff, d.mean);
+        std::printf("[scene3d] cube lighting yaw %.0f: mean abs diff %.3f max %d (sphere luma %d)\n", yaw, d.mean, d.max,
+                    luma(GetImageColor(imgs[0], W / 2, H / 2)));
+        CHECK(luma(GetImageColor(imgs[0], W / 2, H / 2)) > 20);          // it is lit, not black
+        UnloadImage(imgs[0]); UnloadImage(imgs[1]);
+    }
+    CHECK(litDiff < 2.0);
+
+    // 4. The horizontal cross gives the same picture as the six files.
+    const std::string cross = writeCross(dir, "cube-grad", n, gradient);
+    int crossMax = 0;
+    double crossMean = 0;
+    for (const Vector3& v : views) {
+        auto a = skyScene(v), b = skyScene(v);
+        a->environmentFaces = faces;
+        b->environmentFaces = { cross };
+        Image ia = look(a), ib = look(b);
+        Diff d = diff(ia, ib);
+        crossMax = std::max(crossMax, d.max); crossMean += d.mean / (double)(sizeof(views) / sizeof(views[0]));
+        UnloadImage(ia); UnloadImage(ib);
+    }
+    std::printf("[scene3d] cube cross vs six files: mean abs diff %.4f, max %d\n", crossMean, crossMax);
+    CHECK(crossMax <= 1);
+
+    // 5. Precedence: a file beats faces, and faces beat the generator.
+    {
+        auto s = skyScene({ 1, 0, 0 });
+        s->environmentFaces = solidFiles;
+        s->environment = eq;
+        Image i = look(s);
+        Color c = GetImageColor(i, W / 2, H / 2);
+        CHECK(!close(c, solid[1], 20));
+        UnloadImage(i);
+        auto g = skyScene({ 1, 0, 0 });
+        g->environmentFaces = solidFiles;
+        g->environmentGenerator = g3d::studioEnvironment(GREEN, GREEN, GREEN, 0);
+        i = look(g);
+        CHECK(close(GetImageColor(i, W / 2, H / 2), solid[1], 6));
+        UnloadImage(i);
+    }
+
+    // 6. Errors name the problem.
+    auto five = skyScene({ 1, 0, 0 });
+    five->environmentFaces = std::vector<std::string>(solidFiles.begin(), solidFiles.begin() + 5);
+    const std::string e5 = errorOf(five);
+    Image rect = GenImageColor(32, 16, WHITE);
+    const std::string rectPath = (dir / "cube-rect.png").string();
+    ExportImage(rect, rectPath.c_str());
+    UnloadImage(rect);
+    auto nonSquare = skyScene({ 1, 0, 0 });
+    nonSquare->environmentFaces = solidFiles;
+    nonSquare->environmentFaces[3] = rectPath;
+    const std::string eRect = errorOf(nonSquare);
+    auto missing = skyScene({ 1, 0, 0 });
+    missing->environmentFaces = solidFiles;
+    missing->environmentFaces[2] = (dir / "no-such-face.png").string();
+    const std::string eMissing = errorOf(missing);
+    std::printf("[scene3d] cube errors:\n  five: %s\n  non-square: %s\n  missing: %s\n", e5.c_str(), eRect.c_str(), eMissing.c_str());
+    CHECK(e5.find("six") != std::string::npos);
+    CHECK(eRect.find("square") != std::string::npos && eRect.find("cube-rect") != std::string::npos);
+    CHECK(eMissing.find("no-such-face") != std::string::npos);
 }
 
 // A box that glows white (emissive, so it shows without lights) and takes fog.
@@ -2559,6 +2876,7 @@ int main() try {
     vegetationMaterials(dir);
     waterTest();
     environment(dir);
+    cubeSkybox(dir);
     skyAndFog();
     depthOfField();
     determinism();

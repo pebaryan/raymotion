@@ -545,6 +545,17 @@ with a 2:1 image. The callback uses the same `void pixels(int frame, array<uint>
 signature as dynamic maps, receives frame 0, and must fill exactly `width*(width/2)` packed
 pixels. It runs once when the environment is first generated; its width must be even and 16..2048.
 Do not combine the JSON callback with an `environment` path or `studioEnvironment` object.
+A scene descriptor's `environment` is an image path (equirectangular PNG/JPG/HDR), or an object
+that gives a cube skybox: `{"faces": [px, nx, py, ny, pz, nz]}` (six files in the order +x, -x,
++y, -y, +z, -z) or `{"cross": "sky.png"}` (one horizontal cross, a 4x3 grid: `+y` above column 1,
+`-x +z +x -z` along row 1, `-y` below column 1). Packs are labelled for left-handed engines and
+raymotion is right-handed, so the `+x` and `-x` faces swap sides (as in three.js): the face labelled
+`+x` appears toward world -x. Every face stays unmirrored and the sky continuous. Faces must be
+square and equal in size, and are all 8-bit or all HDR (HDR stays linear). They are converted once
+to an equirectangular image, so `environmentIntensity`, `environmentRotation`, `showEnvironment`
+and `fogFromSky` work as for a path. Paths resolve like any other media file. A wrong face count,
+a non-square or mismatched face, a missing file, or both keys at once is an error. `examples/scripts/cube_skybox.as`
+shows it.
 Scene handles also expose `modelAnimationCount(file)`, `modelAnimationIndex(file, name)` and
 `modelAnimationFrames(file, index)` for choosing clips on `Object3D` models; query these in draw
 callbacks, where models are loaded with the graphics context active. `Object3D.lookAt` applies
