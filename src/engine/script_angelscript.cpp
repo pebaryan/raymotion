@@ -3989,7 +3989,9 @@ voxel::Grid jsonVoxelGrid(const Json& d) {
     return grid; }
 g3d::GeometryPtr cachedVoxelMesh(const Json& d) {
     static thread_local std::unordered_map<std::string,g3d::GeometryPtr> meshes; const auto key=d.dump(); auto it=meshes.find(key); if(it!=meshes.end()) return it->second; if(meshes.size()>=64) meshes.clear(); auto grid=jsonVoxelGrid(d); voxel::MeshOptions opts; opts.size=(float)d.num("cellSize",opts.size); opts.origin=jsonV3(d["origin"],opts.origin); opts.centre=d.flag("centre",opts.centre); opts.ao=d.flag("ao",opts.ao); opts.aoStrength=(float)d.num("aoStrength",opts.aoStrength); if(!std::isfinite(opts.size)||opts.size<=0||!std::isfinite(opts.aoStrength)||opts.aoStrength<0||opts.aoStrength>1)        throw std::runtime_error("voxel cellSize must be positive and aoStrength must be 0..1"); return meshes.emplace(key,voxel::mesh(grid,opts)).first->second; }
+g3d::GeometryPtr jsonTerrain(const Json& object);
 g3d::GeometryPtr jsonGeometry(const Json& object) {
+    if(object.str("geometry","")=="terrain")return jsonTerrain(object);
     auto shape=object.str("geometry", "box"); const float w=(float)object.num("width",1), h=(float)object.num("height",1), d=(float)object.num("depth",1); const float radius=(float)object.num("radius",(shape=="sphere"||shape=="torus"||shape=="knot")?1:0.5),tube=(float)object.num("tube",0.25); const int rings=object.integer("rings",24),slices=object.integer("slices",object.integer("segments",32)); const int resX=object.integer("resX",1),resZ=object.integer("resZ",1); const int torusRadialSegments=object.integer("radialSegments",64),torusSides=object.integer("sides",24); const int knotRadialSegments=object.integer("radialSegments",24),tubularSegments=object.integer("tubularSegments",256); const int p=object.integer("p",2),q=object.integer("q",3); std::ostringstream key; key.precision(9); key<<shape<<':'<<w<<':'<<h<<':'<<d<<':'<<radius<<':'<<tube<<':'<<rings<<':'<<slices<<':'<<resX<<':'<<resZ<<':'<<torusRadialSegments<<':'<<torusSides<<':'<<knotRadialSegments<<':'<<tubularSegments<<':'<<p<<':'<<q; static thread_local std::unordered_map<std::string,g3d::GeometryPtr> cache; auto it=cache.find(key.str()); if(it!=cache.end()) return it->second; if(cache.size()>=128) cache.clear(); g3d::GeometryPtr mesh; if(shape=="box") mesh=g3d::Geometry::box(w,h,d); else if(shape=="sphere") mesh=g3d::Geometry::sphere(radius,rings,slices); else if(shape=="plane") mesh=g3d::Geometry::plane(w,d,resX,resZ); else if(shape=="cylinder") mesh=g3d::Geometry::cylinder(radius,h,slices); else if(shape=="cone") mesh=g3d::Geometry::cone(radius,h,slices); else if(shape=="torus") mesh=g3d::Geometry::torus(radius,tube,torusRadialSegments,torusSides); else if(shape=="knot") mesh=g3d::Geometry::knot(radius,tube,tubularSegments,knotRadialSegments,p,q); else throw std::runtime_error("unknown 3D geometry: "+shape); return cache.emplace(key.str(),std::move(mesh)).first->second; }
 g3d::DynamicTexturePtr jsonDynamicTexture(const Json& descriptor) {
     if(!descriptor.isObject())throw std::runtime_error("dynamicMap must be an object"); const auto drawName=descriptor.str("drawFunction",""); const auto pixelName=descriptor.str("pixelsFunction",""); if(!drawName.empty()&&!pixelName.empty())throw std::runtime_error("dynamicMap may specify drawFunction or pixelsFunction, not both"); const auto& invocationState=invocation(); const auto key=descriptor.dump()+((drawName.empty()&&pixelName.empty())?std::string{}:"#script:"+std::to_string(invocationState.scriptIdentity)); static thread_local std::unordered_map<std::string,g3d::DynamicTexturePtr> cache; auto found=cache.find(key); if(found!=cache.end())return found->second; if(cache.size()>=64)throw std::runtime_error("3D script supports at most 64 distinct dynamic textures per worker"); const int width=descriptor.integer("width",0),height=descriptor.integer("height",0),every=descriptor.integer("every",1); const auto& frames=descriptor["frames"]; if(width<1||height<1||width>512||height>512||(long long)width*height>65536||every<1||every>10000||       (drawName.empty()&&pixelName.empty()&&(!frames.isArray()||frames.size()<1||frames.size()>128)))        throw std::runtime_error("dynamicMap needs 1..512 dimensions (at most 65536 pixels), every 1..10000 and drawFunction, pixelsFunction or 1..128 frames"); auto texture=std::make_shared<g3d::DynamicTexture>(); texture->width=width; texture->height=height; texture->every=every; if(!drawName.empty()) {
@@ -4612,7 +4614,9 @@ lo.x=std::min(lo.x,mesh->positions[i]); lo.y=std::min(lo.y,mesh->positions[i+1])
 ; for(size_t i=0; i<perFrame*frames; i+=3){
 const float x=mesh->positions[i]-mesh->centre.x,y=mesh->positions[i+1]-mesh->centre.y,z=mesh->positions[i+2]-mesh->centre.z; mesh->radius=std::max(mesh->radius,std::sqrt(x*x+y*y+z*z)); }
     cache.emplace(meshKey,animated); return animated; }
+std::shared_ptr<g3d::Instances> jsonScatterInstances(const g3d::GeometryPtr& rest, const Json& descriptor);
 std::shared_ptr<g3d::Instances> jsonInstances(const g3d::GeometryPtr& rest,const Json& descriptor) {
+    if(descriptor.isObject()&&descriptor.has("scatter")&&!descriptor.has("items"))return jsonScatterInstances(rest,descriptor);
     if(!descriptor.isObject())throw std::runtime_error("instances must be an object with an items array"); const auto& items=descriptor["items"]; if(!items.isArray()||items.size()>100000)throw std::runtime_error("3D instances needs an items array with at most 100000 entries"); auto out=std::make_shared<g3d::Instances>(); out->mesh=cachedScriptAnimatedMesh(rest,descriptor); out->list.reserve(items.size()); for(const auto& source:items.asArray()){
 g3d::Instance i; i.position=jsonV3(source["position"]); i.yaw=(float)source.num("yaw",0); i.pitch=(float)source.num("pitch",0); i.bank=(float)source.num("bank",0); i.scale=(float)source.num("scale",1); i.frame=(float)source.num("frame",0); i.clipStart=source.integer("clipStart",0); i.clipLength=source.integer("clipLength",1); i.shade=(float)source.num("shade",1); i.tint=source.color("tint",WHITE); const float v[]={
 i.position.x,i.position.y,i.position.z,i.yaw,i.pitch,i.bank,i.scale,i.frame,i.shade}
@@ -4630,12 +4634,12 @@ std::function<float(float, float)> jsonFieldGrid(const Json& g, Vector2 lo, Vect
     const auto& values = g["values"];
     const int w = g.isObject() ? g.integer("width", 0) : 0, h = g.isObject() ? g.integer("height", 0) : 0;
     if (w < 2 || h < 2 || w > 1024 || h > 1024 || !values.isArray() || values.size() != (size_t)w * (size_t)h)
-        throw std::runtime_error(std::string("grass ") + name + " needs width and height of 2..1024 and width * height values");
+        throw std::runtime_error(std::string(name) + " needs width and height of 2..1024 and width * height values");
     auto v = std::make_shared<std::vector<float>>();
     v->reserve(values.size());
     for (const auto& value : values.asArray()) {
         if (!value.isNumber() || !std::isfinite(value.asNumber()))
-            throw std::runtime_error(std::string("grass ") + name + " values must be finite numbers");
+            throw std::runtime_error(std::string(name) + " values must be finite numbers");
         v->push_back((float)value.asNumber());
     }
     return [v, w, h, lo, hi](float x, float z) {
@@ -4652,6 +4656,7 @@ std::function<float(float, float)> jsonFieldGrid(const Json& g, Vector2 lo, Vect
 // number or colour by name, and optional "mask", "ground" and "tall" grids}. The field is
 // kept between frames while its area, tiles and grids stay the same, so its maps are made
 // once; everything else is read every frame (so the wind or the colours can follow t).
+flora::Area jsonArea(const Json& d);
 std::shared_ptr<g3d::Field> jsonGrass(const Json& d, int fps) {
     if (!d.isObject()) throw std::runtime_error("grass must be an object");
     g3d::Field next;
@@ -4683,23 +4688,199 @@ std::shared_ptr<g3d::Field> jsonGrass(const Json& d, int fps) {
         throw std::runtime_error("grass segments must be 1..8 and mapResolution 2..1024");
     next.min = lo; next.max = hi;
 
+    const bool hasArea = d.has("area");
+    if (hasArea && (d.has("mask") || d.has("ground")))
+        throw std::runtime_error("grass takes an area or mask and ground grids, not both (put them in the area)");
     const std::string key = d["min"].dump() + d["max"].dump() + std::to_string(next.tileSize) + ":" +
-                            std::to_string(next.mapResolution) + d["mask"].dump() + d["ground"].dump() + d["tall"].dump();
+                            std::to_string(next.mapResolution) + d["mask"].dump() + d["ground"].dump() + d["tall"].dump() +
+                            d["area"].dump();
     static thread_local std::unordered_map<std::string, std::shared_ptr<g3d::Field>> cache;
     auto found = cache.find(key);
     if (found == cache.end()) {
         if (cache.size() >= 32) cache.clear();
         auto made = std::make_shared<g3d::Field>();
-        made->mask = jsonFieldGrid(d["mask"], lo, hi, "mask");
-        made->ground = jsonFieldGrid(d["ground"], lo, hi, "ground");
-        made->tall = jsonFieldGrid(d["tall"], lo, hi, "tall");
+        made->min = lo; made->max = hi;
+        made->mapResolution = next.mapResolution;
+        if (hasArea) flora::fit(*made, jsonArea(d["area"]));      // the area's bounds, weight and ground
+        else {
+            made->mask = jsonFieldGrid(d["mask"], lo, hi, "grass mask");
+            made->ground = jsonFieldGrid(d["ground"], lo, hi, "grass ground");
+        }
+        made->tall = jsonFieldGrid(d["tall"], made->min, made->max, "grass tall");
         found = cache.emplace(key, made).first;
     }
     g3d::Field& field = *found->second;
     next.mask = field.mask; next.ground = field.ground; next.tall = field.tall;
+    next.min = field.min; next.max = field.max; next.mapResolution = field.mapResolution;
     next.revision = field.revision;
     field = std::move(next);
     return found->second;
+}
+
+// ---- flora areas, scattered instances and terrain from JSON (docs/scripting.md)
+std::vector<Vector2> jsonAreaRing(const Json& r, const char* what, size_t& budget) {
+    if (!r.isArray() || r.size() < 2) throw std::runtime_error(std::string("area ") + what + " must be an array of [x, z] points");
+    if (r.size() > budget) throw std::runtime_error("area outlines exceed 20000 points in all");
+    budget -= r.size();
+    std::vector<Vector2> out;
+    out.reserve(r.size());
+    for (const auto& p : r.asArray()) {
+        if (!p.isArray() || p.size() < 2 || !p[0].isNumber() || !p[1].isNumber())
+            throw std::runtime_error(std::string("area ") + what + " points must be [x, z]");
+        const double x = p[0].asNumber(), z = p[1].asNumber();
+        if (!std::isfinite(x) || !std::isfinite(z) || std::fabs(x) > 1e5 || std::fabs(z) > 1e5)
+            throw std::runtime_error("area coordinates must be finite and within +/-1e5");
+        out.push_back({ (float)x, (float)z });
+    }
+    return out;
+}
+
+flora::Area jsonArea(const Json& d) {
+    if (!d.isObject()) throw std::runtime_error("area must be an object");
+    size_t budget = 20000;
+    flora::Area a;
+    if (d.has("polygon")) a.polygons.push_back(jsonAreaRing(d["polygon"], "polygon", budget));
+    if (d.has("polygons")) {
+        const auto& rings = d["polygons"];
+        if (!rings.isArray() || rings.size() > 256) throw std::runtime_error("area polygons must be an array of at most 256 rings");
+        for (const auto& r : rings.asArray()) a.polygons.push_back(jsonAreaRing(r, "polygons", budget));
+    }
+    if (!a.polygons.empty()) {
+        const flora::Area fitted = flora::polygon(a.polygons[0]);
+        a.min = fitted.min; a.max = fitted.max;
+        for (const auto& ring : a.polygons)
+            for (Vector2 p : ring) {
+                a.min = { std::min(a.min.x, p.x), std::min(a.min.y, p.y) };
+                a.max = { std::max(a.max.x, p.x), std::max(a.max.y, p.y) };
+            }
+    }
+    a.min = jsonV2(d["min"], a.min);
+    a.max = jsonV2(d["max"], a.max);
+    if (!(std::isfinite(a.min.x) && std::isfinite(a.min.y) && std::isfinite(a.max.x) && std::isfinite(a.max.y)) ||
+        std::fabs(a.min.x) > 1e5f || std::fabs(a.min.y) > 1e5f || std::fabs(a.max.x) > 1e5f || std::fabs(a.max.y) > 1e5f)
+        throw std::runtime_error("area min and max must be finite and within +/-1e5");
+    if (!(a.max.x > a.min.x && a.max.y > a.min.y)) throw std::runtime_error("area max must be greater than min in x and z");
+    if (d.has("exclude")) {
+        const auto& rings = d["exclude"];
+        if (!rings.isArray() || rings.size() > 1024) throw std::runtime_error("area exclude must be an array of at most 1024 rings");
+        for (const auto& r : rings.asArray()) a.exclude.push_back(jsonAreaRing(r, "exclude", budget));
+    }
+    if (d.has("clearings")) {
+        const auto& list = d["clearings"];
+        if (!list.isArray() || list.size() > 1024) throw std::runtime_error("area clearings must be an array of at most 1024 [x, z, radius]");
+        for (const auto& c : list.asArray()) {
+            if (!c.isArray() || c.size() != 3 || !c[0].isNumber() || !c[1].isNumber() || !c[2].isNumber())
+                throw std::runtime_error("area clearings must be [x, z, radius]");
+            a.clearings.push_back({ { (float)c[0].asNumber(), (float)c[1].asNumber() }, (float)c[2].asNumber() });
+        }
+    }
+    if (d.has("strips")) {
+        const auto& list = d["strips"];
+        if (!list.isArray() || list.size() > 256) throw std::runtime_error("area strips must be an array of at most 256 {points, width}");
+        for (const auto& s : list.asArray()) {
+            if (!s.isObject()) throw std::runtime_error("area strips must be objects with points and width");
+            a.strips.push_back({ jsonAreaRing(s["points"], "strip points", budget), (float)s.num("width", 4) });
+        }
+    }
+    a.edge = (float)d.num("edge", 0);
+    a.maxSlope = (float)d.num("maxSlope", 90);
+    a.minAltitude = (float)d.num("minAltitude", -1e30);
+    a.maxAltitude = (float)d.num("maxAltitude", 1e30);
+    for (const auto& c : a.clearings)
+        if (!std::isfinite(c.centre.x) || !std::isfinite(c.centre.y) || !std::isfinite(c.radius)) throw std::runtime_error("area clearings must be finite");
+    for (const auto& s : a.strips)
+        if (!std::isfinite(s.width) || s.width < 0) throw std::runtime_error("area strip widths must be finite and >= 0");
+    if (!std::isfinite(a.edge) || !std::isfinite(a.maxSlope) || std::isnan(a.minAltitude) || std::isnan(a.maxAltitude))
+        throw std::runtime_error("area edge, maxSlope and altitudes must be numbers");
+    const auto& ground = d["ground"];
+    if (ground.isObject() && ground.has("hills")) {
+        const auto& h = ground["hills"];
+        const float height = (float)h.num("height", 5), scale = (float)h.num("scale", 50), base = (float)h.num("base", 0);
+        const uint32_t seed = (uint32_t)scriptUnsigned64(h["seed"], 1, "hills seed");
+        if (!std::isfinite(height) || !std::isfinite(scale) || !std::isfinite(base) || scale <= 0)
+            throw std::runtime_error("area hills need a finite height and base and a positive scale");
+        a.ground = [height, scale, base, seed](float x, float z) { return base + height * flora::noise(x, z, scale, seed); };
+    } else a.ground = jsonFieldGrid(ground, a.min, a.max, "area ground");
+    const auto& density = d["density"];
+    if (density.isObject() && density.has("noise")) {
+        const auto& n = density["noise"];
+        const float scale = (float)n.num("scale", 30), low = (float)n.num("low", 0.35), high = (float)n.num("high", 0.65);
+        const uint32_t seed = (uint32_t)scriptUnsigned64(n["seed"], 1, "density noise seed");
+        if (!std::isfinite(scale) || scale <= 0 || !std::isfinite(low) || !std::isfinite(high))
+            throw std::runtime_error("area density noise needs a positive scale and finite low and high");
+        a.density = [scale, low, high, seed](float x, float z) {
+            const float v = flora::noise(x, z, scale, seed);
+            if (high <= low) return v < low ? 0.f : 1.f;
+            const float t = std::clamp((v - low) / (high - low), 0.f, 1.f);
+            return t * t * (3 - 2 * t);
+        };
+    } else a.density = jsonFieldGrid(density, a.min, a.max, "area density");
+    return a;
+}
+
+std::shared_ptr<g3d::Instances> jsonScatterInstances(const g3d::GeometryPtr& rest, const Json& descriptor) {
+    const Json& s = descriptor["scatter"];
+    if (!s.isObject()) throw std::runtime_error("instances scatter must be an object");
+    static thread_local std::unordered_map<std::string, std::shared_ptr<const std::vector<flora::Placement>>> cache;
+    const std::string key = s["area"].dump() + "|" + std::to_string(s.num("spacing", 3)) + "|" + std::to_string(s.num("clumping", 0)) + "|" +
+                            std::to_string(s.num("clumpScale", 25)) + "|" + std::to_string(s.num("scaleMin", 0.8)) + "|" +
+                            std::to_string(s.num("scaleMax", 1.25)) + "|" + s["tints"].dump() + "|" + s["seed"].dump();
+    auto found = cache.find(key);
+    if (found == cache.end()) {
+        flora::ScatterSpec spec;
+        spec.spacing = (float)s.num("spacing", spec.spacing);
+        spec.clumping = (float)s.num("clumping", spec.clumping);
+        spec.clumpScale = (float)s.num("clumpScale", spec.clumpScale);
+        spec.scaleMin = (float)s.num("scaleMin", spec.scaleMin);
+        spec.scaleMax = (float)s.num("scaleMax", spec.scaleMax);
+        const auto& tints = s["tints"];
+        spec.variants = tints.isArray() && tints.size() > 0 ? (int)tints.size() : 1;
+        for (float v : { spec.spacing, spec.clumping, spec.clumpScale, spec.scaleMin, spec.scaleMax })
+            if (!std::isfinite(v)) throw std::runtime_error("instances scatter values must be finite");
+        if (spec.spacing < 0.05f || spec.clumpScale <= 0 || spec.scaleMin <= 0 || spec.scaleMax < spec.scaleMin)
+            throw std::runtime_error("instances scatter needs spacing >= 0.05, a positive clumpScale and 0 < scaleMin <= scaleMax");
+        std::vector<flora::Placement> placed;
+        try { placed = flora::scatter(jsonArea(s["area"]), spec, (uint32_t)scriptUnsigned64(s["seed"], 1, "scatter seed")); }
+        catch (const std::invalid_argument& e) { throw std::runtime_error(e.what()); }
+        if (placed.size() > 100000)
+            throw std::runtime_error("instances scatter placed " + std::to_string(placed.size()) + " bodies; at most 100000 (widen the spacing)");
+        if (cache.size() >= 16) cache.clear();
+        found = cache.emplace(key, std::make_shared<const std::vector<flora::Placement>>(std::move(placed))).first;
+    }
+    std::vector<Color> tints;
+    if (s["tints"].isArray())
+        for (const auto& t : s["tints"].asArray()) {
+            if (!t.isString()) throw std::runtime_error("instances scatter tints must be colour strings");
+            tints.push_back(parseColor(t.asString()));
+        }
+    const float lift = (float)s.num("lift", 0), shadeVariation = (float)s.num("shadeVariation", 0);
+    if (!std::isfinite(lift) || !std::isfinite(shadeVariation)) throw std::runtime_error("instances scatter lift and shadeVariation must be finite");
+    auto out = std::make_shared<g3d::Instances>();
+    out->mesh = cachedScriptAnimatedMesh(rest, descriptor);
+    out->list.reserve(found->second->size());
+    for (const flora::Placement& p : *found->second) {
+        g3d::Instance i;
+        i.position = { p.position.x, p.position.y + lift * p.scale, p.position.z };
+        i.yaw = p.yaw;
+        i.scale = p.scale;
+        i.clipLength = std::max(1, out->mesh->frames);
+        i.frame = 0;
+        if (!tints.empty()) i.tint = tints[(size_t)p.variant % tints.size()];
+        if (shadeVariation != 0) i.shade = 1 + shadeVariation * (rnd01(p.id, 77) - 0.5f) * 2;
+        out->list.push_back(i);
+    }
+    return out;
+}
+
+g3d::GeometryPtr jsonTerrain(const Json& object) {
+    static thread_local std::unordered_map<std::string, g3d::GeometryPtr> cache;
+    const int resX = object.integer("resX", 128), resZ = object.integer("resZ", 128);
+    if (resX < 1 || resZ < 1 || resX > 254 || resZ > 254) throw std::runtime_error("terrain resX and resZ must be 1..254");
+    const std::string key = object["area"].dump() + ":" + std::to_string(resX) + ":" + std::to_string(resZ);
+    auto found = cache.find(key);
+    if (found != cache.end()) return found->second;
+    if (cache.size() >= 16) cache.clear();
+    return cache.emplace(key, flora::terrain(jsonArea(object["area"]), resX, resZ)).first->second;
 }
 
 void addJsonObject(g3d::Scene& scene,g3d::Object3D* parent,const Json& source,int depth,int& count,int fps) {

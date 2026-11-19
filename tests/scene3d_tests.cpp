@@ -1997,6 +1997,47 @@ static void grassField() {
         CHECK(probe.x > 0 && shaded < open - 15);
         UnloadImage(ia); UnloadImage(ib);
     }
+    {   // an area: grass stands on its terrain and keeps off its road
+        flora::Area land = flora::rect({ -12, -12 }, { 12, 12 });
+        land.ground = [](float x, float z) { return 3 + 0.0f * x * z; };   // a plateau 3 m up
+        land.strips.push_back({ { { -12, -2 }, { 12, 2 } }, 3 });
+        auto build = [&](bool fromAbove) {
+            auto s = std::make_shared<g3d::Scene>();
+            g3d::Material ground;
+            ground.color = { 200, 40, 200, 255 };
+            ground.roughness = 1;
+            s->add(flora::terrain(land, 24, 24), ground);
+            g3d::Field look = flora::meadow();
+            look.density = 300;
+            flora::addGrass(*s, land, look, 4);
+            s->lights.push_back(g3d::Light::directional({ 3, 10, 4 }, WHITE, 1.5f, false));
+            if (fromAbove) { s->camera.position = { 0, 14, 0.01f }; s->camera.target = { 0, 3, 0 }; }
+            else { s->camera.position = { 0, 3.6f, 18 }; s->camera.target = { 0, 3, 0 }; }
+            return s;
+        };
+        auto above = build(true);
+        Comp a = longComp(above);
+        Image top = render(a, 5);
+        dumpField("area_top.png", top);
+        const Vector2 r0 = project(above->camera, { -4, 3, -0.5f }), r1 = project(above->camera, { 4, 3, 0.5f });
+        const Vector2 g0 = project(above->camera, { -4, 3, 4 }), g1 = project(above->camera, { 4, 3, 6 });
+        const int onRoad = bladePixels(top, (int)std::min(r0.x, r1.x), (int)std::max(r0.x, r1.x), (int)std::min(r0.y, r1.y), (int)std::max(r0.y, r1.y));
+        const int offRoad = bladePixels(top, (int)std::min(g0.x, g1.x), (int)std::max(g0.x, g1.x), (int)std::min(g0.y, g1.y), (int)std::max(g0.y, g1.y));
+        std::printf("[scene3d] grass area: %d blade pixels on the road, %d beside it\n", onRoad, offRoad);
+        CHECK(onRoad == 0 && offRoad > 50);
+        UnloadImage(top);
+        auto side = build(false);
+        Comp b = longComp(side);
+        Image img = render(b, 5);
+        dumpField("area_side.png", img);
+        int lowest = -1;                                                      // the lowest row with a blade in it
+        for (int y = 0; y < H; y++)
+            if (bladePixels(img, 0, W, y, y + 1) > 0) lowest = y;
+        const int plateau = (int)project(side->camera, { 0, 3, 12 }).y, below = (int)project(side->camera, { 0, 2.7f, 12 }).y;
+        std::printf("[scene3d] grass area: lowest blade row %d, the plateau's near edge at %d, 0.3 m below it at %d\n", lowest, plateau, below);
+        CHECK(lowest >= plateau - 2 && lowest < below);
+        UnloadImage(img);
+    }
     {   // landscape: a 400 m square; time printed, not checked. Full size (600 blades a square
         // metre at 1080p) with RMTN_FIELD_BENCH set; smaller by default, for software GL on CI.
         const bool bench = std::getenv("RMTN_FIELD_BENCH") != nullptr;

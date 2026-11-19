@@ -146,6 +146,41 @@ void draw(int frame) {
         self.assertIn("grass mask needs", self.run_cli("still", "grass", "--script", self.path, "--png", "x.png", ok=False))
 
     @unittest.skipUnless(GL, "needs OpenGL")
+    def test_flora_area_scatter_terrain(self):
+        # One area feeds a terrain, grass and scattered instances; frames repeat exactly, and
+        # bad areas and oversized scatters say what is wrong.
+        def write(area, spacing=3, grass_extra=""):
+            land = area.replace('"', '\\"')
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "land"; c.w = 160; c.h = 90; c.fps = 30; c.duration = 10; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) {
+    string land = "''' + land + '''";
+    g3d::draw("{\\"camera\\":{\\"position\\":[0,14,30],\\"target\\":[0,2,0]},"
+              "\\"lights\\":[{\\"type\\":\\"directional\\",\\"position\\":[10,20,-10],\\"castShadow\\":true,\\"shadowExtent\\":30}],"
+              "\\"objects\\":[{\\"geometry\\":\\"terrain\\",\\"area\\":" + land + ",\\"resX\\":40,\\"resZ\\":40,\\"material\\":{\\"color\\":\\"#c828c8\\"}},"
+              "{\\"grass\\":{\\"preset\\":\\"lawn\\",\\"area\\":" + land + ",\\"seed\\":2''' + grass_extra + '''}},"
+              "{\\"geometry\\":\\"cone\\",\\"radius\\":0.8,\\"height\\":2.5,\\"slices\\":6,"
+              "\\"instances\\":{\\"scatter\\":{\\"area\\":" + land + ",\\"spacing\\":''' + str(spacing) + ''',\\"lift\\":1.25,"
+              "\\"tints\\":[\\"#2f5a2a\\",\\"#5a7a30\\"],\\"seed\\":4}}}]}", frame, 0, 0, 160, 90);
+}
+''')
+        hills = ('{"min":[-25,-25],"max":[25,25],"ground":{"hills":{"height":4,"scale":20,"seed":3}},'
+                 '"strips":[{"points":[[-25,0],[25,6]],"width":4}],"clearings":[[8,-8,5]],"maxSlope":35}')
+        write(hills)
+        for name, frame in (("a", 3), ("b", 7), ("c", 3)):
+            self.run_cli("still", "land", "--script", self.path, "--at", frame, "--png", f"{name}.png")
+        self.assertEqual((self.cwd / "a.png").read_bytes(), (self.cwd / "c.png").read_bytes())
+        self.assertGreater((self.cwd / "a.png").stat().st_size, 5000)
+        write('{"min":[-25,-25],"max":[25,25],"strips":[{"points":[[0,0]],"width":4}]}')
+        self.assertIn("strip points", self.run_cli("still", "land", "--script", self.path, "--png", "x.png", ok=False))
+        write(hills.replace('"min":[-25,-25],"max":[25,25]', '"min":[-900,-900],"max":[900,900]'), spacing=4)
+        self.assertIn("at most", self.run_cli("still", "land", "--script", self.path, "--png", "x.png", ok=False, timeout=90))
+        write(hills, grass_extra=',\\"mask\\":{\\"width\\":2,\\"height\\":2,\\"values\\":[1,1,1,1]}')
+        self.assertIn("not both", self.run_cli("still", "land", "--script", self.path, "--png", "x.png", ok=False))
+
+    @unittest.skipUnless(GL, "needs OpenGL")
     def test_map_helpers_draw(self):
         # geo::base, choropleth, colorbar, labels, highlight, markers, route, fly, focus,
         # valuesAt and the geo-route / geo-flyto prefabs: every frame sampled must draw.

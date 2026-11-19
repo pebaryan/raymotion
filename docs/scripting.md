@@ -718,6 +718,21 @@ and any field value by name to override the preset: `density` (blades a square m
 the grass material (translucent, matt, no ink lines) and changes only what it names. The field
 is kept between frames while its area, `tileSize`, `mapResolution` and grids stay the same,
 so its maps are made once; the rest may follow `t`. See `examples/scripts/flora_meadow.as`.
+An `area` descriptor (`flora::Area`) says where plants grow: `min` and `max`, or `polygon`
+(one ring of `[x, z]`) or `polygons` (rings; inside an odd number of them, so holes are
+rings too); `exclude` (rings), `clearings` (`[x, z, radius]`), `strips` (`{"points": [[x, z],
+...], "width": w}` for roads and paths), `edge` (metres of fade-in), `maxSlope` (degrees),
+`minAltitude`, `maxAltitude`; `ground` as a grid or `{"hills": {"height", "scale", "seed",
+"base"}}`, and `density` as a grid or `{"noise": {"scale", "seed", "low", "high"}}`. Grass
+takes it as `"area"` in place of `min`/`max` and the `mask`/`ground` grids. The geometry
+`"terrain"` with an `area` (and `resX`, `resZ`, 1..254) is its ground as a mesh. An
+`instances` descriptor with `scatter` in place of `items` places bodies over an `area`:
+`spacing` (Poisson-disk, metres), `clumping` (0..1, groves and clearings) and `clumpScale`,
+`scaleMin`, `scaleMax`, `seed`, `lift` (raises each body by this times its scale, for meshes
+centred on their origin), `tints` (colour strings, one picked per body) and
+`shadeVariation`; at most 100000 bodies. Placements depend only on the bounds, spacing and
+seed, so editing a road or density removes bodies without moving the others. See
+`examples/scripts/flora_scatter.as`.
 The `physics` namespace exposes native Rope and Cloth solver handles, `PhysicsParams`, Sphere/Plane/Capsule/Box colliders, seeded wind, pins, bending/stretching, tearing, self collision and frame sampling. `physics::rope` and `physics::cloth` accept an optional params handle; omitting it uses the native defaults. See `examples/scripts/physics_scene.as` for the descriptor
 path and `examples/scripts/physics_callbacks.as` for direct callback-driven handles.
 `PhysicsParams.state(values)` returns

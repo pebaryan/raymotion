@@ -1,6 +1,6 @@
 # 0.12 plan: vegetation (`flora::`)
 
-Status: M0 and M1 done 2026-11-19 (see below); M2 next. Set 2026-11-18; owner's decisions the same day:
+Status: M0, M1 and M2 done 2026-11-19 (see below); M3 next. Set 2026-11-18; owner's decisions the same day:
 
 1. **Realistic first, then stylised.** Cards with alpha cutout, translucency and PBR leaves
    come first; low-poly / toon presets follow on the same scatter and wind.
@@ -123,6 +123,26 @@ grid (the ground plane is the caller's; comes with M2's height areas), ink lines
   function/map, clumping noise, exclusion polygons, keep-clear lists (buildings, roads),
   slope/altitude limits. Chunked by tile so 50k trees scatter quickly.
 - The same masks feed the grass field, so grass stops at roads and under buildings.
+
+**Done 2026-11-19.** `flora::Area` (rect, polygons with even-odd holes, `exclude` rings,
+`clearings`, `strips`, `edge` fade, `ground`, `density`, `maxSlope` with a 4-degree fade,
+altitude limits; `weight(x, z)`), built by `rect`, `polygon`, `region` (geo rings through
+any projection callable, so a 2D projection or a laid-down `geo3d::Surface` both work) and
+`onMesh` (upward faces under a slope limit, binned for the highest face over a point).
+`flora::noise` (value noise, three octaves) for hills, patches and clumps.
+`flora::terrain(area)` makes the ground mesh. `flora::scatter`: Bridson's Poisson disk over
+the bounds, then each point kept by the area's weight times a clump mask, by its own hash,
+so placements depend only on bounds, spacing and seed (an edit only removes or restores).
+About 33k placements over 1 km² in 0.12 s, so no chunking was needed. `addGrass(area)` and
+`fit(field, area)` feed the weight and ground to the grass maps. Script: `area`
+descriptors for grass, `instances.scatter`, the `terrain` geometry;
+`examples/scripts/flora_scatter.as`. Tests: `flora_tests` (new, no window: areas, holes,
+exclusions, edges, slope, altitude, density, noise, spacing, determinism, edits that only
+remove, density and clumps, the 1 km² timing, mesh faces, France by geo region, `fit`),
+`scene3d_tests` (grass keeps off a road and stands on a raised terrain), `test_script.py`
+(`test_flora_area_scatter_terrain`). **Moved to M7:** `city::` surfaces by type as areas
+(CityJSON is z-up in its own space; with M7's city integration), and a globe-surface area
+(`region` covers the flat map).
 
 ## M3. Realistic trees and shrubs
 
