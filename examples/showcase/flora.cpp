@@ -5,8 +5,12 @@
 //   flora2d::                      a 2D hillside in layers
 // The meadow, the tree and the hillside are the built-in prefabs (flora-meadow,
 // flora-tree-grow, flora-2d-hill); the fly-over is built here.
+// The score is generated (procgen::Score) into out/flora-assets-v2 by the composition's assets.
 //   raymotion render flora
 #include "rmtn/raymotion.hpp"
+#include "procgen.hpp"
+
+#include <filesystem>
 
 namespace rmtn {
 namespace {
@@ -16,6 +20,66 @@ const Color INK = mkColor(0xf2f4ff), SUB = mkColor(0xb4bfcc);
 
 Font bold() { return fonts::ui(true); }
 Font regular() { return fonts::ui(false); }
+
+// ---------------------------------------------------------------- the score
+
+const std::string SCORE = "out/flora-assets-v2/score.wav";
+
+// 72 bpm in G major, a bar per chord (G, Em, C, D). Under it all, wind: band-passed noise
+// that swells with gusts, strongest in the meadow and the fly-over. The meadow has birds
+// (bell pairs); a riser carries into the fly-over; while the oak grows, an arpeggio climbs
+// an octave; the 2D hill gets lighter plucks; it ends on G. Chapters start at 0, 6.33,
+// 12.67 and 19 s (210-frame scenes, 20-frame transitions).
+void genScore(const std::string& path, int frames) {
+    using procgen::Score;
+    const double end = frames / (double)FPS, bar = 4 * 60.0 / 72, stop = end - 2.6;
+    const double ch[4] = { 0, 190.0 / FPS, 380.0 / FPS, 570.0 / FPS };
+    Score s(end + 0.5);
+    struct Chord { int root; int pad[3]; };
+    const Chord prog[4] = { { 43, { 62, 67, 71 } }, { 40, { 64, 67, 71 } }, { 36, { 60, 64, 67 } }, { 38, { 62, 66, 69 } } };
+    int i = 0;
+    for (double t = 0; t < stop; t += bar, i++) {
+        const Chord& c = prog[i % 4];
+        const bool fly = t >= ch[1] && t < ch[2];
+        for (int q : c.pad) s.pad(t, bar * 0.98, q, 0.06f, fly ? 1300.f : 800.f, 0.5f);
+        s.pad(t, bar * 0.98, c.pad[0] - 12, 0.04f, 500, 0.5f);
+        s.bass(t, bar * 0.9, c.root, 0.12f);
+        if (t >= ch[3])                                             // the 2D hill: light plucks
+            for (int e = 0; e < 4; e++)
+                if (rnd01(7, (unsigned long long)(i * 4 + e)) < 0.7) s.pluck(t + e * bar / 4, c.pad[e % 3] + 12, 0.03f, e % 2 ? 0.3f : 0.7f, 6);
+    }
+    // wind: a gust every few seconds, louder in the open chapters
+    {
+        procgen::Svf f;
+        const int n = (int)(end * Score::RATE);
+        for (int k = 0; k < n; k++) {
+            const double t = (double)k / Score::RATE;
+            const float open = t < ch[2] ? 1.f : (t < ch[3] ? 0.55f : 0.35f);
+            const float gust = 0.55f + 0.45f * (float)std::sin(t * 1.1 + 0.8 * std::sin(t * 0.37));
+            const float fade = (float)std::min({ 1.0, t / 1.5, (end - t) / 2.0 });
+            const float x = f.bp(s.noise(), 380 + 520 * gust, 0.6f, Score::RATE);
+            s.put(k, x * 0.065f * gust * open * std::max(0.f, fade), 0.5f + 0.2f * (float)std::sin(t * 0.5), 0.3f, 0);
+        }
+    }
+    for (int k = 0; k < 14; k++) {                                  // birds in the meadow
+        const double t = 0.8 + (ch[1] - 1.2) * rnd01(11, (unsigned long long)k);
+        const int note = 88 + (int)(rnd01(12, (unsigned long long)k) * 6);
+        const float pan = (float)rnd01(13, (unsigned long long)k);
+        s.bell(t, note, 0.02f, pan);
+        s.bell(t + 0.08, note + 3, 0.014f, pan);
+    }
+    s.riser(ch[1] - 1.6, ch[1] + 0.4, 0.035f);                      // into the fly-over
+    for (int e = 0; e < 16; e++) {                                  // the oak grows: an arpeggio climbs
+        const int steps[8] = { 55, 59, 62, 67, 71, 74, 79, 83 };
+        const double t = ch[2] + 10.0 / FPS + e * (150.0 / FPS) / 16;
+        s.pluck(t, steps[std::min(7, e / 2)], 0.045f, e % 2 ? 0.35f : 0.65f, 4);
+    }
+    for (int q : prog[0].pad) s.pad(stop, 2.6, q, 0.08f, 900, 0.5f);
+    s.bass(stop, 2.6, prog[0].root - 12, 0.14f);
+    std::vector<float> mixed = s.mix();          // peaks at 0.9; 0.8 of that keeps the AAC true peak under -1 dB
+    for (float& v : mixed) v *= 0.8f;
+    media::writeWav(path, mixed, Score::RATE);
+}
 
 struct Chapter { std::string title, note, code; };
 
@@ -150,6 +214,13 @@ void registerFlora(Registry& out) {
     caption(flat, LEN, CHAPTERS[3], true);
 
     c.duration = ts.end();
+    const int total = c.duration;
+    c.assets = [total](const Comp&, const Json&) {
+        if (std::filesystem::exists(SCORE)) return;
+        std::filesystem::create_directories(std::filesystem::path(SCORE).parent_path());
+        genScore(SCORE, total);
+    };
+    media::audio(addRoot(c.roots, 0, c.duration), SCORE);
     out.push_back(std::move(c));
 }
 
