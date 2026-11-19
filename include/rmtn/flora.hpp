@@ -2,8 +2,8 @@
 // looks to start from, areas (where things grow), scattering (where each plant stands), and
 // trees and shrubs drawn at the detail their distance needs (flora::makeTree, addForest).
 // All of it can grow in by a reveal u (Field::grow, addGrowingTree), and trees and grass come
-// in stylised looks (TreeStyle, toonGrass). 2D vegetation follows
-// (docs/flora-plan.md).
+// in stylised looks (TreeStyle, toonGrass). 2D vegetation is in flora2d.hpp
+// (docs/flora-plan.md has the plan).
 //
 //   flora::Area land = flora::rect({ -100, -100 }, { 100, 100 });
 //   land.ground = [](float x, float z) { return 6 * flora::noise(x, z, 60, 3); };      // hills

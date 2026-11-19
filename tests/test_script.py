@@ -280,6 +280,46 @@ void draw(int frame) { g3d::draw("''' + literal + '''", frame, 0, 0, 160, 90); }
         self.assertIn("standard, toon, gooch or hatch", self.run_cli("still", "styles", "--script", self.path, "--png", "x.png", ok=False))
 
     @unittest.skipUnless(GL, "needs OpenGL")
+    def test_flora_2d(self):
+        # 2D vegetation: u 0 draws only the ground, growth changes the picture, frames are pure
+        # in t, and bad items are refused by name.
+        def write(u, items=None):
+            d = {"wind": {"gust": 1}, "camera": [10, 0], "items": items if items is not None else [
+                {"ground": {"depth": 0.6, "hills": {"x0": 0, "x1": 200, "y": 60, "amplitude": 6, "wavelength": 80}, "bottom": 90}},
+                {"tree": {"depth": 0.6, "preset": "pine", "x": 40, "height": 40, "silhouette": True, "u": u}},
+                {"ground": {"line": [[0, 80], [160, 80]], "bottom": 90, "color": "#4a6a34"}},
+                {"grass": {"preset": "tall", "height": 20, "u": u}},
+                {"tree": {"x": 90, "height": 60, "trunkWidth": 4, "leafSize": 6, "u": u}},
+                {"shrub": {"at": [130, 80], "size": 20, "height": 14, "u": u}},
+                {"tuft": {"at": [20, 80], "count": 8, "u": u}},
+                {"meadow": {"shape": [[0, 82], [160, 82], [160, 90], [0, 90]], "preset": "lawn", "height": 4, "u": u}}]}
+            literal = json.dumps(d).replace("\\", "\\\\").replace('"', '\\"')
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "flat"; c.w = 160; c.h = 90; c.fps = 30; c.duration = 40; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) { flora2d::draw("''' + literal + '''", frame); }
+''')
+        write(0, [{"ground": {"depth": 0.6, "hills": {"x0": 0, "x1": 200, "y": 60, "amplitude": 6, "wavelength": 80}, "bottom": 90}},
+                  {"ground": {"line": [[0, 80], [160, 80]], "bottom": 90, "color": "#4a6a34"}}])
+        self.run_cli("still", "flat", "--script", self.path, "--at", 5, "--png", "bare.png")
+        write(0)
+        self.run_cli("still", "flat", "--script", self.path, "--at", 5, "--png", "zero.png")
+        self.assertEqual((self.cwd / "bare.png").read_bytes(), (self.cwd / "zero.png").read_bytes())
+        write(1)
+        for name, frame in (("a.png", 5), ("b.png", 30), ("a2.png", 5)):
+            self.run_cli("still", "flat", "--script", self.path, "--at", frame, "--png", name)
+        self.assertNotEqual((self.cwd / "zero.png").read_bytes(), (self.cwd / "a.png").read_bytes())
+        self.assertNotEqual((self.cwd / "a.png").read_bytes(), (self.cwd / "b.png").read_bytes())
+        self.assertEqual((self.cwd / "a.png").read_bytes(), (self.cwd / "a2.png").read_bytes())
+        write(1, [{"cactus": {}}])
+        self.assertIn("ground, grass, meadow, tuft, shrub, tree", self.run_cli("still", "flat", "--script", self.path, "--png", "x.png", ok=False))
+        write(1, [{"tree": {"preset": "baobab", "at": [10, 10]}}])
+        self.assertIn("oak, birch, pine", self.run_cli("still", "flat", "--script", self.path, "--png", "x.png", ok=False))
+        write(1, [{"tree": {"x": 10}}])
+        self.assertIn("needs \"at\"", self.run_cli("still", "flat", "--script", self.path, "--png", "x.png", ok=False))
+
+    @unittest.skipUnless(GL, "needs OpenGL")
     def test_map_helpers_draw(self):
         # geo::base, choropleth, colorbar, labels, highlight, markers, route, fly, focus,
         # valuesAt and the geo-route / geo-flyto prefabs: every frame sampled must draw.

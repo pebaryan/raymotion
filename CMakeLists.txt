@@ -96,6 +96,7 @@ add_library(rmtn_engine STATIC
   src/engine/crowd.cpp
   src/engine/flora.cpp
   src/engine/flora_tree.cpp
+  src/engine/flora2d.cpp
   src/engine/crowd_rig.cpp
   src/engine/voxel.cpp
   src/engine/splat.cpp
@@ -418,6 +419,9 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   add_executable(raymotion_path_render_tests tests/path_render_tests.cpp)
   target_link_libraries(raymotion_path_render_tests PRIVATE rmtn_engine)
   add_test(NAME path_rendering COMMAND raymotion_path_render_tests)
+  add_executable(raymotion_flora2d_render_tests tests/flora2d_render_tests.cpp)
+  target_link_libraries(raymotion_flora2d_render_tests PRIVATE rmtn_engine)
+  add_test(NAME flora2d_rendering COMMAND raymotion_flora2d_render_tests)
   add_executable(raymotion_math_render_tests tests/math_render_tests.cpp)
   target_link_libraries(raymotion_math_render_tests PRIVATE rmtn_engine)
   add_test(NAME math_rendering COMMAND raymotion_math_render_tests)

@@ -332,6 +332,30 @@ static void stylesCpu() {
     CHECK(flora::grass("toon").colorBands == 3 && flora::toonGrass().width > flora::meadow().width);
 }
 
+static void flat() {
+    // 2D: ground lines are deterministic and follow their amplitude; presets resolve by name.
+    const auto a = flora2d::groundLine(0, 1000, 500, 40, 400, 3), b = flora2d::groundLine(0, 1000, 500, 40, 400, 3);
+    float lo = 1e9f, hi = -1e9f;
+    for (const Vector2& p : a) { lo = std::min(lo, p.y); hi = std::max(hi, p.y); }
+    CHECK(a.size() == 64 && a.front().x == 0 && a.back().x == 1000 && hi <= 540.01f && lo >= 459.99f && hi - lo > 30);
+    bool same = a.size() == b.size();
+    for (size_t i = 0; same && i < a.size(); i++) same = a[i].x == b[i].x && a[i].y == b[i].y;
+    CHECK(same);
+    NEAR(flora2d::heightAt({ { 0, 10 }, { 10, 20 } }, 5), 15, 1e-5);
+    NEAR(flora2d::heightAt({ { 0, 10 }, { 10, 20 } }, -4), 10, 1e-5);
+    CHECK(flora2d::grass("tall").height > flora2d::grass("lawn").height && flora2d::tree("pine").form == flora2d::TreeForm::Conifer);
+    bool threw = false;
+    try { flora2d::tree("baobab"); } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+    // The wind: still is zero; a direction flips the lean.
+    flora2d::Wind w;
+    CHECK(flora2d::bendAt(flora2d::Wind{ 0 }, 100, 40) == 0);
+    w.sway = 0; w.gust = 0;
+    const float right = flora2d::bendAt(w, 100, 40);
+    w.direction = -1;
+    NEAR(flora2d::bendAt(w, 100, 40), -right, 1e-6);
+}
+
 int main() try {
     areas();
     noise();
@@ -342,6 +366,7 @@ int main() try {
     treesCpu();
     growthCpu();
     stylesCpu();
+    flat();
     if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }
     std::puts("flora tests passed");
     return 0;

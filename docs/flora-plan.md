@@ -1,6 +1,6 @@
 # 0.12 plan: vegetation (`flora::`)
 
-Status: M0-M5 done 2026-11-19 (see below); M6 next. Set 2026-11-18; owner's decisions the same day:
+Status: M0-M6 done 2026-11-19 (see below); M7 next. Set 2026-11-18; owner's decisions the same day:
 
 1. **Realistic first, then stylised.** Cards with alpha cutout, translucency and PBR leaves
    come first; low-poly / toon presets follow on the same scatter and wind.
@@ -243,6 +243,26 @@ five different pictures; bad names refused). `examples/scripts/flora_styles.as`.
   a `u` draw-on/grow reveal.
 - Layers for parallax (near/mid/far colour and blur), and a fill-a-shape meadow.
 - Works on flat compositions and on `g3d::Surface`.
+
+**Done 2026-11-19.** `rmtn/flora2d.hpp`, drawn with the node's `Ctx`, so the same calls work
+on a flat composition and on a `g3d::Surface`. Blades are tapered strips with a root-to-tip
+gradient, bent by `bendAt` (a lean, a sway and gusts that travel along x; pure in t). Grass
+along a polyline, tufts, and a meadow filling a polygon in rows back to front (smaller
+toward the back by `perspective`). Shrubs: stems and three tones of leaf blobs on a dome.
+Trees: a seeded skeleton (broadleaf: a trunk splitting two or three ways per level, each
+child keeping 80% of its parent's lean so crowns stay up, lengths scaled to the stated
+height; conifer: a stem with side branches shortening up it and needle tiers), wood run out
+from the root over u 0..0.7 and thickening behind the front, leaf clumps from u 0.6 in three
+tones lit from the top left. Layers: `parallax`, `hazed`, `groundLine`, `heightAt`, `ground`
+and `softness` (tilt-shift with no sharp band: a uniform blur). Script: `flora2d::draw`
+with `examples/scripts/flora_2d.as`. Not done: a `vg::Path` shape for the meadow (it takes
+a polygon) and per-blade motion blur. Tests: `flora2d_render_tests` (u = 0 draws nothing
+and u = 1 equals no u; tree coverage rising 39 → 8,228 px; grass at u 0.5 3,194 px on the
+left, 0 on the right; wind: 7,790 px change among the tips, 11 at the roots, a still wind
+still, the same frame twice identical, a gust peaking at x 0 on frame 2 and at x 300 on
+frame 33; a meadow's roots inside its shape; parallax and haze; `softness` 12 grey px
+across an edge; 12,041 px on a surface), `flora_tests` (ground lines, presets, wind
+direction), `test_script.py` (`test_flora_2d`).
 
 ## M7. Integration
 

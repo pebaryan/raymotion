@@ -328,6 +328,12 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   canopy of Gaussian splats; one object a tree, at most 256, and casting no shadow), with
   `TreeBuild::shading` for Toon, Gooch or Hatch; `flora::toonGrass()` draws blades in flat
   colour bands (`g3d::Field::colorBands`).
+* 2D vegetation (`flora2d::`, drawn with the node's context, so flat compositions and
+  `g3d::Surface` alike): grass along a ground line, tufts, a meadow filling a shape (smaller
+  toward its back), shrubs, and branching trees (oak, birch, pine; a silhouette option for
+  far layers). Wind leans, sways and sends gusts along x; every plant grows by `u` as in
+  3D. Parallax layers: `parallax` (a context shifted by the camera), `hazed` colours,
+  `groundLine`/`ground` for rolling hills and `softness` (a blur filter for a layer).
 * Lights: up to 8 directional/point/spot lights with range falloff. Any of them can cast
   PCF shadows; they share one shadow atlas (`shadowMapSize` per tile, a tile per
   directional/spot light and six per point light, 16 tiles), with `shadowBias` in world

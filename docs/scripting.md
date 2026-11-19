@@ -754,6 +754,16 @@ Styles: a forest's `build` takes `"style"` (`realistic`, `lowpoly`, `paper`, `sp
 bands. Splat forests are one object a tree (at most 256). See
 `examples/scripts/flora_styles.as`.
 
+2D vegetation: `flora2d::draw(descriptor, frame)` draws `items` in order (far first):
+`{"ground": {...}}`, `{"grass": {...}}`, `{"meadow": {"shape": [[x, y], ...]}}`,
+`{"tuft": {"at": [x, y], "count": n}}`, `{"shrub": {...}}` and `{"tree": {"preset": "oak" |
+"birch" | "pine", ...}}`. Ground and grass take a `"line"` of points or `"hills"` (`x0`,
+`x1`, `y`, `amplitude`, `wavelength`, `seed`); a shrub or tree takes `"at"`, or `"x"` to
+stand on the last line. Each item can set `"u"` (growth), `"seed"`, `"depth"` (0 near .. 1
+far: shifted by the top-level `"camera"` and faded into `"haze"`) and style keys (heights,
+widths, colours, `silhouette`). `"wind"` sets `strength`, `direction`, `sway`, `gust`,
+`gustSpeed` and `gustWidth`. See `examples/scripts/flora_2d.as`.
+
 The `physics` namespace exposes native Rope and Cloth solver handles, `PhysicsParams`, Sphere/Plane/Capsule/Box colliders, seeded wind, pins, bending/stretching, tearing, self collision and frame sampling. `physics::rope` and `physics::cloth` accept an optional params handle; omitting it uses the native defaults. See `examples/scripts/physics_scene.as` for the descriptor
 path and `examples/scripts/physics_callbacks.as` for direct callback-driven handles.
 `PhysicsParams.state(values)` returns
