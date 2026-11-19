@@ -1,6 +1,7 @@
 // flora:: trees -- skeletons, bark and leaf meshes, baked wind, impostors and forests
 // (docs/flora-plan.md, M3). Everything here runs on the CPU and is a function of the spec.
 #include "rmtn/flora.hpp"
+#include "rmtn/splat.hpp"
 #include <raymath.h>
 #include <algorithm>
 #include <array>
@@ -722,6 +723,144 @@ void frondMesh(const TreeSpec& s, const Skeleton& sk, const std::vector<Frond>& 
     }
 }
 
+// ---- stylised crowns --------------------------------------------------------------------
+// One flat-shaded triangle (its own three vertices), facing away from `inside`.
+void facet(Soup& out, Vector3 a, Vector3 b, Vector3 c, Vector3 inside, Color col, const Vert& like) {
+    Vector3 n = Vector3Normalize(Vector3CrossProduct(Vector3Subtract(b, a), Vector3Subtract(c, a)));
+    const Vector3 mid = Vector3Scale(Vector3Add(Vector3Add(a, b), c), 1.f / 3);
+    if (Vector3DotProduct(n, Vector3Subtract(mid, inside)) < 0) { std::swap(b, c); n = Vector3Negate(n); }
+    const size_t first = out.v.size();
+    for (Vector3 p : { a, b, c }) {
+        Vert v = like;
+        v.p = p;
+        v.n = n;
+        v.uv = { 0.5f, 0.5f };
+        v.c = col;
+        out.v.push_back(v);
+    }
+    for (int k = 0; k < 3; k++) out.idx.push_back((unsigned short)(first + k));
+}
+
+// Low-poly broadleaf crowns: the leaf cards gathered into clumps (farthest-point centres,
+// each card to its nearest), each clump a jittered icosahedron in the cards' colour.
+void clumpMesh(const TreeSpec& s, const Skeleton& sk, const std::vector<Card>& cs, Soup& out) {
+    if (cs.empty()) return;
+    const int K = std::clamp((int)cs.size() / 45, 5, 18);
+    std::vector<int> centre;
+    std::vector<float> far(cs.size(), 1e30f);
+    size_t next = 0;
+    for (size_t i = 1; i < cs.size(); i++) if (cs[i].at.y > cs[next].at.y) next = i;
+    for (int k = 0; k < K && k < (int)cs.size(); k++) {
+        centre.push_back((int)next);
+        for (size_t i = 0; i < cs.size(); i++) far[i] = std::min(far[i], Vector3DistanceSqr(cs[i].at, cs[next].at));
+        next = (size_t)(std::max_element(far.begin(), far.end()) - far.begin());
+    }
+    const size_t k = centre.size();
+    std::vector<Vector3> sum(k, { 0, 0, 0 });
+    std::vector<float> spread(k, 0.f), r(k, 0.f), g(k, 0.f), bl(k, 0.f);
+    std::vector<int> count(k, 0), owner(cs.size(), 0);
+    for (size_t i = 0; i < cs.size(); i++) {
+        size_t best = 0;
+        for (size_t j = 1; j < k; j++)
+            if (Vector3DistanceSqr(cs[i].at, cs[(size_t)centre[j]].at) < Vector3DistanceSqr(cs[i].at, cs[(size_t)centre[best]].at)) best = j;
+        owner[i] = (int)best;
+        sum[best] = Vector3Add(sum[best], cs[i].at);
+        r[best] += cs[i].c.r; g[best] += cs[i].c.g; bl[best] += cs[i].c.b;
+        count[best]++;
+    }
+    std::vector<Vector3> mid(k);
+    for (size_t j = 0; j < k; j++) mid[j] = Vector3Scale(sum[j], 1.f / std::max(count[j], 1));
+    for (size_t i = 0; i < cs.size(); i++) spread[(size_t)owner[i]] += Vector3DistanceSqr(cs[i].at, mid[(size_t)owner[i]]);
+    // The icosahedron.
+    const float p = 1.618034f;
+    const Vector3 ico[12] = { { -1, p, 0 }, { 1, p, 0 }, { -1, -p, 0 }, { 1, -p, 0 }, { 0, -1, p }, { 0, 1, p },
+                              { 0, -1, -p }, { 0, 1, -p }, { p, 0, -1 }, { p, 0, 1 }, { -p, 0, -1 }, { -p, 0, 1 } };
+    const int faces[20][3] = { { 0, 11, 5 }, { 0, 5, 1 }, { 0, 1, 7 }, { 0, 7, 10 }, { 0, 10, 11 }, { 1, 5, 9 }, { 5, 11, 4 },
+                               { 11, 10, 2 }, { 10, 7, 6 }, { 7, 1, 8 }, { 3, 9, 4 }, { 3, 4, 2 }, { 3, 2, 6 }, { 3, 6, 8 },
+                               { 3, 8, 9 }, { 4, 9, 5 }, { 2, 4, 11 }, { 6, 2, 10 }, { 8, 6, 7 }, { 9, 8, 1 } };
+    Rng rng{ s.seed * 613ull + 29 };
+    for (size_t j = 0; j < k; j++) {
+        if (!count[j]) continue;
+        const float radius = std::sqrt(spread[j] / count[j]) * 1.25f + s.leafSize * 0.45f;
+        const Color tone{ (unsigned char)(r[j] / count[j]), (unsigned char)(g[j] / count[j]), (unsigned char)(bl[j] / count[j]), 255 };
+        // The node nearest the clump carries it in the wind and in growth.
+        int node = cs[(size_t)centre[j]].node;
+        float best = 1e30f;
+        for (size_t i = 0; i < cs.size(); i++)
+            if (owner[i] == (int)j && Vector3DistanceSqr(cs[i].at, mid[j]) < best) { best = Vector3DistanceSqr(cs[i].at, mid[j]); node = cs[i].node; }
+        Vert like;
+        like.branch = (float)sk.nodes[(size_t)node].branch;
+        like.reach = sk.nodes[(size_t)node].reach;
+        like.node = like.sizer = node;
+        like.pivot = mid[j];
+        like.appear = 0.6f + 0.26f * rng.unit();
+        Vector3 pts[12];
+        for (int q = 0; q < 12; q++) {
+            const Vector3 d = Vector3Normalize(ico[q]);
+            const float jit = rng.range(0.82f, 1.15f);
+            pts[q] = Vector3Add(mid[j], { d.x * radius * jit, d.y * radius * jit * 0.85f, d.z * radius * jit });
+        }
+        for (const auto& f : faces) {
+            const Vector3 fc = Vector3Scale(Vector3Add(Vector3Add(pts[f[0]], pts[f[1]]), pts[f[2]]), 1.f / 3);
+            facet(out, pts[f[0]], pts[f[1]], pts[f[2]], mid[j], scaleColor(tone, rng.range(0.9f, 1.07f) * (0.8f + 0.2f * occlusion(sk, fc))), like);
+        }
+    }
+}
+
+// Low-poly conifers: stacked seven-sided cones up the stem, each closed underneath.
+void coneMesh(const TreeSpec& s, const Skeleton& sk, Soup& out) {
+    const float H = s.height, yb = s.crownBase * H;
+    const int tiers = std::clamp(s.whorls / 5, 3, 5), sides = 7;
+    Rng rng{ s.seed * 389ull + 3 };
+    for (int i = 0; i < tiers; i++) {
+        const float t = (float)i / tiers;
+        const float y0 = yb + (H - yb) * t * 0.9f, y1 = std::min(H, y0 + (H - yb) / tiers * 1.8f);
+        const float prof = s.crownShape >= 0.5f ? (1 - t) * 0.95f + 0.05f : std::pow(std::sin(3.14159f * std::min(1.f, t * 0.95f + 0.05f)), 0.6f);
+        const float radius = std::max(s.crownRadius * prof, s.crownRadius * 0.2f);
+        int node = 0;                                            // the stem node at the tier's foot
+        float best = 1e30f;
+        for (size_t n = 0; n < sk.nodes.size(); n++)
+            if (sk.nodes[n].stem && std::fabs(sk.nodes[n].p.y - y0) < best) { best = std::fabs(sk.nodes[n].p.y - y0); node = (int)n; }
+        const Vector3 foot{ sk.nodes[(size_t)node].p.x, y0, sk.nodes[(size_t)node].p.z };
+        const Vector3 apex = Vector3Add(foot, { 0, y1 - y0, 0 });
+        Vert like;
+        like.node = like.sizer = node;
+        like.pivot = foot;
+        like.appear = 0.6f + 0.26f * t;
+        const Color tone = scaleColor(s.leafColor, rng.range(0.92f, 1.08f) * (1.1f + 0.2f * t));   // flat fills read darker
+        const float turn = rng.range(0, TAU);
+        for (int k = 0; k < sides; k++) {
+            const float a0 = turn + TAU * k / sides, a1 = turn + TAU * (k + 1) / sides;
+            const Vector3 p0 = Vector3Add(foot, { std::cos(a0) * radius, 0, std::sin(a0) * radius });
+            const Vector3 p1 = Vector3Add(foot, { std::cos(a1) * radius, 0, std::sin(a1) * radius });
+            const Vector3 in = Vector3Add(foot, { 0, (y1 - y0) * 0.3f, 0 });
+            facet(out, p0, p1, apex, in, scaleColor(tone, rng.range(0.92f, 1.06f)), like);
+            facet(out, p0, p1, foot, Vector3Add(foot, { 0, 1, 0 }), scaleColor(tone, 0.7f), like);      // underneath
+        }
+    }
+}
+
+// A soft canopy: two flat Gaussian splats per leaf card, lying in the card, lit by a sun
+// from above and darkened inside the crown.
+std::shared_ptr<const splat::Cloud> canopyOf(const TreeSpec& s, const Skeleton& sk, const std::vector<Card>& cs) {
+    auto cloud = std::make_shared<splat::Cloud>();
+    Rng rng{ s.seed * 977ull + 41 };
+    for (const Card& c : cs) {
+        const Vector3 n = Vector3Normalize(c.normal), up = Vector3Normalize(c.up), right = Vector3Normalize(Vector3CrossProduct(up, n));
+        const Matrix m{ right.x, up.x, n.x, 0, right.y, up.y, n.y, 0, right.z, up.z, n.z, 0, 0, 0, 0, 1 };
+        const Quaternion q = QuaternionNormalize(QuaternionFromMatrix(m));
+        const float light = (0.62f + 0.38f * occlusion(sk, c.at)) * (0.9f + 0.2f * std::max(n.y, 0.f));
+        for (int k = 0; k < 2; k++) {
+            const Vector3 at = Vector3Add(c.at, Vector3Add(Vector3Scale(right, rng.range(-0.3f, 0.3f) * c.size),
+                                                           Vector3Scale(up, rng.range(-0.3f, 0.3f) * c.size)));
+            const float r = c.size * rng.range(0.3f, 0.42f);
+            cloud->add(at, { r, r, r * 0.25f }, { q.w, q.x, q.y, q.z }, scaleColor(c.c, light * rng.range(0.92f, 1.08f)), 0.85f);
+        }
+    }
+    cloud->bound();
+    return cloud;
+}
+
 // The wind loop: frame f of `frames` moves a vertex by the stem's bend (a function of
 // height), its branch's lag (a phase per branch, more further out) and its card's flutter.
 Vector3 windAt(const TreeSpec& s, const Vert& v, float f, int frames) {
@@ -792,7 +931,8 @@ std::shared_ptr<g3d::AnimatedMesh> bake(const TreeSpec& s, const Soup& soup, int
 // ---- impostors: the hero tree drawn on the CPU from `views` directions round it -----------
 struct Baked { std::shared_ptr<Picture> colour, normal; float side = 1; };
 
-Baked bakeViews(const Soup& wood, const Soup& leaves, const Picture& bark, const Picture& leaf, int views, int size, float top, float reach) {
+Baked bakeViews(const Soup& wood, const Soup& leaves, const Picture& bark, const Picture& leaf, int views, int size, float top, float reach,
+                bool cutLeaves = true) {
     const int S = size, SS = size * 2;
     Baked b;
     b.side = std::max(top, 2 * reach) * 1.06f;
@@ -842,7 +982,7 @@ Baked bakeViews(const Soup& wood, const Soup& leaves, const Picture& bark, const
             }
         };
         raster(wood, bark, false);
-        raster(leaves, leaf, true);
+        raster(leaves, leaf, cutLeaves);
         // 2x2 down to the cell; colour averaged over what is covered, coverage as alpha.
         for (int y = 0; y < S; y++)
             for (int x = 0; x < S; x++) {
@@ -927,6 +1067,77 @@ std::shared_ptr<g3d::AnimatedMesh> quad(float side, float u0, float u1) {
         return m;
     });
     return am;
+}
+
+// Paper cut-out: the front view in flat fills: two tones of leaf (lit and shaded, from the
+// picture's brightness smoothed into big shapes) and one of bark, with a dark cut edge.
+std::shared_ptr<Picture> paperPicture(const Picture& baked, const TreeSpec& s) {
+    const int W = baked.w, H = baked.h;
+    auto hue = [](float r, float g, float b) { const float t = std::max(r + g + b, 1e-3f); return Vector3{ r / t, g / t, b / t }; };
+    const Vector3 leafHue = hue(s.leafColor.r, s.leafColor.g, s.leafColor.b), autumnHue = hue(s.autumnColor.r, s.autumnColor.g, s.autumnColor.b);
+    const Vector3 barkHue = hue(s.bark.r, s.bark.g, s.bark.b);
+    std::vector<float> lum((size_t)W * H, 0.f), leafy((size_t)W * H, 0.f);
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            const unsigned char* q = baked.at(x, y);
+            if (q[3] < 128) continue;
+            const Vector3 h = hue(q[0], q[1], q[2]);
+            lum[(size_t)y * W + x] = 0.3f * q[0] + 0.59f * q[1] + 0.11f * q[2];
+            leafy[(size_t)y * W + x] = std::min(Vector3Distance(h, leafHue), Vector3Distance(h, autumnHue)) < Vector3Distance(h, barkHue) ? 1.f : 0.f;
+        }
+    // Smooth brightness and leafiness over a few percent of the picture (two box passes).
+    auto blur = [W, H](std::vector<float> v, int r) {
+        std::vector<float> t(v.size());
+        for (int pass = 0; pass < 2; pass++) {
+            for (int y = 0; y < H; y++)
+                for (int x = 0; x < W; x++) {
+                    float sum = 0; int n = 0;
+                    for (int k = std::max(0, x - r); k <= std::min(W - 1, x + r); k++) { sum += v[(size_t)y * W + k]; n++; }
+                    t[(size_t)y * W + x] = sum / n;
+                }
+            for (int y = 0; y < H; y++)
+                for (int x = 0; x < W; x++) {
+                    float sum = 0; int n = 0;
+                    for (int k = std::max(0, y - r); k <= std::min(H - 1, y + r); k++) { sum += t[(size_t)k * W + x]; n++; }
+                    v[(size_t)y * W + x] = sum / n;
+                }
+        }
+        return v;
+    };
+    std::vector<float> cover((size_t)W * H);
+    for (size_t i = 0; i < cover.size(); i++) cover[i] = baked.px[i * 4 + 3] >= 128 ? 1.f : 0.f;
+    const int r = std::max(1, W / 40);
+    const std::vector<float> sl = blur(lum, r), sc = blur(cover, r), sf = blur(leafy, std::max(1, r / 3));
+    double sum = 0;
+    int n = 0;
+    for (size_t i = 0; i < cover.size(); i++)
+        if (cover[i] > 0 && leafy[i] > 0) { sum += sl[i] / std::max(sc[i], 1e-3f); n++; }
+    const float split = n ? (float)(sum / n) : 128;
+    Color lit = scaleColor(s.leafColor, 1.3f), shade = scaleColor(s.leafColor, 0.72f);
+    if (s.deciduous && s.season > 0.5f) { lit = scaleColor(s.autumnColor, 1.2f); shade = scaleColor(s.autumnColor, 0.7f); }
+    const Color bark = scaleColor(s.bark, 0.9f), edge = scaleColor(s.leafColor, 0.3f);
+    const int e = std::max(1, W / 200);                                          // the cut edge, px
+    auto pic = std::make_shared<Picture>(W, H);
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            const size_t i = (size_t)y * W + x;
+            unsigned char* o = pic->at(x, y);
+            Color c = lit;
+            bool onEdge = false;
+            if (cover[i] > 0)
+                for (int dy = -e; dy <= e && !onEdge; dy++)
+                    for (int dx = -e; dx <= e; dx++) {
+                        const int xx = x + dx, yy = y + dy;
+                        if (xx < 0 || yy < 0 || xx >= W || yy >= H || cover[(size_t)yy * W + xx] == 0) { onEdge = true; break; }
+                    }
+            if (cover[i] == 0) c = shade;                                         // under the cut (mipmaps)
+            else if (onEdge) c = edge;
+            else if (sf[i] < 0.5f) c = bark;
+            else c = sl[i] / std::max(sc[i], 1e-3f) > split ? lit : shade;
+            o[0] = c.r; o[1] = c.g; o[2] = c.b;
+            o[3] = cover[i] > 0 ? 255 : 0;
+        }
+    return pic;
 }
 
 }  // namespace
@@ -1119,20 +1330,65 @@ TreePtr makeTree(const TreeSpec& specIn, const TreeBuild& buildIn) {
     const float twig = std::max(0.004f, s.trunkRadius * 0.03f);
 
     Soup heroWood, heroLeaves, lowWood, lowLeaves;
-    woodMesh(s, sk, heroWood, s.form == TreeForm::Palm ? s.trunkRadius * 0.5f : twig * 1.5f, 8);
-    woodMesh(s, sk, lowWood, s.form == TreeForm::Palm ? s.trunkRadius * 0.5f : std::max(twig * 4, s.trunkRadius * 0.16f), 5);
-    if (s.form == TreeForm::Palm) { frondMesh(s, sk, fronds, heroLeaves); lowLeaves = heroLeaves; }
-    else { leafMesh(s, sk, cs, 1, heroLeaves); leafMesh(s, sk, cs, b.reducedLeaves, lowLeaves); }
+    std::shared_ptr<Picture> paper;
+    float paperSide = 1;
+    std::shared_ptr<const splat::Cloud> canopy;
+    if (b.style == TreeStyle::Splat) {
+        woodMesh(s, sk, heroWood, std::max(s.trunkRadius * 0.2f, s.height * 0.008f), 6);
+        woodMesh(s, sk, lowWood, s.trunkRadius * 0.45f, 4);
+        if (s.form == TreeForm::Palm) { frondMesh(s, sk, fronds, heroLeaves); lowLeaves = heroLeaves; }
+        else canopy = canopyOf(s, sk, cs);
+    } else if (b.style == TreeStyle::LowPoly) {
+        woodMesh(s, sk, heroWood, std::max(s.trunkRadius * 0.3f, s.height * 0.015f), 5);   // limbs only: the clumps hide the rest
+        woodMesh(s, sk, lowWood, s.trunkRadius * 0.45f, 4);
+        if (s.form == TreeForm::Conifer) coneMesh(s, sk, heroLeaves);
+        else if (s.form == TreeForm::Palm) frondMesh(s, sk, fronds, heroLeaves);
+        else clumpMesh(s, sk, cs, heroLeaves);
+        lowLeaves = heroLeaves;
+    } else {
+        woodMesh(s, sk, heroWood, s.form == TreeForm::Palm ? s.trunkRadius * 0.5f : twig * 1.5f, 8);
+        woodMesh(s, sk, lowWood, s.form == TreeForm::Palm ? s.trunkRadius * 0.5f : std::max(twig * 4, s.trunkRadius * 0.16f), 5);
+        if (s.form == TreeForm::Palm) { frondMesh(s, sk, fronds, heroLeaves); lowLeaves = heroLeaves; }
+        else { leafMesh(s, sk, cs, 1, heroLeaves); leafMesh(s, sk, cs, b.reducedLeaves, lowLeaves); }
+    }
+    if (b.style == TreeStyle::PaperCut) {
+        // The realistic tree's front view, flattened, on one card that stands where the tree does.
+        float top = 0, reach = 0;
+        for (const Soup* so : { &heroWood, &heroLeaves })
+            for (const Vert& v : so->v) { top = std::max(top, v.p.y); reach = std::max(reach, std::hypot(v.p.x, v.p.z)); }
+        const Baked front = bakeViews(heroWood, heroLeaves, *barkPic, *leafPic, 1, std::min(b.viewSize * 2, 512), top, reach);
+        paper = paperPicture(*front.colour, s);
+        paperSide = front.side;
+        const float h = paperSide * 0.5f;
+        Soup card;
+        const Vector3 corners[4] = { { -h, 0, 0 }, { h, 0, 0 }, { h, paperSide, 0 }, { -h, paperSide, 0 } };
+        const Vector2 uvs[4] = { { 0, 1 }, { 1, 1 }, { 1, 0 }, { 0, 0 } };
+        for (int k = 0; k < 4; k++) {
+            Vert v;
+            v.p = corners[k]; v.n = { 0, 0, 1 }; v.uv = uvs[k]; v.c = WHITE;
+            card.v.push_back(v);
+        }
+        card.idx = { 0, 1, 2, 0, 2, 3 };
+        heroWood = card; lowWood = card;
+        heroLeaves = Soup{}; lowLeaves = Soup{};
+    }
 
     auto t = std::make_shared<Tree>();
     t->spec = s;
     t->build = b;
+    t->canopy = canopy;
     t->hero = { bake(s, heroWood, b.frames), bake(s, heroLeaves, b.frames) };
     t->reduced = { bake(s, lowWood, b.frames), bake(s, lowLeaves, b.frames) };
     t->heroTriangles = (long long)(heroWood.idx.size() + heroLeaves.idx.size()) / 3;
     t->reducedTriangles = (long long)(lowWood.idx.size() + lowLeaves.idx.size()) / 3;
     for (const Soup* so : { &heroWood, &heroLeaves })
         for (const Vert& v : so->v) { t->top = std::max(t->top, v.p.y); t->radius = std::max(t->radius, std::hypot(v.p.x, v.p.z)); }
+    if (canopy)
+        for (size_t i = 0; i < canopy->size(); i++) {
+            const float* p = &canopy->position[i * 3];
+            t->top = std::max(t->top, p[1]);
+            t->radius = std::max(t->radius, std::hypot(p[0], p[2]));
+        }
     {
         auto g = std::make_shared<TreeGrowth>();
         g->spec = s;
@@ -1156,11 +1412,17 @@ TreePtr makeTree(const TreeSpec& specIn, const TreeBuild& buildIn) {
         t->growth = g;
     }
 
-    const Baked baked = bakeViews(heroWood, heroLeaves, *barkPic, *leafPic, b.views, b.viewSize, t->top, t->radius);
-    for (int k = 0; k < b.views; k++) {
-        // Half a texel in from each cell's edge, so mipmaps of one view don't take the next's.
-        const float pad = 1.5f / (b.viewSize * b.views);
-        t->views.push_back(quad(baked.side, (float)k / b.views + pad, (float)(k + 1) / b.views - pad));
+    Picture white(1, 1);
+    white.px = { 255, 255, 255, 255 };
+    Baked baked;
+    if (b.style != TreeStyle::PaperCut && b.style != TreeStyle::Splat) {   // a paper card is its own picture; splats stay near
+        const bool solid = b.style == TreeStyle::LowPoly;
+        baked = bakeViews(heroWood, heroLeaves, solid ? white : *barkPic, solid ? white : *leafPic, b.views, b.viewSize, t->top, t->radius, !solid);
+        for (int k = 0; k < b.views; k++) {
+            // Half a texel in from each cell's edge, so mipmaps of one view don't take the next's.
+            const float pad = 1.5f / (b.viewSize * b.views);
+            t->views.push_back(quad(baked.side, (float)k / b.views + pad, (float)(k + 1) / b.views - pad));
+        }
     }
 
     g3d::Material wood;
@@ -1171,10 +1433,28 @@ TreePtr makeTree(const TreeSpec& specIn, const TreeBuild& buildIn) {
     leaves.dynamicMap = texture(leafPic);
     leaves.alphaCutoff = 0.5f; leaves.doubleSided = true;
     leaves.translucency = 0.55f; leaves.translucencyColor = { 255, 245, 190, 255 };
+    if (b.style == TreeStyle::LowPoly) {                       // flat colours; ink lines welcome
+        wood = {}; wood.color = WHITE; wood.roughness = 1;
+        leaves = {}; leaves.color = WHITE; leaves.roughness = 0.9f; leaves.doubleSided = s.form == TreeForm::Palm;
+        leaves.lineWidth = 0.6f;                 // ink: lighter inside a crown
+        leaves.translucency = 0.2f; leaves.translucencyColor = { 255, 245, 190, 255 };
+    }
     g3d::Material imp = leaves;
-    imp.dynamicMap = texture(baked.colour);
-    imp.dynamicNormalMap = texture(baked.normal);
-    imp.translucency = 0.4f;
+    if (baked.colour) {
+        imp.dynamicMap = texture(baked.colour);
+        imp.dynamicNormalMap = texture(baked.normal);
+        imp.alphaCutoff = 0.5f; imp.doubleSided = true; imp.lineWidth = 0;
+        imp.translucency = 0.4f;
+    }
+    if (b.style == TreeStyle::PaperCut) {                      // one cut-out card, lit flat
+        wood = {}; wood.color = WHITE; wood.roughness = 1;
+        wood.dynamicMap = texture(paper);
+        wood.alphaCutoff = 0.5f; wood.doubleSided = true;
+    }
+    for (g3d::Material* m : { &wood, &leaves, &imp }) {
+        m->shading = b.shading;
+        m->toon.highlight = 0.12f;                 // foliage and bark: no glossy spots
+    }
     t->wood = wood;
     t->leaves = leaves;
     t->impostor = imp;
@@ -1190,6 +1470,7 @@ struct ForestState {
     std::vector<TreePtr> trees;
     ForestSpec spec;
     std::vector<size_t> first;      // each kind's first child
+    std::vector<g3d::Object3D*> canopies;   // per placement: its splat crown's tilt (or null)
 };
 
 // Children per tree kind, in this order.
@@ -1227,7 +1508,7 @@ void place(g3d::Object3D& group, const std::shared_ptr<ForestState>& st, int t) 
     if (Vector2Length(wind) < 1e-6f) wind = { 1, 0 };
     wind = Vector2Normalize(wind);
     const size_t kinds = st->trees.size();
-    for (auto& child : group.children) child->instances->list.clear();
+    for (auto& child : group.children) if (child->instances) child->instances->list.clear();
     const float blend = std::max(f.blend, 0.01f);
     for (const Placement& p : st->at) {
         const size_t kind = (size_t)std::max(p.variant, 0) % kinds;
@@ -1237,10 +1518,17 @@ void place(g3d::Object3D& group, const std::shared_ptr<ForestState>& st, int t) 
         const float d = Vector3Distance(eye, mid);
         // Coverage of each level: hero, reduced, impostor, and what is left after hiding.
         auto ramp = [blend](float d, float at) { return std::clamp((d - (at - blend * 0.5f)) / blend, 0.f, 1.f); };
-        const float toLow = ramp(d, f.reducedFrom), toFar = ramp(d, f.impostorFrom);
+        const bool paper = tree.build.style == TreeStyle::PaperCut;     // one card, no impostors
+        const bool near = paper || tree.views.empty();                   // nothing to stand in far away
+        const float toLow = paper ? 0.f : ramp(d, f.reducedFrom), toFar = near ? 0.f : ramp(d, f.impostorFrom);
         const float shown = f.hideFrom > 0 ? 1 - ramp(d, f.hideFrom) : 1;
         if (shown <= 0) continue;
         const Sway sway = swayOf(f, wind, p, tree, seconds);
+        if (tree.canopy) {                                       // the splat crown leans with the wood
+            g3d::Object3D* tilt = st->canopies[(size_t)(&p - st->at.data())];
+            tilt->rotation = { sway.pitch, 0, sway.bank };
+            tilt->visible = shown > 0;
+        }
         g3d::Instance in;
         in.position = p.position;
         in.yaw = p.yaw;
@@ -1249,6 +1537,10 @@ void place(g3d::Object3D& group, const std::shared_ptr<ForestState>& st, int t) 
         in.clipLength = tree.build.frames;
         in.pitch = sway.pitch;
         in.bank = sway.bank;
+        if (paper) {                                             // the card turns to face the camera
+            const Vector3 to = Vector3Subtract(eye, p.position);
+            in.yaw = st->yawSign * std::atan2(to.x, to.z) * RAD2DEG;
+        }
         // Screen doors: hero keeps [0, a), reduced [a, b), impostor [b, shown).
         const float a = 1 - toLow, bnd = std::max(a, 1 - toFar);
         auto put = [&](int child, float from, float to, const g3d::Instance& i0) {
@@ -1299,7 +1591,7 @@ g3d::Object3D* forestInto(g3d::Object3D* group, const std::vector<Placement>& at
         st->first.push_back(group->children.size());
         auto add = [&](const std::shared_ptr<g3d::AnimatedMesh>& mesh, const g3d::Material& m) {
             auto in = std::make_shared<g3d::Instances>();
-            in->mesh = mesh && mesh->frames > 0 ? mesh : tr->views[0];
+            in->mesh = mesh && mesh->frames > 0 ? mesh : tr->views.empty() ? tr->hero.wood : tr->views[0];
             g3d::Object3D* o = group->add(in, m);
             if (!mesh || mesh->frames <= 0) o->visible = false;          // nothing at this level
         };
@@ -1310,6 +1602,24 @@ g3d::Object3D* forestInto(g3d::Object3D* group, const std::vector<Placement>& at
         g3d::Material imp = tr->impostor;
         imp.castShadow = spec.impostorShadows;
         for (const auto& v : tr->views) add(v, imp);
+    }
+    // Splat crowns: one object a tree, after every kind's instanced children.
+    size_t crowns = 0;
+    for (const Placement& p : at) crowns += st->trees[(size_t)std::max(p.variant, 0) % trees.size()]->canopy ? 1 : 0;
+    if (crowns > 256) throw std::invalid_argument("flora::addForest: at most 256 splat trees");
+    for (const Placement& p : at) {
+        const Tree& tree = *st->trees[(size_t)std::max(p.variant, 0) % trees.size()];
+        if (!tree.canopy) { st->canopies.push_back(nullptr); continue; }
+        g3d::Object3D* holder = group->add();
+        holder->position = p.position;
+        holder->rotation = { 0, p.yaw, 0 };
+        holder->scale = { p.scale, p.scale, p.scale };
+        g3d::Object3D* tilt = holder->add();
+        auto splats = std::make_shared<g3d::Splats>();
+        splats->cloud = tree.canopy;
+        splats->look.shDegree = 0;
+        tilt->add(splats);
+        st->canopies.push_back(tilt);
     }
     group->up = [st](int t, g3d::Object3D& self) { place(self, st, t); };
     return group;
@@ -1335,7 +1645,8 @@ struct Growing {
     std::vector<TreePtr> trees;
     std::function<float(int, const Placement&)> grow;
     ForestSpec spec;
-    struct Body { g3d::Object3D *holder, *tilt; g3d::GeometryPtr wood, leaves; size_t kind; };
+    float yawSign = 1;
+    struct Body { g3d::Object3D *holder, *tilt; g3d::GeometryPtr wood, leaves; size_t kind; std::shared_ptr<g3d::Splats> crown; };
     std::vector<Body> bodies;
 };
 
@@ -1372,6 +1683,15 @@ void growAll(const std::shared_ptr<Growing>& st, int t) {
         const Tree& tree = *st->trees[b.kind];
         const Sway sway = swayOf(f, wind, p, tree, seconds);
         b.tilt->rotation = { sway.pitch * u, 0, sway.bank * u };
+        if (b.crown) {                                     // a splat crown swells in as the leaves would
+            const float k = std::clamp((u - 0.62f) / 0.3f, 0.f, 1.f), e = k * k * (3 - 2 * k);
+            b.crown->look.scale = 0.15f + 0.85f * e;
+            b.crown->look.opacity = e;
+        }
+        if (tree.build.style == TreeStyle::PaperCut) {     // a paper cut-out turns to the camera
+            const Vector3 to = Vector3Subtract(g3d::drawingCamera().position, p.position);
+            b.holder->rotation.y = st->yawSign * std::atan2(to.x, to.z) * RAD2DEG;
+        }
         reshape(b.wood, tree.growth, false, u, sway.frame, f.wind == 0);
         reshape(b.leaves, tree.growth, true, u, sway.frame, f.wind == 0);
     }
@@ -1387,6 +1707,7 @@ g3d::Object3D* growingInto(g3d::Object3D* group, const std::vector<Placement>& a
     st->trees = trees;
     st->grow = std::move(grow);
     st->spec = spec;
+    st->yawSign = Vector3Transform({ 0, 0, 1 }, MatrixRotateXYZ({ 0, 90 * DEG2RAD, 0 })).x > 0 ? 1.f : -1.f;
     for (const Placement& p : at) {
         Growing::Body b;
         b.kind = (size_t)std::max(p.variant, 0) % trees.size();
@@ -1399,6 +1720,12 @@ g3d::Object3D* growingInto(g3d::Object3D* group, const std::vector<Placement>& a
         b.tilt = b.holder->add();
         if (!g.wood->empty()) { b.wood = geometryOf(g.wood, g.woodIdx); b.tilt->add(b.wood, tree.wood); }
         if (!g.leaves->empty()) { b.leaves = geometryOf(g.leaves, g.leafIdx); b.tilt->add(b.leaves, tree.leaves); }
+        if (tree.canopy) {
+            b.crown = std::make_shared<g3d::Splats>();
+            b.crown->cloud = tree.canopy;
+            b.crown->look.shDegree = 0;
+            b.tilt->add(b.crown);
+        }
         st->bodies.push_back(b);
     }
     group->up = [st](int t, g3d::Object3D&) { growAll(st, t); };

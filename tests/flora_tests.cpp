@@ -292,6 +292,46 @@ static void growthCpu() {
     NEAR(into(5, 5), 1, 1e-6); NEAR(into(1, 5), 0.2, 1e-6);
 }
 
+static void stylesCpu() {
+    // Low-poly: faceted crowns, a fraction of the realistic triangles, and growth still exact at u = 1.
+    flora::TreeBuild realistic{ 8, 4, 4, 32 }, low = realistic, paper = realistic;
+    low.style = flora::TreeStyle::LowPoly;
+    paper.style = flora::TreeStyle::PaperCut;
+    const char* names[] = { "oak", "spruce", "palm", "shrub" };
+    for (const char* n : names) {
+        const flora::TreePtr r = flora::makeTree(flora::tree(n), realistic), l = flora::makeTree(flora::tree(n), low),
+                             p = flora::makeTree(flora::tree(n), paper);
+        std::printf("[flora] %-6s triangles: realistic %lld, low-poly %lld, paper %lld; heights %.1f %.1f %.1f m\n", n, r->heroTriangles,
+                    l->heroTriangles, p->heroTriangles, r->top, l->top, p->top);
+        CHECK(l->heroTriangles > 20 && (std::string(n) == "palm" || l->heroTriangles * 3 < r->heroTriangles));
+        CHECK(l->top > 0.75f * r->top && l->top < 1.25f * r->top);
+        CHECK((int)l->views.size() == 4 && l->leaves.alphaCutoff == 0 && !l->leaves.dynamicMap);
+        CHECK(p->heroTriangles == 2 && p->views.empty() && p->wood.dynamicMap && p->wood.alphaCutoff > 0);
+        CHECK(p->top >= r->top * 0.99f);                                // the card holds the whole tree
+        const flora::TreePose full = flora::grownPositions(*l, 1);
+        bool exact = full.leaves.size() == (size_t)l->hero.leaves->vertices;
+        for (size_t i = 0; exact && i < full.leaves.size(); i++)
+            exact = full.leaves[i].x == l->hero.leaves->positions[i * 3] && full.leaves[i].y == l->hero.leaves->positions[i * 3 + 1] &&
+                    full.leaves[i].z == l->hero.leaves->positions[i * 3 + 2];
+        CHECK(exact);
+    }
+    // Splat canopies: two splats a leaf card in place of the cards, wood kept, no impostors.
+    flora::TreeBuild splatBuild = realistic;
+    splatBuild.style = flora::TreeStyle::Splat;
+    const flora::TreePtr soft = flora::makeTree(flora::oak(), splatBuild), sharp = flora::makeTree(flora::oak(), realistic);
+    std::printf("[flora] splat oak: %zu splats, %d wood vertices, top %.1f m (realistic %.1f)\n", soft->canopy ? soft->canopy->size() : 0,
+                soft->hero.wood->vertices, soft->top, sharp->top);
+    CHECK(soft->canopy && soft->canopy->size() > 500 && soft->hero.leaves->frames == 0 && soft->views.empty());
+    CHECK(soft->top > 0.9f * sharp->top && soft->top < 1.1f * sharp->top);
+    CHECK(!sharp->canopy);
+    // Shading reaches every material; toon grass is drawn in flat bands.
+    flora::TreeBuild toon = low;
+    toon.shading = g3d::Shading::Toon;
+    const flora::TreePtr t = flora::makeTree(flora::oak(), toon);
+    CHECK(t->wood.shading == g3d::Shading::Toon && t->leaves.shading == g3d::Shading::Toon && t->impostor.shading == g3d::Shading::Toon);
+    CHECK(flora::grass("toon").colorBands == 3 && flora::toonGrass().width > flora::meadow().width);
+}
+
 int main() try {
     areas();
     noise();
@@ -301,6 +341,7 @@ int main() try {
     fields();
     treesCpu();
     growthCpu();
+    stylesCpu();
     if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }
     std::puts("flora tests passed");
     return 0;

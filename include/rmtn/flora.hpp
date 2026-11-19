@@ -1,7 +1,8 @@
 // rmtn/flora.hpp -- vegetation (flora::): grass fields at landscape scale with realistic
 // looks to start from, areas (where things grow), scattering (where each plant stands), and
 // trees and shrubs drawn at the detail their distance needs (flora::makeTree, addForest).
-// All of it can grow in by a reveal u (Field::grow, addGrowingTree). 2D vegetation follows
+// All of it can grow in by a reveal u (Field::grow, addGrowingTree), and trees and grass come
+// in stylised looks (TreeStyle, toonGrass). 2D vegetation follows
 // (docs/flora-plan.md).
 //
 //   flora::Area land = flora::rect({ -100, -100 }, { 100, 100 });
@@ -30,6 +31,7 @@ g3d::Field lawn();          // short, dense, even and green: mown grass
 g3d::Field meadow();        // calf-high mixed grass with some straw
 g3d::Field tallGrass();     // waist-high, leaning and swaying more
 g3d::Field dryGrass();      // late-summer or savanna grass: straw with a little green
+g3d::Field toonGrass();     // stylised: fewer, wider blades in three flat colour bands (for Shading::Toon)
 
 // What grass is drawn with: thin blades that let a light behind them through (translucency),
 // a matt surface, and no ink lines (a million outlines would be noise).
@@ -127,6 +129,11 @@ void fit(g3d::Field& field, const Area& area);
 // baked into a loop: the trunk bends, branches lag, leaves flutter. Every texture is made in
 // code. Heights are metres; the tree stands at its origin.
 enum class TreeForm { Broadleaf, Conifer, Palm };
+// How a tree is drawn: Realistic (bark and leaf cards), LowPoly (faceted crowns in flat
+// colours: clumps, stacked cones; good under Shading::Toon and ink lines) or PaperCut (the
+// front view in two flat leaf tones and one of bark, on a single cut-out card) or Splat (limbs
+// under a soft canopy of Gaussian splats; one object per tree, so at most 256 in a forest).
+enum class TreeStyle { Realistic, LowPoly, PaperCut, Splat };
 enum class LeafShape { Broad, Needles, Frond };
 
 struct TreeSpec {
@@ -181,6 +188,8 @@ struct TreeBuild {
     int views = 8;                  // impostor directions
     int viewSize = 192;             // impostor pixels a side
     float reducedLeaves = 0.3f;     // the reduced level keeps this fraction of cards, enlarged
+    TreeStyle style = TreeStyle::Realistic;
+    g3d::Shading shading = g3d::Shading::Standard;   // for the wood, leaf and impostor materials
 };
 struct TreeGrowth;
 struct Tree {
@@ -193,6 +202,7 @@ struct Tree {
     float top = 0, radius = 0;      // highest point; widest reach from the stem
     long long heroTriangles = 0, reducedTriangles = 0;
     std::shared_ptr<const TreeGrowth> growth;          // what growing needs (flora::addGrowingTree)
+    std::shared_ptr<const splat::Cloud> canopy;        // TreeStyle::Splat: the crown, in the tree's space
 };
 using TreePtr = std::shared_ptr<const Tree>;
 // Builds a tree (CPU only: may run before a window exists). Same spec, same tree.

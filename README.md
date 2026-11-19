@@ -322,6 +322,12 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   popping; `flora::addGrowingTree(s)` grows trees: the trunk extends, branches sprout as the
   front reaches them and thicken behind it, and leaves unfold last. Every frame is a
   function of `u`, and `u` = 1 is the full tree exactly.
+* Stylised vegetation on the same scatter, wind and growth code: `TreeBuild::style`
+  `LowPoly` (faceted clumps and stacked cones, a tenth of the triangles), `PaperCut` (one
+  card in flat leaf tones with a cut edge, always facing the camera) or `Splat` (a soft
+  canopy of Gaussian splats; one object a tree, at most 256, and casting no shadow), with
+  `TreeBuild::shading` for Toon, Gooch or Hatch; `flora::toonGrass()` draws blades in flat
+  colour bands (`g3d::Field::colorBands`).
 * Lights: up to 8 directional/point/spot lights with range falloff. Any of them can cast
   PCF shadows; they share one shadow atlas (`shadowMapSize` per tile, a tile per
   directional/spot light and six per point light, 16 tiles), with `shadowBias` in world

@@ -48,12 +48,23 @@ g3d::Field dryGrass() {
     return f;
 }
 
+g3d::Field toonGrass() {
+    g3d::Field f;
+    f.density = 160;
+    f.height = 0.5f; f.heightVariation = 0.25f; f.width = 0.06f; f.lean = 0.35f; f.segments = 2;
+    f.root = { 46, 112, 64, 255 }; f.tip = { 156, 210, 90, 255 };
+    f.colorVariation = 0.04f; f.dryness = 0; f.colorBands = 3;
+    f.sway = 0.14f; f.gust = 0.3f;
+    return f;
+}
+
 g3d::Field grass(const std::string& name) {
     if (name == "lawn") return lawn();
     if (name == "meadow") return meadow();
     if (name == "tall") return tallGrass();
     if (name == "dry") return dryGrass();
-    throw std::invalid_argument("flora: no grass look \"" + name + "\" (lawn, meadow, tall, dry)");
+    if (name == "toon") return toonGrass();
+    throw std::invalid_argument("flora: no grass look \"" + name + "\" (lawn, meadow, tall, dry, toon)");
 }
 
 g3d::Material grassMaterial() {

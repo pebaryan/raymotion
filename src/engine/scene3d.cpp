@@ -131,6 +131,7 @@ uniform vec4 fieldGusts;                 // speed, spacing, time (s), colour var
 uniform vec4 fieldFade;                  // fade start, fade end, dryness, grow
 uniform vec3 fieldCam;                   // the viewing camera (world), in the shadow passes too
 uniform vec3 fieldRoot; uniform vec3 fieldTip; uniform vec3 fieldDry;     // sRGB 0..1
+uniform float fieldBands;                // Field::colorBands (0 = smooth)
 uint fieldHash(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
 float fieldRand(uint x) { return float(fieldHash(x) >> 8) / 16777216.0; }
 // Point k of the R2 sequence (Roberts 2018) in the unit square, shifted per tile: any first n
@@ -183,9 +184,10 @@ bool fieldVertex(vec3 corner, out vec3 pos, out vec3 nrm, out vec4 col) {
     n = normalize(mat3(fieldWorld) * n);
     if (dot(n, fieldCam - pos) < 0.0) n = -n;                                // lit on the side seen
     nrm = normalize(mix(n, vec3(0.0, 1.0, 0.0), 0.3 + 0.4 * (1.0 - far)));  // far off, shaded like the ground
-    vec3 base = mix(fieldRoot, fieldTip, t) * (1.0 + fieldGusts.w * (r6 - 0.5));
-    if (r7 < fieldFade.z) base = mix(base, fieldDry * (0.8 + 0.2 * t), 0.5 + 0.5 * r2);
-    col = vec4(base * (0.75 + 0.25 * t), 1.0);
+    float tc = fieldBands > 1.5 ? min(floor(t * fieldBands), fieldBands - 1.0) / (fieldBands - 1.0) : t;   // flat bands
+    vec3 base = mix(fieldRoot, fieldTip, tc) * (1.0 + fieldGusts.w * (r6 - 0.5));
+    if (r7 < fieldFade.z) base = mix(base, fieldDry * (0.8 + 0.2 * tc), 0.5 + 0.5 * r2);
+    col = vec4(base * (fieldBands > 1.5 ? 1.0 : 0.75 + 0.25 * t), 1.0);
     return true;
 }
 )";
@@ -1094,7 +1096,7 @@ struct InstLocs { int instanced = -1, vat = -1, width = -1, verts = -1, rows = -
 constexpr int VAT_SLOT = 12;             // the baked-animation texture (material maps use 0..11)
 // A field's uniforms in one program (see FIELD_VS); its maps share the VAT_SLOT unit.
 struct FieldLocs { int on = -1, world = -1, tile = -1, key = -1, seed = -1, area = -1, mapFit = -1, maps = -1,
-                   blade = -1, wind = -1, gusts = -1, fade = -1, cam = -1, root = -1, tip = -1, dry = -1; };
+                   blade = -1, wind = -1, gusts = -1, fade = -1, cam = -1, root = -1, tip = -1, dry = -1, bands = -1; };
 constexpr int FIELD_MAX_SEGMENTS = 8;
 struct LineLocs { int depthTex, texel, zNear, zFar, ortho, pixelWorld, pxScale, styles, maxRadius, creaseCos,
                   depthThreshold, wobble, wobbleScale, seed; };
@@ -1277,7 +1279,7 @@ void ensureGpu() {
             auto f = [&b](const char* name) { return GetShaderLocation(b, name); };
             gpu.F[i] = { f("fieldOn"), f("fieldWorld"), f("fieldTile"), f("fieldKey"), f("fieldSeed"), f("fieldArea"),
                          f("fieldMapFit"), f("fieldMaps"), f("fieldBlade"), f("fieldWind"), f("fieldGusts"),
-                         f("fieldFade"), f("fieldCam"), f("fieldRoot"), f("fieldTip"), f("fieldDry") };
+                         f("fieldFade"), f("fieldCam"), f("fieldRoot"), f("fieldTip"), f("fieldDry"), f("fieldBands") };
         }
     }
     auto nloc = [](const char* name) { return GetShaderLocation(gpu.line, name); };
@@ -2051,6 +2053,8 @@ void drawField(const Item& it, Pass pass) {
     setColor(L.root, f.root);
     setColor(L.tip, f.tip);
     setColor(L.dry, f.dry);
+    const float bands = (float)std::clamp(f.colorBands, 0, 16);
+    rlSetUniform(L.bands, &bands, SHADER_UNIFORM_FLOAT, 1);
 
     const float ts = std::max(f.tileSize, 0.05f);
     const float full = (float)f.bladesPerTile();
@@ -2581,7 +2585,8 @@ void drawSkybox(const Camera& cam) {
     mat.maps[MATERIAL_MAP_DIFFUSE].texture = whiteTexture();
     mat.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
     setBones(gpu.L.bones, gpu.L.skinned, gpu.lit, nullptr, 0);
-    const float size = cam.farPlane;                    // corners stay inside the far plane
+    setInstanced(Pass::Lit, false);                     // a forest drawn before may have left it on
+    const float size = cam.farPlane;                 // corners stay inside the far plane
     rlDisableBackfaceCulling();
     rlDisableDepthMask();
     DrawMesh(gpu.skyCube, mat, MatrixMultiply(MatrixScale(size, size, size),

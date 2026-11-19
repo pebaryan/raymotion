@@ -4935,6 +4935,19 @@ flora::TreePtr jsonTree(const Json& d, const Json& build) {
     b.viewSize = build.integer("viewSize", b.viewSize);
     b.reducedLeaves = (float)build.num("reducedLeaves", b.reducedLeaves);
     b.loopSeconds = (float)build.num("loopSeconds", b.loopSeconds);
+    {
+        const std::string style = build.str("style", "realistic");
+        if (style == "realistic") b.style = flora::TreeStyle::Realistic;
+        else if (style == "lowpoly") b.style = flora::TreeStyle::LowPoly;
+        else if (style == "paper") b.style = flora::TreeStyle::PaperCut;
+        else if (style == "splat") b.style = flora::TreeStyle::Splat;
+        else throw std::runtime_error("forest build style must be realistic, lowpoly, paper or splat");
+        const std::string shading = build.str("shading", "standard");
+        if (shading == "toon") b.shading = g3d::Shading::Toon;
+        else if (shading == "gooch") b.shading = g3d::Shading::Gooch;
+        else if (shading == "hatch") b.shading = g3d::Shading::Hatch;
+        else if (shading != "standard") throw std::runtime_error("forest build shading must be standard, toon, gooch or hatch");
+    }
     if (b.frames < 1 || b.frames > 64 || b.views < 1 || b.views > 32 || b.viewSize < 16 || b.viewSize > 512 || !std::isfinite(b.reducedLeaves) ||
         !std::isfinite(b.loopSeconds) || b.loopSeconds <= 0)
         throw std::runtime_error("forest build needs frames 1..64, views 1..32, viewSize 16..512 and a positive loopSeconds");

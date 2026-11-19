@@ -2263,6 +2263,77 @@ static void trees() {
         CHECK(same);
         UnloadImage(prev); UnloadImage(next); UnloadImage(alone);
     }
+    {   // styles: a paper card turns to face any camera; low-poly toon trees draw; a sky after a forest
+        flora::TreeBuild paperBuild{ 4, 4, 4, 64 }, lowBuild = paperBuild;
+        paperBuild.style = flora::TreeStyle::PaperCut;
+        lowBuild.style = flora::TreeStyle::LowPoly;
+        lowBuild.shading = g3d::Shading::Toon;
+        const flora::TreePtr paper = flora::makeTree(flora::oak(), paperBuild), low = flora::makeTree(flora::oak(), lowBuild);
+        auto seen = [&](const flora::TreePtr& t, float azimuth, bool growing) {
+            auto s = noShadows(treeStage());
+            s->camera.position = { 30 * std::sin(azimuth * DEG2RAD), 7, 30 * std::cos(azimuth * DEG2RAD) };
+            s->camera.target = { 0, 7, 0 };
+            flora::ForestSpec still;
+            still.wind = 0;
+            if (growing) flora::addGrowingTree(*s, t, { 0, 0, 0 }, 0, 1, [](int) { return 1.f; }, still);
+            else flora::addTree(*s, t, { 0, 0, 0 }, 0, 1, still);
+            Comp c = longComp(s, 200, 200);
+            Image img = render(c, 3);
+            const int n = coverage(img);
+            UnloadImage(img);
+            return n;
+        };
+        const int front = seen(paper, 0, false), side = seen(paper, 90, false), back = seen(paper, 200, false),
+                  growSide = seen(paper, 90, true), lowFront = seen(low, 0, false), lowSide = seen(low, 90, false);
+        std::printf("[scene3d] paper oak: %d / %d / %d px from 0 / 90 / 200 degrees, %d growing from 90; low-poly toon oak %d / %d px\n",
+                    front, side, back, growSide, lowFront, lowSide);
+        CHECK(front > 2000 && std::abs(side - front) < front / 10 && std::abs(back - front) < front / 10);
+        CHECK(std::abs(growSide - front) < front / 10);
+        CHECK(lowFront > 2000 && lowSide > 2000);
+        // Splat crowns: drawn whole when grown and still; while growing, they come in after the wood.
+        flora::TreeBuild splatBuild = paperBuild;
+        splatBuild.style = flora::TreeStyle::Splat;
+        const flora::TreePtr soft = flora::makeTree(flora::oak(), splatBuild);
+        auto grownSoft = [&](float u) {
+            auto s = noShadows(treeStage());
+            s->camera.position = { 0, 7, 30 };
+            s->camera.target = { 0, 7, 0 };
+            flora::ForestSpec still;
+            still.wind = 0;
+            flora::addGrowingTree(*s, soft, { 0, 0, 0 }, 0, 1, [u](int) { return u; }, still);
+            Comp c = longComp(s, 200, 200);
+            Image img = render(c, 3);
+            const int n = coverage(img);
+            UnloadImage(img);
+            return n;
+        };
+        const int softStill = seen(soft, 0, false), softHalf = grownSoft(0.5f), softFull = grownSoft(1);
+        std::printf("[scene3d] splat oak: %d px still, %d px growing at u 0.5, %d at u 1\n", softStill, softHalf, softFull);
+        CHECK(softStill > 2000 && std::abs(softFull - softStill) < softStill / 10 && softHalf < softFull / 2);
+
+        // A forest leaves the shared program instanced; the next scene's sky must still draw.
+        auto sky = [&](bool forestFirst) {
+            if (forestFirst) {
+                auto s = noShadows(treeStage());
+                flora::addTree(*s, low, { 0, 0, 0 }, 0, 1);
+                Comp c = longComp(s, 64, 64);
+                UnloadImage(render(c, 1));
+            }
+            auto s = std::make_shared<g3d::Scene>();
+            s->camera.position = { 0, 2, 10 };
+            s->camera.target = { 0, 4, 0 };
+            s->sky.enabled = true;
+            s->sky.show = true;
+            Comp c = longComp(s, 64, 64);
+            Image img = render(c, 1);
+            const Color top = GetImageColor(img, 32, 4);
+            UnloadImage(img);
+            return top;
+        };
+        const Color clean = sky(false), after = sky(true);
+        std::printf("[scene3d] sky alone (%d %d %d), after a forest (%d %d %d)\n", clean.r, clean.g, clean.b, after.r, after.g, after.b);
+        CHECK(clean.r + clean.g + clean.b > 150 && std::abs(after.r - clean.r) + std::abs(after.g - clean.g) + std::abs(after.b - clean.b) < 6);
+    }
     {   // grass growth: blades come up from a point outwards; none at grow 0, rising, not popping
         auto field = [&](float grow) {
             auto s = meadow([grow](g3d::Field& f) {

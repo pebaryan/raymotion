@@ -1,6 +1,6 @@
 # 0.12 plan: vegetation (`flora::`)
 
-Status: M0-M4 done 2026-11-19 (see below); M5 next. Set 2026-11-18; owner's decisions the same day:
+Status: M0-M5 done 2026-11-19 (see below); M6 next. Set 2026-11-18; owner's decisions the same day:
 
 1. **Realistic first, then stylised.** Cards with alpha cutout, translucency and PBR leaves
    come first; low-poly / toon presets follow on the same scatter and wind.
@@ -216,6 +216,25 @@ byte for byte).
 On the same scatter, wind and field code: low-poly crowns (as in `rooftop_dusk`),
 toon-friendly blades with flat colour bands, splat canopies, paper-cut cards. Checked
 under `Shading::Toon`, `Gooch` and `Hatch` and with scene ink lines.
+
+**Done 2026-11-19.** `flora::TreeStyle` on `TreeBuild::style`, with `TreeBuild::shading`
+applied to the wood, leaf and impostor materials. `LowPoly`: leaf cards gathered into
+5..18 clumps (farthest-point centres), each a jittered flat-shaded icosahedron, and
+conifers as 3..5 stacked seven-sided cones; limbs only; lighter ink inside crowns; impostors
+baked solid. `PaperCut`: the realistic front view, its brightness smoothed into two flat
+leaf tones plus bark, with a dark cut edge, on one card that turns to the camera in forests
+and while growing. `Splat`: limbs under two flat Gaussian splats a leaf card, lit from
+above and darkened inside; the crown leans with the wind and swells in while growing; no
+impostors and no shadow. `flora::toonGrass()` / `"toon"` and `g3d::Field::colorBands`.
+Ink lines: low-poly crowns use `lineWidth` 0.6 and grass 0; a ground plane under inked
+grass wants `lineWidth` 0 too. Fixed on the way: a scene drawn after one with a forest lost
+its sky (the shared lit program was left instanced). Tests: `flora_tests` (triangles
+realistic / low-poly / paper: oak 14,276 / 860 / 2, spruce 26,086 / 200 / 2; low-poly growth
+exact at u = 1; 3,796 splats for an oak; shading on every material), `scene3d_tests` (a
+paper oak covers 5,576 px from 0, 90 and 200 degrees and growing; low-poly toon oak draws;
+splat oak 6,839 px still, 608 at u 0.5, 6,830 at u 1; the sky after a forest matches the sky
+alone, and is black without the fix), `test_script.py` (`test_flora_styles`: five looks,
+five different pictures; bad names refused). `examples/scripts/flora_styles.as`.
 
 ## M6. 2D vegetation
 

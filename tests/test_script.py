@@ -250,6 +250,36 @@ void draw(int frame) { g3d::draw("''' + literal + '''", frame, 0, 0, 160, 90); }
         self.assertIn("at most 64", self.run_cli("still", "grow", "--script", self.path, "--png", "x.png", ok=False, timeout=120))
 
     @unittest.skipUnless(GL, "needs OpenGL")
+    def test_flora_styles(self):
+        # Each tree style and shading draws, each differently, and a bad one is refused by name.
+        def write(build):
+            world = json.dumps({
+                "camera": {"position": [0, 4, 14], "target": [0, 3, 0]},
+                "lights": [{"type": "directional", "position": [10, 20, -10]}],
+                "objects": [{"geometry": "plane", "width": 60, "depth": 60, "material": {"color": "#c828c8"}},
+                            {"grass": {"preset": "toon", "min": [-4, -4], "max": [4, 4], "seed": 1}},
+                            {"forest": {"trees": ["shrub"], "build": dict(build, frames=2, views=4, viewSize=32),
+                                        "scatter": {"area": {"min": [-3, -3], "max": [3, 3]}, "spacing": 4, "seed": 2}}}]})
+            literal = world.replace("\\", "\\\\").replace('"', '\\"')
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "styles"; c.w = 160; c.h = 90; c.fps = 30; c.duration = 10; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) { g3d::draw("''' + literal + '''", frame, 0, 0, 160, 90); }
+''')
+        pictures = set()
+        for i, build in enumerate([{}, {"style": "lowpoly", "shading": "toon"}, {"style": "lowpoly", "shading": "hatch"},
+                                   {"style": "paper"}, {"style": "splat", "shading": "gooch"}]):
+            write(build)
+            self.run_cli("still", "styles", "--script", self.path, "--at", 3, "--png", f"s{i}.png", timeout=120)
+            pictures.add((self.cwd / f"s{i}.png").read_bytes())
+        self.assertEqual(len(pictures), 5)
+        write({"style": "cubist"})
+        self.assertIn("realistic, lowpoly, paper or splat", self.run_cli("still", "styles", "--script", self.path, "--png", "x.png", ok=False))
+        write({"shading": "oil"})
+        self.assertIn("standard, toon, gooch or hatch", self.run_cli("still", "styles", "--script", self.path, "--png", "x.png", ok=False))
+
+    @unittest.skipUnless(GL, "needs OpenGL")
     def test_map_helpers_draw(self):
         # geo::base, choropleth, colorbar, labels, highlight, markers, route, fly, focus,
         # valuesAt and the geo-route / geo-flyto prefabs: every frame sampled must draw.

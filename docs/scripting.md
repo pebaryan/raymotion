@@ -749,6 +749,11 @@ r}`, `{"along": [[x, z], ...], "reach": r}`, `{"into": area, "depth": d}` or a g
 blades come up where `grow` passes their arrival. A `forest` with `grow` grows its trees
 (at most 64, each its own mesh): `growFrom` (`[x, z]`) and `growReach` start the nearer
 ones first. See `examples/scripts/flora_growth.as`.
+Styles: a forest's `build` takes `"style"` (`realistic`, `lowpoly`, `paper`, `splat`) and
+`"shading"` (`standard`, `toon`, `gooch`, `hatch`); the `toon` grass preset has flat colour
+bands. Splat forests are one object a tree (at most 256). See
+`examples/scripts/flora_styles.as`.
+
 The `physics` namespace exposes native Rope and Cloth solver handles, `PhysicsParams`, Sphere/Plane/Capsule/Box colliders, seeded wind, pins, bending/stretching, tearing, self collision and frame sampling. `physics::rope` and `physics::cloth` accept an optional params handle; omitting it uses the native defaults. See `examples/scripts/physics_scene.as` for the descriptor
 path and `examples/scripts/physics_callbacks.as` for direct callback-driven handles.
 `PhysicsParams.state(values)` returns

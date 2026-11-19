@@ -273,6 +273,7 @@ struct Field {
     float colorVariation = 0.3f;                // per-blade brightness spread, 0..1
     Color dry{ 176, 156, 86, 255 };             // straw colour...
     float dryness = 0.12f;                      // ...and the fraction of blades turning to it
+    int colorBands = 0;                         // > 1: root to tip in this many flat bands (toon looks)
 
     std::function<float(float x, float z)> ground;      // ground height (null = 0)
     std::function<float(float x, float z)> mask;        // density, 0..1 (null = 1)
