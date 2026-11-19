@@ -339,6 +339,10 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   and its PlantCover into grass or shrubs (`isPlant` to filter the solids out);
   `geo3d::forest` scatters low-poly trees over countries or boxes, standing along the
   surface's up on a globe, a map or between, and growing in west to east.
+* Vegetation prefabs `flora-meadow`, `flora-tree-grow` and `flora-2d-hill`, and an engine
+  showcase (`raymotion render flora`: a meadow, a 5,000-tree fly-over, a growing tree, a 2D
+  hillside). The whole vegetation API, measured budgets and what is verified are in
+  [docs/flora.md](docs/flora.md).
 * Lights: up to 8 directional/point/spot lights with range falloff. Any of them can cast
   PCF shadows; they share one shadow atlas (`shadowMapSize` per tile, a tile per
   directional/spot light and six per point light, 16 tiles), with `shadowBias` in world

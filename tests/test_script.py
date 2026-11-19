@@ -372,6 +372,31 @@ void draw(int frame) { g3d::draw("''' + literal + '''", frame, 0, 0, 160, 90); }
         self.assertIn("[west, south, east, north]", self.run_cli("still", "green", "--script", self.path, "--png", "x.png", ok=False))
 
     @unittest.skipUnless(GL, "needs OpenGL")
+    def test_flora_prefabs(self):
+        # Each flora prefab draws, changes as it grows, and refuses unknown trees and grass.
+        def write(name, props):
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "fp"; c.w = 192; c.h = 108; c.fps = 30; c.duration = 60; c.supersample = 1;
+    prefab::use(0, 60, "''' + name + '''", "''' + json.dumps(props).replace('"', '\\"') + '''");
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) {}
+''')
+        for name, props in (("flora-2d-hill", {"box": [0, 0, 192, 108], "duration": 40}),
+                            ("flora-tree-grow", {"box": [0, 0, 192, 108], "tree": "birch", "duration": 40}),
+                            ("flora-meadow", {"box": [0, 0, 192, 108], "trees": 3, "size": 12, "kinds": ["birch"]})):
+            write(name, props)
+            self.run_cli("still", "fp", "--script", self.path, "--at", 2, "--png", "a.png", timeout=180)
+            self.run_cli("still", "fp", "--script", self.path, "--at", 50, "--png", "b.png", timeout=180)
+            self.assertNotEqual((self.cwd / "a.png").read_bytes(), (self.cwd / "b.png").read_bytes(), name)
+        write("flora-tree-grow", {"tree": "baobab"})
+        self.assertIn('no tree "baobab"', self.run_cli("still", "fp", "--script", self.path, "--png", "x.png", ok=False))
+        write("flora-2d-hill", {"grass": "astroturf"})
+        self.assertIn('no grass "astroturf"', self.run_cli("still", "fp", "--script", self.path, "--png", "x.png", ok=False))
+        write("flora-meadow", {"box": [0, 0, 0, 10]})
+        self.assertIn("positive size", self.run_cli("still", "fp", "--script", self.path, "--png", "x.png", ok=False))
+
+    @unittest.skipUnless(GL, "needs OpenGL")
     def test_map_helpers_draw(self):
         # geo::base, choropleth, colorbar, labels, highlight, markers, route, fly, focus,
         # valuesAt and the geo-route / geo-flyto prefabs: every frame sampled must draw.

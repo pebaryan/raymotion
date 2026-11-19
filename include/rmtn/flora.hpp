@@ -259,5 +259,9 @@ g3d::Object3D* addGrowingTrees(g3d::Object3D& parent, const std::vector<Placemen
                                std::function<float(int t, const Placement& p)> grow, ForestSpec wind = {});
 g3d::Object3D* addGrowingTree(g3d::Scene& scene, TreePtr tree, Vector3 position, float yaw, float scale,
                               std::function<float(int t)> grow, ForestSpec wind = {});
+
+// Built-in prefabs "flora-meadow", "flora-tree-grow" and "flora-2d-hill" (runCli registers
+// them; props in docs/flora.md).
+void registerPrefabs();
 }  // namespace flora
 }  // namespace rmtn

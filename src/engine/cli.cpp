@@ -30,6 +30,7 @@
 #include "rmtn/flags.hpp"
 #include "rmtn/geomap.hpp"
 #include "rmtn/rig.hpp"
+#include "rmtn/flora.hpp"
 
 #ifdef _WIN32
 #define popen _popen
@@ -817,6 +818,7 @@ int runCli(int argc, const char** argv, const RegisterFn& registerAll){
     flags::registerPrefabs();
     geo::registerPrefabs();
     rig::registerPrefabs();
+    flora::registerPrefabs();
     try {
         // A .cpp script runs in its own compiled executable, which handles any .as scripts.
         if (auto status = runNativeCpp(argc, argv)) return *status;

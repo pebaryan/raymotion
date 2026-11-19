@@ -97,6 +97,7 @@ add_library(rmtn_engine STATIC
   src/engine/flora.cpp
   src/engine/flora_tree.cpp
   src/engine/flora2d.cpp
+  src/engine/flora_prefabs.cpp
   src/engine/crowd_rig.cpp
   src/engine/voxel.cpp
   src/engine/splat.cpp
@@ -202,6 +203,7 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/own_compute_v2.cpp
     examples/showcase/promo.cpp
     examples/showcase/npr.cpp
+    examples/showcase/flora.cpp
     examples/showcase/diagrams.cpp
     examples/showcase/particles.cpp
     examples/showcase/particles3d.cpp

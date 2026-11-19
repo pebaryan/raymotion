@@ -772,6 +772,10 @@ Plants in cities and on maps: a 3D scene's `city` takes `"plants": true` or `{"t
 `start`/`duration` or `progress` reveal, and `geo3d::forest(parent, surface, regionsJson,
 styleJson)` does the same on a handle; see `examples/scripts/geo_forest.as`.
 
+The vegetation prefabs `flora-meadow`, `flora-tree-grow` and `flora-2d-hill` work through
+`prefab::use` like any other (props in [flora.md](flora.md); see
+`examples/scripts/flora_prefabs.as`).
+
 The `physics` namespace exposes native Rope and Cloth solver handles, `PhysicsParams`, Sphere/Plane/Capsule/Box colliders, seeded wind, pins, bending/stretching, tearing, self collision and frame sampling. `physics::rope` and `physics::cloth` accept an optional params handle; omitting it uses the native defaults. See `examples/scripts/physics_scene.as` for the descriptor
 path and `examples/scripts/physics_callbacks.as` for direct callback-driven handles.
 `PhysicsParams.state(values)` returns

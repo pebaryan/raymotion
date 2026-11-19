@@ -1,6 +1,6 @@
 # 0.12 plan: vegetation (`flora::`)
 
-Status: M0-M7 done 2026-11-19 (see below); M8 in part (bindings, examples and docs landed with each milestone; prefabs, the C++ showcase and docs/flora.md remain). Set 2026-11-18; owner's decisions the same day:
+Status: M0-M7 done 2026-11-19 (see below); M8 done the same day. All milestones done. Set 2026-11-18; owner's decisions the same day:
 
 1. **Realistic first, then stylised.** Cards with alpha cutout, translucency and PBR leaves
    come first; low-poly / toon presets follow on the same scatter and wind.
@@ -301,6 +301,18 @@ are cheap enough up to the 100,000-tree default limit).
   a tree that grows, a 2D scene.
 - Prefabs: `flora-meadow`, `flora-tree-grow`, `flora-2d-hill`.
 - `docs/flora.md`: API, measured budgets, what is and is not verified.
+
+**Done 2026-11-19.** Bindings, examples and docs landed with each milestone (the examples
+are `flora_meadow`, `flora_scatter`, `flora_forest`, `flora_growth`, `flora_styles`,
+`flora_2d`, `city_plants`, `geo_forest` and `flora_prefabs`). Prefabs in
+`src/engine/flora_prefabs.cpp` (`flora::registerPrefabs`, called by `runCli`):
+`flora-meadow`, `flora-tree-grow` (the camera framed on the grown tree, a lawn on ground
+out to the haze) and `flora-2d-hill`. The engine showcase `flora`
+(`examples/showcase/flora.cpp`): a meadow in gusts, a valley fly-over of 5,025 trees (the
+caption prints the scatter's count), a growing oak, a 2D hillside. It is a feature demo,
+not a film: no brief or QC. `docs/flora.md` has the API, the prefab props, measured budgets
+and what is and is not verified. Test: `test_script.py` (`test_flora_prefabs`: each prefab
+draws and changes as it grows; unknown trees, grass and an empty box are refused by name).
 
 ## Tests
 
