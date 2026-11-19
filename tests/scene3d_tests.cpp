@@ -2,6 +2,8 @@
 // transparency, hierarchy, models (OBJ and a generated skinned glTF), determinism.
 #include "rmtn/raymotion.hpp"
 #include <raymath.h>
+#include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -9,6 +11,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 using namespace rmtn;
 namespace fs = std::filesystem;
@@ -168,6 +171,48 @@ static void shadows() {
     }
     CHECK(lit[1] < lit[0] - 60);                                                   // shadowed
     CHECK(std::abs(open[1] - open[0]) <= 2);                                       // no acne in open ground
+}
+
+// A sun 5 and 10 degrees above the horizon over flat ground (backlit grass at dusk): open
+// ground must match the unshadowed render (acne used to draw horizontal bands here), and a
+// box's long shadow must still start at its foot.
+static void lowSunShadows() {
+    for (float elevation : { 5.f, 10.f }) {
+        Image img[2];
+        g3d::ScenePtr s;
+        for (int k = 0; k < 2; k++) {
+            s = std::make_shared<g3d::Scene>();
+            s->camera.position = { 0, 1.6f, 5 };
+            s->camera.target = { 0, 0.6f, 0 };
+            g3d::Material m;
+            m.roughness = 1;
+            m.color = { 120, 150, 90, 255 };
+            s->add(g3d::Geometry::plane(40, 40), m);
+            s->add(g3d::Geometry::box(1, 1, 1), m)->position = { -1.5f, 0.5f, -1 };
+            const float e = elevation * DEG2RAD;
+            g3d::Light l = g3d::Light::directional({ 0, 10 * std::sin(e), -10 * std::cos(e) }, WHITE, 2, k == 1);
+            l.shadowExtent = 12;
+            s->lights.push_back(l);
+            Comp c = sceneComp(s);
+            img[k] = render(c, 0);
+        }
+        int banded = 0, ground = 0;
+        for (int y = H / 2 + 8; y < H; y++)
+            for (int x = W / 2; x < W; x++) {                                       // right half: open ground
+                ground++;
+                banded += luma(GetImageColor(img[1], x, y)) < luma(GetImageColor(img[0], x, y)) - 6;
+            }
+        const int foot[2] = { luma(px(img[0], project(s->camera, { -1.5f, 0, -0.35f }))),
+                              luma(px(img[1], project(s->camera, { -1.5f, 0, -0.35f }))) };
+        const int tail[2] = { luma(px(img[0], project(s->camera, { -1.5f, 0, 2 }))),
+                              luma(px(img[1], project(s->camera, { -1.5f, 0, 2 }))) };
+        std::printf("[scene3d] low sun %.0f deg: %d of %d open-ground pixels darkened, foot %d -> %d, tail %d -> %d\n",
+                    elevation, banded, ground, foot[0], foot[1], tail[0], tail[1]);
+        CHECK(banded * 100 < ground);                                               // under 1 %
+        CHECK(foot[1] < foot[0] - 15 && tail[1] < tail[0] - 15);
+        UnloadImage(img[0]);
+        UnloadImage(img[1]);
+    }
 }
 
 static void viewportsAndOpacity() {
@@ -1757,6 +1802,221 @@ static void surfaces() {
     }
 }
 
+// ---- grass fields
+static void dumpField(const char* name, const Image& img) {
+    if (const char* dir = std::getenv("RMTN_FIELD_DUMP")) {
+        fs::create_directories(dir);
+        ExportImage(img, (fs::path(dir) / name).string().c_str());
+    }
+}
+// A meadow on magenta ground (so blades are easy to count), lit from behind by a low sun.
+static g3d::ScenePtr meadow(std::function<void(g3d::Field&)> edit = {}, bool withField = true) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = { 0, 1.4f, 6 };
+    s->camera.target = { 0, 0.4f, 0 };
+    s->ambient = 0.35f;
+    g3d::Material ground;
+    ground.color = { 200, 40, 200, 255 };
+    ground.roughness = 1;
+    s->add(g3d::Geometry::plane(80, 80), ground);
+    auto f = std::make_shared<g3d::Field>();
+    f->min = { -20, -30 }; f->max = { 20, 8 };
+    f->density = 150;
+    if (edit) edit(*f);
+    g3d::Material grass;
+    grass.roughness = 0.8f;
+    grass.translucency = 0.8f;
+    grass.translucencyColor = { 255, 236, 160, 255 };
+    grass.lineWidth = 0;
+    if (withField) s->add(f, grass);
+    g3d::Light sun = g3d::Light::directional({ 3, 2.5f, -10 }, { 255, 226, 180, 255 }, 2.2f, true);
+    sun.shadowExtent = 14;
+    s->lights.push_back(sun);
+    return s;
+}
+static void grassField() {
+    {   // placement: a tile holds density * size^2 blades; any first n of them spread evenly
+        g3d::Field f;
+        f.density = 400; f.tileSize = 4; f.min = { 0, 0 }; f.max = { 10, 6 };
+        CHECK(f.bladesPerTile() == 6400 && f.tilesX() == 3 && f.tilesZ() == 2);
+        int cells[16] = {};
+        bool inside = true;
+        for (uint32_t k = 0; k < 160; k++) {
+            const Vector2 p = f.bladeRoot(1, 1, k);
+            inside = inside && p.x >= 4 && p.x < 8 && p.y >= 4 && p.y < 8;
+            cells[std::clamp((int)(p.x - 4), 0, 3) + 4 * std::clamp((int)(p.y - 4), 0, 3)]++;
+        }
+        CHECK(inside);
+        CHECK(*std::min_element(cells, cells + 16) >= 6 && *std::max_element(cells, cells + 16) <= 14);   // 10 each, evenly
+        const Vector2 a = f.bladeRoot(0, 0, 5), b = f.bladeRoot(1, 0, 5);
+        CHECK(std::fabs(a.x + 4 - b.x) > 1e-3f || std::fabs(a.y - b.y) > 1e-3f);                 // tiles differ
+        g3d::Field g = f;
+        g.seed = 2;
+        CHECK(Vector2Distance(g.bladeRoot(1, 1, 7), f.bladeRoot(1, 1, 7)) > 1e-3f);             // seeds differ
+    }
+    // Blade pixels: grass is yellow-green, the meadow's ground magenta (blue above green).
+    auto bladePixels = [](const Image& img, int x0, int x1, int y0, int y1) {
+        int n = 0;
+        for (int y = y0; y < y1; y++)
+            for (int x = x0; x < x1; x++) {
+                const Color c = GetImageColor(img, x, y);
+                n += c.g > c.b + 8;
+            }
+        return n;
+    };
+    auto same = [](const Image& a, const Image& b) {
+        for (int y = 0; y < a.height; y++)
+            for (int x = 0; x < a.width; x++)
+                if (!close(GetImageColor(a, x, y), GetImageColor(b, x, y), 0)) return false;
+        return true;
+    };
+    {   // a look at it (dumped when RMTN_FIELD_DUMP is set); deterministic, and frames are pure
+        Comp c = longComp(meadow(), 960, 540);
+        Image img = render(c, 40);
+        dumpField("meadow.png", img);
+        if (std::getenv("RMTN_FIELD_DUMP")) {
+            auto s = meadow([](g3d::Field& f) { f.density = 900; });
+            s->objects[0]->material.color = { 52, 64, 30, 255 };
+            s->camera.position = { 0, 0.35f, 2 };
+            s->camera.target = { 0.3f, 0.2f, 0 };
+            Comp close = longComp(s, 960, 540);
+            Image ci = render(close, 40);
+            dumpField("closeup.png", ci);
+            UnloadImage(ci);
+        }
+        Comp again = longComp(meadow());
+        Image before = render(again, 39), after = render(again, 40);
+        Comp fresh = longComp(meadow());
+        Image alone = render(fresh, 40);
+        CHECK(same(after, alone));
+        CHECK(!same(before, after));                                    // the wind moves it
+        UnloadImage(before); UnloadImage(after); UnloadImage(alone);
+        UnloadImage(img);
+    }
+    {   // the mask: no blades where it is 0
+        Comp c = longComp(meadow([](g3d::Field& f) { f.mask = [](float x, float) { return x < 0 ? 0.f : 1.f; }; }));
+        Image img = render(c, 10);
+        const g3d::Camera cam = meadow()->camera;
+        const int mid = (int)project(cam, { 0, 0, 2 }).x;
+        const int y0 = (int)project(cam, { 0, 0, -2 }).y, y1 = (int)project(cam, { 0, 0, 4 }).y;
+        const int left = bladePixels(img, 0, mid - 12, y0, y1), right = bladePixels(img, mid + 12, W, y0, y1);
+        std::printf("[scene3d] grass mask: %d blade pixels where 0, %d where 1\n", left, right);
+        CHECK(left == 0 && right > 400);
+        UnloadImage(img);
+    }
+    {   // beyond fadeEnd nothing is drawn or submitted
+        Comp c = longComp(meadow([](g3d::Field& f) { f.min = { -20, -60 }; f.max = { 20, -30 }; f.fadeStart = 10; f.fadeEnd = 25; }));
+        Image img = render(c, 10);
+        CHECK(bladePixels(img, 0, W, 0, H) == 0 && g3d::fieldBladesSubmitted() == 0);
+        UnloadImage(img);
+        Comp near = longComp(meadow([](g3d::Field& f) { f.fadeStart = 10; f.fadeEnd = 25; }));
+        Image seen = render(near, 10);
+        CHECK(bladePixels(seen, 0, W, 0, H) > 1000 && g3d::fieldBladesSubmitted() > 0);
+        UnloadImage(seen);
+    }
+    {   // sway: tips move between frames, roots stay; seen from the side, against the sky
+        auto side = [](std::function<void(g3d::Field&)> edit) {
+            auto s = meadow([&](g3d::Field& f) {
+                f.min = { -3, -0.3f }; f.max = { 3, 0.3f }; f.density = 200; f.height = 0.5f; f.heightVariation = 0;
+                f.lean = 0; f.tileSize = 1;
+                edit(f);
+            });
+            s->objects[0]->visible = false;                                      // no ground: blades against black
+            s->camera.position = { 0, 0.25f, 5 };
+            s->camera.target = { 0, 0.25f, 0 };
+            return s;
+        };
+        auto s = side([](g3d::Field& f) { f.sway = 0.3f; f.gust = 0.3f; });
+        Comp c = longComp(s);
+        Image a = render(c, 0), b = render(c, 8);
+        const int rootY = (int)project(s->camera, { 0, 0.03f, 0 }).y, tipY = (int)project(s->camera, { 0, 0.4f, 0 }).y;
+        int rootDiff = 0, tipDiff = 0;
+        for (int x = 0; x < W; x++)
+            for (int d = -2; d <= 2; d++) {
+                rootDiff += std::abs(luma(GetImageColor(a, x, rootY + d)) - luma(GetImageColor(b, x, rootY + d)));
+                tipDiff += std::abs(luma(GetImageColor(a, x, tipY + d)) - luma(GetImageColor(b, x, tipY + d)));
+            }
+        std::printf("[scene3d] grass sway: root band changes %d, tip band %d\n", rootDiff, tipDiff);
+        CHECK(tipDiff > 4 * rootDiff + 500);
+        UnloadImage(a); UnloadImage(b);
+
+        // A gust reaches a patch 4 m downwind later: with only the gust bending the blades,
+        // the frame each patch leans furthest comes about 4 m / gustSpeed after the other's.
+        auto g = side([](g3d::Field& f) { f.sway = 0; f.gust = 0.6f; f.gustSpeed = 4; f.gustScale = 10; f.windDirection = { 1, 0 }; });
+        g->camera.position = { 0, 0.25f, 7 };
+        Comp gc = longComp(g);
+        const int period = 75;                                                    // 10 m / 4 m/s at 30 fps
+        const int band = (int)project(g->camera, { 0, 0.3f, 0 }).y;
+        const int leftX = (int)project(g->camera, { -2, 0.3f, 0 }).x, rightX = (int)project(g->camera, { 2, 0.3f, 0 }).x;
+        std::vector<double> lean[2];
+        for (int f = 0; f < period; f++) {
+            Image img = render(gc, f);
+            for (int p = 0; p < 2; p++) {                                         // mean x of blade pixels in the patch
+                const int cx = p ? rightX : leftX;
+                double sx = 0, n = 0;
+                for (int y = band - 2; y <= band + 2; y++)
+                    for (int x = cx - 30; x < cx + 30; x++)
+                        if (luma(GetImageColor(img, x, y)) > 20) { sx += x - cx; n++; }
+                lean[p].push_back(n > 0 ? sx / n : 0);
+            }
+            UnloadImage(img);
+        }
+        for (auto& series : lean) {                                               // around its mean
+            double m = 0;
+            for (double v : series) m += v / period;
+            for (double& v : series) v -= m;
+        }
+        int lag = 0;
+        double bestCorr = -1e300;
+        for (int d = 0; d < period; d++) {                                        // downwind(t + d) ~ upwind(t)
+            double sum = 0;
+            for (int f = 0; f < period; f++) sum += lean[0][(size_t)f] * lean[1][(size_t)((f + d) % period)];
+            if (sum > bestCorr) { bestCorr = sum; lag = d; }
+        }
+        std::printf("[scene3d] grass gust: downwind patch follows the upwind one by %d frames (expect 30)\n", lag);
+        CHECK(lag >= 24 && lag <= 36);
+    }
+    {   // a tile out of view still shadows the ground in view
+        auto build = [](bool grass) {
+            auto s = meadow([](g3d::Field& f) { f.min = { -4, -2 }; f.max = { -2, 2 }; f.tileSize = 1; f.height = 1.6f;
+                                                f.density = 1500; f.heightVariation = 0; }, grass);
+            s->camera.position = { 3, 3, 4 };
+            s->camera.target = { 3, 0, 0 };
+            s->lights[0] = g3d::Light::directional({ -14, 5, 0 }, WHITE, 2, true);
+            s->lights[0].target = { 0, 0, 0 };
+            s->lights[0].shadowExtent = 8;
+            return s;
+        };
+        auto with = build(true), without = build(false);
+        CHECK(project(with->camera, { -2, 1.6f, 0 }).x < 0);                     // the grass is off screen
+        Comp a = longComp(with), b = longComp(without);
+        Image ia = render(a, 0), ib = render(b, 0);
+        const Vector2 probe = project(with->camera, { 1, 0, 0 });
+        const int shaded = luma(px(ia, probe)), open = luma(px(ib, probe));
+        std::printf("[scene3d] grass shadow from off screen: %d vs %d unshadowed\n", shaded, open);
+        CHECK(probe.x > 0 && shaded < open - 15);
+        UnloadImage(ia); UnloadImage(ib);
+    }
+    {   // landscape: a 400 m square; time printed, not checked. Full size (600 blades a square
+        // metre at 1080p) with RMTN_FIELD_BENCH set; smaller by default, for software GL on CI.
+        const bool bench = std::getenv("RMTN_FIELD_BENCH") != nullptr;
+        auto s = meadow([bench](g3d::Field& f) { f.min = { -200, -200 }; f.max = { 200, 200 }; f.density = bench ? 600.f : 120.f; });
+        s->camera.position = { 0, 1.7f, 6 };
+        s->camera.target = { 0, 1.2f, -10 };
+        s->objects[0]->material.color = { 70, 92, 40, 255 };
+        Comp c = longComp(s, bench ? 1920 : 480, bench ? 1080 : 270);
+        Image first = render(c, 30);
+        dumpField("landscape.png", first);
+        UnloadImage(first);
+        const int frames = bench ? 5 : 2;
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int f = 31; f < 31 + frames; f++) UnloadImage(render(c, f));
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / frames;
+        std::printf("[scene3d] grass landscape %dx%d: %lld blades submitted, %.1f ms a frame (with readback)\n",
+                    c.w, c.h, g3d::fieldBladesSubmitted(), ms);
+    }
+}
+
 int main() try {
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
@@ -1771,6 +2031,7 @@ int main() try {
     supersampledPlacement();
     lighting();
     shadows();
+    lowSunShadows();
     viewportsAndOpacity();
     transparencyAndHierarchy();
     moreShadows();
@@ -1790,6 +2051,7 @@ int main() try {
     particles3d();
     surfaces();
     lines3d();
+    grassField();
     devices();
     shutdownGraphics();
     CloseWindow();

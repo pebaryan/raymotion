@@ -706,6 +706,18 @@ arrays use the primitive geometry as a static one-frame mesh. See the instanced 
 draw callback, `g3d::geometryData(geometryJson, vertices, normals)` samples a native primitive's
 CPU mesh as flattened xyz triples, so scripts can derive baked deformation frames without
 guessing the tessellator's vertex order.
+An object with a `grass` descriptor is a grass field made on the GPU (`g3d::Field`): `preset`
+(`lawn`, `meadow`, `tall` or `dry`), `min` and `max` (`[x, z]` corners of the area), `seed`,
+and any field value by name to override the preset: `density` (blades a square metre),
+`height`, `heightVariation`, `width`, `lean`, `segments`, colours `root`, `tip` and `dry`,
+`colorVariation`, `dryness`, wind `windDirection` (`[x, z]`), `sway`, `gust`, `gustSpeed`,
+`gustScale`, `fps`, and detail `tileSize`, `detailDistance`, `fadeStart`, `fadeEnd`,
+`shadowDistance`, `mapResolution`. Optional grids over the area, `mask` (density 0..1),
+`ground` (height) and `tall` (height multiplier), are `{"width": w, "height": h, "values":
+[...]}` row by row from `min` to `max`, read bilinearly. The object's `material` starts from
+the grass material (translucent, matt, no ink lines) and changes only what it names. The field
+is kept between frames while its area, `tileSize`, `mapResolution` and grids stay the same,
+so its maps are made once; the rest may follow `t`. See `examples/scripts/flora_meadow.as`.
 The `physics` namespace exposes native Rope and Cloth solver handles, `PhysicsParams`, Sphere/Plane/Capsule/Box colliders, seeded wind, pins, bending/stretching, tearing, self collision and frame sampling. `physics::rope` and `physics::cloth` accept an optional params handle; omitting it uses the native defaults. See `examples/scripts/physics_scene.as` for the descriptor
 path and `examples/scripts/physics_callbacks.as` for direct callback-driven handles.
 `PhysicsParams.state(values)` returns

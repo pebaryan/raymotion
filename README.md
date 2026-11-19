@@ -291,10 +291,19 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   `normalMap` (no tangents needed) and `roughnessMap` (glTF metallic-roughness) add surface
   detail. Give a cut-out texture's clear texels the leaf's colour, not black, or filtering
   draws a dark fringe.
+* Grass at landscape scale (`g3d::Field`, `flora::addGrass` with the looks `lawn`,
+  `meadow`, `tallGrass` and `dryGrass`): every blade is made on the GPU from its tile and
+  number, so nothing per blade is stored. Tiles are culled on the CPU (shadows included)
+  and thin out with distance into the ground's colour without popping; density, ground
+  height and blade height come from functions of x and z; wind sways the blades and sends
+  gusts downwind as a function of time. About 1.5 million blades a frame at 1080p took
+  12 ms with shadows on the development GPU (`RMTN_FIELD_BENCH=1` runs that measurement in
+  `scene3d_tests`). Grass shadows want a fine shadow map (`shadowMapSize` 4096) under a low sun.
 * Lights: up to 8 directional/point/spot lights with range falloff. Any of them can cast
   PCF shadows; they share one shadow atlas (`shadowMapSize` per tile, a tile per
   directional/spot light and six per point light, 16 tiles), with `shadowBias` in world
-  units on top of an automatic slope bias.
+  units on top of an automatic slope bias and a normal offset (so a sun a few degrees above
+  the horizon draws no acne bands).
 * Ambient light is a sky/ground hemisphere, or image-based: `scene->environment` (an
   equirectangular PNG/JPG/HDR) or `environmentGenerator` (e.g. `g3d::studioEnvironment`,
   a gradient with soft light boxes) lights diffuse surfaces from its blurred mips and

@@ -114,6 +114,38 @@ void second(int t) { }
         self.assertGreater((self.cwd / "splat.png").stat().st_size, 1000)
 
     @unittest.skipUnless(GL, "needs OpenGL")
+    def test_grass_field(self):
+        # A "grass" object draws, the same frame comes out the same in any order (the field is
+        # kept between frames), and bad presets and grids say what is wrong.
+        def write(preset="meadow", density=300, extra=""):
+            grass = (f'\\"preset\\":\\"{preset}\\",\\"min\\":[-6,-6],\\"max\\":[6,6],'
+                     f'\\"density\\":{density},\\"seed\\":3{extra}')
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "grass"; c.w = 160; c.h = 90; c.fps = 30; c.duration = 10; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) {
+    g3d::draw("{\\"camera\\":{\\"position\\":[0,1.2,4],\\"target\\":[0,0.3,0]},"
+              "\\"lights\\":[{\\"type\\":\\"directional\\",\\"position\\":[2,4,-6],\\"castShadow\\":true}],"
+              "\\"objects\\":[{\\"geometry\\":\\"plane\\",\\"width\\":20,\\"depth\\":20,\\"material\\":{\\"color\\":\\"#c828c8\\"}},"
+              "{\\"grass\\":{''' + grass + '''}}]}", frame, 0, 0, 160, 90);
+}
+''')
+        write()
+        for frame in (5, 4, 5):
+            self.run_cli("still", "grass", "--script", self.path, "--at", frame, "--png", f"g{frame}-{len(list(self.cwd.glob('*.png')))}.png")
+        first, moved, again = (self.cwd / "g5-0.png"), (self.cwd / "g4-1.png"), (self.cwd / "g5-2.png")
+        self.assertEqual(first.read_bytes(), again.read_bytes())
+        self.assertNotEqual(first.read_bytes(), moved.read_bytes())       # the wind moves it
+        write(density=0)
+        self.run_cli("still", "grass", "--script", self.path, "--at", 5, "--png", "bare.png")
+        self.assertNotEqual(first.read_bytes(), (self.cwd / "bare.png").read_bytes())
+        write(preset="jungle")
+        self.assertIn('no grass look "jungle"', self.run_cli("still", "grass", "--script", self.path, "--png", "x.png", ok=False))
+        write(extra=',\\"mask\\":{\\"width\\":3,\\"height\\":3,\\"values\\":[1,0]}')
+        self.assertIn("grass mask needs", self.run_cli("still", "grass", "--script", self.path, "--png", "x.png", ok=False))
+
+    @unittest.skipUnless(GL, "needs OpenGL")
     def test_map_helpers_draw(self):
         # geo::base, choropleth, colorbar, labels, highlight, markers, route, fly, focus,
         # valuesAt and the geo-route / geo-flyto prefabs: every frame sampled must draw.

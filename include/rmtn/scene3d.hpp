@@ -17,6 +17,7 @@
 // absolute values from t so any frame renders the same on its own.
 #pragma once
 #include <raylib.h>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -238,6 +239,65 @@ struct Instances {
     std::vector<Instance> list;
 };
 
+// ------------------------------------------------------------------ fields (grass)
+// Grass at landscape scale: every blade is made on the GPU from its tile and its number, so
+// nothing per blade is stored or sent, and a million blades cost what their pixels cost.
+// The area is cut into square tiles; each frame the CPU keeps the tiles that can show (their
+// shadows included) and picks a level for each from its distance, and the vertex shader
+// places, shapes, colours and bends each blade. The same seed makes the same field, in any
+// frame order; the wind is a function of position and time, never integrated.
+//
+// Blade k of a tile sits at point k of a low-discrepancy sequence, so any first n blades of a
+// tile cover it evenly. Far away fewer are drawn (by rank, each shrinking away over a band
+// rather than popping) and the ones left grow wider, so the cover holds until the fade.
+// `mask`, `ground` and `tall` are sampled over the area once, into a texture of
+// `mapResolution` squared, when the field is first drawn: change them, then bump `revision`.
+// Drawn with the object's material (its colour multiplies the blade colours; translucency,
+// roughness and receiveShadow apply); always double-sided.
+struct Field {
+    Vector2 min{ -10, -10 }, max{ 10, 10 };     // the area: x and z in the object's space
+    float density = 400;                        // blades per square metre where `mask` is 1
+    uint32_t seed = 1;
+
+    float height = 0.3f;                        // metres
+    float heightVariation = 0.35f;              // +- this fraction, per blade
+    float width = 0.012f;                       // metres at the root; blades taper to a point
+    float lean = 0.25f;                         // resting bend: the tip's offset over the height
+    int segments = 4;                           // along a near blade (far blades have one)
+    Color root{ 38, 66, 24, 255 }, tip{ 128, 168, 64, 255 };    // colour from root to tip
+    float colorVariation = 0.3f;                // per-blade brightness spread, 0..1
+    Color dry{ 176, 156, 86, 255 };             // straw colour...
+    float dryness = 0.12f;                      // ...and the fraction of blades turning to it
+
+    std::function<float(float x, float z)> ground;      // ground height (null = 0)
+    std::function<float(float x, float z)> mask;        // density, 0..1 (null = 1)
+    std::function<float(float x, float z)> tall;        // height multiplier (null = 1)
+    int mapResolution = 256;
+    int revision = 0;                           // bump after changing the three above
+
+    Vector2 windDirection{ 1, 0.3f };           // x, z; normalised when drawn
+    float sway = 0.12f;                         // steady lean downwind and flutter, tip offset / height
+    float gust = 0.35f;                         // extra bend while a gust passes
+    float gustSpeed = 5;                        // metres a second the gust fronts travel downwind
+    float gustScale = 14;                       // metres between gust fronts
+    float fps = 30;                             // the film's frames per second: wind moves in seconds
+
+    float tileSize = 4;                         // metres
+    float detailDistance = 14;                  // nearer tiles get full blades, further one segment
+    float fadeStart = 35, fadeEnd = 70;         // blades thin out over this band (metres from the camera)
+    float shadowDistance = 18;                  // tiles nearer than this cast shadows (all receive)
+
+    // What the shader draws, mirrored on the CPU for tests and placement: blade k of tile
+    // (tx, tz) has its root at x, z in the object's space (before masks and fading).
+    Vector2 bladeRoot(int tx, int tz, uint32_t k) const;
+    int tilesX() const;
+    int tilesZ() const;
+    uint32_t bladesPerTile() const;             // density * tileSize^2, rounded
+};
+// Blades the last rendered frame submitted in its main pass, over every field (before the
+// shader thins them by mask and distance; shadow passes not counted): for measuring budgets.
+long long fieldBladesSubmitted();
+
 // ------------------------------------------------------------------ gaussian splats
 // A cloud of Gaussian splats (see splat.hpp) drawn in the object's space: one instanced quad
 // per splat, depth-sorted back to front each frame, blended over what is behind them and
@@ -374,6 +434,7 @@ struct Object3D {
     // geometry itself is not drawn.
     std::shared_ptr<const fx::Emitter3D> emitter;
     std::shared_ptr<Instances> instances;               // many copies of one baked mesh
+    std::shared_ptr<Field> field;                       // grass made on the GPU
     std::shared_ptr<Splats> splats;                     // a Gaussian splat cloud
     std::shared_ptr<Surface> surface;                   // a 2D picture (with its own geometry and dynamicMap)
     std::shared_ptr<Lines> lines;                       // strokes and arrows
@@ -386,6 +447,7 @@ struct Object3D {
     Object3D* add(fx::Emitter3D e);                    // particles (billboards, streaks, quads)
     Object3D* add(fx::Emitter3D e, GeometryPtr g, Material m = {});   // mesh particles
     Object3D* add(std::shared_ptr<Instances> i, Material m = {});      // instanced bodies
+    Object3D* add(std::shared_ptr<Field> f, Material m = {});          // a grass field
     Object3D* add(std::shared_ptr<Splats> s);                          // a splat cloud
     Object3D* add(std::shared_ptr<Surface> s);                         // a 2D picture
     Object3D* add(std::shared_ptr<Lines> l);                           // strokes and arrows
@@ -576,6 +638,7 @@ struct Scene {
     Object3D* add(fx::Emitter3D e);
     Object3D* add(fx::Emitter3D e, GeometryPtr g, Material m = {});
     Object3D* add(std::shared_ptr<Instances> i, Material m = {});
+    Object3D* add(std::shared_ptr<Field> f, Material m = {});
     Object3D* add(std::shared_ptr<Splats> s);
     Object3D* add(std::shared_ptr<Surface> s);
     Object3D* add(std::shared_ptr<g3d::Lines> l);    // strokes and arrows (not `lines`, the ink outlines)

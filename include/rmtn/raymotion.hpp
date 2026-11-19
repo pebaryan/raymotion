@@ -24,6 +24,7 @@
 #include "human3d.hpp"
 #include "rig.hpp"
 #include "crowd.hpp"
+#include "flora.hpp"
 #include "voxel.hpp"
 #include "splat.hpp"
 #include "physics.hpp"

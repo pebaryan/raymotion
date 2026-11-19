@@ -35,6 +35,7 @@
 #include "rmtn/globe.hpp"
 #include "rmtn/geo3d.hpp"
 #include "rmtn/crowd.hpp"
+#include "rmtn/flora.hpp"
 #include "rmtn/voxel.hpp"
 #include "rmtn/splat.hpp"
 #include <climits>
@@ -1218,7 +1219,7 @@ value.lineColor=mkColor(color); value.lineWidth=width; }
 ; ScriptGeometry3D* ScriptCrowdBody::restGeometry()const{if(!value.mesh||!value.mesh->rest)return nullptr;auto* out=new ScriptGeometry3D();out->value=value.mesh->rest;return out;}
 Json cityLookFaceJson(const city::Face& face){Json out(Json::Object{});out.set("kind",face.kind);out.set("semantic",face.semantic);Json::Array rings;for(const auto& sourceRing:face.rings){Json::Array ring;for(const auto& p:sourceRing)ring.emplace_back(Json::Array{Json(p.x),Json(p.y),Json(p.z)});rings.emplace_back(std::move(ring));}out.set("rings",Json(std::move(rings)));return out;}
 Json cityLookObjectJson(const city::Object& object){Json out(Json::Object{});out.set("id",object.id);out.set("type",object.type);out.set("attributes",object.attributes);Json::Array parents,children,geometries;for(const auto& value:object.parents)parents.emplace_back(value);for(const auto& value:object.children)children.emplace_back(value);for(const auto& geometry:object.geometry){Json entry(Json::Object{});entry.set("type",geometry.type);entry.set("lod",geometry.lod);Json::Array faces,lines,points;for(const auto& face:geometry.faces)faces.emplace_back(cityLookFaceJson(face));for(const auto& sourceLine:geometry.lines){Json::Array line;for(const auto& p:sourceLine)line.emplace_back(Json::Array{Json(p.x),Json(p.y),Json(p.z)});lines.emplace_back(std::move(line));}for(const auto& p:geometry.points)points.emplace_back(Json::Array{Json(p.x),Json(p.y),Json(p.z)});entry.set("faces",Json(std::move(faces)));entry.set("lines",Json(std::move(lines)));entry.set("points",Json(std::move(points)));geometries.emplace_back(std::move(entry));}out.set("parents",Json(std::move(parents)));out.set("children",Json(std::move(children)));out.set("geometry",Json(std::move(geometries)));return out;}
-std::string cityLookCallbackInput(const city::Object& object,const city::Face* face){Json input(Json::Object{});input.set("object",cityLookObjectJson(object));if(face)input.set("face",cityLookFaceJson(*face));return input.dump();}g3d::Material jsonMaterial(const Json& j); city::Look scriptCityLook(const std::string& source){
+std::string cityLookCallbackInput(const city::Object& object,const city::Face* face){Json input(Json::Object{});input.set("object",cityLookObjectJson(object));if(face)input.set("face",cityLookFaceJson(*face));return input.dump();}g3d::Material jsonMaterial(const Json& j, g3d::Material m = {}); city::Look scriptCityLook(const std::string& source){
     const Json j=source.empty()?Json(Json::Object{
 }
 ):Json::parse(source); if(!j.isObject())throw std::runtime_error("CityJSON look must be a JSON object"); const auto preset=j.str("preset","default"); city::Look look=preset=="default"?city::Look{
@@ -4011,8 +4012,8 @@ rgba[0],rgba[1],rgba[2],rgba[3]}
     texture->make=[images=std::move(images),width,height,every](int frame){
 ::Image image=GenImageColor(width,height,BLANK); if(!image.data)return image; const size_t index=(size_t)((frame/std::max(1,every))%(int)images.size()); std::copy(images[index].begin(),images[index].end(),static_cast<Color*>(image.data)); return image; }
 ; cache.emplace(key,texture); return texture; }
-g3d::Material jsonMaterial(const Json& j) {
-    g3d::Material m; m.color=j.color("color",WHITE); m.emissive=j.color("emissive",BLACK); m.roughness=(float)j.num("roughness",m.roughness); m.metalness=(float)j.num("metalness",m.metalness); m.opacity=(float)j.num("opacity",m.opacity); m.unlit=j.flag("unlit",m.unlit); m.doubleSided=j.flag("doubleSided",m.doubleSided); m.castShadow=j.flag("castShadow",m.castShadow); m.receiveShadow=j.flag("receiveShadow",m.receiveShadow); m.map=j.str("map",""); if(j["dynamicMap"].isObject())m.dynamicMap=jsonDynamicTexture(j["dynamicMap"]); const auto shading=j.str("shading","standard"); if(shading=="toon") m.shading=g3d::Shading::Toon; else if(shading=="gooch") m.shading=g3d::Shading::Gooch; else if(shading=="hatch") m.shading=g3d::Shading::Hatch; else if(shading!="standard") throw std::runtime_error("unknown 3D shading mode: "+shading); const auto& toon=j["toon"]; if(toon.isObject()) {
+g3d::Material jsonMaterial(const Json& j, g3d::Material m) {
+    m.color=j.color("color",m.color); m.emissive=j.color("emissive",m.emissive); m.roughness=(float)j.num("roughness",m.roughness); m.metalness=(float)j.num("metalness",m.metalness); m.opacity=(float)j.num("opacity",m.opacity); m.unlit=j.flag("unlit",m.unlit); m.doubleSided=j.flag("doubleSided",m.doubleSided); m.castShadow=j.flag("castShadow",m.castShadow); m.receiveShadow=j.flag("receiveShadow",m.receiveShadow); m.map=j.str("map",""); if(j["dynamicMap"].isObject())m.dynamicMap=jsonDynamicTexture(j["dynamicMap"]); const auto shading=j.str("shading","standard"); if(shading=="toon") m.shading=g3d::Shading::Toon; else if(shading=="gooch") m.shading=g3d::Shading::Gooch; else if(shading=="hatch") m.shading=g3d::Shading::Hatch; else if(shading!="standard") throw std::runtime_error("unknown 3D shading mode: "+shading); const auto& toon=j["toon"]; if(toon.isObject()) {
         m.toon.bands=toon.integer("bands",m.toon.bands); m.toon.softness=(float)toon.num("softness",m.toon.softness); m.toon.highlight=(float)toon.num("highlight",m.toon.highlight); m.toon.highlightSize=(float)toon.num("highlightSize",m.toon.highlightSize); m.toon.rim=toon.color("rim",m.toon.rim); m.toon.rimWidth=(float)toon.num("rimWidth",m.toon.rimWidth); }
     const auto& gooch=j["gooch"]; if(gooch.isObject()) {
  m.gooch.warm=gooch.color("warm",m.gooch.warm); m.gooch.cool=gooch.color("cool",m.gooch.cool); }
@@ -4622,9 +4623,90 @@ if(!geometry||!geometry->value)throw std::runtime_error("Scene3D.addInstances ne
 }
 ); return o; }
 ScriptObject3D* ScriptScene3D::addRigInstances(const std::string& lookJson,const std::string& clipsJson,const std::string& itemsJson,ScriptMaterial3D* material,bool coarse){auto instances=scriptRigInstances(lookJson,clipsJson,itemsJson,coarse);auto* o=new ScriptObject3D();o->owner=value;o->value=value->add(instances,material?material->value:g3d::Material{});return o;}
+// A grid of values over a grass field's area, {"width": w, "height": h, "values": [...]} row
+// by row from min to max, read bilinearly.
+std::function<float(float, float)> jsonFieldGrid(const Json& g, Vector2 lo, Vector2 hi, const char* name) {
+    if (g.isNull()) return {};
+    const auto& values = g["values"];
+    const int w = g.isObject() ? g.integer("width", 0) : 0, h = g.isObject() ? g.integer("height", 0) : 0;
+    if (w < 2 || h < 2 || w > 1024 || h > 1024 || !values.isArray() || values.size() != (size_t)w * (size_t)h)
+        throw std::runtime_error(std::string("grass ") + name + " needs width and height of 2..1024 and width * height values");
+    auto v = std::make_shared<std::vector<float>>();
+    v->reserve(values.size());
+    for (const auto& value : values.asArray()) {
+        if (!value.isNumber() || !std::isfinite(value.asNumber()))
+            throw std::runtime_error(std::string("grass ") + name + " values must be finite numbers");
+        v->push_back((float)value.asNumber());
+    }
+    return [v, w, h, lo, hi](float x, float z) {
+        const float u = std::clamp((x - lo.x) / (hi.x - lo.x), 0.f, 1.f) * (w - 1);
+        const float t = std::clamp((z - lo.y) / (hi.y - lo.y), 0.f, 1.f) * (h - 1);
+        const int i = std::min((int)u, w - 2), j = std::min((int)t, h - 2);
+        const float fx = u - i, fz = t - j;
+        auto at = [&](int a, int b) { return (*v)[(size_t)b * w + a]; };
+        return (at(i, j) * (1 - fx) + at(i + 1, j) * fx) * (1 - fz) + (at(i, j + 1) * (1 - fx) + at(i + 1, j + 1) * fx) * fz;
+    };
+}
+
+// A grass field: {"preset": "meadow", "min": [x, z], "max": [x, z], "seed": 1, any g3d::Field
+// number or colour by name, and optional "mask", "ground" and "tall" grids}. The field is
+// kept between frames while its area, tiles and grids stay the same, so its maps are made
+// once; everything else is read every frame (so the wind or the colours can follow t).
+std::shared_ptr<g3d::Field> jsonGrass(const Json& d, int fps) {
+    if (!d.isObject()) throw std::runtime_error("grass must be an object");
+    g3d::Field next;
+    try { next = flora::grass(d.str("preset", "meadow")); }
+    catch (const std::invalid_argument& e) { throw std::runtime_error(e.what()); }
+    const Vector2 lo = jsonV2(d["min"], { -10, -10 }), hi = jsonV2(d["max"], { 10, 10 });
+    for (float v : { lo.x, lo.y, hi.x, hi.y })
+        if (!std::isfinite(v) || std::fabs(v) > 1e5f) throw std::runtime_error("grass min and max must be finite and within +/-1e5");
+    if (!(hi.x > lo.x && hi.y > lo.y)) throw std::runtime_error("grass max must be greater than min in x and z");
+    auto num = [&d](const char* key, float& out) { out = (float)d.num(key, out); };
+    num("density", next.density); num("height", next.height); num("heightVariation", next.heightVariation);
+    num("width", next.width); num("lean", next.lean); num("colorVariation", next.colorVariation);
+    num("dryness", next.dryness); num("sway", next.sway); num("gust", next.gust); num("gustSpeed", next.gustSpeed);
+    num("gustScale", next.gustScale); num("tileSize", next.tileSize); num("detailDistance", next.detailDistance);
+    num("fadeStart", next.fadeStart); num("fadeEnd", next.fadeEnd); num("shadowDistance", next.shadowDistance);
+    next.fps = (float)d.num("fps", fps);
+    next.segments = d.integer("segments", next.segments);
+    next.mapResolution = d.integer("mapResolution", next.mapResolution);
+    next.seed = (uint32_t)scriptUnsigned64(d["seed"], 1, "grass seed");
+    next.root = d.color("root", next.root); next.tip = d.color("tip", next.tip); next.dry = d.color("dry", next.dry);
+    next.windDirection = jsonV2(d["windDirection"], next.windDirection);
+    for (float v : { next.density, next.height, next.heightVariation, next.width, next.lean, next.colorVariation, next.dryness,
+                     next.sway, next.gust, next.gustSpeed, next.gustScale, next.tileSize, next.detailDistance, next.fadeStart,
+                     next.fadeEnd, next.shadowDistance, next.fps, next.windDirection.x, next.windDirection.y })
+        if (!std::isfinite(v)) throw std::runtime_error("grass values must be finite");
+    if (next.density < 0 || next.density > 20000 || next.tileSize < 0.25f || next.tileSize > 64 || next.height < 0 || next.width < 0)
+        throw std::runtime_error("grass density must be 0..20000 a square metre, tileSize 0.25..64, height and width >= 0");
+    if (next.segments < 1 || next.segments > 8 || next.mapResolution < 2 || next.mapResolution > 1024)
+        throw std::runtime_error("grass segments must be 1..8 and mapResolution 2..1024");
+    next.min = lo; next.max = hi;
+
+    const std::string key = d["min"].dump() + d["max"].dump() + std::to_string(next.tileSize) + ":" +
+                            std::to_string(next.mapResolution) + d["mask"].dump() + d["ground"].dump() + d["tall"].dump();
+    static thread_local std::unordered_map<std::string, std::shared_ptr<g3d::Field>> cache;
+    auto found = cache.find(key);
+    if (found == cache.end()) {
+        if (cache.size() >= 32) cache.clear();
+        auto made = std::make_shared<g3d::Field>();
+        made->mask = jsonFieldGrid(d["mask"], lo, hi, "mask");
+        made->ground = jsonFieldGrid(d["ground"], lo, hi, "ground");
+        made->tall = jsonFieldGrid(d["tall"], lo, hi, "tall");
+        found = cache.emplace(key, made).first;
+    }
+    g3d::Field& field = *found->second;
+    next.mask = field.mask; next.ground = field.ground; next.tall = field.tall;
+    next.revision = field.revision;
+    field = std::move(next);
+    return found->second;
+}
+
 void addJsonObject(g3d::Scene& scene,g3d::Object3D* parent,const Json& source,int depth,int& count,int fps) {
     if(depth>12 || ++count>512) throw std::runtime_error("3D scene exceeds 512 objects or nesting depth 12"); auto material=jsonMaterial(source["material"]); g3d::Object3D* object=nullptr; int specialized=0; const auto particles=source.str("particles",""); if(!particles.empty()) {
         ++specialized; const auto seed=scriptUnsigned64(source["seed"],1,"particle seed"); fx::Emitter3D emitter; if(particles=="burst") emitter=fx::burst3d(source.integer("count",150)); else if(particles=="sparks") emitter=fx::sparks3d(); else if(particles=="fountain") emitter=fx::fountain3d(); else if(particles=="confetti") emitter=fx::confetti3d((float)source.num("width",6),(float)source.num("depth",6)); else if(particles=="snow") emitter=fx::snow3d((float)source.num("width",10),(float)source.num("depth",10),(float)source.num("height",5)); else if(particles=="rain") emitter=fx::rain3d((float)source.num("width",10),(float)source.num("depth",10),(float)source.num("height",5)); else if(particles=="fire") emitter=fx::fire3d((float)source.num("radius",0.25)); else if(particles=="smoke") emitter=fx::smoke3d((float)source.num("radius",0.2)); else if(particles=="embers") emitter=fx::embers3d((float)source.num("radius",0.4)); else if(particles=="debris") emitter=fx::debris3d(source.integer("count",40)); else throw std::runtime_error("unknown 3D particle preset: "+particles); emitter.seed=seed; if(source.has("particleConfig")) emitter=particleEmitter3D(source["particleConfig"],std::move(emitter)); object=parent?parent->add(emitter):scene.add(emitter); }
+    const auto& grassDesc=source["grass"]; if(!grassDesc.isNull()) {
+        ++specialized; auto field=jsonGrass(grassDesc,fps); const auto look=jsonMaterial(source["material"],flora::grassMaterial()); object=parent?parent->add(field,look):scene.add(field,look); }
     const auto splatFile=source.str("splatPly",""); if(!splatFile.empty()) {
         ++specialized; static thread_local std::unordered_map<std::string,std::shared_ptr<const splat::Cloud>> clouds; auto it=clouds.find(splatFile); if(it==clouds.end()) {
             if(clouds.size()>=16) clouds.clear(); it=clouds.emplace(splatFile,std::make_shared<const splat::Cloud>(splat::loadPly(splatFile))).first; }
@@ -4743,7 +4825,7 @@ return std::string(interior3d::name(k)); }
 return std::string(lab3d::name(k)); }
 ); if(index<0) throw std::runtime_error("unknown lab prefab kind: "+kind); object=parent?lab3d::add(*parent,values[(size_t)index]):lab3d::add(scene,values[(size_t)index]); }
  else throw std::runtime_error("unknown 3D prefab type: "+type); }
-    const auto model=source.str("model",""); const auto& instancesDesc=source["instances"]; if(!instancesDesc.isNull()&&(specialized>0||!source.has("geometry")||!model.empty()))        throw std::runtime_error("3D instances require one primitive geometry source and cannot be combined with another specialized object source"); if(!model.empty() || source.has("geometry")) ++specialized; if(specialized>1) throw std::runtime_error("3D object must specify only one specialized source (particles, splat, splatPly, voxel, voxelFrames, voxFile, physics, chemistry, prefab, model, or geometry)"); if(!object && !model.empty()) object=parent?parent->add(g3d::loadModel(model)):scene.add(g3d::loadModel(model)); else if(!object && source.has("geometry")) {
+    const auto model=source.str("model",""); const auto& instancesDesc=source["instances"]; if(!instancesDesc.isNull()&&(specialized>0||!source.has("geometry")||!model.empty()))        throw std::runtime_error("3D instances require one primitive geometry source and cannot be combined with another specialized object source"); if(!model.empty() || source.has("geometry")) ++specialized; if(specialized>1) throw std::runtime_error("3D object must specify only one specialized source (particles, grass, splat, splatPly, voxel, voxelFrames, voxFile, physics, chemistry, prefab, model, or geometry)"); if(!object && !model.empty()) object=parent?parent->add(g3d::loadModel(model)):scene.add(g3d::loadModel(model)); else if(!object && source.has("geometry")) {
         auto geometry=jsonGeometry(source); object=parent?parent->add(geometry,material):scene.add(geometry,material); }
  else if(!object) object=parent?parent->add():scene.add(); object->name=source.str("name",""); object->position=jsonV3(source["position"]); object->rotation=jsonV3(source["rotation"]); object->scale=jsonV3(source["scale"],{
 1,1,1}

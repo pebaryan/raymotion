@@ -1,6 +1,6 @@
 # 0.12 plan: vegetation (`flora::`)
 
-Status: M0 done 2026-11-19 (see below); M1 next. Set 2026-11-18; owner's decisions the same day:
+Status: M0 and M1 done 2026-11-19 (see below); M2 next. Set 2026-11-18; owner's decisions the same day:
 
 1. **Realistic first, then stylised.** Cards with alpha cutout, translucency and PBR leaves
    come first; low-poly / toon presets follow on the same scatter and wind.
@@ -63,7 +63,9 @@ identity and highlight. Item 5 moves to M1/M3, where the textures are needed.
 (horizontal bands) on a flat ground plane. It was already there before M0 (the same picture
 from the 17 Nov build is pixel-identical). Low suns are the point of backlit grass, so M1
 must fix it: a normal-offset bias in `shadowAt` scaled by the light's grazing angle, with a
-test at 5-10° elevation.
+test at 5-10° elevation. **Fixed in M1:** the lookup point moves 1.5 shadow texels times
+sin(angle to the light) along the geometric normal; 929 and 3960 darkened pixels at 5 and
+10 degrees before, 0 after, and a box's shadow still starts at its foot.
 
 ## M1. Grass at landscape scale: `g3d::Field`
 
@@ -84,6 +86,33 @@ A new scene primitive, because a CPU instance list cannot carry a million blades
   field, any frame order.
 - Budget to measure and state in the docs: 1M blades in view at 1080p on the dev GPU,
   with the time per frame, and under Mesa on CI at a reduced count.
+
+**Done 2026-11-19.** `g3d::Field` (`Object3D::field`, `Scene::add(field, material)`) drawn
+through the lit, depth and g-buffer programs in a field mode (`FIELD_VS`), so lighting,
+shadows, translucency, fog and the M0 materials apply unchanged. Blade k of a tile sits at
+point k of the R2 low-discrepancy sequence (shifted per tile by a hash of tile and seed), so
+any first n blades cover the tile evenly: far tiles draw fewer, kept by rank, with the last
+12 % shrinking away instead of popping, and the ones left widen (up to 3x) to keep the cover
+until the fade, where the field gives way to the ground's colour. That replaces the planned
+far cards: the ground under the grass is the far level. Levels: full blades (`segments`)
+inside `detailDistance`, one segment beyond. `mask`, `ground` and `tall` are functions
+baked into one float texture per field (`revision` to remake), with per-tile maxima for
+culling and blade counts; the cache holds fields weakly and drops dead ones each frame.
+Wind: resting lean, steady sway with flutter, gust fronts travelling downwind at
+`gustSpeed`. `flora::` (`rmtn/flora.hpp`): looks `lawn`, `meadow`, `tallGrass`,
+`dryGrass`, `grassMaterial()` (translucent, no ink lines), `addGrass`. Script: a `grass`
+object descriptor with grids for the maps; `examples/scripts/flora_meadow.as`.
+Measured on the dev GPU: about 1.47 M blades submitted at 1080p with shadows, 12-13 ms a
+frame including readback (`RMTN_FIELD_BENCH=1 raymotion_scene3d_tests`); the default test
+runs a 480x270 version (about 0.3 M blades) so software GL on CI stays quick.
+Tests (`scene3d_tests`, `grassField`; `test_script.py`, `test_grass_field`): placement
+spread and seeds, mask, fade (nothing submitted beyond it), determinism and purity, sway
+(tips move, roots stay), a gust reaching a patch 4 m downwind 30 frames later (measured
+30), an off-screen tile's shadow landing in view; the low-sun acne test (`lowSunShadows`,
+5 and 10 degrees) fails without the normal offset.
+Not done in M1: self-shadow beyond root darkening, a terrain mesh from the same `ground`
+grid (the ground plane is the caller's; comes with M2's height areas), ink lines on fields
+(off by default; checked in M5).
 
 ## M2. Scattering and areas (shared by everything)
 
