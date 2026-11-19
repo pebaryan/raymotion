@@ -103,6 +103,12 @@ vec3 vatFetch(float frame, int row0) {
 }
 vec3 instPosition() { return mix(vatFetch(instAnim.x, 0), vatFetch(instAnim.y, 0), instAnim.z); }
 vec3 instNormal() { return normalize(mix(vatFetch(instAnim.x, vatRows), vatFetch(instAnim.y, vatRows), instAnim.z)); }
+// The body's colour multiplier (tint x shade), 0..254 a channel for 0..2, packed as the
+// integer r + 256 g + 65536 b (exact in a float).
+vec3 instTint() {
+    float v = instAnim.w;
+    return vec3(mod(v, 256.0), mod(floor(v / 256.0), 256.0), floor(v / 65536.0)) / 127.0;
+}
 )";
 
 
@@ -342,7 +348,7 @@ void main() {
         vec4 world = instM * vec4(instPosition(), 1.0);
         fragPos = world.xyz;
         fragNormal = mat3(instM) * instNormal();
-        fragColor = vertexColor * vec4(vec3(instAnim.w), 1.0);
+        fragColor = vertexColor * vec4(instTint(), 1.0);
         gl_Position = mvp * world;
         return;
     }
@@ -356,7 +362,10 @@ void main() {
 )";
 
 const char* DEPTH_VS_BODY = R"(
+out vec2 fragTexCoord; out float fragAlpha;
 void main() {
+    fragTexCoord = vertexTexCoord;
+    fragAlpha = vertexColor.a;
     if (instanced != 0) {
         setupInstance();
         gl_Position = mvp * (instM * vec4(instPosition(), 1.0));
@@ -366,9 +375,29 @@ void main() {
 }
 )";
 
+// Material::alphaCutoff, shared by the lit, depth and g-buffer programs. Alpha grows with the
+// mip level, so a card that is mostly holes keeps its coverage far away (after Ben Golus,
+// "Anti-aliased Alpha Test", 2017).
+const char* CUTOUT_FS = R"(
+uniform float alphaCutoff;
+bool cutAway(float a, vec2 uv) {
+    if (alphaCutoff <= 0.0) return false;
+    vec2 texels = uv * vec2(textureSize(texture0, 0));
+    vec2 d = max(abs(dFdx(texels)), abs(dFdy(texels)));
+    float mip = max(log2(max(max(d.x, d.y), 1e-6)), 0.0);
+    return a * (1.0 + 0.25 * mip) < alphaCutoff;
+}
+)";
+
 const char* DEPTH_FS = R"(#version 330
+in vec2 fragTexCoord; in float fragAlpha;
+uniform sampler2D texture0; uniform vec4 colDiffuse;
 out vec4 finalColor;
-void main() { finalColor = vec4(1.0); }
+//@CUTOUT_FS@
+void main() {
+    if (cutAway(texture(texture0, fragTexCoord).a * colDiffuse.a * fragAlpha, fragTexCoord)) discard;
+    finalColor = vec4(1.0);
+}
 )";
 
 // Colours arrive as sRGB (texture, colDiffuse, vertex colour) or already linear (scene
@@ -397,8 +426,28 @@ uniform int toonBands; uniform float toonSoftness; uniform float toonHighlight; 
 uniform vec3 rimColor; uniform float rimWidth;
 uniform vec3 goochWarm; uniform vec3 goochCool;
 uniform vec3 hatchInk; uniform float hatchSpacing; uniform float hatchAngle; uniform float hatchWeight;
+uniform float translucency; uniform vec3 translucencyColor;
+uniform sampler2D texture1; uniform int hasRoughnessMap;        // glTF metallic-roughness: g, b
+uniform sampler2D texture2; uniform int hasNormalMap; uniform float normalScale;
 out vec4 finalColor;
 //@WATER_COMMON@
+//@CUTOUT_FS@
+
+// A tangent-space normal map without stored tangents: the frame is rebuilt from the screen
+// derivatives of position and uv (Schüler, "Normal Mapping Without Precomputed Tangents", 2013).
+vec3 mapNormal(vec3 n, vec3 p, vec2 uv) {
+    vec3 dp1 = dFdx(p), dp2 = dFdy(p);
+    vec2 duv1 = dFdx(uv), duv2 = dFdy(uv);
+    vec3 dp2perp = cross(dp2, n), dp1perp = cross(n, dp1);
+    vec3 t = dp2perp * duv1.x + dp1perp * duv2.x;
+    vec3 b = dp2perp * duv1.y + dp1perp * duv2.y;
+    float m = max(dot(t, t), dot(b, b));
+    if (m < 1e-20) return n;                                       // no uv change: nothing to map
+    float inv = inversesqrt(m);
+    vec3 s = texture(texture2, uv).xyz * 2.0 - 1.0;
+    s.xy *= normalScale;
+    return normalize(mat3(t * inv, b * inv, n) * s);
+}
 
 const float PI = 3.14159265;
 
@@ -570,20 +619,30 @@ void main() {
     float cutDist = clipPlane.w - dot(fragPos, clipPlane.xyz);     // < 0: beyond the cut
     if (cutDist < 0.0) discard;
     vec4 base = texture(texture0, fragTexCoord) * colDiffuse * fragColor;
+    if (alphaCutoff > 0.0) {
+        if (cutAway(base.a, fragTexCoord)) discard;
+        base.a = 1.0;                                              // what a cut-out keeps is solid
+    }
     if (unlit == 1) { finalColor = vec4(base.rgb, base.a * opacity); return; }
     vec3 albedo = pow(base.rgb, vec3(2.2));
     vec3 n = normalize(fragNormal);
     if (!gl_FrontFacing) n = -n;
     vec3 v = normalize(viewPos - fragPos);
+    if (hasNormalMap == 1 && shading == 0) n = mapNormal(n, fragPos, fragTexCoord);
 
     vec3 color;
     if (shading == 1) color = toon(albedo, n, v);
     else if (shading == 2) color = gooch(albedo, n, v);
     else if (shading == 3) color = hatch(albedo, n);
     else {
-        float rough = clamp(roughness, 0.0, 1.0);
-        vec3 specColor = mix(vec3(0.04), albedo, metalness);
-        vec3 diffColor = albedo * (1.0 - metalness);
+        float rough = roughness, metal = metalness;
+        if (hasRoughnessMap == 1) {
+            vec3 mr = texture(texture1, fragTexCoord).rgb;
+            rough *= mr.g; metal *= mr.b;
+        }
+        rough = clamp(rough, 0.0, 1.0);
+        vec3 specColor = mix(vec3(0.04), albedo, metal);
+        vec3 diffColor = albedo * (1.0 - metal);
         if (hasEnv == 1) {
             float ndv = max(dot(n, v), 1e-4);
             vec3 r = reflect(-v, n);
@@ -598,7 +657,18 @@ void main() {
             if (i >= lightCount) break;
             vec3 l; float ndl;
             float atten = lightAt(i, n, l, ndl);
-            if (atten <= 0.0) continue;
+            if (atten <= 0.0) {
+                // Translucency: the light falls on the far side; it comes through diffused,
+                // and more of it when looking towards the light (forward scattering).
+                if (translucency <= 0.0) continue;
+                vec3 lb; float ndlb;
+                float back = lightAt(i, -n, lb, ndlb);
+                if (back <= 0.0) continue;
+                float forward = pow(clamp(dot(v, -lb), 0.0, 1.0), 6.0);
+                color += diffColor * translucencyColor * lightColor[i] * waterLight(i) * back
+                       * translucency * (0.6 * ndlb + 1.4 * forward);
+                continue;
+            }
             vec3 h = normalize(l + v);
             float spec = pow(max(dot(n, h), 0.0), shininess) * (shininess + 8.0) / 25.1327;
             color += (diffColor + specColor * spec) * lightColor[i] * waterLight(i) * atten * ndl;
@@ -708,13 +778,16 @@ void main() {
 const char* GBUF_FS = R"(#version 330
 in vec3 fragPos; in vec2 fragTexCoord; in vec3 fragNormal; in vec4 fragColor;
 uniform mat4 matView; uniform float objectId; uniform float lineStyle;
+uniform sampler2D texture0; uniform vec4 colDiffuse;
 out vec4 finalColor;
+//@CUTOUT_FS@
 vec2 octEncode(vec3 n) {
     n /= abs(n.x) + abs(n.y) + abs(n.z);
     vec2 e = n.z >= 0.0 ? n.xy : (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
     return e * 0.5 + 0.5;
 }
 void main() {
+    if (cutAway(texture(texture0, fragTexCoord).a * colDiffuse.a * fragColor.a, fragTexCoord)) discard;
     vec3 n = normalize(mat3(matView) * normalize(fragNormal));
     if (!gl_FrontFacing) n = -n;
     finalColor = vec4(octEncode(n), lineStyle / 255.0, objectId / 255.0);
@@ -882,7 +955,8 @@ struct LitLocs {
         envLinear, envMaxLod, envIntensity, envRotation, skybox, fogColor, fogNear, fogFar, fogMode, fogDensity,
         fogHeight, fogFalloff, fogSky, backdropScale, skinned, bones,
         shading, pxScale, toonBands, toonSoftness, toonHighlight, toonHighlightSize, rimColor, rimWidth,
-        goochWarm, goochCool, hatchInk, hatchSpacing, hatchAngle, hatchWeight, reflection;
+        goochWarm, goochCool, hatchInk, hatchSpacing, hatchAngle, hatchWeight, reflection,
+        translucency, translucencyColor, hasRoughnessMap, hasNormalMap, normalScale;
 };
 struct WaterLocs { int on, mode, level, eye, time, centre, count, waveA, waveB, absorb, scatter, caustics, foam,
                    open, invAmp, glint, band; };
@@ -925,6 +999,7 @@ struct Gpu {
     GbufLocs G{};
     LineLocs N{};
     int depthSkinned = -1, depthBones = -1;
+    int cutoff[3] = { -1, -1, -1 };      // alphaCutoff in the lit, depth and g-buffer programs
     Shader inst[3]{};                    // lit, depth, gbuf, for DrawMeshInstanced
     std::array<int, 32> instLocs[3]{};
     InstLocs il[3];
@@ -989,17 +1064,20 @@ void releaseGpu() {
 void ensureGpu() {
     if (gpu.ready) return;
     const std::string head = SKIN_VS_HEAD;
-    std::string litFs = LIT_FS;
-    for (const auto& [marker, text] : { std::pair<const char*, const char*>{ "//@WATER_COMMON@", WATER_COMMON },
-                                        { "//@WATER_FS@", WATER_FS } }) {
-        const size_t at = litFs.find(marker);
-        if (at != std::string::npos) litFs.replace(at, std::strlen(marker), text);
-    }
+    auto splice = [](std::string src) {
+        for (const auto& [marker, text] : { std::pair<const char*, const char*>{ "//@WATER_COMMON@", WATER_COMMON },
+                                            { "//@WATER_FS@", WATER_FS }, { "//@CUTOUT_FS@", CUTOUT_FS } }) {
+            const size_t at = src.find(marker);
+            if (at != std::string::npos) src.replace(at, std::strlen(marker), text);
+        }
+        return src;
+    };
+    const std::string litFs = splice(LIT_FS), depthFs = splice(DEPTH_FS), gbufFs = splice(GBUF_FS);
     const std::string litVs = head + WATER_COMMON + LIT_VS_BODY;
     gpu.lit = LoadShaderFromMemory(litVs.c_str(), litFs.c_str());
-    gpu.depth = LoadShaderFromMemory((head + DEPTH_VS_BODY).c_str(), DEPTH_FS);
+    gpu.depth = LoadShaderFromMemory((head + DEPTH_VS_BODY).c_str(), depthFs.c_str());
     gpu.dof = LoadShaderFromMemory(nullptr, DOF_FS);
-    gpu.gbuf = LoadShaderFromMemory(litVs.c_str(), GBUF_FS);
+    gpu.gbuf = LoadShaderFromMemory(litVs.c_str(), gbufFs.c_str());
     gpu.line = LoadShaderFromMemory(nullptr, LINE_FS);
     gpu.particle = LoadShaderFromMemory(nullptr, PARTICLE_FS);
     gpu.sky = LoadShaderFromMemory(nullptr, SKY_FS);
@@ -1019,7 +1097,12 @@ void ensureGpu() {
               loc("fogHeight"), loc("fogFalloff"), loc("fogSky"), loc("backdropScale"), loc("skinned"), loc("boneMatrices"),
               loc("shading"), loc("pxScale"), loc("toonBands"), loc("toonSoftness"), loc("toonHighlight"),
               loc("toonHighlightSize"), loc("rimColor"), loc("rimWidth"), loc("goochWarm"), loc("goochCool"),
-              loc("hatchInk"), loc("hatchSpacing"), loc("hatchAngle"), loc("hatchWeight"), loc("reflection") };
+              loc("hatchInk"), loc("hatchSpacing"), loc("hatchAngle"), loc("hatchWeight"), loc("reflection"),
+              loc("translucency"), loc("translucencyColor"), loc("hasRoughnessMap"), loc("hasNormalMap"),
+              loc("normalScale") };
+    gpu.cutoff[0] = loc("alphaCutoff");
+    gpu.cutoff[1] = GetShaderLocation(gpu.depth, "alphaCutoff");
+    gpu.cutoff[2] = GetShaderLocation(gpu.gbuf, "alphaCutoff");
     gpu.W = { loc("waterOn"), loc("waterMode"), loc("waterLevel"), loc("waterEye"), loc("waterTime"), loc("waterCentre"),
               loc("waveCount"), loc("waveA"), loc("waveB"), loc("waterAbsorb"), loc("waterScatter"), loc("waterCaustics"),
               loc("waterFoam"), loc("waterOpen"), loc("waterInvAmp"), loc("waterGlint"), loc("waterBand") };
@@ -1371,8 +1454,17 @@ void animate(std::vector<std::unique_ptr<Object3D>>& list, int t, const Matrix& 
     }
 }
 
+// Instance::tint x Instance::shade as the shader's instTint() reads it.
+float packTint(Color tint, float shade) {
+    auto q = [shade](unsigned char c) {
+        const float v = std::isfinite(shade) ? c / 255.f * shade : 1.f;
+        return (float)std::lround(std::clamp(v, 0.f, 2.f) * 127.f);   // 127 = exactly 1
+    };
+    return q(tint.r) + 256.f * q(tint.g) + 65536.f * q(tint.b);
+}
+
 // The world matrices of an object's instances that can show, each carrying its animation (two
-// baked frames, their blend, a brightness) in the w of its columns, where an affine matrix has
+// baked frames, their blend, a colour) in the w of its columns, where an affine matrix has
 // 0, 0, 0 and 1: see the shader's setupInstance.
 void gatherInstances(const Object3D& o, const Matrix& world, const Cull& k, std::vector<Matrix>& out) {
     const Instances& in = *o.instances;
@@ -1398,7 +1490,7 @@ void gatherInstances(const Object3D& o, const Matrix& world, const Cull& k, std:
         m.m3 = (float)std::clamp(i.clipStart + a, 0, last);
         m.m7 = (float)std::clamp(i.clipStart + (a + 1) % len, 0, last);
         m.m11 = f - (float)a;
-        m.m15 = i.shade;
+        m.m15 = packTint(i.tint, i.shade);
         out.push_back(m);
     }
 }
@@ -1459,6 +1551,14 @@ void setMaterial(const g3d::Material& m) {
     SetShaderValue(sh, gpu.L.unlit, &unlit, SHADER_UNIFORM_INT);
     SetShaderValue(sh, gpu.L.opacity, &m.opacity, SHADER_UNIFORM_FLOAT);
     SetShaderValue(sh, gpu.L.receiveShadow, &receive, SHADER_UNIFORM_INT);
+    const float translucency = std::max(m.translucency, 0.f), normalScale = m.normalScale;
+    const Vector3 tc = linear(m.translucencyColor);
+    const int hasRough = m.roughnessMap.empty() ? 0 : 1, hasNormal = m.normalMap.empty() ? 0 : 1;
+    SetShaderValue(sh, gpu.L.translucency, &translucency, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(sh, gpu.L.translucencyColor, &tc, SHADER_UNIFORM_VEC3);
+    SetShaderValue(sh, gpu.L.hasRoughnessMap, &hasRough, SHADER_UNIFORM_INT);
+    SetShaderValue(sh, gpu.L.hasNormalMap, &hasNormal, SHADER_UNIFORM_INT);
+    SetShaderValue(sh, gpu.L.normalScale, &normalScale, SHADER_UNIFORM_FLOAT);
 
     const Vector3 cn = Vector3Length(m.clip.normal) > 1e-6f ? Vector3Normalize(m.clip.normal) : Vector3{ 1, 0, 0 };
     const Vector4 plane{ cn.x, cn.y, cn.z, m.clip.offset };
@@ -1495,6 +1595,18 @@ void setMaterial(const g3d::Material& m) {
 }
 
 enum class Pass { Lit, Depth, Gbuf };
+
+// The cut-out and the extra texture maps, for any pass. The raylib material's maps array is
+// shared by every draw, so each draw sets them all (white where a map is unused).
+void setMaps(Pass pass, const g3d::Material& m, ::Material& mat) {
+    const int p = (int)pass;
+    const Shader& sh = pass == Pass::Lit ? gpu.lit : pass == Pass::Depth ? gpu.depth : gpu.gbuf;
+    const float cut = std::max(m.alphaCutoff, 0.f);
+    SetShaderValue(sh, gpu.cutoff[p], &cut, SHADER_UNIFORM_FLOAT);
+    const bool lit = pass == Pass::Lit;
+    mat.maps[MATERIAL_MAP_METALNESS].texture = lit && !m.roughnessMap.empty() ? texture(m.roughnessMap) : whiteTexture();
+    mat.maps[MATERIAL_MAP_NORMAL].texture = lit && !m.normalMap.empty() ? texture(m.normalMap) : whiteTexture();
+}
 
 void bindUnit(int slot, unsigned int id);
 
@@ -1545,6 +1657,7 @@ void drawInstances(const Item& it, Pass pass) {
     if (o.material.doubleSided) rlDisableBackfaceCulling(); else rlEnableBackfaceCulling();
     mat.maps[MATERIAL_MAP_DIFFUSE].texture = mapOf(o.material);
     mat.maps[MATERIAL_MAP_DIFFUSE].color = o.material.color;
+    setMaps(pass, o.material, mat);
     const int skinnedLoc = pass == Pass::Lit ? gpu.L.skinned : pass == Pass::Depth ? gpu.depthSkinned : gpu.G.skinned;
     setBones(pass == Pass::Lit ? gpu.L.bones : pass == Pass::Depth ? gpu.depthBones : gpu.G.bones, skinnedLoc, base, nullptr, 0);
     setInstanced(pass, true);
@@ -1576,6 +1689,7 @@ void drawItem(const Item& it, Pass pass) {
         } else setMaterial(o.material);
     }
     if (o.material.doubleSided) rlDisableBackfaceCulling(); else rlEnableBackfaceCulling();
+    setMaps(pass, o.material, mat);
 
     if (o.geometry) {
         mat.maps[MATERIAL_MAP_DIFFUSE].texture = mapOf(o.material);

@@ -146,6 +146,26 @@ struct Material {
                                     // multiplies opacity: give a see-through overlay opacity
                                     // just under 1 so it draws with the transparent objects
 
+    // Cut-out: > 0 drops every fragment whose alpha (texture x colour x vertex colour) is
+    // below it, in the picture, the shadows and the ink lines alike; what is kept is opaque
+    // (not blended), so leaf and grass cards sort and shadow like solid objects. Alpha is
+    // raised with the texture's mip level so a card seen far away does not thin out.
+    float alphaCutoff = 0;
+    // Light through a thin surface (a leaf, a blade of grass, paper, a lampshade): a light
+    // behind it, as seen from the camera, shows through in `translucencyColor` (multiplied by
+    // the base colour), brightest when looking towards the light. 0 = opaque to light.
+    // Standard shading only.
+    float translucency = 0;
+    Color translucencyColor = WHITE;
+    // Surface detail from textures, in the mesh's uv. `normalMap` is a tangent-space normal
+    // map in the OpenGL convention (green = +v); no tangents are needed, the frame comes from
+    // the uv's screen derivatives. `normalScale` scales its bumps (0 = flat, < 0 inverts).
+    // `roughnessMap` is glTF's metallic-roughness texture: green multiplies `roughness`,
+    // blue multiplies `metalness`. Standard shading only.
+    std::string normalMap;
+    float normalScale = 1;
+    std::string roughnessMap;
+
     Shading shading = Shading::Standard;
     struct Toon {
         int bands = 2;              // lit steps per light above the shadow (1 = lit or unlit)
@@ -204,11 +224,14 @@ struct Instance {
     float frame = 0;
     int clipStart = 0, clipLength = 1;
     float shade = 1;                        // brightness multiplier
+    Color tint = WHITE;                     // colour multiplier (alpha unused): tint x shade per
+                                            // channel is kept to 8 bits over 0..2
 };
 
 // An object's instances: `up` refills `list` each frame from t (pure, like any `up`). They
-// are drawn in the object's space with its `material` (opaque only; the colour comes from the
-// mesh's vertex colours, multiplied by the material's). Each one is culled on its own (see
+// are drawn in the object's space with its `material` (opaque or cut out, not blended; the
+// colour comes from the mesh's vertex colours, multiplied by the material's and each
+// instance's tint and shade). Each one is culled on its own (see
 // Object3D::cullRadius), shadow footprint included, so only what can show is submitted.
 struct Instances {
     std::shared_ptr<AnimatedMesh> mesh;

@@ -286,6 +286,11 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   animations play on the GPU (`object->animation`, `animationFrame`).
 * Materials: colour/texture, roughness, metalness, emissive, opacity (sorted
   transparency), unlit, double-sided. Lighting is in linear space with sRGB output.
+  `alphaCutoff` cuts holes from a texture's alpha (leaf and grass cards; the holes stay out
+  of shadows and ink lines), `translucency` lets light through thin surfaces from behind,
+  `normalMap` (no tangents needed) and `roughnessMap` (glTF metallic-roughness) add surface
+  detail. Give a cut-out texture's clear texels the leaf's colour, not black, or filtering
+  draws a dark fringe.
 * Lights: up to 8 directional/point/spot lights with range falloff. Any of them can cast
   PCF shadows; they share one shadow atlas (`shadowMapSize` per tile, a tile per
   directional/spot light and six per point light, 16 tiles), with `shadowBias` in world

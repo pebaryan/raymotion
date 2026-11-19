@@ -1036,6 +1036,211 @@ static void instancing() {
     }
 }
 
+// ---- materials for vegetation: cut-out cards, light through leaves, per-instance colour,
+// normal and roughness maps.
+static std::string writePng(const fs::path& dir, const char* name, int w, int h, Color (*at)(int x, int y)) {
+    Image img = GenImageColor(w, h, BLANK);
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) ImageDrawPixel(&img, x, y, at(x, y));
+    const std::string path = (dir / name).string();
+    ExportImage(img, path.c_str());
+    UnloadImage(img);
+    return path;
+}
+
+static void vegetationMaterials(const fs::path& dir) {
+    // A card whose left half is clear: with a cut-off the clear half shows what is behind it
+    // and casts no shadow; the solid half draws and shadows as before.
+    const std::string half = writePng(dir, "half.png", 64, 64, [](int x, int) { return x < 32 ? Color{ 255, 255, 255, 0 } : WHITE; });
+    {
+        // The picture: an unlit card facing the camera over a red backdrop card.
+        auto s = std::make_shared<g3d::Scene>();
+        s->camera.position = { 0, 0, 6 };
+        s->add(g3d::Geometry::box(8, 8, 0.1f), unlit({ 200, 30, 30, 255 }))->position = { 0, 0, -2 };
+        g3d::Material card = unlit({ 40, 220, 40, 255 });
+        card.map = half;
+        card.alphaCutoff = 0.5f;
+        card.doubleSided = true;
+        s->add(g3d::Geometry::plane(3, 3), card)->rotation = { 90, 0, 0 };
+        Comp c = sceneComp(s);
+        Image img = render(c, 0);
+        const Color clear = px(img, project(s->camera, { -0.8f, 0, 0 })), solid = px(img, project(s->camera, { 0.8f, 0, 0 }));
+        std::printf("[scene3d] cut-out picture: clear half %d,%d,%d, solid half %d,%d,%d\n",
+                    clear.r, clear.g, clear.b, solid.r, solid.g, solid.b);
+        CHECK(close(clear, { 200, 30, 30, 255 }, 3));                   // the backdrop through the clear half
+        CHECK(close(solid, { 40, 220, 40, 255 }, 3));                   // the card, solid
+        UnloadImage(img);
+
+        // The shadow: the same card lying flat 2 m up, lit from straight above, seen from
+        // below its height so it hides none of the ground.
+        auto run = [&](float cutoff) {
+            auto sh = std::make_shared<g3d::Scene>();
+            sh->camera.position = { 0, 1.2f, 9 };
+            sh->camera.target = { 0, 0, 0 };
+            sh->camera.fov = 40;
+            g3d::Material ground;
+            ground.color = { 200, 200, 200, 255 };
+            ground.roughness = 1;
+            sh->add(g3d::Geometry::plane(40, 40), ground);
+            g3d::Material leaf;
+            leaf.color = { 90, 200, 90, 255 };
+            leaf.map = half;
+            leaf.alphaCutoff = cutoff;
+            leaf.doubleSided = true;
+            sh->add(g3d::Geometry::plane(4, 4), leaf)->position = { 0, 2, 0 };
+            sh->lights.push_back(g3d::Light::directional({ 0, 10, 0.01f }, WHITE, 1.5f, true));
+            sh->lights.back().shadowExtent = 12;
+            Comp cc = sceneComp(sh);
+            Image im = render(cc, 0);
+            const Color l = px(im, project(sh->camera, { -1.2f, 0, -0.5f })), r = px(im, project(sh->camera, { 1.2f, 0, -0.5f }));
+            UnloadImage(im);
+            return std::pair<int, int>{ luma(l), luma(r) };
+        };
+        const auto [cutL, cutR] = run(0.5f);
+        const auto [fullL, fullR] = run(0);
+        std::printf("[scene3d] cut-out shadow: ground under clear half %d, under solid half %d (no cut-off: %d, %d)\n",
+                    cutL, cutR, fullL, fullR);
+        CHECK(cutL > cutR + 40);                                          // the clear half casts no shadow
+        CHECK(std::abs(cutR - fullR) <= 2);                               // the solid half shadows as before
+        CHECK(fullL < cutL - 40);                                         // without the cut-off the whole card shadows
+    }
+
+    // Light through a leaf: a card between the camera and the light is dark without
+    // translucency and bright with it, brightest looking into the light.
+    {
+        auto run = [&](float translucency) {
+            auto s = std::make_shared<g3d::Scene>();
+            s->camera.position = { 0, 0, 5 };
+            s->camera.target = { 0, 0, 0 };
+            s->camera.fov = 40;
+            s->skyColor = BLACK;
+            s->groundColor = BLACK;
+            g3d::Material leaf;
+            leaf.color = { 120, 200, 80, 255 };
+            leaf.doubleSided = true;
+            leaf.translucency = translucency;
+            leaf.translucencyColor = { 255, 240, 160, 255 };
+            g3d::Object3D* o = s->add(g3d::Geometry::plane(3, 3), leaf);
+            o->rotation = { 90, 0, 0 };                                   // stands up, facing the camera
+            s->lights.push_back(g3d::Light::directional({ 0, 0, -10 }, WHITE, 0.4f, false));   // behind the leaf, dim enough not to clip
+            Comp c = sceneComp(s);
+            Image img = render(c, 0);
+            const Color mid = GetImageColor(img, W / 2, H / 2);
+            UnloadImage(img);
+            return mid;
+        };
+        const Color opaque = run(0), through = run(1), half = run(0.5f);
+        std::printf("[scene3d] translucency: 0 -> %d, 0.5 -> %d, 1 -> %d\n", luma(opaque), luma(half), luma(through));
+        CHECK(luma(opaque) < 12);
+        CHECK(luma(through) > 90 && luma(half) > luma(opaque) + 30 && luma(through) > luma(half) + 15);
+        CHECK(through.g > through.b);                                   // tinted by leaf and translucency colour
+    }
+
+    // Instance tint and shade: unlit white boxes come out in each instance's colour.
+    {
+        auto am = std::make_shared<g3d::AnimatedMesh>();
+        am->rest = g3d::Geometry::box(1, 1, 1);
+        const Mesh& m = am->rest->mesh();
+        am->frames = 1;
+        am->vertices = m.vertexCount;
+        am->positions.assign(m.vertices, m.vertices + m.vertexCount * 3);
+        am->normals.assign(m.normals, m.normals + m.vertexCount * 3);
+        am->radius = 1;
+        auto set = std::make_shared<g3d::Instances>();
+        set->mesh = am;
+        const Color tints[3] = { { 255, 0, 0, 255 }, { 255, 255, 255, 255 }, { 40, 120, 200, 255 } };
+        const float shades[3] = { 1, 0.5f, 1 };
+        for (int k = 0; k < 3; k++) {
+            g3d::Instance i;
+            i.position = { -1.6f + 1.6f * k, 0, 0 };
+            i.tint = tints[k];
+            i.shade = shades[k];
+            set->list.push_back(i);
+        }
+        auto s = std::make_shared<g3d::Scene>();
+        s->camera.position = { 0, 0, 6 };
+        s->add(set, unlit(WHITE));
+        Comp c = sceneComp(s);
+        Image img = render(c, 0);
+        const Color a = px(img, project(s->camera, { -1.6f, 0, 0.5f })), b = px(img, project(s->camera, { 0, 0, 0.5f })),
+                    d = px(img, project(s->camera, { 1.6f, 0, 0.5f }));
+        std::printf("[scene3d] instance tint: %d,%d,%d  %d,%d,%d  %d,%d,%d\n", a.r, a.g, a.b, b.r, b.g, b.b, d.r, d.g, d.b);
+        CHECK(close(a, { 255, 0, 0, 255 }, 2));
+        CHECK(close(b, { 128, 128, 128, 255 }, 2));
+        CHECK(close(d, { 40, 120, 200, 255 }, 2));
+        UnloadImage(img);
+    }
+
+    // Normal map: a floor lit at a grazing angle from +x looks brighter where the map leans
+    // its normals towards the light, darker where it leans them away, and normalScale 0 is
+    // the flat floor exactly.
+    {
+        const std::string towards = writePng(dir, "n_plus.png", 8, 8, [](int, int) { return Color{ 217, 128, 217, 255 }; });
+        const std::string away = writePng(dir, "n_minus.png", 8, 8, [](int, int) { return Color{ 38, 128, 217, 255 }; });
+        auto run = [&](const std::string& map, float scale) {
+            auto s = std::make_shared<g3d::Scene>();
+            s->camera.position = { 0, 6, 0.01f };
+            s->camera.target = { 0, 0, 0 };
+            s->camera.fov = 40;
+            s->skyColor = BLACK;
+            s->groundColor = BLACK;
+            g3d::Material floor;
+            floor.color = { 200, 200, 200, 255 };
+            floor.roughness = 1;
+            floor.normalMap = map;
+            floor.normalScale = scale;
+            s->add(g3d::Geometry::plane(6, 6), floor);
+            s->lights.push_back(g3d::Light::directional({ 10, 3, 0 }, WHITE, 1.5f, false));
+            Comp c = sceneComp(s);
+            Image img = render(c, 0);
+            const int l = luma(GetImageColor(img, W / 2, H / 2));
+            UnloadImage(img);
+            return l;
+        };
+        const int flat = run("", 1), plus = run(towards, 1), minus = run(away, 1), zero = run(towards, 0);
+        std::printf("[scene3d] normal map: flat %d, towards %d, away %d, scale 0 %d\n", flat, plus, minus, zero);
+        CHECK(plus > flat + 20 && minus < flat - 10);
+        CHECK(std::abs(zero - flat) <= 1);
+    }
+
+    // Roughness map: green multiplies roughness. A white map changes nothing; a black one
+    // makes a rough floor a mirror-sharp one, so the light's highlight shows.
+    {
+        const std::string white = writePng(dir, "mr_white.png", 4, 4, [](int, int) { return WHITE; });
+        const std::string smooth = writePng(dir, "mr_smooth.png", 4, 4, [](int, int) { return Color{ 255, 0, 0, 255 }; });
+        auto run = [&](const std::string& map) {
+            auto s = std::make_shared<g3d::Scene>();
+            s->camera.position = { 0, 3, 5 };
+            s->camera.target = { 0, 0, 0 };
+            s->camera.fov = 40;
+            g3d::Material floor;
+            floor.color = { 90, 90, 90, 255 };
+            floor.roughness = 1;
+            floor.roughnessMap = map;
+            s->add(g3d::Geometry::plane(10, 10), floor);
+            s->lights.push_back(g3d::Light::directional({ 0, 3, -5 }, WHITE, 1.5f, false));   // mirrors into the camera
+            Comp c = sceneComp(s);
+            return render(c, 0);
+        };
+        Image none = run(""), whiteMap = run(white), smoothMap = run(smooth);
+        int maxNone = 0, maxSmooth = 0;
+        long differ = 0;
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) {
+                const Color a = GetImageColor(none, x, y), b = GetImageColor(whiteMap, x, y);
+                if (!close(a, b, 1)) differ++;
+                maxNone = std::max(maxNone, luma(a));
+                maxSmooth = std::max(maxSmooth, luma(GetImageColor(smoothMap, x, y)));
+            }
+        std::printf("[scene3d] roughness map: white map differs at %ld px; brightest rough %d, smooth %d\n", differ, maxNone, maxSmooth);
+        CHECK(differ == 0);
+        CHECK(maxSmooth > maxNone + 60);
+        UnloadImage(none);
+        UnloadImage(whiteMap);
+        UnloadImage(smoothMap);
+    }
+}
+
 // ---- water: the CPU's surface, the surface seen from above and below, the water's colour on
 // what is under it, and caustics that move the light about without changing its sum.
 static g3d::ScenePtr waterScene(bool water, float caustics, Vector3 eye, Vector3 target) {
@@ -1571,6 +1776,7 @@ int main() try {
     moreShadows();
     culling();
     instancing();
+    vegetationMaterials(dir);
     waterTest();
     environment(dir);
     skyAndFog();

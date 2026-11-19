@@ -436,7 +436,7 @@ adds the same computed pose as a native animated 3D character subtree. See
 changes, face tracks, outfit textures, and mounted carriers, use
 `Scene3D.addCharacter(characterJson, fps)` or `Object3D.addCharacter(characterJson, fps)`;
 both attach the native animated rig and return its root object handle.
-For GPU instancing of a procedural rig, `Scene3D.addRigInstances` and `Object3D.addRigInstances` bake a JSON look and an array of named clips directly with native `rig::bakeAnimated`, then attach repeated instances without supplying vertex arrays. Each clip object has `name`, `frames`, `seconds`, and optional `options`; each instance has `position`, optional orientation, scale, shade, and either a `clip` index or explicit `clipStart` / `clipLength`. Clip indices map to their baked frame ranges automatically. `coarse` defaults to true for smaller meshes; use false for the full native tessellation. The native baker omits model-backed and translucent parts.
+For GPU instancing of a procedural rig, `Scene3D.addRigInstances` and `Object3D.addRigInstances` bake a JSON look and an array of named clips directly with native `rig::bakeAnimated`, then attach repeated instances without supplying vertex arrays. Each clip object has `name`, `frames`, `seconds`, and optional `options`; each instance has `position`, optional orientation, scale, shade, `tint`, and either a `clip` index or explicit `clipStart` / `clipLength`. Clip indices map to their baked frame ranges automatically. `coarse` defaults to true for smaller meshes; use false for the full native tessellation. The native baker omits model-backed and translucent parts.
 Custom model-backed rig parts can be registered during `configure` with
 `rig::registerModelPart(name, slot, file, jointIndex, x, y, z, rotationX, rotationY,
 rotationZ, scale, svg, width, height)`. The optional SVG and size provide the 2D puppet
@@ -566,6 +566,16 @@ uses the same callback signature, and `g3d::upScene()` provides the active scene
 it, allowing frame-derived scene and camera settings.
 `modelPath()` reads a model object's source path. In draw callbacks, `modelMaterialCount()`, `modelMeshCount()` and `modelMeshMaterial(meshIndex)` inspect imported material slots and submesh assignments; `modelMaterialBaseColor(index)` reads a slot's diffuse RGBA color. `modelMaterialTint(index)` reads the per-object multiplier (white by default), and `modelMaterialTint(index, rgba)` sets it without changing the shared model asset or its texture. The tint combines with the imported diffuse color and the object's material tint while `usesModelMaterials()` is true. `materialSnapshot()` returns a detached `Material3D` value copy so scripts can inspect the material assigned to an object.
 `childCount()` and `childAt(index)` inspect and traverse object subtrees. `contentFlags()` reports whether an object contains geometry, a model, particles, instances, or splats; `geometryHandle()` returns its reusable geometry handle when present.
+Materials for leaves, grass and other thin surfaces: the JSON keys `alphaCutoff` (0..1; texels
+whose alpha is below it are holes, in the picture, the shadows and the ink lines),
+`translucency` (0 and up) with `translucencyColor` (light from behind showing through),
+`normalMap` with `normalScale` (a tangent-space normal map, OpenGL convention, no tangents
+needed) and `roughnessMap` (glTF metallic-roughness: green scales roughness, blue
+metalness). `Material3D` sets them with `alphaCutoff(cutoff)`, `translucency(amount, color)`,
+`normalMap(file, scale)` and `roughnessMap(file)`, and reads them with `alphaCutoffValue`,
+`translucencyValue`, `translucencyColorValue`, `normalMapPath`, `normalScaleValue` and
+`roughnessMapPath`. Give a cut-out texture's clear texels the surface colour with alpha 0,
+not black, or filtering draws a dark fringe. See `examples/scripts/leaf_cards.as`.
 `Material3D.colorValue`, `roughnessValue`, `metalnessValue`, `emissiveValue`, `opacityValue`,
 `shadingName`, `mapPath`, `hasDynamicMap`, `isUnlit`, `isDoubleSided`, `castsShadow`, and
 `receivesShadow` read base controls. `toonState`, `goochColors`, `hatchState`, `clipState`, and
@@ -688,7 +698,8 @@ absolute animation. Primitive geometry descriptors expose the native tessellatio
 `tubularSegments`/`radialSegments`/`p`/`q`). Objects also accept `cullRadius` and
 `cullCentre`, and scenes accept `cullFloor`, matching the native shadow-aware culling fields.
 Geometry objects can use an `instances` descriptor with `items` carrying position, yaw,
-pitch, bank, scale, baked `frame`, clip start/length, and shade. Optional `frames`, `positions`
+pitch, bank, scale, baked `frame`, clip start/length, shade, and `tint` (a colour multiplying the
+mesh; tint x shade is kept to 8 bits a channel over 0..2). Optional `frames`, `positions`
 and `normals` arrays expose native baked vertex animation (frame-major xyz triples); omitted
 arrays use the primitive geometry as a static one-frame mesh. See the instanced swarm in
 `examples/scripts/material_controls.as` and `examples/scripts/physics_scene.as`. Within a
