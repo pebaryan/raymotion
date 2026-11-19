@@ -286,10 +286,68 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   animations play on the GPU (`object->animation`, `animationFrame`).
 * Materials: colour/texture, roughness, metalness, emissive, opacity (sorted
   transparency), unlit, double-sided. Lighting is in linear space with sRGB output.
+  `alphaCutoff` cuts holes from a texture's alpha (leaf and grass cards; the holes stay out
+  of shadows and ink lines), `translucency` lets light through thin surfaces from behind,
+  `normalMap` (no tangents needed) and `roughnessMap` (glTF metallic-roughness) add surface
+  detail. Give a cut-out texture's clear texels the leaf's colour, not black, or filtering
+  draws a dark fringe.
+* Grass at landscape scale (`g3d::Field`, `flora::addGrass` with the looks `lawn`,
+  `meadow`, `tallGrass` and `dryGrass`): every blade is made on the GPU from its tile and
+  number, so nothing per blade is stored. Tiles are culled on the CPU (shadows included)
+  and thin out with distance into the ground's colour without popping; density, ground
+  height and blade height come from functions of x and z; wind sways the blades and sends
+  gusts downwind as a function of time. About 1.5 million blades a frame at 1080p took
+  12 ms with shadows on the development GPU (`RMTN_FIELD_BENCH=1` runs that measurement in
+  `scene3d_tests`). Grass shadows want a fine shadow map (`shadowMapSize` 4096) under a low sun.
+* Where plants grow (`flora::Area`): a rectangle or polygons with holes, less buildings,
+  clearings and roads (strips), over a ground (hills from `flora::noise`, a mesh's upward
+  faces, a geo region through a projection), thinned by density, slope and altitude, with a
+  soft edge. `flora::terrain` makes its ground mesh, `addGrass(area)` grows grass on it and
+  `flora::scatter` places plants on it with Poisson-disk spacing and clumps into groves.
+  Placements depend only on the bounds, spacing and seed, so moving a road removes or
+  restores plants without shifting the rest (33,000 over a square kilometre in about 0.1 s).
+* Trees and shrubs (`flora::makeTree`, presets `oak`, `birch`, `pine`, `spruce`, `palm`,
+  `tropical`, `shrub`, `hedge`): grown from a seed (space colonisation for broadleaf crowns,
+  whorls for conifers, fronds for palms), with bark tubes and cut-out leaf cards that let
+  light through. All textures are made in code. Wind is baked into a loop: the trunk bends,
+  branches lag and leaves flutter, and gusts lean the trees as they pass. `season` turns
+  and drops deciduous leaves. `flora::addForest` draws each tree at the detail its distance
+  from the camera needs: the full tree, a reduced one, then an impostor (a lit picture of
+  itself from 8 directions). It cross-fades between levels with a screen door
+  (`Instance::fade`), so nothing pops. About 11,000 trees at 1080p take 26 ms a frame.
+  Impostors turn only about the vertical, so for aerial shots push `impostorFrom` out.
+* Growth, by a reveal `u` = 0..1 as in `plot::` and `geo::`: grass comes up where
+  `g3d::Field::grow` passes each spot's `arrival` (`flora::arrivalFrom` a point,
+  `arrivalAlong` a line, `arrivalInto` an area from its edges), blades rising rather than
+  popping; `flora::addGrowingTree(s)` grows trees: the trunk extends, branches sprout as the
+  front reaches them and thicken behind it, and leaves unfold last. Every frame is a
+  function of `u`, and `u` = 1 is the full tree exactly.
+* Stylised vegetation on the same scatter, wind and growth code: `TreeBuild::style`
+  `LowPoly` (faceted clumps and stacked cones, a tenth of the triangles), `PaperCut` (one
+  card in flat leaf tones with a cut edge, always facing the camera) or `Splat` (a soft
+  canopy of Gaussian splats; one object a tree, at most 256, and casting no shadow), with
+  `TreeBuild::shading` for Toon, Gooch or Hatch; `flora::toonGrass()` draws blades in flat
+  colour bands (`g3d::Field::colorBands`).
+* 2D vegetation (`flora2d::`, drawn with the node's context, so flat compositions and
+  `g3d::Surface` alike): grass along a ground line, tufts, a meadow filling a shape (smaller
+  toward its back), shrubs, and branching trees (oak, birch, pine; a silhouette option for
+  far layers). Wind leans, sways and sends gusts along x; every plant grows by `u` as in
+  3D. Parallax layers: `parallax` (a context shifted by the camera), `hazed` colours,
+  `groundLine`/`ground` for rolling hills and `softness` (a blur filter for a layer).
+* Plants in cities and on maps: `city::addPlants` turns a CityJSON model's
+  SolitaryVegetationObjects into trees (as tall as their `height`; conifers by species)
+  and its PlantCover into grass or shrubs (`isPlant` to filter the solids out);
+  `geo3d::forest` scatters low-poly trees over countries or boxes, standing along the
+  surface's up on a globe, a map or between, and growing in west to east.
+* Vegetation prefabs `flora-meadow`, `flora-tree-grow` and `flora-2d-hill`, and an engine
+  showcase (`raymotion render flora`: a meadow, a 5,000-tree fly-over, a growing tree, a 2D
+  hillside). The whole vegetation API, measured budgets and what is verified are in
+  [docs/flora.md](docs/flora.md).
 * Lights: up to 8 directional/point/spot lights with range falloff. Any of them can cast
   PCF shadows; they share one shadow atlas (`shadowMapSize` per tile, a tile per
   directional/spot light and six per point light, 16 tiles), with `shadowBias` in world
-  units on top of an automatic slope bias.
+  units on top of an automatic slope bias and a normal offset (so a sun a few degrees above
+  the horizon draws no acne bands).
 * Ambient light is a sky/ground hemisphere, or image-based: `scene->environment` (an
   equirectangular PNG/JPG/HDR) or `environmentGenerator` (e.g. `g3d::studioEnvironment`,
   a gradient with soft light boxes) lights diffuse surfaces from its blurred mips and

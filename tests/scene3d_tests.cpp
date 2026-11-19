@@ -2,6 +2,8 @@
 // transparency, hierarchy, models (OBJ and a generated skinned glTF), determinism.
 #include "rmtn/raymotion.hpp"
 #include <raymath.h>
+#include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -9,6 +11,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 using namespace rmtn;
 namespace fs = std::filesystem;
@@ -168,6 +171,48 @@ static void shadows() {
     }
     CHECK(lit[1] < lit[0] - 60);                                                   // shadowed
     CHECK(std::abs(open[1] - open[0]) <= 2);                                       // no acne in open ground
+}
+
+// A sun 5 and 10 degrees above the horizon over flat ground (backlit grass at dusk): open
+// ground must match the unshadowed render (acne used to draw horizontal bands here), and a
+// box's long shadow must still start at its foot.
+static void lowSunShadows() {
+    for (float elevation : { 5.f, 10.f }) {
+        Image img[2];
+        g3d::ScenePtr s;
+        for (int k = 0; k < 2; k++) {
+            s = std::make_shared<g3d::Scene>();
+            s->camera.position = { 0, 1.6f, 5 };
+            s->camera.target = { 0, 0.6f, 0 };
+            g3d::Material m;
+            m.roughness = 1;
+            m.color = { 120, 150, 90, 255 };
+            s->add(g3d::Geometry::plane(40, 40), m);
+            s->add(g3d::Geometry::box(1, 1, 1), m)->position = { -1.5f, 0.5f, -1 };
+            const float e = elevation * DEG2RAD;
+            g3d::Light l = g3d::Light::directional({ 0, 10 * std::sin(e), -10 * std::cos(e) }, WHITE, 2, k == 1);
+            l.shadowExtent = 12;
+            s->lights.push_back(l);
+            Comp c = sceneComp(s);
+            img[k] = render(c, 0);
+        }
+        int banded = 0, ground = 0;
+        for (int y = H / 2 + 8; y < H; y++)
+            for (int x = W / 2; x < W; x++) {                                       // right half: open ground
+                ground++;
+                banded += luma(GetImageColor(img[1], x, y)) < luma(GetImageColor(img[0], x, y)) - 6;
+            }
+        const int foot[2] = { luma(px(img[0], project(s->camera, { -1.5f, 0, -0.35f }))),
+                              luma(px(img[1], project(s->camera, { -1.5f, 0, -0.35f }))) };
+        const int tail[2] = { luma(px(img[0], project(s->camera, { -1.5f, 0, 2 }))),
+                              luma(px(img[1], project(s->camera, { -1.5f, 0, 2 }))) };
+        std::printf("[scene3d] low sun %.0f deg: %d of %d open-ground pixels darkened, foot %d -> %d, tail %d -> %d\n",
+                    elevation, banded, ground, foot[0], foot[1], tail[0], tail[1]);
+        CHECK(banded * 100 < ground);                                               // under 1 %
+        CHECK(foot[1] < foot[0] - 15 && tail[1] < tail[0] - 15);
+        UnloadImage(img[0]);
+        UnloadImage(img[1]);
+    }
 }
 
 static void viewportsAndOpacity() {
@@ -1036,6 +1081,211 @@ static void instancing() {
     }
 }
 
+// ---- materials for vegetation: cut-out cards, light through leaves, per-instance colour,
+// normal and roughness maps.
+static std::string writePng(const fs::path& dir, const char* name, int w, int h, Color (*at)(int x, int y)) {
+    Image img = GenImageColor(w, h, BLANK);
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) ImageDrawPixel(&img, x, y, at(x, y));
+    const std::string path = (dir / name).string();
+    ExportImage(img, path.c_str());
+    UnloadImage(img);
+    return path;
+}
+
+static void vegetationMaterials(const fs::path& dir) {
+    // A card whose left half is clear: with a cut-off the clear half shows what is behind it
+    // and casts no shadow; the solid half draws and shadows as before.
+    const std::string half = writePng(dir, "half.png", 64, 64, [](int x, int) { return x < 32 ? Color{ 255, 255, 255, 0 } : WHITE; });
+    {
+        // The picture: an unlit card facing the camera over a red backdrop card.
+        auto s = std::make_shared<g3d::Scene>();
+        s->camera.position = { 0, 0, 6 };
+        s->add(g3d::Geometry::box(8, 8, 0.1f), unlit({ 200, 30, 30, 255 }))->position = { 0, 0, -2 };
+        g3d::Material card = unlit({ 40, 220, 40, 255 });
+        card.map = half;
+        card.alphaCutoff = 0.5f;
+        card.doubleSided = true;
+        s->add(g3d::Geometry::plane(3, 3), card)->rotation = { 90, 0, 0 };
+        Comp c = sceneComp(s);
+        Image img = render(c, 0);
+        const Color clear = px(img, project(s->camera, { -0.8f, 0, 0 })), solid = px(img, project(s->camera, { 0.8f, 0, 0 }));
+        std::printf("[scene3d] cut-out picture: clear half %d,%d,%d, solid half %d,%d,%d\n",
+                    clear.r, clear.g, clear.b, solid.r, solid.g, solid.b);
+        CHECK(close(clear, { 200, 30, 30, 255 }, 3));                   // the backdrop through the clear half
+        CHECK(close(solid, { 40, 220, 40, 255 }, 3));                   // the card, solid
+        UnloadImage(img);
+
+        // The shadow: the same card lying flat 2 m up, lit from straight above, seen from
+        // below its height so it hides none of the ground.
+        auto run = [&](float cutoff) {
+            auto sh = std::make_shared<g3d::Scene>();
+            sh->camera.position = { 0, 1.2f, 9 };
+            sh->camera.target = { 0, 0, 0 };
+            sh->camera.fov = 40;
+            g3d::Material ground;
+            ground.color = { 200, 200, 200, 255 };
+            ground.roughness = 1;
+            sh->add(g3d::Geometry::plane(40, 40), ground);
+            g3d::Material leaf;
+            leaf.color = { 90, 200, 90, 255 };
+            leaf.map = half;
+            leaf.alphaCutoff = cutoff;
+            leaf.doubleSided = true;
+            sh->add(g3d::Geometry::plane(4, 4), leaf)->position = { 0, 2, 0 };
+            sh->lights.push_back(g3d::Light::directional({ 0, 10, 0.01f }, WHITE, 1.5f, true));
+            sh->lights.back().shadowExtent = 12;
+            Comp cc = sceneComp(sh);
+            Image im = render(cc, 0);
+            const Color l = px(im, project(sh->camera, { -1.2f, 0, -0.5f })), r = px(im, project(sh->camera, { 1.2f, 0, -0.5f }));
+            UnloadImage(im);
+            return std::pair<int, int>{ luma(l), luma(r) };
+        };
+        const auto [cutL, cutR] = run(0.5f);
+        const auto [fullL, fullR] = run(0);
+        std::printf("[scene3d] cut-out shadow: ground under clear half %d, under solid half %d (no cut-off: %d, %d)\n",
+                    cutL, cutR, fullL, fullR);
+        CHECK(cutL > cutR + 40);                                          // the clear half casts no shadow
+        CHECK(std::abs(cutR - fullR) <= 2);                               // the solid half shadows as before
+        CHECK(fullL < cutL - 40);                                         // without the cut-off the whole card shadows
+    }
+
+    // Light through a leaf: a card between the camera and the light is dark without
+    // translucency and bright with it, brightest looking into the light.
+    {
+        auto run = [&](float translucency) {
+            auto s = std::make_shared<g3d::Scene>();
+            s->camera.position = { 0, 0, 5 };
+            s->camera.target = { 0, 0, 0 };
+            s->camera.fov = 40;
+            s->skyColor = BLACK;
+            s->groundColor = BLACK;
+            g3d::Material leaf;
+            leaf.color = { 120, 200, 80, 255 };
+            leaf.doubleSided = true;
+            leaf.translucency = translucency;
+            leaf.translucencyColor = { 255, 240, 160, 255 };
+            g3d::Object3D* o = s->add(g3d::Geometry::plane(3, 3), leaf);
+            o->rotation = { 90, 0, 0 };                                   // stands up, facing the camera
+            s->lights.push_back(g3d::Light::directional({ 0, 0, -10 }, WHITE, 0.4f, false));   // behind the leaf, dim enough not to clip
+            Comp c = sceneComp(s);
+            Image img = render(c, 0);
+            const Color mid = GetImageColor(img, W / 2, H / 2);
+            UnloadImage(img);
+            return mid;
+        };
+        const Color opaque = run(0), through = run(1), half = run(0.5f);
+        std::printf("[scene3d] translucency: 0 -> %d, 0.5 -> %d, 1 -> %d\n", luma(opaque), luma(half), luma(through));
+        CHECK(luma(opaque) < 12);
+        CHECK(luma(through) > 90 && luma(half) > luma(opaque) + 30 && luma(through) > luma(half) + 15);
+        CHECK(through.g > through.b);                                   // tinted by leaf and translucency colour
+    }
+
+    // Instance tint and shade: unlit white boxes come out in each instance's colour.
+    {
+        auto am = std::make_shared<g3d::AnimatedMesh>();
+        am->rest = g3d::Geometry::box(1, 1, 1);
+        const Mesh& m = am->rest->mesh();
+        am->frames = 1;
+        am->vertices = m.vertexCount;
+        am->positions.assign(m.vertices, m.vertices + m.vertexCount * 3);
+        am->normals.assign(m.normals, m.normals + m.vertexCount * 3);
+        am->radius = 1;
+        auto set = std::make_shared<g3d::Instances>();
+        set->mesh = am;
+        const Color tints[3] = { { 255, 0, 0, 255 }, { 255, 255, 255, 255 }, { 40, 120, 200, 255 } };
+        const float shades[3] = { 1, 0.5f, 1 };
+        for (int k = 0; k < 3; k++) {
+            g3d::Instance i;
+            i.position = { -1.6f + 1.6f * k, 0, 0 };
+            i.tint = tints[k];
+            i.shade = shades[k];
+            set->list.push_back(i);
+        }
+        auto s = std::make_shared<g3d::Scene>();
+        s->camera.position = { 0, 0, 6 };
+        s->add(set, unlit(WHITE));
+        Comp c = sceneComp(s);
+        Image img = render(c, 0);
+        const Color a = px(img, project(s->camera, { -1.6f, 0, 0.5f })), b = px(img, project(s->camera, { 0, 0, 0.5f })),
+                    d = px(img, project(s->camera, { 1.6f, 0, 0.5f }));
+        std::printf("[scene3d] instance tint: %d,%d,%d  %d,%d,%d  %d,%d,%d\n", a.r, a.g, a.b, b.r, b.g, b.b, d.r, d.g, d.b);
+        CHECK(close(a, { 255, 0, 0, 255 }, 2));
+        CHECK(close(b, { 128, 128, 128, 255 }, 2));
+        CHECK(close(d, { 40, 120, 200, 255 }, 2));
+        UnloadImage(img);
+    }
+
+    // Normal map: a floor lit at a grazing angle from +x looks brighter where the map leans
+    // its normals towards the light, darker where it leans them away, and normalScale 0 is
+    // the flat floor exactly.
+    {
+        const std::string towards = writePng(dir, "n_plus.png", 8, 8, [](int, int) { return Color{ 217, 128, 217, 255 }; });
+        const std::string away = writePng(dir, "n_minus.png", 8, 8, [](int, int) { return Color{ 38, 128, 217, 255 }; });
+        auto run = [&](const std::string& map, float scale) {
+            auto s = std::make_shared<g3d::Scene>();
+            s->camera.position = { 0, 6, 0.01f };
+            s->camera.target = { 0, 0, 0 };
+            s->camera.fov = 40;
+            s->skyColor = BLACK;
+            s->groundColor = BLACK;
+            g3d::Material floor;
+            floor.color = { 200, 200, 200, 255 };
+            floor.roughness = 1;
+            floor.normalMap = map;
+            floor.normalScale = scale;
+            s->add(g3d::Geometry::plane(6, 6), floor);
+            s->lights.push_back(g3d::Light::directional({ 10, 3, 0 }, WHITE, 1.5f, false));
+            Comp c = sceneComp(s);
+            Image img = render(c, 0);
+            const int l = luma(GetImageColor(img, W / 2, H / 2));
+            UnloadImage(img);
+            return l;
+        };
+        const int flat = run("", 1), plus = run(towards, 1), minus = run(away, 1), zero = run(towards, 0);
+        std::printf("[scene3d] normal map: flat %d, towards %d, away %d, scale 0 %d\n", flat, plus, minus, zero);
+        CHECK(plus > flat + 20 && minus < flat - 10);
+        CHECK(std::abs(zero - flat) <= 1);
+    }
+
+    // Roughness map: green multiplies roughness. A white map changes nothing; a black one
+    // makes a rough floor a mirror-sharp one, so the light's highlight shows.
+    {
+        const std::string white = writePng(dir, "mr_white.png", 4, 4, [](int, int) { return WHITE; });
+        const std::string smooth = writePng(dir, "mr_smooth.png", 4, 4, [](int, int) { return Color{ 255, 0, 0, 255 }; });
+        auto run = [&](const std::string& map) {
+            auto s = std::make_shared<g3d::Scene>();
+            s->camera.position = { 0, 3, 5 };
+            s->camera.target = { 0, 0, 0 };
+            s->camera.fov = 40;
+            g3d::Material floor;
+            floor.color = { 90, 90, 90, 255 };
+            floor.roughness = 1;
+            floor.roughnessMap = map;
+            s->add(g3d::Geometry::plane(10, 10), floor);
+            s->lights.push_back(g3d::Light::directional({ 0, 3, -5 }, WHITE, 1.5f, false));   // mirrors into the camera
+            Comp c = sceneComp(s);
+            return render(c, 0);
+        };
+        Image none = run(""), whiteMap = run(white), smoothMap = run(smooth);
+        int maxNone = 0, maxSmooth = 0;
+        long differ = 0;
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) {
+                const Color a = GetImageColor(none, x, y), b = GetImageColor(whiteMap, x, y);
+                if (!close(a, b, 1)) differ++;
+                maxNone = std::max(maxNone, luma(a));
+                maxSmooth = std::max(maxSmooth, luma(GetImageColor(smoothMap, x, y)));
+            }
+        std::printf("[scene3d] roughness map: white map differs at %ld px; brightest rough %d, smooth %d\n", differ, maxNone, maxSmooth);
+        CHECK(differ == 0);
+        CHECK(maxSmooth > maxNone + 60);
+        UnloadImage(none);
+        UnloadImage(whiteMap);
+        UnloadImage(smoothMap);
+    }
+}
+
 // ---- water: the CPU's surface, the surface seen from above and below, the water's colour on
 // what is under it, and caustics that move the light about without changing its sum.
 static g3d::ScenePtr waterScene(bool water, float caustics, Vector3 eye, Vector3 target) {
@@ -1552,6 +1802,740 @@ static void surfaces() {
     }
 }
 
+// ---- grass fields
+static void dumpField(const char* name, const Image& img) {
+    if (const char* dir = std::getenv("RMTN_FIELD_DUMP")) {
+        fs::create_directories(dir);
+        ExportImage(img, (fs::path(dir) / name).string().c_str());
+    }
+}
+// A meadow on magenta ground (so blades are easy to count), lit from behind by a low sun.
+static g3d::ScenePtr meadow(std::function<void(g3d::Field&)> edit = {}, bool withField = true) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = { 0, 1.4f, 6 };
+    s->camera.target = { 0, 0.4f, 0 };
+    s->ambient = 0.35f;
+    g3d::Material ground;
+    ground.color = { 200, 40, 200, 255 };
+    ground.roughness = 1;
+    s->add(g3d::Geometry::plane(80, 80), ground);
+    auto f = std::make_shared<g3d::Field>();
+    f->min = { -20, -30 }; f->max = { 20, 8 };
+    f->density = 150;
+    if (edit) edit(*f);
+    g3d::Material grass;
+    grass.roughness = 0.8f;
+    grass.translucency = 0.8f;
+    grass.translucencyColor = { 255, 236, 160, 255 };
+    grass.lineWidth = 0;
+    if (withField) s->add(f, grass);
+    g3d::Light sun = g3d::Light::directional({ 3, 2.5f, -10 }, { 255, 226, 180, 255 }, 2.2f, true);
+    sun.shadowExtent = 14;
+    s->lights.push_back(sun);
+    return s;
+}
+static void grassField() {
+    {   // placement: a tile holds density * size^2 blades; any first n of them spread evenly
+        g3d::Field f;
+        f.density = 400; f.tileSize = 4; f.min = { 0, 0 }; f.max = { 10, 6 };
+        CHECK(f.bladesPerTile() == 6400 && f.tilesX() == 3 && f.tilesZ() == 2);
+        int cells[16] = {};
+        bool inside = true;
+        for (uint32_t k = 0; k < 160; k++) {
+            const Vector2 p = f.bladeRoot(1, 1, k);
+            inside = inside && p.x >= 4 && p.x < 8 && p.y >= 4 && p.y < 8;
+            cells[std::clamp((int)(p.x - 4), 0, 3) + 4 * std::clamp((int)(p.y - 4), 0, 3)]++;
+        }
+        CHECK(inside);
+        CHECK(*std::min_element(cells, cells + 16) >= 6 && *std::max_element(cells, cells + 16) <= 14);   // 10 each, evenly
+        const Vector2 a = f.bladeRoot(0, 0, 5), b = f.bladeRoot(1, 0, 5);
+        CHECK(std::fabs(a.x + 4 - b.x) > 1e-3f || std::fabs(a.y - b.y) > 1e-3f);                 // tiles differ
+        g3d::Field g = f;
+        g.seed = 2;
+        CHECK(Vector2Distance(g.bladeRoot(1, 1, 7), f.bladeRoot(1, 1, 7)) > 1e-3f);             // seeds differ
+    }
+    // Blade pixels: grass is yellow-green, the meadow's ground magenta (blue above green).
+    auto bladePixels = [](const Image& img, int x0, int x1, int y0, int y1) {
+        int n = 0;
+        for (int y = y0; y < y1; y++)
+            for (int x = x0; x < x1; x++) {
+                const Color c = GetImageColor(img, x, y);
+                n += c.g > c.b + 8;
+            }
+        return n;
+    };
+    auto same = [](const Image& a, const Image& b) {
+        for (int y = 0; y < a.height; y++)
+            for (int x = 0; x < a.width; x++)
+                if (!close(GetImageColor(a, x, y), GetImageColor(b, x, y), 0)) return false;
+        return true;
+    };
+    {   // a look at it (dumped when RMTN_FIELD_DUMP is set); deterministic, and frames are pure
+        Comp c = longComp(meadow(), 960, 540);
+        Image img = render(c, 40);
+        dumpField("meadow.png", img);
+        if (std::getenv("RMTN_FIELD_DUMP")) {
+            auto s = meadow([](g3d::Field& f) { f.density = 900; });
+            s->objects[0]->material.color = { 52, 64, 30, 255 };
+            s->camera.position = { 0, 0.35f, 2 };
+            s->camera.target = { 0.3f, 0.2f, 0 };
+            Comp close = longComp(s, 960, 540);
+            Image ci = render(close, 40);
+            dumpField("closeup.png", ci);
+            UnloadImage(ci);
+        }
+        Comp again = longComp(meadow());
+        Image before = render(again, 39), after = render(again, 40);
+        Comp fresh = longComp(meadow());
+        Image alone = render(fresh, 40);
+        CHECK(same(after, alone));
+        CHECK(!same(before, after));                                    // the wind moves it
+        UnloadImage(before); UnloadImage(after); UnloadImage(alone);
+        UnloadImage(img);
+    }
+    {   // the mask: no blades where it is 0
+        Comp c = longComp(meadow([](g3d::Field& f) { f.mask = [](float x, float) { return x < 0 ? 0.f : 1.f; }; }));
+        Image img = render(c, 10);
+        const g3d::Camera cam = meadow()->camera;
+        const int mid = (int)project(cam, { 0, 0, 2 }).x;
+        const int y0 = (int)project(cam, { 0, 0, -2 }).y, y1 = (int)project(cam, { 0, 0, 4 }).y;
+        const int left = bladePixels(img, 0, mid - 12, y0, y1), right = bladePixels(img, mid + 12, W, y0, y1);
+        std::printf("[scene3d] grass mask: %d blade pixels where 0, %d where 1\n", left, right);
+        CHECK(left == 0 && right > 400);
+        UnloadImage(img);
+    }
+    {   // beyond fadeEnd nothing is drawn or submitted
+        Comp c = longComp(meadow([](g3d::Field& f) { f.min = { -20, -60 }; f.max = { 20, -30 }; f.fadeStart = 10; f.fadeEnd = 25; }));
+        Image img = render(c, 10);
+        CHECK(bladePixels(img, 0, W, 0, H) == 0 && g3d::fieldBladesSubmitted() == 0);
+        UnloadImage(img);
+        Comp near = longComp(meadow([](g3d::Field& f) { f.fadeStart = 10; f.fadeEnd = 25; }));
+        Image seen = render(near, 10);
+        CHECK(bladePixels(seen, 0, W, 0, H) > 1000 && g3d::fieldBladesSubmitted() > 0);
+        UnloadImage(seen);
+    }
+    {   // sway: tips move between frames, roots stay; seen from the side, against the sky
+        auto side = [](std::function<void(g3d::Field&)> edit) {
+            auto s = meadow([&](g3d::Field& f) {
+                f.min = { -3, -0.3f }; f.max = { 3, 0.3f }; f.density = 200; f.height = 0.5f; f.heightVariation = 0;
+                f.lean = 0; f.tileSize = 1;
+                edit(f);
+            });
+            s->objects[0]->visible = false;                                      // no ground: blades against black
+            s->camera.position = { 0, 0.25f, 5 };
+            s->camera.target = { 0, 0.25f, 0 };
+            return s;
+        };
+        auto s = side([](g3d::Field& f) { f.sway = 0.3f; f.gust = 0.3f; });
+        Comp c = longComp(s);
+        Image a = render(c, 0), b = render(c, 8);
+        const int rootY = (int)project(s->camera, { 0, 0.03f, 0 }).y, tipY = (int)project(s->camera, { 0, 0.4f, 0 }).y;
+        int rootDiff = 0, tipDiff = 0;
+        for (int x = 0; x < W; x++)
+            for (int d = -2; d <= 2; d++) {
+                rootDiff += std::abs(luma(GetImageColor(a, x, rootY + d)) - luma(GetImageColor(b, x, rootY + d)));
+                tipDiff += std::abs(luma(GetImageColor(a, x, tipY + d)) - luma(GetImageColor(b, x, tipY + d)));
+            }
+        std::printf("[scene3d] grass sway: root band changes %d, tip band %d\n", rootDiff, tipDiff);
+        CHECK(tipDiff > 4 * rootDiff + 500);
+        UnloadImage(a); UnloadImage(b);
+
+        // A gust reaches a patch 4 m downwind later: with only the gust bending the blades,
+        // the frame each patch leans furthest comes about 4 m / gustSpeed after the other's.
+        auto g = side([](g3d::Field& f) { f.sway = 0; f.gust = 0.6f; f.gustSpeed = 4; f.gustScale = 10; f.windDirection = { 1, 0 }; });
+        g->camera.position = { 0, 0.25f, 7 };
+        Comp gc = longComp(g);
+        const int period = 75;                                                    // 10 m / 4 m/s at 30 fps
+        const int band = (int)project(g->camera, { 0, 0.3f, 0 }).y;
+        const int leftX = (int)project(g->camera, { -2, 0.3f, 0 }).x, rightX = (int)project(g->camera, { 2, 0.3f, 0 }).x;
+        std::vector<double> lean[2];
+        for (int f = 0; f < period; f++) {
+            Image img = render(gc, f);
+            for (int p = 0; p < 2; p++) {                                         // mean x of blade pixels in the patch
+                const int cx = p ? rightX : leftX;
+                double sx = 0, n = 0;
+                for (int y = band - 2; y <= band + 2; y++)
+                    for (int x = cx - 30; x < cx + 30; x++)
+                        if (luma(GetImageColor(img, x, y)) > 20) { sx += x - cx; n++; }
+                lean[p].push_back(n > 0 ? sx / n : 0);
+            }
+            UnloadImage(img);
+        }
+        for (auto& series : lean) {                                               // around its mean
+            double m = 0;
+            for (double v : series) m += v / period;
+            for (double& v : series) v -= m;
+        }
+        int lag = 0;
+        double bestCorr = -1e300;
+        for (int d = 0; d < period; d++) {                                        // downwind(t + d) ~ upwind(t)
+            double sum = 0;
+            for (int f = 0; f < period; f++) sum += lean[0][(size_t)f] * lean[1][(size_t)((f + d) % period)];
+            if (sum > bestCorr) { bestCorr = sum; lag = d; }
+        }
+        std::printf("[scene3d] grass gust: downwind patch follows the upwind one by %d frames (expect 30)\n", lag);
+        CHECK(lag >= 24 && lag <= 36);
+    }
+    {   // a tile out of view still shadows the ground in view
+        auto build = [](bool grass) {
+            auto s = meadow([](g3d::Field& f) { f.min = { -4, -2 }; f.max = { -2, 2 }; f.tileSize = 1; f.height = 1.6f;
+                                                f.density = 1500; f.heightVariation = 0; }, grass);
+            s->camera.position = { 3, 3, 4 };
+            s->camera.target = { 3, 0, 0 };
+            s->lights[0] = g3d::Light::directional({ -14, 5, 0 }, WHITE, 2, true);
+            s->lights[0].target = { 0, 0, 0 };
+            s->lights[0].shadowExtent = 8;
+            return s;
+        };
+        auto with = build(true), without = build(false);
+        CHECK(project(with->camera, { -2, 1.6f, 0 }).x < 0);                     // the grass is off screen
+        Comp a = longComp(with), b = longComp(without);
+        Image ia = render(a, 0), ib = render(b, 0);
+        const Vector2 probe = project(with->camera, { 1, 0, 0 });
+        const int shaded = luma(px(ia, probe)), open = luma(px(ib, probe));
+        std::printf("[scene3d] grass shadow from off screen: %d vs %d unshadowed\n", shaded, open);
+        CHECK(probe.x > 0 && shaded < open - 15);
+        UnloadImage(ia); UnloadImage(ib);
+    }
+    {   // an area: grass stands on its terrain and keeps off its road
+        flora::Area land = flora::rect({ -12, -12 }, { 12, 12 });
+        land.ground = [](float x, float z) { return 3 + 0.0f * x * z; };   // a plateau 3 m up
+        land.strips.push_back({ { { -12, -2 }, { 12, 2 } }, 3 });
+        auto build = [&](bool fromAbove) {
+            auto s = std::make_shared<g3d::Scene>();
+            g3d::Material ground;
+            ground.color = { 200, 40, 200, 255 };
+            ground.roughness = 1;
+            s->add(flora::terrain(land, 24, 24), ground);
+            g3d::Field look = flora::meadow();
+            look.density = 300;
+            flora::addGrass(*s, land, look, 4);
+            s->lights.push_back(g3d::Light::directional({ 3, 10, 4 }, WHITE, 1.5f, false));
+            if (fromAbove) { s->camera.position = { 0, 14, 0.01f }; s->camera.target = { 0, 3, 0 }; }
+            else { s->camera.position = { 0, 3.6f, 18 }; s->camera.target = { 0, 3, 0 }; }
+            return s;
+        };
+        auto above = build(true);
+        Comp a = longComp(above);
+        Image top = render(a, 5);
+        dumpField("area_top.png", top);
+        const Vector2 r0 = project(above->camera, { -4, 3, -0.5f }), r1 = project(above->camera, { 4, 3, 0.5f });
+        const Vector2 g0 = project(above->camera, { -4, 3, 4 }), g1 = project(above->camera, { 4, 3, 6 });
+        const int onRoad = bladePixels(top, (int)std::min(r0.x, r1.x), (int)std::max(r0.x, r1.x), (int)std::min(r0.y, r1.y), (int)std::max(r0.y, r1.y));
+        const int offRoad = bladePixels(top, (int)std::min(g0.x, g1.x), (int)std::max(g0.x, g1.x), (int)std::min(g0.y, g1.y), (int)std::max(g0.y, g1.y));
+        std::printf("[scene3d] grass area: %d blade pixels on the road, %d beside it\n", onRoad, offRoad);
+        CHECK(onRoad == 0 && offRoad > 50);
+        UnloadImage(top);
+        auto side = build(false);
+        Comp b = longComp(side);
+        Image img = render(b, 5);
+        dumpField("area_side.png", img);
+        int lowest = -1;                                                      // the lowest row with a blade in it
+        for (int y = 0; y < H; y++)
+            if (bladePixels(img, 0, W, y, y + 1) > 0) lowest = y;
+        const int plateau = (int)project(side->camera, { 0, 3, 12 }).y, below = (int)project(side->camera, { 0, 2.7f, 12 }).y;
+        std::printf("[scene3d] grass area: lowest blade row %d, the plateau's near edge at %d, 0.3 m below it at %d\n", lowest, plateau, below);
+        CHECK(lowest >= plateau - 2 && lowest < below);
+        UnloadImage(img);
+    }
+    {   // landscape: a 400 m square; time printed, not checked. Full size (600 blades a square
+        // metre at 1080p) with RMTN_FIELD_BENCH set; smaller by default, for software GL on CI.
+        const bool bench = std::getenv("RMTN_FIELD_BENCH") != nullptr;
+        auto s = meadow([bench](g3d::Field& f) { f.min = { -200, -200 }; f.max = { 200, 200 }; f.density = bench ? 600.f : 120.f; });
+        s->camera.position = { 0, 1.7f, 6 };
+        s->camera.target = { 0, 1.2f, -10 };
+        s->objects[0]->material.color = { 70, 92, 40, 255 };
+        Comp c = longComp(s, bench ? 1920 : 480, bench ? 1080 : 270);
+        Image first = render(c, 30);
+        dumpField("landscape.png", first);
+        UnloadImage(first);
+        const int frames = bench ? 5 : 2;
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int f = 31; f < 31 + frames; f++) UnloadImage(render(c, f));
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / frames;
+        std::printf("[scene3d] grass landscape %dx%d: %lld blades submitted, %.1f ms a frame (with readback)\n",
+                    c.w, c.h, g3d::fieldBladesSubmitted(), ms);
+    }
+}
+
+// ---- trees (flora::makeTree, addForest): levels by distance, impostors, wind
+static g3d::ScenePtr treeStage(Color ground = { 200, 40, 200, 255 }) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->ambient = 0.4f;
+    g3d::Material g;
+    g.color = ground;
+    g.roughness = 1;
+    s->add(g3d::Geometry::plane(400, 400), g);
+    g3d::Light sun = g3d::Light::directional({ 20, 30, 14 }, { 255, 240, 220, 255 }, 2.2f, true);
+    sun.shadowExtent = 40;
+    s->lights.push_back(sun);
+    return s;
+}
+static void trees() {
+    const char* names[] = { "oak", "birch", "pine", "spruce", "palm", "tropical", "shrub", "hedge" };
+    std::vector<flora::TreePtr> built;
+    for (const char* n : names) {
+        flora::TreeSpec spec = flora::tree(n);
+        const auto t0 = std::chrono::steady_clock::now();
+        built.push_back(flora::makeTree(spec));
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        std::printf("[scene3d] tree %-8s %6lld / %5lld triangles (hero / reduced), %5d leaf and %5d wood vertices, %.0f ms to build\n", n,
+                    built.back()->heroTriangles, built.back()->reducedTriangles, built.back()->hero.leaves->vertices,
+                    built.back()->hero.wood->vertices, ms);
+    }
+    // Tree pixels: neither the magenta ground nor the black sky.
+    auto isTree = [](Color c) { return !(c.r > 1.3f * c.g && c.b > 1.3f * c.g) && c.r + c.g + c.b > 12; };
+    auto coverage = [&](const Image& img, int* sumX = nullptr) {
+        int n = 0;
+        long long sx = 0;
+        for (int y = 0; y < img.height; y++)
+            for (int x = 0; x < img.width; x++)
+                if (isTree(GetImageColor(img, x, y))) { n++; sx += x; }
+        if (sumX) *sumX = n ? (int)(sx / n) : -1;
+        return n;
+    };
+    auto noShadows = [](g3d::ScenePtr s) { s->lights[0].castShadow = false; return s; };
+    {   // Instance::fade: f and -(1 - f) cover each pixel exactly once, f alone about f of them
+        auto boxes = [&](float a, float b) {
+            auto s = noShadows(treeStage());
+            s->camera.position = { 0, 1, 6 };
+            s->camera.target = { 0, 1, 0 };
+            auto in = std::make_shared<g3d::Instances>();
+            g3d::Material m;
+            m.color = { 30, 200, 60, 255 };
+            in->mesh = flora::makeTree(flora::shrub(), { 1, 4, 1, 16 })->views[0];   // a quad
+            auto add = [&](float f, Color tint) {
+                g3d::Instance i;
+                i.scale = 0.6f; i.fade = f; i.tint = tint;
+                in->list.push_back(i);
+            };
+            if (a != 0) add(a, WHITE);
+            if (b != 0) add(b, WHITE);
+            m.alphaCutoff = 0;
+            m.dynamicMap.reset();
+            s->add(in, m);
+            Comp c = longComp(s, 320, 180);
+            return render(c, 3);
+        };
+        Image whole = boxes(1, 0), part = boxes(0.25f, 0), both = boxes(0.25f, -0.75f);
+        const int all = coverage(whole), quarter = coverage(part), joined = coverage(both);
+        std::printf("[scene3d] screen door: %d pixels whole, %d at fade 0.25, %d at 0.25 and -0.75\n", all, quarter, joined);
+        CHECK(all > 2000);
+        CHECK(std::abs(quarter - all / 4) < all / 40);
+        CHECK(std::abs(joined - all) <= all / 200);
+        UnloadImage(whole); UnloadImage(part); UnloadImage(both);
+    }
+    {   // levels by distance: walking away changes the tree's coverage smoothly (no popping)
+        // through hero -> reduced -> impostor; with a 0.05 m blend the same walk pops.
+        auto walk = [&](float blend, int& worst, int& at) {
+            worst = 0; at = 0;
+            int before = -1;
+            for (int k = 0; k <= 60; k++) {
+                const float d = 18 + 0.5f * k;                      // across 25 and 40 m
+                auto s = noShadows(treeStage());
+                s->camera.position = { 0, 6, d };
+                s->camera.target = { 0, 6, 0 };
+                s->camera.fov = 40.f * 30 / d;                     // the tree keeps its size on screen
+                flora::ForestSpec fs;
+                fs.reducedFrom = 25; fs.impostorFrom = 40; fs.blend = blend; fs.wind = 0; fs.gust = 0;
+                flora::addTree(*s, built[0], { 0, 0, 0 }, 0, 1, fs);
+                Comp c = longComp(s, 240, 240);
+                Image img = render(c, 0);
+                const int n = coverage(img);
+                UnloadImage(img);
+                if (before >= 0 && std::abs(n - before) > worst) { worst = std::abs(n - before); at = k; }
+                before = n;
+            }
+        };
+        int smoothWorst, smoothAt, popWorst, popAt;
+        walk(6, smoothWorst, smoothAt);
+        walk(0.05f, popWorst, popAt);
+        std::printf("[scene3d] tree levels: largest step in coverage %d px blended (at %.1f m), %d px with no blend (at %.1f m)\n",
+                    smoothWorst, 18 + 0.5f * smoothAt, popWorst, 18 + 0.5f * popAt);
+        CHECK(smoothWorst * 2 < popWorst);
+    }
+    {   // the impostor is the tree: its silhouette overlaps the full tree's from any side
+        for (float yaw : { 0.f, 70.f, 200.f }) {
+            auto shot = [&](bool far) {
+                auto s = noShadows(treeStage());
+                s->camera.position = { 0, 6, 30 };
+                s->camera.target = { 0, 6, 0 };
+                flora::ForestSpec fs;
+                fs.wind = 0; fs.gust = 0;
+                if (far) { fs.reducedFrom = 1; fs.impostorFrom = 2; fs.blend = 0.1f; }
+                flora::addTree(*s, built[0], { 0, 0, 0 }, yaw, 1, fs);
+                Comp c = longComp(s, 240, 240);
+                return render(c, 0);
+            };
+            Image a = shot(false), b = shot(true);
+            int both = 0, either = 0;
+            for (int y = 0; y < a.height; y++)
+                for (int x = 0; x < a.width; x++) {
+                    const bool p = isTree(GetImageColor(a, x, y)), q = isTree(GetImageColor(b, x, y));
+                    both += p && q; either += p || q;
+                }
+            const float iou = either ? (float)both / either : 0;
+            std::printf("[scene3d] oak impostor at yaw %.0f: silhouette overlap %.2f\n", yaw, iou);
+            CHECK(iou > 0.6f);
+            UnloadImage(a); UnloadImage(b);
+        }
+    }
+    {   // wind: the crown leans downwind, frames are pure, and the wind moves it
+        auto windy = [&](Vector2 dir) {
+            auto s = noShadows(treeStage());
+            s->camera.position = { 0, 6, 30 };
+            s->camera.target = { 0, 6, 0 };
+            flora::ForestSpec fs;
+            fs.windDirection = dir; fs.wind = 3; fs.gust = 0;
+            flora::addTree(*s, built[1], { 0, 0, 0 }, 37, 1, fs);
+            return longComp(s, 240, 240);
+        };
+        Comp east = windy({ 1, 0 }), west = windy({ -1, 0 });
+        Image e = render(east, 12), w = render(west, 12);
+        int ex = 0, wx = 0;
+        coverage(e, &ex); coverage(w, &wx);
+        std::printf("[scene3d] birch in wind: crown centre x %d blown east, %d blown west\n", ex, wx);
+        CHECK(ex > wx + 2);
+        Comp again = windy({ 1, 0 });
+        Image prev = render(again, 11), next = render(again, 12);
+        bool same = true, moved = false;
+        for (int y = 0; y < e.height; y++)
+            for (int x = 0; x < e.width; x++) {
+                const Color p = GetImageColor(e, x, y), q = GetImageColor(next, x, y), o = GetImageColor(prev, x, y);
+                same = same && p.r == q.r && p.g == q.g && p.b == q.b;
+                moved = moved || p.r != o.r || p.g != o.g || p.b != o.b;
+            }
+        CHECK(same);
+        CHECK(moved);
+        UnloadImage(e); UnloadImage(w); UnloadImage(prev); UnloadImage(next);
+    }
+    {   // growth: u = 0 draws nothing, u = 1 is the still tree, coverage rises with u, frames pure
+        auto grown = [&](float u, bool growing) {
+            auto s = noShadows(treeStage());
+            s->camera.position = { 0, 6, 30 };
+            s->camera.target = { 0, 6, 0 };
+            flora::ForestSpec still;
+            still.wind = 0;
+            still.reducedFrom = 200; still.impostorFrom = 300;
+            if (growing) flora::addGrowingTree(*s, built[0], { 0, 0, 0 }, 20, 1, [u](int) { return u; }, still);
+            else flora::addTree(*s, built[0], { 0, 0, 0 }, 20, 1, still);
+            Comp c = longComp(s, 240, 240);
+            return render(c, 5);
+        };
+        Image none = grown(0, true), whole = grown(1, true), reference = grown(1, false);
+        dumpField("grown-1.png", whole);
+        dumpField("still-tree.png", reference);
+        int differ = 0;
+        for (int y = 0; y < whole.height; y++)
+            for (int x = 0; x < whole.width; x++) {
+                const Color a = GetImageColor(whole, x, y), b = GetImageColor(reference, x, y);
+                differ += std::abs(a.r - b.r) + std::abs(a.g - b.g) + std::abs(a.b - b.b) > 6;
+            }
+        std::vector<int> cover;
+        for (float u : { 0.1f, 0.3f, 0.5f, 0.7f, 0.85f, 1.f }) {
+            Image img = grown(u, true);
+            cover.push_back(coverage(img));
+            UnloadImage(img);
+        }
+        std::printf("[scene3d] oak growing: %d px at u 0; coverage %d %d %d %d %d %d at u 0.1..1; %d px differ from the still tree\n",
+                    coverage(none), cover[0], cover[1], cover[2], cover[3], cover[4], cover[5], differ);
+        CHECK(coverage(none) == 0);
+        bool rising = true;
+        for (size_t i = 1; i < cover.size(); i++) rising = rising && cover[i] >= cover[i - 1];
+        CHECK(rising && cover[0] > 0);
+        CHECK(differ < whole.width * whole.height / 200);
+        UnloadImage(none); UnloadImage(whole); UnloadImage(reference);
+
+        auto s = noShadows(treeStage());
+        s->camera.position = { 0, 6, 30 };
+        s->camera.target = { 0, 6, 0 };
+        flora::addGrowingTree(*s, built[1], { 0, 0, 0 }, 0, 1, [](int t) { return t / 20.f; });
+        Comp c = longComp(s, 240, 240);
+        Image prev = render(c, 11), next = render(c, 12);
+        Comp fresh = longComp(s, 240, 240);
+        Image alone = render(fresh, 12);
+        bool same = true;
+        for (int y = 0; y < next.height && same; y++)
+            for (int x = 0; x < next.width && same; x++) {
+                const Color p = GetImageColor(next, x, y), q = GetImageColor(alone, x, y);
+                same = p.r == q.r && p.g == q.g && p.b == q.b;
+            }
+        CHECK(same);
+        UnloadImage(prev); UnloadImage(next); UnloadImage(alone);
+    }
+    {   // styles: a paper card turns to face any camera; low-poly toon trees draw; a sky after a forest
+        flora::TreeBuild paperBuild{ 4, 4, 4, 64 }, lowBuild = paperBuild;
+        paperBuild.style = flora::TreeStyle::PaperCut;
+        lowBuild.style = flora::TreeStyle::LowPoly;
+        lowBuild.shading = g3d::Shading::Toon;
+        const flora::TreePtr paper = flora::makeTree(flora::oak(), paperBuild), low = flora::makeTree(flora::oak(), lowBuild);
+        auto seen = [&](const flora::TreePtr& t, float azimuth, bool growing) {
+            auto s = noShadows(treeStage());
+            s->camera.position = { 30 * std::sin(azimuth * DEG2RAD), 7, 30 * std::cos(azimuth * DEG2RAD) };
+            s->camera.target = { 0, 7, 0 };
+            flora::ForestSpec still;
+            still.wind = 0;
+            if (growing) flora::addGrowingTree(*s, t, { 0, 0, 0 }, 0, 1, [](int) { return 1.f; }, still);
+            else flora::addTree(*s, t, { 0, 0, 0 }, 0, 1, still);
+            Comp c = longComp(s, 200, 200);
+            Image img = render(c, 3);
+            const int n = coverage(img);
+            UnloadImage(img);
+            return n;
+        };
+        const int front = seen(paper, 0, false), side = seen(paper, 90, false), back = seen(paper, 200, false),
+                  growSide = seen(paper, 90, true), lowFront = seen(low, 0, false), lowSide = seen(low, 90, false);
+        std::printf("[scene3d] paper oak: %d / %d / %d px from 0 / 90 / 200 degrees, %d growing from 90; low-poly toon oak %d / %d px\n",
+                    front, side, back, growSide, lowFront, lowSide);
+        CHECK(front > 2000 && std::abs(side - front) < front / 10 && std::abs(back - front) < front / 10);
+        CHECK(std::abs(growSide - front) < front / 10);
+        CHECK(lowFront > 2000 && lowSide > 2000);
+        // Splat crowns: drawn whole when grown and still; while growing, they come in after the wood.
+        flora::TreeBuild splatBuild = paperBuild;
+        splatBuild.style = flora::TreeStyle::Splat;
+        const flora::TreePtr soft = flora::makeTree(flora::oak(), splatBuild);
+        auto grownSoft = [&](float u) {
+            auto s = noShadows(treeStage());
+            s->camera.position = { 0, 7, 30 };
+            s->camera.target = { 0, 7, 0 };
+            flora::ForestSpec still;
+            still.wind = 0;
+            flora::addGrowingTree(*s, soft, { 0, 0, 0 }, 0, 1, [u](int) { return u; }, still);
+            Comp c = longComp(s, 200, 200);
+            Image img = render(c, 3);
+            const int n = coverage(img);
+            UnloadImage(img);
+            return n;
+        };
+        const int softStill = seen(soft, 0, false), softHalf = grownSoft(0.5f), softFull = grownSoft(1);
+        std::printf("[scene3d] splat oak: %d px still, %d px growing at u 0.5, %d at u 1\n", softStill, softHalf, softFull);
+        CHECK(softStill > 2000 && std::abs(softFull - softStill) < softStill / 10 && softHalf < softFull / 2);
+
+        // A forest leaves the shared program instanced; the next scene's sky must still draw.
+        auto sky = [&](bool forestFirst) {
+            if (forestFirst) {
+                auto s = noShadows(treeStage());
+                flora::addTree(*s, low, { 0, 0, 0 }, 0, 1);
+                Comp c = longComp(s, 64, 64);
+                UnloadImage(render(c, 1));
+            }
+            auto s = std::make_shared<g3d::Scene>();
+            s->camera.position = { 0, 2, 10 };
+            s->camera.target = { 0, 4, 0 };
+            s->sky.enabled = true;
+            s->sky.show = true;
+            Comp c = longComp(s, 64, 64);
+            Image img = render(c, 1);
+            const Color top = GetImageColor(img, 32, 4);
+            UnloadImage(img);
+            return top;
+        };
+        const Color clean = sky(false), after = sky(true);
+        std::printf("[scene3d] sky alone (%d %d %d), after a forest (%d %d %d)\n", clean.r, clean.g, clean.b, after.r, after.g, after.b);
+        CHECK(clean.r + clean.g + clean.b > 150 && std::abs(after.r - clean.r) + std::abs(after.g - clean.g) + std::abs(after.b - clean.b) < 6);
+    }
+    {   // city plants: trees from SolitaryVegetationObjects (height, species, points), cover as grass or shrubs
+        const city::Model town = city::parse(R"({"type":"CityJSON","version":"2.0","transform":{"scale":[1,1,1],"translate":[0,0,0]},
+          "CityObjects":{
+            "house":{"type":"Building","geometry":[{"type":"MultiSurface","lod":"1","boundaries":[[[0,1,2,3]]]}]},
+            "pine":{"type":"SolitaryVegetationObject","attributes":{"species":"Pinus sylvestris","height":"18 m"},
+                    "geometry":[{"type":"MultiPoint","lod":"1","boundaries":[4]}]},
+            "row":{"type":"SolitaryVegetationObject","geometry":[{"type":"MultiPoint","lod":"1","boundaries":[5,6,7]}]},
+            "lawn":{"type":"PlantCover","attributes":{"averageHeight":0.3},
+                    "geometry":[{"type":"MultiSurface","lod":"1","boundaries":[[[8,9,10,11]]]}]},
+            "bed":{"type":"PlantCover","attributes":{"averageHeight":2},
+                   "geometry":[{"type":"MultiSurface","lod":"1","boundaries":[[[12,13,14,15]]]}]}},
+          "vertices":[[30,30,0],[34,30,0],[34,34,0],[30,34,0],
+                      [-12,0,0],[4,-2,0],[10,-2,0],[16,-2,0],
+                      [-20,-14,0],[-4,-14,0],[-4,-6,0],[-20,-6,0],
+                      [8,-16,0],[18,-16,0],[18,-10,0],[8,-10,0]]})");
+        int plants = 0;
+        for (const city::Object& o : town.objects) plants += city::isPlant(o);
+        CHECK(plants == 4);
+        auto s = noShadows(treeStage());
+        s->camera.position = { 0, 9, 46 };
+        s->camera.target = { 0, 7, 0 };
+        city::Plants p;
+        p.forest.wind = 0;
+        p.build = { 4, 4, 4, 32 };
+        g3d::Object3D* green = city::addPlants(*s, town, p);
+        int fields = 0, forests = 0;
+        for (const auto& ch : green->children) { fields += ch->field != nullptr; forests += !ch->children.empty(); }
+        Comp c = longComp(s, 320, 200);
+        Image img = render(c, 3);
+        dumpField("city-plants.png", img);
+        // The pine (x -12, 18 m) stands taller than the 10 m street trees (x 4..16).
+        auto topOf = [&](int x0, int x1) {
+            for (int y = 0; y < img.height; y++)
+                for (int x = x0; x < x1; x++) if (isTree(GetImageColor(img, x, y))) return y;
+            return img.height;
+        };
+        const int pineTop = topOf(0, 90), rowTop = topOf(110, 250);           // the left third; the middle
+        std::printf("[scene3d] city plants: %d grass field(s), %d forest(s); pine top at y %d, street trees at y %d; %d tree px\n",
+                    fields, forests, pineTop, rowTop, coverage(img));
+        CHECK(fields == 1 && forests == 2);
+        CHECK(pineTop < rowTop - 10 && rowTop < img.height);
+        UnloadImage(img);
+    }
+    {   // geo3d forest cover: trees stand along the surface's up, globe or map, and grow in
+        auto surface = std::make_shared<geo3d::Surface>(geo::Projection::equirectangular(), geo::LonLat{ 20, 55 }, 1);
+        geo::Geometry patch;
+        patch.polygons.push_back({ { { 5, 45 }, { 35, 45 }, { 35, 65 }, { 5, 65 }, { 5, 45 } } });
+        auto s = std::make_shared<g3d::Scene>();
+        s->lights.push_back(g3d::Light::directional({ 1, 2, 3 }, WHITE, 1.4f, false));
+        g3d::Object3D* world = s->add();
+        g3d::Material ground;
+        ground.color = { 200, 40, 200, 255 };
+        geo3d::base(*world, surface, ground, 64);
+        float u = 1;
+        geo3d::ForestCover cover;
+        cover.spacing = 1.2f;
+        cover.height = 0.05f;
+        cover.grow = [&u](int) { return u; };
+        g3d::Object3D* trees = geo3d::forest(*world, surface, { patch }, cover);
+        auto standing = [&](float morph) {
+            surface->morph = morph;
+            trees->up(0, *trees);
+            float worst = 1;
+            size_t n = 0;
+            for (const auto& ch : trees->children)
+                for (const g3d::Instance& in : ch->instances->list) {
+                    const Vector3 dir = Vector3Transform({ 0, 1, 0 }, MatrixRotateXYZ(Vector3Scale({ in.pitch, 0, in.bank }, DEG2RAD)));
+                    // the tree's base is where the surface is; compare its +y with the surface's up there
+                    float bestDot = -2;
+                    for (float lon = 5; lon <= 35; lon += 0.25f)
+                        for (float lat = 45; lat <= 65; lat += 0.25f)
+                            if (Vector3DistanceSqr(surface->point({ lon, lat }), in.position) < 1e-4f)
+                                bestDot = std::max(bestDot, Vector3DotProduct(dir, surface->up({ lon, lat })));
+                    if (bestDot > -2) worst = std::min(worst, bestDot);
+                    n++;
+                }
+            return std::make_pair(n, worst);
+        };
+        const auto globe = standing(0), half = standing(0.5f), flat = standing(1);
+        u = 0;
+        const auto none = standing(0);
+        u = 1;
+        std::printf("[scene3d] map forest: %zu tree parts; up vs surface up, worst cosine %.4f globe, %.4f half, %.4f map; %zu at grow 0\n",
+                    globe.first, globe.second, half.second, flat.second, none.first);
+        CHECK(globe.first > 300 && none.first == 0);
+        CHECK(globe.second > 0.995f && half.second > 0.995f && flat.second > 0.995f);
+        surface->morph = 0;
+        s->camera.position = Vector3Scale(surface->onGlobe({ 20, 55 }), 2.6f);
+        s->camera.target = { 0, 0, 0 };
+        Comp c = longComp(s, 320, 240);
+        Image img = render(c, 2);
+        dumpField("map-forest.png", img);
+        int green = 0;
+        for (int y = 0; y < img.height; y++)
+            for (int x = 0; x < img.width; x++) {
+                const Color q = GetImageColor(img, x, y);
+                green += q.g > q.r && q.g > q.b && q.g > 30;
+            }
+        std::printf("[scene3d] map forest on the globe: %d green px\n", green);
+        CHECK(green > 800);
+        UnloadImage(img);
+    }
+    {   // grass growth: blades come up from a point outwards; none at grow 0, rising, not popping
+        auto field = [&](float grow) {
+            auto s = meadow([grow](g3d::Field& f) {
+                f.arrival = flora::arrivalFrom({ 0, -4 }, 12);
+                f.grow = grow;
+                f.gust = 0; f.sway = 0;
+            });
+            s->camera.position = { 0, 9, 8 };
+            s->camera.target = { 0, 0, -4 };
+            Comp c = longComp(s, 240, 160);
+            return render(c, 4);
+        };
+        auto blades = [](const Image& img, int* nearCentre = nullptr) {
+            int n = 0, near = 0;
+            for (int y = 0; y < img.height; y++)
+                for (int x = 0; x < img.width; x++) {
+                    const Color c = GetImageColor(img, x, y);
+                    if (c.g > c.r && c.g > c.b) { n++; if (std::abs(x - img.width / 2) < 30 && std::abs(y - img.height / 2) < 30) near++; }
+                }
+            if (nearCentre) *nearCentre = near;
+            return n;
+        };
+        std::vector<int> counts;
+        int nearHalf = 0;
+        for (int k = 0; k <= 10; k++) {
+            Image img = field(k / 10.f);
+            counts.push_back(blades(img, k == 4 ? &nearHalf : nullptr));
+            UnloadImage(img);
+        }
+        int worst = 0;
+        for (size_t i = 1; i < counts.size(); i++) worst = std::max(worst, std::abs(counts[i] - counts[i - 1]));
+        std::printf("[scene3d] grass growing: %d blade px at 0, %d at 0.4 (%d near the start), %d at 1; largest step %d\n",
+                    counts[0], counts[4], nearHalf, counts[10], worst);
+        CHECK(counts[0] == 0);
+        CHECK(counts[4] > 0 && counts[4] < counts[10] && nearHalf > 0);
+        CHECK(worst < counts[10] / 3);
+    }
+    {   // a forest: time printed, not checked. 1 km square, ~10^4 trees, with RMTN_FIELD_BENCH.
+        const bool bench = std::getenv("RMTN_FIELD_BENCH") != nullptr;
+        const float half = bench ? 500.f : 120.f;
+        auto s = treeStage({ 70, 92, 40, 255 });
+        s->camera.position = { 0, 30, half + 20 };
+        s->camera.target = { 0, 6, half - 60 };
+        s->camera.fov = 55;
+        const auto placed = flora::scatter(flora::rect({ -half, -half }, { half, half }), { 7.f, 0.3f, 60, 0.8f, 1.2f, 4 }, 3);
+        flora::addForest(*s, placed, { built[0], built[1], built[2], built[3] });
+        Comp c = longComp(s, bench ? 1920 : 480, bench ? 1080 : 270);
+        Image first = render(c, 30);
+        dumpField("forest.png", first);
+        UnloadImage(first);
+        const int frames = bench ? 5 : 2;
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int f = 31; f < 31 + frames; f++) UnloadImage(render(c, f));
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / frames;
+        std::printf("[scene3d] forest %dx%d: %zu trees, %.1f ms a frame (with readback)\n", c.w, c.h, placed.size(), ms);
+    }
+    if (std::getenv("RMTN_FIELD_DUMP")) {     // the presets in a row, near enough for the full trees
+        auto s = treeStage({ 92, 104, 60, 255 });
+        s->camera.position = { 0, 9, 52 };
+        s->camera.target = { 0, 7, 0 };
+        s->camera.fov = 50;
+        std::vector<flora::Placement> row;
+        for (int i = 0; i < 8; i++) row.push_back({ { -35.f + 10 * i, 0, 0 }, 0, 1, i, (uint32_t)i + 1 });
+        flora::ForestSpec fs;
+        fs.reducedFrom = 200; fs.impostorFrom = 300;
+        flora::addForest(*s, row, built, fs);
+        Comp c = longComp(s, 1600, 600);
+        Image img = render(c, 10, 2);
+        dumpField("trees.png", img);
+        UnloadImage(img);
+        fs.reducedFrom = 1; fs.impostorFrom = 2;               // the same row as impostors
+        s->objects.pop_back();
+        flora::addForest(*s, row, built, fs);
+        Image far = render(c, 10, 2);
+        dumpField("trees-impostors.png", far);
+        UnloadImage(far);
+        s->objects.pop_back();                                  // close: oak, birch, pine, palm
+        fs.reducedFrom = 200; fs.impostorFrom = 300;
+        std::vector<flora::Placement> four;
+        const int pick[4] = { 0, 1, 2, 4 };
+        for (int i = 0; i < 4; i++) four.push_back({ { -21.f + 14 * i, 0, 0 }, 30.f * i, 1, pick[i], (uint32_t)i + 1 });
+        flora::addForest(*s, four, built, fs);
+        s->camera.position = { 0, 6, 30 };
+        s->camera.target = { 0, 7, 0 };
+        s->camera.fov = 60;
+        s->sky = g3d::Sky::day();
+        Image near = render(c, 10, 2);
+        dumpField("trees-close.png", near);
+        UnloadImage(near);
+        s->objects.pop_back();                                  // an oak growing, u 0.15 .. 1
+        std::vector<flora::Placement> stages;
+        for (int i = 0; i < 6; i++) stages.push_back({ { -30.f + 12 * i, 0, 0 }, 0, 0.8f, i % 2 ? 0 : 3, (uint32_t)i });
+        flora::addGrowingTrees(*s, stages, built, [](int, const flora::Placement& p) { return 0.15f + 0.17f * p.id; });
+        s->camera.position = { 0, 7, 34 };
+        Image strip = render(c, 10, 2);
+        dumpField("growth.png", strip);
+        UnloadImage(strip);
+    }
+}
+
 int main() try {
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
@@ -1566,11 +2550,13 @@ int main() try {
     supersampledPlacement();
     lighting();
     shadows();
+    lowSunShadows();
     viewportsAndOpacity();
     transparencyAndHierarchy();
     moreShadows();
     culling();
     instancing();
+    vegetationMaterials(dir);
     waterTest();
     environment(dir);
     skyAndFog();
@@ -1584,6 +2570,8 @@ int main() try {
     particles3d();
     surfaces();
     lines3d();
+    grassField();
+    trees();
     devices();
     shutdownGraphics();
     CloseWindow();

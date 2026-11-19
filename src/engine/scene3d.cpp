@@ -91,10 +91,12 @@ in mat4 instanceTransform;
 uniform int instanced;
 uniform sampler2D vat;
 uniform int vatWidth; uniform int vatVerts; uniform int vatRows;
-mat4 instM; vec4 instAnim;
+mat4 instM; vec4 instAnim; float instFade = 1.0;
+// The third column's w is the frame blend plus 32 (Instance::fade + 1), quantised to 1/32.
 void setupInstance() {
     instM = instanceTransform;
-    instAnim = vec4(instM[0].w, instM[1].w, instM[2].w, instM[3].w);
+    instAnim = vec4(instM[0].w, instM[1].w, fract(instM[2].w), instM[3].w);
+    instFade = floor(instM[2].w) / 32.0 - 1.0;
     instM[0].w = 0.0; instM[1].w = 0.0; instM[2].w = 0.0; instM[3].w = 1.0;
 }
 vec3 vatFetch(float frame, int row0) {
@@ -103,6 +105,91 @@ vec3 vatFetch(float frame, int row0) {
 }
 vec3 instPosition() { return mix(vatFetch(instAnim.x, 0), vatFetch(instAnim.y, 0), instAnim.z); }
 vec3 instNormal() { return normalize(mix(vatFetch(instAnim.x, vatRows), vatFetch(instAnim.y, vatRows), instAnim.z)); }
+// The body's colour multiplier (tint x shade), 0..254 a channel for 0..2, packed as the
+// integer r + 256 g + 65536 b (exact in a float).
+vec3 instTint() {
+    float v = instAnim.w;
+    return vec3(mod(v, 256.0), mod(floor(v / 256.0), 256.0), floor(v / 65536.0)) / 127.0;
+}
+)";
+
+// ---- grass fields (g3d::Field): every blade is made here from its tile and its number, the
+// instance id. The vertex attribute is the blade template's corner: x -1 / 1 across the blade
+// (0 at the tip), y 0 at the root to 1 at the tip. Field::bladeRoot mirrors the placement.
+const char* FIELD_VS = R"(
+uniform int fieldOn;
+uniform mat4 fieldWorld;                 // the object's world matrix
+uniform vec4 fieldTile;                  // tile corner x, z (object space), tile size, blades in a full tile
+uniform ivec2 fieldKey;                  // the tile's column and row
+uniform int fieldSeed;
+uniform vec4 fieldArea;                  // min x, min z, max x, max z: where the maps lie
+uniform vec2 fieldMapFit;                // map uv scale and offset onto texel centres
+uniform sampler2D fieldMaps;             // r ground height, g density, b height multiplier, a arrival
+uniform vec4 fieldBlade;                 // height, height variation, width, lean
+uniform vec4 fieldWind;                  // direction x, z (unit, object space), sway, gust
+uniform vec4 fieldGusts;                 // speed, spacing, time (s), colour variation
+uniform vec4 fieldFade;                  // fade start, fade end, dryness, grow
+uniform vec3 fieldCam;                   // the viewing camera (world), in the shadow passes too
+uniform vec3 fieldRoot; uniform vec3 fieldTip; uniform vec3 fieldDry;     // sRGB 0..1
+uniform float fieldBands;                // Field::colorBands (0 = smooth)
+uint fieldHash(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
+float fieldRand(uint x) { return float(fieldHash(x) >> 8) / 16777216.0; }
+// Point k of the R2 sequence (Roberts 2018) in the unit square, shifted per tile: any first n
+// points are spread evenly, so a tile can be thinned by drawing fewer.
+vec2 fieldSpot(uint k, uint th) {
+    uint x = k * 3242174889u + th, z = k * 2447445413u + fieldHash(th);
+    return vec2(float(x >> 8), float(z >> 8)) / 16777216.0;
+}
+bool fieldVertex(vec3 corner, out vec3 pos, out vec3 nrm, out vec4 col) {
+    uint k = uint(gl_InstanceID);
+    uint th = fieldHash(uint(fieldKey.x) * 73856093u ^ uint(fieldKey.y) * 19349663u ^ uint(fieldSeed) * 83492791u);
+    vec2 p = fieldTile.xy + fieldSpot(k, th) * fieldTile.z;
+    vec2 a = (p - fieldArea.xy) / (fieldArea.zw - fieldArea.xy);
+    if (a.x < 0.0 || a.y < 0.0 || a.x > 1.0 || a.y > 1.0) return false;
+    vec4 maps = textureLod(fieldMaps, a * fieldMapFit.x + fieldMapFit.y, 0.0);
+    uint h = fieldHash(k * 2654435769u ^ th);
+    float r1 = fieldRand(h), r2 = fieldRand(h + 1u), r3 = fieldRand(h + 2u), r4 = fieldRand(h + 3u);
+    float r5 = fieldRand(h + 4u), r6 = fieldRand(h + 5u), r7 = fieldRand(h + 6u);
+    vec3 rootW = (fieldWorld * vec4(p.x, maps.r, p.y, 1.0)).xyz;
+    float far = 1.0 - smoothstep(fieldFade.x, fieldFade.y, distance(rootW, fieldCam));
+    // Blades are kept by rank: the first `keep` of the tile stay, and those just past it
+    // shrink away over a band instead of popping.
+    const float BAND = 0.12;
+    float keep = maps.g * far, rank = (float(k) + 0.5) / fieldTile.w;
+    float s = clamp((keep * (1.0 + BAND) - rank) / BAND, 0.0, 1.0);
+    float grown = clamp((fieldFade.w * 1.15 - maps.a) / 0.15, 0.0, 1.0);     // Field::grow past the arrival
+    float H = fieldBlade.x * (1.0 + fieldBlade.y * (2.0 * r1 - 1.0)) * maps.b * s * grown * grown * (3.0 - 2.0 * grown);
+    if (H <= 1e-4) return false;
+    float W = fieldBlade.z * (0.7 + 0.6 * r2) / max(far, 0.33);        // fewer blades far off, each wider
+    float yaw = r3 * 6.2831853;
+    vec3 side = vec3(cos(yaw), 0.0, sin(yaw));
+    vec2 face = vec2(-side.z, side.x), wd = fieldWind.xy;
+    // The bend, as the tip's offset over the height: a resting lean, a steady sway downwind
+    // with a flutter, and gust fronts travelling downwind (a gust reaches a blade further
+    // downwind later).
+    float front = 0.5 + 0.5 * sin(6.2831853 * (dot(p, wd) - fieldGusts.x * fieldGusts.z) / max(fieldGusts.y, 0.01));
+    float flutter = sin(fieldGusts.z * (5.0 + 3.0 * r4) + r5 * 6.2831853);
+    vec2 bend = face * fieldBlade.w * (0.4 + 1.2 * r4)
+              + wd * (fieldWind.z * (1.0 + 0.4 * flutter) + fieldWind.w * front * front)
+              + vec2(-wd.y, wd.x) * (fieldWind.z * 0.3 * flutter);
+    float bl = length(bend);
+    if (bl > 0.9) { bend *= 0.9 / bl; bl = 0.9; }
+    float c = sqrt(1.0 - bl * bl), t = corner.y;
+    // Root at 0, tip at (bend * H, c * H): the blade keeps about its length as it bends.
+    vec3 centre = vec3(p.x + bend.x * H * t * t, maps.r + H * (t + t * t * (c - 1.0)), p.y + bend.y * H * t * t);
+    vec3 tangent = normalize(vec3(2.0 * bend.x * t, 1.0 + 2.0 * t * (c - 1.0), 2.0 * bend.y * t));
+    vec3 objPos = centre + side * (0.5 * W * (1.0 - pow(t, 1.5)) * corner.x);
+    vec3 n = normalize(cross(side, tangent) + side * (0.4 * corner.x));     // rounded across the blade
+    pos = (fieldWorld * vec4(objPos, 1.0)).xyz;
+    n = normalize(mat3(fieldWorld) * n);
+    if (dot(n, fieldCam - pos) < 0.0) n = -n;                                // lit on the side seen
+    nrm = normalize(mix(n, vec3(0.0, 1.0, 0.0), 0.3 + 0.4 * (1.0 - far)));  // far off, shaded like the ground
+    float tc = fieldBands > 1.5 ? min(floor(t * fieldBands), fieldBands - 1.0) / (fieldBands - 1.0) : t;   // flat bands
+    vec3 base = mix(fieldRoot, fieldTip, tc) * (1.0 + fieldGusts.w * (r6 - 0.5));
+    if (r7 < fieldFade.z) base = mix(base, fieldDry * (0.8 + 0.2 * tc), 0.5 + 0.5 * r2);
+    col = vec4(base * (fieldBands > 1.5 ? 1.0 : 0.75 + 0.25 * t), 1.0);
+    return true;
+}
 )";
 
 
@@ -325,9 +412,10 @@ void main() {
 )";
 
 const char* LIT_VS_BODY = R"(
-out vec3 fragPos; out vec2 fragTexCoord; out vec3 fragNormal; out vec4 fragColor;
+out vec3 fragPos; out vec2 fragTexCoord; out vec3 fragNormal; out vec4 fragColor; flat out float fragFade;
 void main() {
     fragTexCoord = vertexTexCoord;
+    fragFade = 1.0;
     if (waterMode == 1) {                     // the sea's surface: a mesh round the camera, rolled by the waves
         vec2 p = vertexPosition.xz + waterCentre, g;
         vec4 world = vec4(p.x, waterLevel + waveHeight(p, g), p.y, 1.0);
@@ -337,12 +425,25 @@ void main() {
         gl_Position = mvp * world;
         return;
     }
+    if (fieldOn == 1) {
+        vec3 p, n; vec4 c;
+        fragTexCoord = vec2(vertexPosition.x * 0.5 + 0.5, vertexPosition.y);
+        if (!fieldVertex(vertexPosition, p, n, c)) {
+            fragPos = vec3(0.0); fragNormal = vec3(0.0, 1.0, 0.0); fragColor = vec4(0.0);
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);                           // outside the clip volume
+            return;
+        }
+        fragPos = p; fragNormal = n; fragColor = c;
+        gl_Position = mvp * vec4(p, 1.0);
+        return;
+    }
     if (instanced != 0) {
         setupInstance();
         vec4 world = instM * vec4(instPosition(), 1.0);
         fragPos = world.xyz;
         fragNormal = mat3(instM) * instNormal();
-        fragColor = vertexColor * vec4(vec3(instAnim.w), 1.0);
+        fragColor = vertexColor * vec4(instTint(), 1.0);
+        fragFade = instFade;
         gl_Position = mvp * world;
         return;
     }
@@ -356,9 +457,21 @@ void main() {
 )";
 
 const char* DEPTH_VS_BODY = R"(
+out vec2 fragTexCoord; out float fragAlpha; flat out float fragFade;
 void main() {
+    fragTexCoord = vertexTexCoord;
+    fragFade = 1.0;
+    fragAlpha = vertexColor.a;
+    if (fieldOn == 1) {
+        vec3 p, n; vec4 c;
+        fragTexCoord = vec2(vertexPosition.x * 0.5 + 0.5, vertexPosition.y);
+        fragAlpha = 1.0;
+        gl_Position = fieldVertex(vertexPosition, p, n, c) ? mvp * vec4(p, 1.0) : vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+    }
     if (instanced != 0) {
         setupInstance();
+        fragFade = instFade;
         gl_Position = mvp * (instM * vec4(instPosition(), 1.0));
         return;
     }
@@ -366,15 +479,45 @@ void main() {
 }
 )";
 
+// Material::alphaCutoff, shared by the lit, depth and g-buffer programs. Alpha grows with the
+// mip level, so a card that is mostly holes keeps its coverage far away (after Ben Golus,
+// "Anti-aliased Alpha Test", 2017).
+const char* CUTOUT_FS = R"(
+uniform float alphaCutoff;
+bool cutAway(float a, vec2 uv) {
+    if (alphaCutoff <= 0.0) return false;
+    vec2 texels = uv * vec2(textureSize(texture0, 0));
+    vec2 d = max(abs(dFdx(texels)), abs(dFdy(texels)));
+    float mip = max(log2(max(max(d.x, d.y), 1e-6)), 0.0);
+    return a * (1.0 + 0.25 * mip) < alphaCutoff;
+}
+// Instance::fade as a screen door: fade f > 0 keeps the pixels whose 4x4 Bayer level is
+// below f, f < 0 those at or above 1 + f, so a body at u and its stand-in at -u tile exactly.
+bool fadedAway(float f) {
+    if (f >= 1.0) return false;
+    ivec2 q = ivec2(gl_FragCoord.xy) & 3;
+    const float bayer[16] = float[16](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
+    float d = (bayer[q.y * 4 + q.x] + 0.5) / 16.0;
+    return f >= 0.0 ? d >= f : d < 1.0 + f;
+}
+)";
+
 const char* DEPTH_FS = R"(#version 330
+in vec2 fragTexCoord; in float fragAlpha; flat in float fragFade;
+uniform sampler2D texture0; uniform vec4 colDiffuse;
 out vec4 finalColor;
-void main() { finalColor = vec4(1.0); }
+//@CUTOUT_FS@
+void main() {
+    if (fadedAway(fragFade)) discard;
+    if (cutAway(texture(texture0, fragTexCoord).a * colDiffuse.a * fragAlpha, fragTexCoord)) discard;
+    finalColor = vec4(1.0);
+}
 )";
 
 // Colours arrive as sRGB (texture, colDiffuse, vertex colour) or already linear (scene
 // uniforms, converted on the CPU); lighting is linear and the result is re-encoded.
 const char* LIT_FS = R"(#version 330
-in vec3 fragPos; in vec2 fragTexCoord; in vec3 fragNormal; in vec4 fragColor;
+in vec3 fragPos; in vec2 fragTexCoord; in vec3 fragNormal; in vec4 fragColor; flat in float fragFade;
 uniform sampler2D texture0; uniform vec4 colDiffuse;
 uniform vec3 viewPos;
 uniform vec3 skyColor; uniform vec3 groundColor;
@@ -384,6 +527,7 @@ uniform float lightRange[8]; uniform float lightCosInner[8]; uniform float light
 uniform int lightShadow[8]; uniform float lightBias[8];
 uniform float roughness; uniform float metalness; uniform float reflection; uniform vec3 emissive; uniform int unlit; uniform float opacity;
 uniform int receiveShadow;
+uniform int fieldOn;                                   // drawing a g3d::Field
 uniform sampler2D shadowAtlas; uniform float atlasTexel;
 uniform mat4 shadowVP[16]; uniform vec4 shadowRect[16]; uniform vec4 shadowParams[16];
 uniform sampler2D envMap; uniform int hasEnv; uniform int envLinear; uniform float envMaxLod;
@@ -397,8 +541,28 @@ uniform int toonBands; uniform float toonSoftness; uniform float toonHighlight; 
 uniform vec3 rimColor; uniform float rimWidth;
 uniform vec3 goochWarm; uniform vec3 goochCool;
 uniform vec3 hatchInk; uniform float hatchSpacing; uniform float hatchAngle; uniform float hatchWeight;
+uniform float translucency; uniform vec3 translucencyColor;
+uniform sampler2D texture1; uniform int hasRoughnessMap;        // glTF metallic-roughness: g, b
+uniform sampler2D texture2; uniform int hasNormalMap; uniform float normalScale;
 out vec4 finalColor;
 //@WATER_COMMON@
+//@CUTOUT_FS@
+
+// A tangent-space normal map without stored tangents: the frame is rebuilt from the screen
+// derivatives of position and uv (Schüler, "Normal Mapping Without Precomputed Tangents", 2013).
+vec3 mapNormal(vec3 n, vec3 p, vec2 uv) {
+    vec3 dp1 = dFdx(p), dp2 = dFdy(p);
+    vec2 duv1 = dFdx(uv), duv2 = dFdy(uv);
+    vec3 dp2perp = cross(dp2, n), dp1perp = cross(n, dp1);
+    vec3 t = dp2perp * duv1.x + dp1perp * duv2.x;
+    vec3 b = dp2perp * duv1.y + dp1perp * duv2.y;
+    float m = max(dot(t, t), dot(b, b));
+    if (m < 1e-20) return n;                                       // no uv change: nothing to map
+    float inv = inversesqrt(m);
+    vec3 s = texture(texture2, uv).xyz * 2.0 - 1.0;
+    s.xy *= normalScale;
+    return normalize(mat3(t * inv, b * inv, n) * s);
+}
 
 const float PI = 3.14159265;
 
@@ -407,14 +571,21 @@ float linearDepth(float d, vec4 prm) {
     if (prm.z > 0.5) { float z = d * 2.0 - 1.0; return 2.0 * prm.x * prm.y / (prm.y + prm.x - z * (prm.y - prm.x)); }
     return prm.x + d * (prm.y - prm.x);
 }
-float shadowAt(int tile, float bias, float ndl) {
-    vec4 clip = shadowVP[tile] * vec4(fragPos, 1.0);
+// `ng` is the geometric normal on the light's side. The point is looked up a little way
+// along it (normal offset): at a grazing light the depth under the 3 x 3 kernel changes by
+// more than any constant bias allows, and lifting the point by ~1.5 texels times the sine of
+// the light's angle clears every sample the kernel reads (no acne bands under a low sun).
+float shadowAt(int tile, float bias, float ndl, vec3 ng) {
+    vec4 prm = shadowParams[tile], r = shadowRect[tile];
+    float sinL = sqrt(max(1.0 - ndl * ndl, 0.0));
+    float texelHere = prm.w * (prm.z > 0.5 ? (shadowVP[tile] * vec4(fragPos, 1.0)).w : 1.0);
+    vec3 q = fragPos + ng * texelHere * 1.5 * sinL;
+    vec4 clip = shadowVP[tile] * vec4(q, 1.0);
     vec3 p = clip.xyz / clip.w * 0.5 + 0.5;
     if (p.z >= 1.0 || p.z <= 0.0 || p.x <= 0.0 || p.x >= 1.0 || p.y <= 0.0 || p.y >= 1.0) return 1.0;
-    vec4 prm = shadowParams[tile], r = shadowRect[tile];
     float zf = prm.z > 0.5 ? clip.w : linearDepth(p.z, prm);
     float texelWorld = prm.w * (prm.z > 0.5 ? zf : 1.0);
-    float slope = sqrt(max(1.0 - ndl * ndl, 0.0)) / max(ndl, 0.1);
+    float slope = sinL / max(ndl, 0.1);
     float b = bias + texelWorld * (1.5 + min(slope, 4.0));
     vec2 lo = r.xy + vec2(1.5 * atlasTexel), hi = r.xy + r.zw - vec2(1.5 * atlasTexel);
     float lit = 0.0;
@@ -487,7 +658,8 @@ float lightAt(int i, vec3 n, out vec3 l, out float ndl) {
     if (ndl <= 0.0 || atten <= 0.0) return 0.0;
     if (lightShadow[i] >= 0 && receiveShadow == 1) {
         int tile = lightShadow[i] + (lightType[i] == 1 ? cubeFace(fragPos - lightPos[i]) : 0);
-        atten *= shadowAt(tile, lightBias[i], ndl);
+        vec3 ng = normalize(fragNormal);
+        atten *= shadowAt(tile, lightBias[i], ndl, dot(ng, l) < 0.0 ? -ng : ng);
     }
     return atten;
 }
@@ -569,21 +741,32 @@ void main() {
     if (waterMode == 1) { vec4 w = waterSurface(); finalColor = encode(w.rgb, w.a); return; }
     float cutDist = clipPlane.w - dot(fragPos, clipPlane.xyz);     // < 0: beyond the cut
     if (cutDist < 0.0) discard;
+    if (fadedAway(fragFade)) discard;
     vec4 base = texture(texture0, fragTexCoord) * colDiffuse * fragColor;
+    if (alphaCutoff > 0.0) {
+        if (cutAway(base.a, fragTexCoord)) discard;
+        base.a = 1.0;                                              // what a cut-out keeps is solid
+    }
     if (unlit == 1) { finalColor = vec4(base.rgb, base.a * opacity); return; }
     vec3 albedo = pow(base.rgb, vec3(2.2));
     vec3 n = normalize(fragNormal);
-    if (!gl_FrontFacing) n = -n;
+    if (!gl_FrontFacing && fieldOn == 0) n = -n;                    // a field's blades face the camera already
     vec3 v = normalize(viewPos - fragPos);
+    if (hasNormalMap == 1 && shading == 0) n = mapNormal(n, fragPos, fragTexCoord);
 
     vec3 color;
     if (shading == 1) color = toon(albedo, n, v);
     else if (shading == 2) color = gooch(albedo, n, v);
     else if (shading == 3) color = hatch(albedo, n);
     else {
-        float rough = clamp(roughness, 0.0, 1.0);
-        vec3 specColor = mix(vec3(0.04), albedo, metalness);
-        vec3 diffColor = albedo * (1.0 - metalness);
+        float rough = roughness, metal = metalness;
+        if (hasRoughnessMap == 1) {
+            vec3 mr = texture(texture1, fragTexCoord).rgb;
+            rough *= mr.g; metal *= mr.b;
+        }
+        rough = clamp(rough, 0.0, 1.0);
+        vec3 specColor = mix(vec3(0.04), albedo, metal);
+        vec3 diffColor = albedo * (1.0 - metal);
         if (hasEnv == 1) {
             float ndv = max(dot(n, v), 1e-4);
             vec3 r = reflect(-v, n);
@@ -598,7 +781,18 @@ void main() {
             if (i >= lightCount) break;
             vec3 l; float ndl;
             float atten = lightAt(i, n, l, ndl);
-            if (atten <= 0.0) continue;
+            if (atten <= 0.0) {
+                // Translucency: the light falls on the far side; it comes through diffused,
+                // and more of it when looking towards the light (forward scattering).
+                if (translucency <= 0.0) continue;
+                vec3 lb; float ndlb;
+                float back = lightAt(i, -n, lb, ndlb);
+                if (back <= 0.0) continue;
+                float forward = pow(clamp(dot(v, -lb), 0.0, 1.0), 6.0);
+                color += diffColor * translucencyColor * lightColor[i] * waterLight(i) * back
+                       * translucency * (0.6 * ndlb + 1.4 * forward);
+                continue;
+            }
             vec3 h = normalize(l + v);
             float spec = pow(max(dot(n, h), 0.0), shininess) * (shininess + 8.0) / 25.1327;
             color += (diffColor + specColor * spec) * lightColor[i] * waterLight(i) * atten * ndl;
@@ -706,15 +900,19 @@ void main() {
 // Ink lines, pass 1: per pixel the view-space normal (octahedral, rg), the line style
 // (b, 0 = no lines) and the object id (a, 255 = outside the viewport).
 const char* GBUF_FS = R"(#version 330
-in vec3 fragPos; in vec2 fragTexCoord; in vec3 fragNormal; in vec4 fragColor;
+in vec3 fragPos; in vec2 fragTexCoord; in vec3 fragNormal; in vec4 fragColor; flat in float fragFade;
 uniform mat4 matView; uniform float objectId; uniform float lineStyle;
+uniform sampler2D texture0; uniform vec4 colDiffuse;
 out vec4 finalColor;
+//@CUTOUT_FS@
 vec2 octEncode(vec3 n) {
     n /= abs(n.x) + abs(n.y) + abs(n.z);
     vec2 e = n.z >= 0.0 ? n.xy : (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
     return e * 0.5 + 0.5;
 }
 void main() {
+    if (fadedAway(fragFade)) discard;
+    if (cutAway(texture(texture0, fragTexCoord).a * colDiffuse.a * fragColor.a, fragTexCoord)) discard;
     vec3 n = normalize(mat3(matView) * normalize(fragNormal));
     if (!gl_FrontFacing) n = -n;
     finalColor = vec4(octEncode(n), lineStyle / 255.0, objectId / 255.0);
@@ -882,7 +1080,8 @@ struct LitLocs {
         envLinear, envMaxLod, envIntensity, envRotation, skybox, fogColor, fogNear, fogFar, fogMode, fogDensity,
         fogHeight, fogFalloff, fogSky, backdropScale, skinned, bones,
         shading, pxScale, toonBands, toonSoftness, toonHighlight, toonHighlightSize, rimColor, rimWidth,
-        goochWarm, goochCool, hatchInk, hatchSpacing, hatchAngle, hatchWeight, reflection;
+        goochWarm, goochCool, hatchInk, hatchSpacing, hatchAngle, hatchWeight, reflection,
+        translucency, translucencyColor, hasRoughnessMap, hasNormalMap, normalScale;
 };
 struct WaterLocs { int on, mode, level, eye, time, centre, count, waveA, waveB, absorb, scatter, caustics, foam,
                    open, invAmp, glint, band; };
@@ -895,6 +1094,10 @@ struct GbufLocs { int objectId, lineStyle, skinned, bones; };
 // one, drawn through a copy of its Shader whose model-matrix location is the attribute.
 struct InstLocs { int instanced = -1, vat = -1, width = -1, verts = -1, rows = -1; };
 constexpr int VAT_SLOT = 12;             // the baked-animation texture (material maps use 0..11)
+// A field's uniforms in one program (see FIELD_VS); its maps share the VAT_SLOT unit.
+struct FieldLocs { int on = -1, world = -1, tile = -1, key = -1, seed = -1, area = -1, mapFit = -1, maps = -1,
+                   blade = -1, wind = -1, gusts = -1, fade = -1, cam = -1, root = -1, tip = -1, dry = -1, bands = -1; };
+constexpr int FIELD_MAX_SEGMENTS = 8;
 struct LineLocs { int depthTex, texel, zNear, zFar, ortho, pixelWorld, pxScale, styles, maxRadius, creaseCos,
                   depthThreshold, wobble, wobbleScale, seed; };
 constexpr int MAX_STYLES = 64;
@@ -925,12 +1128,26 @@ struct Gpu {
     GbufLocs G{};
     LineLocs N{};
     int depthSkinned = -1, depthBones = -1;
+    int cutoff[3] = { -1, -1, -1 };      // alphaCutoff in the lit, depth and g-buffer programs
     Shader inst[3]{};                    // lit, depth, gbuf, for DrawMeshInstanced
     std::array<int, 32> instLocs[3]{};
     InstLocs il[3];
     int instState[3] = { -1, -1, -1 };   // the `instanced` uniform last set per program
     struct Vat { unsigned int tex = 0; int width = 0, rows = 0; std::shared_ptr<AnimatedMesh> keep; };
     std::map<const AnimatedMesh*, Vat> vat;
+    FieldLocs F[3];
+    // Blade templates for 1..FIELD_MAX_SEGMENTS segments, one after another in one buffer.
+    unsigned int fieldVao = 0, fieldVbo = 0;
+    int fieldFirst[FIELD_MAX_SEGMENTS + 1] = {}, fieldCount[FIELD_MAX_SEGMENTS + 1] = {};
+    int fieldState[3] = { -1, -1, -1 };  // the `fieldOn` uniform last set per program
+    struct FieldMaps {
+        unsigned int tex = 0;
+        int revision = 0, res = 0;
+        std::weak_ptr<Field> keep;              // held weakly: a field that is gone is dropped (pruneFields)
+        std::vector<float> tileDensity, tileLow, tileHigh, tileTall;    // per tile: max mask, ground range, max tall
+        std::vector<float> tileArrival;                                   // and the earliest arrival
+    };
+    std::map<const Field*, FieldMaps> fields;
     ::Material material{};               // raylib material: owns a MAX_MATERIAL_MAPS maps array
     unsigned int atlasFbo = 0, atlasTex = 0;
     int atlasSize = 0;
@@ -941,8 +1158,11 @@ struct Gpu {
     struct Dynamic { DynamicTexturePtr keep; Texture2D tex{}; RenderTexture canvas{}; long long made = LLONG_MIN; };
     std::map<const DynamicTexture*, Dynamic> dynamic;   // Material::dynamicMap textures
     int frame = 0;                                      // the frame being drawn (for dynamic maps)
+    Vector3 viewCam{ 0, 0, 0 };                         // the frame's camera position (fields)
+    long long fieldBlades = 0;                          // blades submitted by the main pass this frame
 };
 Gpu gpu;
+thread_local const Camera* viewing = nullptr;      // drawingCamera()
 
 Texture2D whiteTexture() { return { rlGetTextureIdDefault(), 1, 1, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 }; }
 
@@ -961,6 +1181,10 @@ void releaseGpu() {
     if (gpu.sky.id) UnloadShader(gpu.sky);
     for (auto& [mesh, v] : gpu.vat)
         if (v.tex) rlUnloadTexture(v.tex);
+    for (auto& [field, f] : gpu.fields)
+        if (f.tex) rlUnloadTexture(f.tex);
+    if (gpu.fieldVao) rlUnloadVertexArray(gpu.fieldVao);
+    if (gpu.fieldVbo) rlUnloadVertexBuffer(gpu.fieldVbo);
     if (gpu.splat.id) UnloadShader(gpu.splat);
     for (auto& [cloud, s] : gpu.splats) {
         if (s.tex) rlUnloadTexture(s.tex);
@@ -988,18 +1212,21 @@ void releaseGpu() {
 
 void ensureGpu() {
     if (gpu.ready) return;
-    const std::string head = SKIN_VS_HEAD;
-    std::string litFs = LIT_FS;
-    for (const auto& [marker, text] : { std::pair<const char*, const char*>{ "//@WATER_COMMON@", WATER_COMMON },
-                                        { "//@WATER_FS@", WATER_FS } }) {
-        const size_t at = litFs.find(marker);
-        if (at != std::string::npos) litFs.replace(at, std::strlen(marker), text);
-    }
+    const std::string head = std::string(SKIN_VS_HEAD) + FIELD_VS;
+    auto splice = [](std::string src) {
+        for (const auto& [marker, text] : { std::pair<const char*, const char*>{ "//@WATER_COMMON@", WATER_COMMON },
+                                            { "//@WATER_FS@", WATER_FS }, { "//@CUTOUT_FS@", CUTOUT_FS } }) {
+            const size_t at = src.find(marker);
+            if (at != std::string::npos) src.replace(at, std::strlen(marker), text);
+        }
+        return src;
+    };
+    const std::string litFs = splice(LIT_FS), depthFs = splice(DEPTH_FS), gbufFs = splice(GBUF_FS);
     const std::string litVs = head + WATER_COMMON + LIT_VS_BODY;
     gpu.lit = LoadShaderFromMemory(litVs.c_str(), litFs.c_str());
-    gpu.depth = LoadShaderFromMemory((head + DEPTH_VS_BODY).c_str(), DEPTH_FS);
+    gpu.depth = LoadShaderFromMemory((head + DEPTH_VS_BODY).c_str(), depthFs.c_str());
     gpu.dof = LoadShaderFromMemory(nullptr, DOF_FS);
-    gpu.gbuf = LoadShaderFromMemory(litVs.c_str(), GBUF_FS);
+    gpu.gbuf = LoadShaderFromMemory(litVs.c_str(), gbufFs.c_str());
     gpu.line = LoadShaderFromMemory(nullptr, LINE_FS);
     gpu.particle = LoadShaderFromMemory(nullptr, PARTICLE_FS);
     gpu.sky = LoadShaderFromMemory(nullptr, SKY_FS);
@@ -1019,7 +1246,12 @@ void ensureGpu() {
               loc("fogHeight"), loc("fogFalloff"), loc("fogSky"), loc("backdropScale"), loc("skinned"), loc("boneMatrices"),
               loc("shading"), loc("pxScale"), loc("toonBands"), loc("toonSoftness"), loc("toonHighlight"),
               loc("toonHighlightSize"), loc("rimColor"), loc("rimWidth"), loc("goochWarm"), loc("goochCool"),
-              loc("hatchInk"), loc("hatchSpacing"), loc("hatchAngle"), loc("hatchWeight"), loc("reflection") };
+              loc("hatchInk"), loc("hatchSpacing"), loc("hatchAngle"), loc("hatchWeight"), loc("reflection"),
+              loc("translucency"), loc("translucencyColor"), loc("hasRoughnessMap"), loc("hasNormalMap"),
+              loc("normalScale") };
+    gpu.cutoff[0] = loc("alphaCutoff");
+    gpu.cutoff[1] = GetShaderLocation(gpu.depth, "alphaCutoff");
+    gpu.cutoff[2] = GetShaderLocation(gpu.gbuf, "alphaCutoff");
     gpu.W = { loc("waterOn"), loc("waterMode"), loc("waterLevel"), loc("waterEye"), loc("waterTime"), loc("waterCentre"),
               loc("waveCount"), loc("waveA"), loc("waveB"), loc("waterAbsorb"), loc("waterScatter"), loc("waterCaustics"),
               loc("waterFoam"), loc("waterOpen"), loc("waterInvAmp"), loc("waterGlint"), loc("waterBand") };
@@ -1044,6 +1276,10 @@ void ensureGpu() {
             gpu.inst[i].locs = gpu.instLocs[i].data();
             gpu.il[i] = { GetShaderLocation(b, "instanced"), GetShaderLocation(b, "vat"), GetShaderLocation(b, "vatWidth"),
                           GetShaderLocation(b, "vatVerts"), GetShaderLocation(b, "vatRows") };
+            auto f = [&b](const char* name) { return GetShaderLocation(b, name); };
+            gpu.F[i] = { f("fieldOn"), f("fieldWorld"), f("fieldTile"), f("fieldKey"), f("fieldSeed"), f("fieldArea"),
+                         f("fieldMapFit"), f("fieldMaps"), f("fieldBlade"), f("fieldWind"), f("fieldGusts"),
+                         f("fieldFade"), f("fieldCam"), f("fieldRoot"), f("fieldTip"), f("fieldDry"), f("fieldBands") };
         }
     }
     auto nloc = [](const char* name) { return GetShaderLocation(gpu.line, name); };
@@ -1196,6 +1432,11 @@ Texture2D mapOf(const g3d::Material& m) {
     if (m.dynamicMap) return dynamicTexture(m.dynamicMap);
     return m.map.empty() ? whiteTexture() : texture(m.map);
 }
+// Material::dynamicNormalMap or normalMap, else white (unused: hasNormalMap is 0).
+Texture2D normalMapOf(const g3d::Material& m) {
+    if (m.dynamicNormalMap) return dynamicTexture(m.dynamicNormalMap);
+    return m.normalMap.empty() ? whiteTexture() : texture(m.normalMap);
+}
 
 Vector3 linear3(Color c) {
     return { std::pow(c.r / 255.f, 2.2f), std::pow(c.g / 255.f, 2.2f), std::pow(c.b / 255.f, 2.2f) };
@@ -1306,12 +1547,15 @@ Vector3 linear(Color c, float k = 1) {
 
 // ---- scene traversal -----------------------------------------------------------------
 // A mesh particle is an item of its emitter object with its own transform, fade and tint.
+// One tile of a field this frame: which, how many of its blades, at what detail.
+struct FieldTile { int tx, tz; int count; int segments; bool shadow; };
 struct Item {
     Object3D* obj; Matrix world; float viewDepth;
     float alpha = 1;
     Color tint = WHITE;
     bool particle = false;
     const std::vector<Matrix>* inst = nullptr;   // an instanced set: the bodies that can show
+    const std::vector<FieldTile>* tiles = nullptr;   // a field: the tiles that can show
 };
 float opacityOf(const Item& it) { return it.obj->material.opacity * it.alpha; }
 // An emitter without a geometry: its particles are drawn as billboards after the meshes.
@@ -1371,8 +1615,17 @@ void animate(std::vector<std::unique_ptr<Object3D>>& list, int t, const Matrix& 
     }
 }
 
+// Instance::tint x Instance::shade as the shader's instTint() reads it.
+float packTint(Color tint, float shade) {
+    auto q = [shade](unsigned char c) {
+        const float v = std::isfinite(shade) ? c / 255.f * shade : 1.f;
+        return (float)std::lround(std::clamp(v, 0.f, 2.f) * 127.f);   // 127 = exactly 1
+    };
+    return q(tint.r) + 256.f * q(tint.g) + 65536.f * q(tint.b);
+}
+
 // The world matrices of an object's instances that can show, each carrying its animation (two
-// baked frames, their blend, a brightness) in the w of its columns, where an affine matrix has
+// baked frames, their blend, a colour) in the w of its columns, where an affine matrix has
 // 0, 0, 0 and 1: see the shader's setupInstance.
 void gatherInstances(const Object3D& o, const Matrix& world, const Cull& k, std::vector<Matrix>& out) {
     const Instances& in = *o.instances;
@@ -1397,14 +1650,156 @@ void gatherInstances(const Object3D& o, const Matrix& world, const Cull& k, std:
         const int last = am.frames - 1;
         m.m3 = (float)std::clamp(i.clipStart + a, 0, last);
         m.m7 = (float)std::clamp(i.clipStart + (a + 1) % len, 0, last);
-        m.m11 = f - (float)a;
-        m.m15 = i.shade;
+        const float fade = std::isfinite(i.fade) ? std::clamp(i.fade, -1.f, 1.f) : 1.f;
+        m.m11 = std::min(f - (float)a, 0.999f) + (float)std::lround((fade + 1) * 32);   // see setupInstance
+        m.m15 = packTint(i.tint, i.shade);
         out.push_back(m);
     }
 }
 
+// ---- fields --------------------------------------------------------------------------
+constexpr float FIELD_BAND = 0.12f;      // FIELD_VS's BAND: blades shrink away over this rank band
+
+float fieldFar(const Field& f, float distance) {   // FIELD_VS's `far`: the fraction kept at a distance
+    const float a = f.fadeStart, b = std::max(f.fadeEnd, f.fadeStart + 1e-3f);
+    const float x = std::clamp((distance - a) / (b - a), 0.f, 1.f);
+    return 1.f - x * x * (3.f - 2.f * x);
+}
+
+// Frees the maps of fields that no longer exist (a script remakes its scene every frame).
+void pruneFields() {
+    for (auto it = gpu.fields.begin(); it != gpu.fields.end();)
+        if (it->second.keep.expired()) {
+            if (it->second.tex) rlUnloadTexture(it->second.tex);
+            it = gpu.fields.erase(it);
+        } else ++it;
+}
+
+// The field's ground, density and height maps, sampled over its area into one float texture,
+// with each tile's largest density, ground range and largest height multiplier (for culling
+// and for how many blades to draw). Remade when the field's revision changes.
+const Gpu::FieldMaps& fieldMapsOf(const std::shared_ptr<Field>& field) {
+    const Field& f = *field;
+    auto found = gpu.fields.find(field.get());
+    if (found != gpu.fields.end() && found->second.revision == f.revision && found->second.keep.lock() == field) return found->second;
+    if (found != gpu.fields.end()) {
+        if (found->second.tex) rlUnloadTexture(found->second.tex);
+        gpu.fields.erase(found);
+    }
+    Gpu::FieldMaps m;
+    m.keep = field;
+    m.revision = f.revision;
+    m.res = std::clamp(f.mapResolution, 2, 4096);
+    const int res = m.res;
+    const float w = f.max.x - f.min.x, d = f.max.y - f.min.y;
+    std::vector<float> texels((size_t)res * res * 4);
+    auto finite = [](float v, float fallback) { return std::isfinite(v) ? v : fallback; };
+    for (int j = 0; j < res; j++)
+        for (int i = 0; i < res; i++) {
+            const float x = f.min.x + w * i / (res - 1), z = f.min.y + d * j / (res - 1);
+            float* t = &texels[((size_t)j * res + i) * 4];
+            t[0] = f.ground ? finite(f.ground(x, z), 0.f) : 0.f;
+            t[1] = f.mask ? std::clamp(finite(f.mask(x, z), 0.f), 0.f, 1.f) : 1.f;
+            t[2] = f.tall ? std::max(finite(f.tall(x, z), 0.f), 0.f) : 1.f;
+            t[3] = f.arrival ? std::clamp(finite(f.arrival(x, z), 0.f), 0.f, 1.f) : 0.f;
+        }
+    const int nx = f.tilesX(), nz = f.tilesZ();
+    const float ts = std::max(f.tileSize, 0.05f);
+    m.tileDensity.assign((size_t)nx * nz, 0.f);
+    m.tileLow.assign((size_t)nx * nz, 1e30f);
+    m.tileHigh.assign((size_t)nx * nz, -1e30f);
+    m.tileTall.assign((size_t)nx * nz, 0.f);
+    m.tileArrival.assign((size_t)nx * nz, 1.f);
+    auto texelOf = [&](float v, float lo, float span) {   // nearest sample index, unclamped
+        return span > 0 ? (int)std::floor((v - lo) / span * (res - 1)) : 0;
+    };
+    for (int tz = 0; tz < nz; tz++)
+        for (int tx = 0; tx < nx; tx++) {
+            // Every sample the tile's blades can read, one texel of margin either side.
+            const int i0 = std::clamp(texelOf(f.min.x + tx * ts, f.min.x, w) - 1, 0, res - 1);
+            const int i1 = std::clamp(texelOf(f.min.x + (tx + 1) * ts, f.min.x, w) + 2, 0, res - 1);
+            const int j0 = std::clamp(texelOf(f.min.y + tz * ts, f.min.y, d) - 1, 0, res - 1);
+            const int j1 = std::clamp(texelOf(f.min.y + (tz + 1) * ts, f.min.y, d) + 2, 0, res - 1);
+            const size_t ti = (size_t)tz * nx + tx;
+            for (int j = j0; j <= j1; j++)
+                for (int i = i0; i <= i1; i++) {
+                    const float* t = &texels[((size_t)j * res + i) * 4];
+                    m.tileLow[ti] = std::min(m.tileLow[ti], t[0]);
+                    m.tileHigh[ti] = std::max(m.tileHigh[ti], t[0]);
+                    m.tileDensity[ti] = std::max(m.tileDensity[ti], t[1]);
+                    m.tileTall[ti] = std::max(m.tileTall[ti], t[2]);
+                    m.tileArrival[ti] = std::min(m.tileArrival[ti], t[3]);
+                }
+        }
+    m.tex = rlLoadTexture(texels.data(), res, res, RL_PIXELFORMAT_UNCOMPRESSED_R32G32B32A32, 1);
+    rlTextureParameters(m.tex, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_BILINEAR);
+    rlTextureParameters(m.tex, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_BILINEAR);
+    rlTextureParameters(m.tex, RL_TEXTURE_WRAP_S, RL_TEXTURE_WRAP_CLAMP);
+    rlTextureParameters(m.tex, RL_TEXTURE_WRAP_T, RL_TEXTURE_WRAP_CLAMP);
+    return gpu.fields.emplace(field.get(), std::move(m)).first->second;
+}
+
+// The tiles of a field that can show this frame (or cast a shadow into view), each with how
+// many of its blades to draw: no more than the densest point of the tile keeps at the
+// tile's nearest distance from the camera.
+void gatherField(const Object3D& o, const Matrix& world, const Cull& k, std::vector<FieldTile>& out) {
+    const Field& f = *o.field;
+    if (!(f.max.x > f.min.x && f.max.y > f.min.y) || f.density <= 0) return;
+    const Gpu::FieldMaps& maps = fieldMapsOf(o.field);
+    const int nx = f.tilesX(), nz = f.tilesZ();
+    const float ts = std::max(f.tileSize, 0.05f);
+    const uint32_t full = f.bladesPerTile();
+    if (!full) return;
+    const float sc = std::max({ std::sqrt(world.m0 * world.m0 + world.m1 * world.m1 + world.m2 * world.m2),
+                                std::sqrt(world.m4 * world.m4 + world.m5 * world.m5 + world.m6 * world.m6),
+                                std::sqrt(world.m8 * world.m8 + world.m9 * world.m9 + world.m10 * world.m10) });
+    const float tallest = f.height * (1 + std::fabs(f.heightVariation));
+    const int segments = std::clamp(f.segments, 1, FIELD_MAX_SEGMENTS);
+    for (int tz = 0; tz < nz; tz++)
+        for (int tx = 0; tx < nx; tx++) {
+            const size_t ti = (size_t)tz * nx + tx;
+            if (maps.tileDensity[ti] <= 0 || maps.tileTall[ti] <= 0) continue;
+            if (f.grow * 1.15f <= maps.tileArrival[ti]) continue;             // nothing has come up yet
+            const float top = maps.tileHigh[ti] + tallest * maps.tileTall[ti];
+            const Vector3 c{ f.min.x + (tx + 0.5f) * ts, 0.5f * (maps.tileLow[ti] + top), f.min.y + (tz + 0.5f) * ts };
+            const float halfY = 0.5f * (top - maps.tileLow[ti]) + tallest;            // bending reaches sideways too
+            const float r = std::sqrt(0.5f * ts * ts + halfY * halfY) * sc;
+            const Vector3 cw = Vector3Transform(c, world);
+            const float nearest = std::max(0.f, Vector3Distance(cw, k.cam->position) - r);
+            const float keep = maps.tileDensity[ti] * fieldFar(f, nearest);
+            if (keep <= 0) continue;
+            if (k.on && !inSight(k, cw, r)) continue;
+            const int count = (int)std::min<double>(full, std::ceil(full * keep * (1 + FIELD_BAND)));
+            if (count <= 0) continue;
+            out.push_back({ tx, tz, count, nearest < f.detailDistance ? segments : 1, nearest < f.shadowDistance });
+        }
+}
+
+// The blade templates: a strip of quads up the blade, then a triangle to the tip.
+void fieldTemplates() {
+    if (gpu.fieldVao) return;
+    std::vector<float> v;
+    auto put = [&v](float x, float y) { v.insert(v.end(), { x, y, 0.f }); };
+    for (int s = 1; s <= FIELD_MAX_SEGMENTS; s++) {
+        gpu.fieldFirst[s] = (int)(v.size() / 3);
+        for (int j = 0; j < s; j++) {
+            const float t0 = (float)j / s, t1 = (float)(j + 1) / s;
+            if (j < s - 1) { put(-1, t0); put(1, t0); put(1, t1); put(-1, t0); put(1, t1); put(-1, t1); }
+            else { put(-1, t0); put(1, t0); put(0, 1); }
+        }
+        gpu.fieldCount[s] = (int)(v.size() / 3) - gpu.fieldFirst[s];
+    }
+    gpu.fieldVao = rlLoadVertexArray();
+    rlEnableVertexArray(gpu.fieldVao);
+    gpu.fieldVbo = rlLoadVertexBuffer(v.data(), (int)(v.size() * sizeof(float)), false);
+    rlSetVertexAttribute(0, 3, RL_FLOAT, false, 0, 0);      // vertexPosition
+    rlEnableVertexAttribute(0);
+    rlDisableVertexArray();
+}
+
 void collect(std::vector<std::unique_ptr<Object3D>>& list, const Matrix& parent, std::vector<Item>& out,
-             std::vector<Emitting>& emitters, double t, const Cull& k, std::deque<std::vector<Matrix>>& store) {
+             std::vector<Emitting>& emitters, double t, const Cull& k, std::deque<std::vector<Matrix>>& store,
+             std::deque<std::vector<FieldTile>>& fieldStore) {
     for (auto& o : list) {
         if (!o->visible || o->culled) continue;
         Matrix world = MatrixMultiply(localMatrix(*o), parent);
@@ -1433,8 +1828,16 @@ void collect(std::vector<std::unique_ptr<Object3D>>& list, const Matrix& parent,
                 it.inst = &store.back();
                 out.push_back(it);
             }
+        } else if (o->field) {
+            fieldStore.emplace_back();
+            gatherField(*o, world, k, fieldStore.back());
+            if (!fieldStore.back().empty()) {
+                Item it{ o.get(), world, 0 };
+                it.tiles = &fieldStore.back();
+                out.push_back(it);
+            }
         } else if (o->geometry || o->model) out.push_back({ o.get(), world, 0 });
-        collect(o->children, world, out, emitters, t, k, store);
+        collect(o->children, world, out, emitters, t, k, store, fieldStore);
     }
 }
 
@@ -1459,6 +1862,14 @@ void setMaterial(const g3d::Material& m) {
     SetShaderValue(sh, gpu.L.unlit, &unlit, SHADER_UNIFORM_INT);
     SetShaderValue(sh, gpu.L.opacity, &m.opacity, SHADER_UNIFORM_FLOAT);
     SetShaderValue(sh, gpu.L.receiveShadow, &receive, SHADER_UNIFORM_INT);
+    const float translucency = std::max(m.translucency, 0.f), normalScale = m.normalScale;
+    const Vector3 tc = linear(m.translucencyColor);
+    const int hasRough = m.roughnessMap.empty() ? 0 : 1, hasNormal = m.normalMap.empty() && !m.dynamicNormalMap ? 0 : 1;
+    SetShaderValue(sh, gpu.L.translucency, &translucency, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(sh, gpu.L.translucencyColor, &tc, SHADER_UNIFORM_VEC3);
+    SetShaderValue(sh, gpu.L.hasRoughnessMap, &hasRough, SHADER_UNIFORM_INT);
+    SetShaderValue(sh, gpu.L.hasNormalMap, &hasNormal, SHADER_UNIFORM_INT);
+    SetShaderValue(sh, gpu.L.normalScale, &normalScale, SHADER_UNIFORM_FLOAT);
 
     const Vector3 cn = Vector3Length(m.clip.normal) > 1e-6f ? Vector3Normalize(m.clip.normal) : Vector3{ 1, 0, 0 };
     const Vector4 plane{ cn.x, cn.y, cn.z, m.clip.offset };
@@ -1495,6 +1906,18 @@ void setMaterial(const g3d::Material& m) {
 }
 
 enum class Pass { Lit, Depth, Gbuf };
+
+// The cut-out and the extra texture maps, for any pass. The raylib material's maps array is
+// shared by every draw, so each draw sets them all (white where a map is unused).
+void setMaps(Pass pass, const g3d::Material& m, ::Material& mat) {
+    const int p = (int)pass;
+    const Shader& sh = pass == Pass::Lit ? gpu.lit : pass == Pass::Depth ? gpu.depth : gpu.gbuf;
+    const float cut = std::max(m.alphaCutoff, 0.f);
+    SetShaderValue(sh, gpu.cutoff[p], &cut, SHADER_UNIFORM_FLOAT);
+    const bool lit = pass == Pass::Lit;
+    mat.maps[MATERIAL_MAP_METALNESS].texture = lit && !m.roughnessMap.empty() ? texture(m.roughnessMap) : whiteTexture();
+    mat.maps[MATERIAL_MAP_NORMAL].texture = lit ? normalMapOf(m) : whiteTexture();
+}
 
 void bindUnit(int slot, unsigned int id);
 
@@ -1545,6 +1968,7 @@ void drawInstances(const Item& it, Pass pass) {
     if (o.material.doubleSided) rlDisableBackfaceCulling(); else rlEnableBackfaceCulling();
     mat.maps[MATERIAL_MAP_DIFFUSE].texture = mapOf(o.material);
     mat.maps[MATERIAL_MAP_DIFFUSE].color = o.material.color;
+    setMaps(pass, o.material, mat);
     const int skinnedLoc = pass == Pass::Lit ? gpu.L.skinned : pass == Pass::Depth ? gpu.depthSkinned : gpu.G.skinned;
     setBones(pass == Pass::Lit ? gpu.L.bones : pass == Pass::Depth ? gpu.depthBones : gpu.G.bones, skinnedLoc, base, nullptr, 0);
     setInstanced(pass, true);
@@ -1558,9 +1982,105 @@ void drawInstances(const Item& it, Pass pass) {
     bindUnit(VAT_SLOT, 0);
 }
 
+// Draws a field: each tile is one instanced draw of a blade template, the blades made in the
+// vertex shader. Shadow passes draw only the tiles marked to cast.
+void drawField(const Item& it, Pass pass) {
+    const Object3D& o = *it.obj;
+    const Field& f = *o.field;
+    const int p = (int)pass;
+    const Shader& sh = pass == Pass::Lit ? gpu.lit : pass == Pass::Depth ? gpu.depth : gpu.gbuf;
+    const FieldLocs& L = gpu.F[p];
+    auto found = gpu.fields.find(&f);
+    if (found == gpu.fields.end()) return;
+    const Gpu::FieldMaps& maps = found->second;
+    fieldTemplates();
+    if (pass == Pass::Lit) setMaterial(o.material);
+    setInstanced(pass, false);
+    const int skinnedLoc = pass == Pass::Lit ? gpu.L.skinned : pass == Pass::Depth ? gpu.depthSkinned : gpu.G.skinned;
+    const int notSkinned = 0;
+    SetShaderValue(sh, skinnedLoc, &notSkinned, SHADER_UNIFORM_INT);
+    rlDisableBackfaceCulling();
+
+    rlEnableShader(sh.id);
+    // What DrawMesh would set, for a mesh already in world space.
+    const Matrix view = rlGetMatrixModelview(), proj = rlGetMatrixProjection();
+    if (sh.locs[SHADER_LOC_MATRIX_VIEW] >= 0) rlSetUniformMatrix(sh.locs[SHADER_LOC_MATRIX_VIEW], view);
+    if (sh.locs[SHADER_LOC_MATRIX_PROJECTION] >= 0) rlSetUniformMatrix(sh.locs[SHADER_LOC_MATRIX_PROJECTION], proj);
+    if (sh.locs[SHADER_LOC_MATRIX_MODEL] >= 0) rlSetUniformMatrix(sh.locs[SHADER_LOC_MATRIX_MODEL], MatrixIdentity());
+    if (sh.locs[SHADER_LOC_MATRIX_NORMAL] >= 0) rlSetUniformMatrix(sh.locs[SHADER_LOC_MATRIX_NORMAL], MatrixIdentity());
+    rlSetUniformMatrix(sh.locs[SHADER_LOC_MATRIX_MVP], MatrixMultiply(view, proj));
+    const Color mc = o.material.color;
+    const float diffuse[4] = { mc.r / 255.f, mc.g / 255.f, mc.b / 255.f, mc.a / 255.f };
+    if (sh.locs[SHADER_LOC_COLOR_DIFFUSE] >= 0) rlSetUniform(sh.locs[SHADER_LOC_COLOR_DIFFUSE], diffuse, SHADER_UNIFORM_VEC4, 1);
+    const float cut = std::max(o.material.alphaCutoff, 0.f);
+    rlSetUniform(gpu.cutoff[p], &cut, SHADER_UNIFORM_FLOAT, 1);
+    const bool lit = pass == Pass::Lit;
+    const unsigned int units[3] = {
+        mapOf(o.material).id,
+        lit && !o.material.roughnessMap.empty() ? texture(o.material.roughnessMap).id : rlGetTextureIdDefault(),
+        lit ? normalMapOf(o.material).id : rlGetTextureIdDefault() };
+    const int samplerLocs[3] = { sh.locs[SHADER_LOC_MAP_DIFFUSE], sh.locs[SHADER_LOC_MAP_METALNESS], sh.locs[SHADER_LOC_MAP_NORMAL] };
+    for (int u = 0; u < 3; u++) {
+        rlActiveTextureSlot(u);
+        rlEnableTexture(units[u]);
+        if (samplerLocs[u] >= 0) rlSetUniform(samplerLocs[u], &u, SHADER_UNIFORM_INT, 1);
+    }
+    rlActiveTextureSlot(VAT_SLOT);
+    rlEnableTexture(maps.tex);
+    rlActiveTextureSlot(0);
+
+    auto set4 = [](int loc, float a, float b, float c, float d) { const float v[4] = { a, b, c, d }; rlSetUniform(loc, v, SHADER_UNIFORM_VEC4, 1); };
+    auto setColor = [](int loc, Color c) { const float v[3] = { c.r / 255.f, c.g / 255.f, c.b / 255.f }; rlSetUniform(loc, v, SHADER_UNIFORM_VEC3, 1); };
+    const int on = 1, mapUnit = VAT_SLOT, seed = (int)f.seed;
+    rlSetUniform(L.on, &on, SHADER_UNIFORM_INT, 1);
+    rlSetUniform(L.maps, &mapUnit, SHADER_UNIFORM_INT, 1);
+    rlSetUniform(L.seed, &seed, SHADER_UNIFORM_INT, 1);
+    rlSetUniformMatrix(L.world, it.world);
+    set4(L.area, f.min.x, f.min.y, f.max.x, f.max.y);
+    const float fit[2] = { (maps.res - 1.f) / maps.res, 0.5f / maps.res };
+    rlSetUniform(L.mapFit, fit, SHADER_UNIFORM_VEC2, 1);
+    set4(L.blade, std::max(f.height, 0.f), std::clamp(f.heightVariation, 0.f, 0.95f), std::max(f.width, 0.f), f.lean);
+    Vector2 wd = f.windDirection;
+    const float wl = std::sqrt(wd.x * wd.x + wd.y * wd.y);
+    wd = wl > 1e-6f ? Vector2{ wd.x / wl, wd.y / wl } : Vector2{ 1, 0 };
+    set4(L.wind, wd.x, wd.y, f.sway, f.gust);
+    const float seconds = (float)(frameTime(gpu.frame) / std::max(f.fps, 1.f));
+    set4(L.gusts, f.gustSpeed, std::max(f.gustScale, 0.01f), seconds, std::clamp(f.colorVariation, 0.f, 1.f));
+    set4(L.fade, f.fadeStart, std::max(f.fadeEnd, f.fadeStart + 1e-3f), std::clamp(f.dryness, 0.f, 1.f),
+         std::isfinite(f.grow) ? std::clamp(f.grow, 0.f, 1.f) : 1.f);
+    const float cam[3] = { gpu.viewCam.x, gpu.viewCam.y, gpu.viewCam.z };
+    rlSetUniform(L.cam, cam, SHADER_UNIFORM_VEC3, 1);
+    setColor(L.root, f.root);
+    setColor(L.tip, f.tip);
+    setColor(L.dry, f.dry);
+    const float bands = (float)std::clamp(f.colorBands, 0, 16);
+    rlSetUniform(L.bands, &bands, SHADER_UNIFORM_FLOAT, 1);
+
+    const float ts = std::max(f.tileSize, 0.05f);
+    const float full = (float)f.bladesPerTile();
+    rlEnableVertexArray(gpu.fieldVao);
+    for (const FieldTile& t : *it.tiles) {
+        if (pass == Pass::Depth && !t.shadow) continue;
+        set4(L.tile, f.min.x + t.tx * ts, f.min.y + t.tz * ts, ts, full);
+        const int key[2] = { t.tx, t.tz };
+        rlSetUniform(L.key, key, SHADER_UNIFORM_IVEC2, 1);
+        rlDrawVertexArrayInstanced(gpu.fieldFirst[t.segments], gpu.fieldCount[t.segments], t.count);
+        if (pass == Pass::Lit) gpu.fieldBlades += t.count;
+    }
+    rlDisableVertexArray();
+    const int off = 0;
+    rlSetUniform(L.on, &off, SHADER_UNIFORM_INT, 1);
+    for (int u : { 0, 1, 2, VAT_SLOT }) {
+        rlActiveTextureSlot(u);
+        rlDisableTexture();
+    }
+    rlActiveTextureSlot(0);
+}
+
 // Draws one item with the lit, depth (shadow maps) or line g-buffer shader.
 void drawItem(const Item& it, Pass pass) {
     if (it.inst) { drawInstances(it, pass); return; }
+    if (it.tiles) { drawField(it, pass); return; }
     setInstanced(pass, false);
     Object3D& o = *it.obj;
     const Shader& sh = pass == Pass::Lit ? gpu.lit : pass == Pass::Depth ? gpu.depth : gpu.gbuf;
@@ -1576,6 +2096,7 @@ void drawItem(const Item& it, Pass pass) {
         } else setMaterial(o.material);
     }
     if (o.material.doubleSided) rlDisableBackfaceCulling(); else rlEnableBackfaceCulling();
+    setMaps(pass, o.material, mat);
 
     if (o.geometry) {
         mat.maps[MATERIAL_MAP_DIFFUSE].texture = mapOf(o.material);
@@ -2064,7 +2585,8 @@ void drawSkybox(const Camera& cam) {
     mat.maps[MATERIAL_MAP_DIFFUSE].texture = whiteTexture();
     mat.maps[MATERIAL_MAP_DIFFUSE].color = WHITE;
     setBones(gpu.L.bones, gpu.L.skinned, gpu.lit, nullptr, 0);
-    const float size = cam.farPlane;                    // corners stay inside the far plane
+    setInstanced(Pass::Lit, false);                     // a forest drawn before may have left it on
+    const float size = cam.farPlane;                 // corners stay inside the far plane
     rlDisableBackfaceCulling();
     rlDisableDepthMask();
     DrawMesh(gpu.skyCube, mat, MatrixMultiply(MatrixScale(size, size, size),
@@ -2701,7 +3223,11 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     const double ft = frameTime(t);              // particles follow motion-blur subframes
     gpu.frame = t;
     std::deque<std::vector<Matrix>> instanceStore;           // what the instanced items point into
-    collect(s.objects, MatrixIdentity(), items, emitters, ft, cull, instanceStore);
+    std::deque<std::vector<FieldTile>> fieldStore;            // and the fields' tiles
+    gpu.viewCam = cam.position;                              // fields thin out by distance from it, in every pass
+    gpu.fieldBlades = 0;
+    pruneFields();
+    collect(s.objects, MatrixIdentity(), items, emitters, ft, cull, instanceStore, fieldStore);
     const Texture2D envTex = s.sky.enabled ? renderSky(s, ft, target.id, target.texture.width, target.texture.height)
                                            : environmentTexture(s);
 
@@ -3285,6 +3811,12 @@ Object3D* Object3D::add(std::shared_ptr<Instances> i, Material m) {
     o->material = std::move(m);
     return o;
 }
+Object3D* Object3D::add(std::shared_ptr<Field> f, Material m) {
+    Object3D* o = add();
+    o->field = std::move(f);
+    o->material = std::move(m);
+    return o;
+}
 Object3D* Object3D::add(std::shared_ptr<Splats> s) {
     Object3D* o = add();
     o->splats = std::move(s);
@@ -3390,6 +3922,39 @@ Object3D* Scene::add(std::shared_ptr<Instances> i, Material m) {
     o->material = std::move(m);
     return o;
 }
+Object3D* Scene::add(std::shared_ptr<Field> f, Material m) {
+    Object3D* o = add();
+    o->field = std::move(f);
+    o->material = std::move(m);
+    return o;
+}
+
+// FIELD_VS's placement, on the CPU.
+namespace {
+uint32_t fieldHash(uint32_t x) {
+    x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16;
+    return x;
+}
+}
+int Field::tilesX() const { return std::max(1, (int)std::ceil((max.x - min.x) / std::max(tileSize, 0.05f) - 1e-4f)); }
+int Field::tilesZ() const { return std::max(1, (int)std::ceil((max.y - min.y) / std::max(tileSize, 0.05f) - 1e-4f)); }
+uint32_t Field::bladesPerTile() const {
+    const float ts = std::max(tileSize, 0.05f);
+    return (uint32_t)std::clamp(std::lround(std::max(density, 0.f) * ts * ts), 0L, 1L << 22);
+}
+Vector2 Field::bladeRoot(int tx, int tz, uint32_t k) const {
+    const uint32_t th = fieldHash(((uint32_t)tx * 73856093u) ^ ((uint32_t)tz * 19349663u) ^ (seed * 83492791u));
+    const uint32_t x = k * 3242174889u + th, z = k * 2447445413u + fieldHash(th);
+    const float ts = std::max(tileSize, 0.05f);
+    return { min.x + (tx + (float)(x >> 8) / 16777216.f) * ts, min.y + (tz + (float)(z >> 8) / 16777216.f) * ts };
+}
+long long fieldBladesSubmitted() { return gpu.fieldBlades; }
+
+const Camera& drawingCamera() {
+    static const Camera none{};
+    return viewing ? *viewing : none;
+}
+
 Object3D* Scene::add(std::shared_ptr<Splats> s) {
     Object3D* o = add();
     o->splats = std::move(s);
@@ -3594,6 +4159,11 @@ void render(Scene& s, int t, const Ctx& c, Rectangle viewport, Camera* camera) {
         cull.screenH = viewport.width > 0 && viewport.height > 0 ? viewport.height * c.s : std::max(1.f, cs.y);
         cull.compH = viewport.width > 0 && viewport.height > 0 ? viewport.height : cull.screenH / std::max(1e-4f, c.s);
     }
+    struct Viewing {                                      // drawingCamera() while the scene's `up`s run
+        const Camera* before;
+        explicit Viewing(const Camera* c) : before(viewing) { viewing = c; }
+        ~Viewing() { viewing = before; }
+    } viewingNow(&cam);
     animate(s.objects, t, MatrixIdentity(), cull);
     if (canvasSize().x > 0) {
         sizeSurfaces(s.objects, MatrixIdentity(), cam, cull.screenH * cull.aspect, cull.screenH);

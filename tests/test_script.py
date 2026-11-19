@@ -1,4 +1,5 @@
 """Runtime loader regressions. Fixtures are generated in a temporary working directory."""
+import json
 import pathlib
 import subprocess
 import sys
@@ -112,6 +113,288 @@ void second(int t) { }
         example = SAMPLE.parent / "splat_color_function.as"
         self.run_cli("still", "splat-color-function", "--script", example, "--at", 10, "--ss", 1, "--png", "splat.png")
         self.assertGreater((self.cwd / "splat.png").stat().st_size, 1000)
+
+    @unittest.skipUnless(GL, "needs OpenGL")
+    def test_grass_field(self):
+        # A "grass" object draws, the same frame comes out the same in any order (the field is
+        # kept between frames), and bad presets and grids say what is wrong.
+        def write(preset="meadow", density=300, extra=""):
+            grass = (f'\\"preset\\":\\"{preset}\\",\\"min\\":[-6,-6],\\"max\\":[6,6],'
+                     f'\\"density\\":{density},\\"seed\\":3{extra}')
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "grass"; c.w = 160; c.h = 90; c.fps = 30; c.duration = 10; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) {
+    g3d::draw("{\\"camera\\":{\\"position\\":[0,1.2,4],\\"target\\":[0,0.3,0]},"
+              "\\"lights\\":[{\\"type\\":\\"directional\\",\\"position\\":[2,4,-6],\\"castShadow\\":true}],"
+              "\\"objects\\":[{\\"geometry\\":\\"plane\\",\\"width\\":20,\\"depth\\":20,\\"material\\":{\\"color\\":\\"#c828c8\\"}},"
+              "{\\"grass\\":{''' + grass + '''}}]}", frame, 0, 0, 160, 90);
+}
+''')
+        write()
+        for frame in (5, 4, 5):
+            self.run_cli("still", "grass", "--script", self.path, "--at", frame, "--png", f"g{frame}-{len(list(self.cwd.glob('*.png')))}.png")
+        first, moved, again = (self.cwd / "g5-0.png"), (self.cwd / "g4-1.png"), (self.cwd / "g5-2.png")
+        self.assertEqual(first.read_bytes(), again.read_bytes())
+        self.assertNotEqual(first.read_bytes(), moved.read_bytes())       # the wind moves it
+        write(density=0)
+        self.run_cli("still", "grass", "--script", self.path, "--at", 5, "--png", "bare.png")
+        self.assertNotEqual(first.read_bytes(), (self.cwd / "bare.png").read_bytes())
+        write(preset="jungle")
+        self.assertIn('no grass look "jungle"', self.run_cli("still", "grass", "--script", self.path, "--png", "x.png", ok=False))
+        write(extra=',\\"mask\\":{\\"width\\":3,\\"height\\":3,\\"values\\":[1,0]}')
+        self.assertIn("grass mask needs", self.run_cli("still", "grass", "--script", self.path, "--png", "x.png", ok=False))
+
+    @unittest.skipUnless(GL, "needs OpenGL")
+    def test_flora_area_scatter_terrain(self):
+        # One area feeds a terrain, grass and scattered instances; frames repeat exactly, and
+        # bad areas and oversized scatters say what is wrong.
+        def write(area, spacing=3, grass_extra=""):
+            land = area.replace('"', '\\"')
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "land"; c.w = 160; c.h = 90; c.fps = 30; c.duration = 10; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) {
+    string land = "''' + land + '''";
+    g3d::draw("{\\"camera\\":{\\"position\\":[0,14,30],\\"target\\":[0,2,0]},"
+              "\\"lights\\":[{\\"type\\":\\"directional\\",\\"position\\":[10,20,-10],\\"castShadow\\":true,\\"shadowExtent\\":30}],"
+              "\\"objects\\":[{\\"geometry\\":\\"terrain\\",\\"area\\":" + land + ",\\"resX\\":40,\\"resZ\\":40,\\"material\\":{\\"color\\":\\"#c828c8\\"}},"
+              "{\\"grass\\":{\\"preset\\":\\"lawn\\",\\"area\\":" + land + ",\\"seed\\":2''' + grass_extra + '''}},"
+              "{\\"geometry\\":\\"cone\\",\\"radius\\":0.8,\\"height\\":2.5,\\"slices\\":6,"
+              "\\"instances\\":{\\"scatter\\":{\\"area\\":" + land + ",\\"spacing\\":''' + str(spacing) + ''',\\"lift\\":1.25,"
+              "\\"tints\\":[\\"#2f5a2a\\",\\"#5a7a30\\"],\\"seed\\":4}}}]}", frame, 0, 0, 160, 90);
+}
+''')
+        hills = ('{"min":[-25,-25],"max":[25,25],"ground":{"hills":{"height":4,"scale":20,"seed":3}},'
+                 '"strips":[{"points":[[-25,0],[25,6]],"width":4}],"clearings":[[8,-8,5]],"maxSlope":35}')
+        write(hills)
+        for name, frame in (("a", 3), ("b", 7), ("c", 3)):
+            self.run_cli("still", "land", "--script", self.path, "--at", frame, "--png", f"{name}.png")
+        self.assertEqual((self.cwd / "a.png").read_bytes(), (self.cwd / "c.png").read_bytes())
+        self.assertGreater((self.cwd / "a.png").stat().st_size, 5000)
+        write('{"min":[-25,-25],"max":[25,25],"strips":[{"points":[[0,0]],"width":4}]}')
+        self.assertIn("strip points", self.run_cli("still", "land", "--script", self.path, "--png", "x.png", ok=False))
+        write(hills.replace('"min":[-25,-25],"max":[25,25]', '"min":[-900,-900],"max":[900,900]'), spacing=4)
+        self.assertIn("at most", self.run_cli("still", "land", "--script", self.path, "--png", "x.png", ok=False, timeout=90))
+        write(hills, grass_extra=',\\"mask\\":{\\"width\\":2,\\"height\\":2,\\"values\\":[1,1,1,1]}')
+        self.assertIn("not both", self.run_cli("still", "land", "--script", self.path, "--png", "x.png", ok=False))
+
+    @unittest.skipUnless(GL, "needs OpenGL")
+    def test_flora_forest(self):
+        # A forest from presets over a scattered area, and one at given spots; frames repeat
+        # exactly, and bad trees say what is wrong.
+        def write(forest):
+            world = json.dumps({
+                "camera": {"position": [0, 12, 40], "target": [0, 5, 0]},
+                "lights": [{"type": "directional", "position": [10, 20, -10], "castShadow": True, "shadowExtent": 30}],
+                "objects": [{"geometry": "plane", "width": 120, "depth": 120, "material": {"color": "#c828c8"}},
+                            {"forest": forest}]})
+            literal = world.replace("\\", "\\\\").replace('"', '\\"')
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "wood"; c.w = 160; c.h = 90; c.fps = 30; c.duration = 10; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) { g3d::draw("''' + literal + '''", frame, 0, 0, 160, 90); }
+''')
+        build = {"frames": 4, "views": 4, "viewSize": 32}
+        write({"trees": ["shrub", {"preset": "birch", "height": 8, "season": 0.7, "seed": 3}], "build": build,
+               "scatter": {"area": {"min": [-30, -30], "max": [30, 10]}, "spacing": 6, "clumping": 0.3, "seed": 2},
+               "reducedFrom": 20, "impostorFrom": 45, "windDirection": [1, 0]})
+        for name, frame in (("a", 3), ("b", 7), ("c", 3)):
+            self.run_cli("still", "wood", "--script", self.path, "--at", frame, "--png", f"{name}.png", timeout=120)
+        self.assertEqual((self.cwd / "a.png").read_bytes(), (self.cwd / "c.png").read_bytes())
+        self.assertNotEqual((self.cwd / "a.png").read_bytes(), (self.cwd / "b.png").read_bytes())
+        write({"trees": ["shrub"], "build": build, "at": [[0, 0, 0], [4, 0, -3, 45, 1.5, 0]]})
+        self.run_cli("still", "wood", "--script", self.path, "--png", "at.png", timeout=120)
+        write({"trees": ["baobab"], "build": build, "at": [[0, 0, 0]]})
+        self.assertIn("unknown preset", self.run_cli("still", "wood", "--script", self.path, "--png", "x.png", ok=False))
+        write({"trees": [], "at": [[0, 0, 0]]})
+        self.assertIn("1..8 trees", self.run_cli("still", "wood", "--script", self.path, "--png", "x.png", ok=False))
+        write({"trees": ["oak"], "build": {"views": 99}, "at": [[0, 0, 0]]})
+        self.assertIn("views 1..32", self.run_cli("still", "wood", "--script", self.path, "--png", "x.png", ok=False))
+
+    @unittest.skipUnless(GL, "needs OpenGL")
+    def test_flora_growth(self):
+        # Grass with an arrival front and a growing grove: at grow 0 both draw nothing (the
+        # picture is the bare ground), part way they show, and a big growing forest is refused.
+        def write(objects):
+            world = json.dumps({
+                "camera": {"position": [0, 10, 26], "target": [0, 2, 0]},
+                "lights": [{"type": "directional", "position": [10, 20, -10], "castShadow": True, "shadowExtent": 30}],
+                "objects": [{"geometry": "plane", "width": 120, "depth": 120, "material": {"color": "#c828c8"}}] + objects})
+            literal = world.replace("\\", "\\\\").replace('"', '\\"')
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "grow"; c.w = 160; c.h = 90; c.fps = 30; c.duration = 10; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) { g3d::draw("''' + literal + '''", frame, 0, 0, 160, 90); }
+''')
+
+        def growing(u, spot=12):
+            return [{"grass": {"preset": "meadow", "min": [-20, -20], "max": [20, 20], "seed": 1,
+                               "arrival": {"from": [0, 0], "reach": 20}, "grow": u}},
+                    {"forest": {"trees": ["shrub"], "build": {"frames": 4, "views": 4, "viewSize": 32},
+                                "scatter": {"area": {"min": [-spot, -spot], "max": [spot, spot]}, "spacing": 6, "seed": 2},
+                                "grow": u, "growFrom": [0, 0], "growReach": 12}}]
+        write([])
+        self.run_cli("still", "grow", "--script", self.path, "--at", 3, "--png", "bare.png")
+        write(growing(0))
+        self.run_cli("still", "grow", "--script", self.path, "--at", 3, "--png", "zero.png", timeout=120)
+        write(growing(0.5))
+        self.run_cli("still", "grow", "--script", self.path, "--at", 3, "--png", "half.png", timeout=120)
+        self.assertEqual((self.cwd / "bare.png").read_bytes(), (self.cwd / "zero.png").read_bytes())
+        self.assertNotEqual((self.cwd / "bare.png").read_bytes(), (self.cwd / "half.png").read_bytes())
+        write(growing(0.5, spot=60))
+        self.assertIn("at most 64", self.run_cli("still", "grow", "--script", self.path, "--png", "x.png", ok=False, timeout=120))
+
+    @unittest.skipUnless(GL, "needs OpenGL")
+    def test_flora_styles(self):
+        # Each tree style and shading draws, each differently, and a bad one is refused by name.
+        def write(build):
+            world = json.dumps({
+                "camera": {"position": [0, 4, 14], "target": [0, 3, 0]},
+                "lights": [{"type": "directional", "position": [10, 20, -10]}],
+                "objects": [{"geometry": "plane", "width": 60, "depth": 60, "material": {"color": "#c828c8"}},
+                            {"grass": {"preset": "toon", "min": [-4, -4], "max": [4, 4], "seed": 1}},
+                            {"forest": {"trees": ["shrub"], "build": dict(build, frames=2, views=4, viewSize=32),
+                                        "scatter": {"area": {"min": [-3, -3], "max": [3, 3]}, "spacing": 4, "seed": 2}}}]})
+            literal = world.replace("\\", "\\\\").replace('"', '\\"')
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "styles"; c.w = 160; c.h = 90; c.fps = 30; c.duration = 10; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) { g3d::draw("''' + literal + '''", frame, 0, 0, 160, 90); }
+''')
+        pictures = set()
+        for i, build in enumerate([{}, {"style": "lowpoly", "shading": "toon"}, {"style": "lowpoly", "shading": "hatch"},
+                                   {"style": "paper"}, {"style": "splat", "shading": "gooch"}]):
+            write(build)
+            self.run_cli("still", "styles", "--script", self.path, "--at", 3, "--png", f"s{i}.png", timeout=120)
+            pictures.add((self.cwd / f"s{i}.png").read_bytes())
+        self.assertEqual(len(pictures), 5)
+        write({"style": "cubist"})
+        self.assertIn("realistic, lowpoly, paper or splat", self.run_cli("still", "styles", "--script", self.path, "--png", "x.png", ok=False))
+        write({"shading": "oil"})
+        self.assertIn("standard, toon, gooch or hatch", self.run_cli("still", "styles", "--script", self.path, "--png", "x.png", ok=False))
+
+    @unittest.skipUnless(GL, "needs OpenGL")
+    def test_flora_2d(self):
+        # 2D vegetation: u 0 draws only the ground, growth changes the picture, frames are pure
+        # in t, and bad items are refused by name.
+        def write(u, items=None):
+            d = {"wind": {"gust": 1}, "camera": [10, 0], "items": items if items is not None else [
+                {"ground": {"depth": 0.6, "hills": {"x0": 0, "x1": 200, "y": 60, "amplitude": 6, "wavelength": 80}, "bottom": 90}},
+                {"tree": {"depth": 0.6, "preset": "pine", "x": 40, "height": 40, "silhouette": True, "u": u}},
+                {"ground": {"line": [[0, 80], [160, 80]], "bottom": 90, "color": "#4a6a34"}},
+                {"grass": {"preset": "tall", "height": 20, "u": u}},
+                {"tree": {"x": 90, "height": 60, "trunkWidth": 4, "leafSize": 6, "u": u}},
+                {"shrub": {"at": [130, 80], "size": 20, "height": 14, "u": u}},
+                {"tuft": {"at": [20, 80], "count": 8, "u": u}},
+                {"meadow": {"shape": [[0, 82], [160, 82], [160, 90], [0, 90]], "preset": "lawn", "height": 4, "u": u}}]}
+            literal = json.dumps(d).replace("\\", "\\\\").replace('"', '\\"')
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "flat"; c.w = 160; c.h = 90; c.fps = 30; c.duration = 40; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) { flora2d::draw("''' + literal + '''", frame); }
+''')
+        write(0, [{"ground": {"depth": 0.6, "hills": {"x0": 0, "x1": 200, "y": 60, "amplitude": 6, "wavelength": 80}, "bottom": 90}},
+                  {"ground": {"line": [[0, 80], [160, 80]], "bottom": 90, "color": "#4a6a34"}}])
+        self.run_cli("still", "flat", "--script", self.path, "--at", 5, "--png", "bare.png")
+        write(0)
+        self.run_cli("still", "flat", "--script", self.path, "--at", 5, "--png", "zero.png")
+        self.assertEqual((self.cwd / "bare.png").read_bytes(), (self.cwd / "zero.png").read_bytes())
+        write(1)
+        for name, frame in (("a.png", 5), ("b.png", 30), ("a2.png", 5)):
+            self.run_cli("still", "flat", "--script", self.path, "--at", frame, "--png", name)
+        self.assertNotEqual((self.cwd / "zero.png").read_bytes(), (self.cwd / "a.png").read_bytes())
+        self.assertNotEqual((self.cwd / "a.png").read_bytes(), (self.cwd / "b.png").read_bytes())
+        self.assertEqual((self.cwd / "a.png").read_bytes(), (self.cwd / "a2.png").read_bytes())
+        write(1, [{"cactus": {}}])
+        self.assertIn("ground, grass, meadow, tuft, shrub, tree", self.run_cli("still", "flat", "--script", self.path, "--png", "x.png", ok=False))
+        write(1, [{"tree": {"preset": "baobab", "at": [10, 10]}}])
+        self.assertIn("oak, birch, pine", self.run_cli("still", "flat", "--script", self.path, "--png", "x.png", ok=False))
+        write(1, [{"tree": {"x": 10}}])
+        self.assertIn("needs \"at\"", self.run_cli("still", "flat", "--script", self.path, "--png", "x.png", ok=False))
+
+    @unittest.skipUnless(GL, "needs OpenGL")
+    def test_flora_city_and_map(self):
+        # A city's vegetation as plants, and forest cover on a map: each changes the picture,
+        # and bad descriptors are refused by name.
+        (self.cwd / "green.city.json").write_text(json.dumps({
+            "type": "CityJSON", "version": "2.0", "transform": {"scale": [1, 1, 1], "translate": [0, 0, 0]},
+            "CityObjects": {
+                "oak": {"type": "SolitaryVegetationObject", "attributes": {"height": 9},
+                        "geometry": [{"type": "MultiPoint", "lod": "1", "boundaries": [0]}]},
+                "lawn": {"type": "PlantCover", "geometry": [{"type": "MultiSurface", "lod": "1", "boundaries": [[[1, 2, 3, 4]]]}]}},
+            "vertices": [[0, 0, 0], [-8, -8, 0], [8, -8, 0], [8, 8, 0], [-8, 8, 0]]}))
+
+        def write(scene):
+            literal = json.dumps(scene).replace("\\", "\\\\").replace('"', '\\"')
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "green"; c.w = 160; c.h = 90; c.fps = 30; c.duration = 10; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) { g3d::draw("''' + literal + '''", frame, 0, 0, 160, 90); }
+''')
+
+        def town(plants):
+            d = {"camera": {"position": [0, 6, 20], "target": [0, 3, 0]},
+                 "lights": [{"type": "directional", "position": [5, 10, 5]}],
+                 "city": {"file": "green.city.json"}}
+            if plants is not None:
+                d["city"]["plants"] = plants
+            return d
+        write(town(None))
+        self.run_cli("still", "green", "--script", self.path, "--at", 2, "--png", "solids.png")
+        write(town({"style": "lowpoly", "wind": 0}))
+        self.run_cli("still", "green", "--script", self.path, "--at", 2, "--png", "plants.png", timeout=120)
+        self.assertNotEqual((self.cwd / "solids.png").read_bytes(), (self.cwd / "plants.png").read_bytes())
+        write(town({"style": "cubist"}))
+        self.assertIn("realistic, lowpoly, paper or splat", self.run_cli("still", "green", "--script", self.path, "--png", "x.png", ok=False))
+
+        def globe(forest):
+            g = {"projection": "equirectangular", "centerLon": 18, "centerLat": 62, "mapWidth": 256}
+            if forest is not None:
+                g["forest"] = forest
+            return {"camera": {"position": [0, 0.2, 2.4], "target": [0, 0, 0]},
+                    "lights": [{"type": "directional", "position": [-2, 3, 4]}], "geo3d": g}
+        write(globe(None))
+        self.run_cli("still", "green", "--script", self.path, "--at", 2, "--png", "bare.png")
+        write(globe({"regions": ["FIN", [5, 58, 12, 63]], "spacing": 1, "height": 0.03}))
+        self.run_cli("still", "green", "--script", self.path, "--at", 2, "--png", "wooded.png", timeout=120)
+        self.assertNotEqual((self.cwd / "bare.png").read_bytes(), (self.cwd / "wooded.png").read_bytes())
+        write(globe({"regions": ["Atlantis"]}))
+        self.assertIn("no country", self.run_cli("still", "green", "--script", self.path, "--png", "x.png", ok=False))
+        write(globe({"regions": [[10, 60, 5, 50]]}))
+        self.assertIn("[west, south, east, north]", self.run_cli("still", "green", "--script", self.path, "--png", "x.png", ok=False))
+
+    @unittest.skipUnless(GL, "needs OpenGL")
+    def test_flora_prefabs(self):
+        # Each flora prefab draws, changes as it grows, and refuses unknown trees and grass.
+        def write(name, props):
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "fp"; c.w = 192; c.h = 108; c.fps = 30; c.duration = 60; c.supersample = 1;
+    prefab::use(0, 60, "''' + name + '''", "''' + json.dumps(props).replace('"', '\\"') + '''");
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) {}
+''')
+        for name, props in (("flora-2d-hill", {"box": [0, 0, 192, 108], "duration": 40}),
+                            ("flora-tree-grow", {"box": [0, 0, 192, 108], "tree": "birch", "duration": 40}),
+                            ("flora-meadow", {"box": [0, 0, 192, 108], "trees": 3, "size": 12, "kinds": ["birch"]})):
+            write(name, props)
+            self.run_cli("still", "fp", "--script", self.path, "--at", 2, "--png", "a.png", timeout=180)
+            self.run_cli("still", "fp", "--script", self.path, "--at", 50, "--png", "b.png", timeout=180)
+            self.assertNotEqual((self.cwd / "a.png").read_bytes(), (self.cwd / "b.png").read_bytes(), name)
+        write("flora-tree-grow", {"tree": "baobab"})
+        self.assertIn('no tree "baobab"', self.run_cli("still", "fp", "--script", self.path, "--png", "x.png", ok=False))
+        write("flora-2d-hill", {"grass": "astroturf"})
+        self.assertIn('no grass "astroturf"', self.run_cli("still", "fp", "--script", self.path, "--png", "x.png", ok=False))
+        write("flora-meadow", {"box": [0, 0, 0, 10]})
+        self.assertIn("positive size", self.run_cli("still", "fp", "--script", self.path, "--png", "x.png", ok=False))
 
     @unittest.skipUnless(GL, "needs OpenGL")
     def test_map_helpers_draw(self):

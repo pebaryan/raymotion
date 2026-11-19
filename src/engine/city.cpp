@@ -5,6 +5,7 @@
 #include <earcut/earcut.hpp>
 #include <raymath.h>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -569,6 +570,113 @@ g3d::Object3D* add(g3d::Scene& scene, const Model& m, const Look& look, g3d::Mat
 g3d::Object3D* add(g3d::Object3D& parent, const Model& m, const Look& look, g3d::Material material) {
     return fill(parent.add(), m, look, defaults(material));
 }
+
+bool isPlant(const Object& o) { return o.type == "SolitaryVegetationObject" || o.type == "PlantCover"; }
+
+namespace {
+
+std::string lower(std::string s) {
+    for (char& ch : s) ch = (char)std::tolower((unsigned char)ch);
+    return s;
+}
+float attribute(const Object& o, const char* key, float fallback) {
+    const Json& v = o.attributes[key];
+    if (v.isNumber() && std::isfinite(v.asNumber())) return (float)v.asNumber();
+    if (v.isString()) {                       // "12.5", "12.5 m"
+        try { return std::stof(v.asString()); } catch (...) {}
+    }
+    return fallback;
+}
+bool conifer(const Object& o) {
+    std::string words;
+    for (const char* k : { "species", "class", "function", "name" })
+        if (o.attributes[k].isString()) words += lower(o.attributes[k].asString()) + " ";
+    for (const char* c : { "pine", "spruce", "fir", "larch", "cedar", "pinus", "picea", "abies", "larix", "conifer", "needle", "taxus", "yew" })
+        if (words.find(c) != std::string::npos) return true;
+    return false;
+}
+uint32_t hashOf(const std::string& s) {
+    uint32_t h = 2166136261u;
+    for (char ch : s) h = (h ^ (unsigned char)ch) * 16777619u;
+    return h;
+}
+
+g3d::Object3D* plantsInto(g3d::Object3D* group, const Model& m, const Plants& p) {
+    group->name = "plants";
+    // Trees: oak and birch for broadleaves, pine and spruce for conifers (variants 0..3).
+    std::vector<flora::Placement> trees;
+    float treeTop[4] = { 0, 0, 0, 0 };
+    std::vector<flora::TreePtr> kinds;
+    const char* names[4] = { "oak", "birch", "pine", "spruce" };
+    auto build = [&]() {
+        if (!kinds.empty()) return;
+        for (int k = 0; k < 4; k++) {
+            kinds.push_back(flora::makeTree(flora::tree(names[k]), p.build));
+            treeTop[k] = std::max(kinds.back()->top, 0.5f);
+        }
+    };
+    std::vector<flora::Placement> shrubs;
+    for (const Object& o : m.objects) {
+        const Geometry* g = o.at(p.lod);
+        if (!g) continue;
+        if (p.trees && o.type == "SolitaryVegetationObject") {
+            build();
+            const uint32_t h = hashOf(o.id);
+            const int kind = (conifer(o) ? 2 : 0) + (int)(h & 1);
+            std::vector<Vector3> at;
+            if (g->faces.empty() && g->lines.empty() && !g->points.empty()) at = g->points;
+            else at.push_back(base(o, p.lod));
+            const float fromGeometry = g->faces.empty() ? 0 : o.height(p.lod);
+            const float tall = attribute(o, "height", fromGeometry > 0.5f ? fromGeometry : p.treeHeight);
+            for (size_t i = 0; i < at.size(); i++) {
+                flora::Placement pl;
+                pl.position = toScene(at[i]);
+                pl.yaw = (float)((h >> 8) % 360) + 47.f * i;
+                pl.scale = std::clamp(tall, 0.5f, 150.f) / treeTop[kind];
+                pl.variant = kind;
+                pl.id = h + (uint32_t)i;
+                trees.push_back(pl);
+            }
+        } else if (p.cover && o.type == "PlantCover" && !g->faces.empty()) {
+            // Its upward faces, in scene axes, are where things grow.
+            std::vector<Vector3> tris;
+            for (const Face& f : g->faces) {
+                Vector3 n;
+                const std::vector<int> idx = triangles(f, &n);
+                if (std::fabs(n.z) < 0.5f) continue;              // flat enough (either winding)
+                std::vector<Vector3> flat;
+                for (const auto& r : f.rings) flat.insert(flat.end(), r.begin(), r.end());
+                for (int k : idx) tris.push_back(toScene(flat[(size_t)k]));
+            }
+            if (tris.empty()) continue;
+            const flora::Area area = flora::onMesh(tris, 60);
+            const float avg = attribute(o, "averageHeight", 0);
+            const uint32_t seed = p.seed ^ hashOf(o.id);
+            if (avg > p.shrubHeight) {
+                flora::ScatterSpec sc;
+                sc.spacing = p.shrubSpacing;
+                sc.scaleMin = 0.8f; sc.scaleMax = 1.2f;
+                for (flora::Placement pl : flora::scatter(area, sc, seed)) {
+                    pl.scale *= std::clamp(avg, 0.3f, 6.f) / 2.4f;          // the shrub preset is about 2.4 m
+                    pl.id ^= seed;
+                    shrubs.push_back(pl);
+                }
+            } else {
+                g3d::Field style = p.grass;
+                if (avg > 0.05f) style.height = std::clamp(avg, 0.05f, 2.f);
+                flora::addGrass(*group, area, style, seed);
+            }
+        }
+    }
+    if (!trees.empty()) flora::addForest(*group, trees, kinds, p.forest);
+    if (!shrubs.empty()) flora::addForest(*group, shrubs, { flora::makeTree(flora::shrub(), p.build) }, p.forest);
+    return group;
+}
+
+}  // namespace
+
+g3d::Object3D* addPlants(g3d::Scene& scene, const Model& m, const Plants& p) { return plantsInto(scene.add(), m, p); }
+g3d::Object3D* addPlants(g3d::Object3D& parent, const Model& m, const Plants& p) { return plantsInto(parent.add(), m, p); }
 
 void rise(g3d::Object3D* group, int delay, float stagger, int length, const Vector3* from) {
     if (!group || group->children.empty()) return;

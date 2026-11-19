@@ -17,6 +17,7 @@
 // absolute values from t so any frame renders the same on its own.
 #pragma once
 #include <raylib.h>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -146,6 +147,27 @@ struct Material {
                                     // multiplies opacity: give a see-through overlay opacity
                                     // just under 1 so it draws with the transparent objects
 
+    // Cut-out: > 0 drops every fragment whose alpha (texture x colour x vertex colour) is
+    // below it, in the picture, the shadows and the ink lines alike; what is kept is opaque
+    // (not blended), so leaf and grass cards sort and shadow like solid objects. Alpha is
+    // raised with the texture's mip level so a card seen far away does not thin out.
+    float alphaCutoff = 0;
+    // Light through a thin surface (a leaf, a blade of grass, paper, a lampshade): a light
+    // behind it, as seen from the camera, shows through in `translucencyColor` (multiplied by
+    // the base colour), brightest when looking towards the light. 0 = opaque to light.
+    // Standard shading only.
+    float translucency = 0;
+    Color translucencyColor = WHITE;
+    // Surface detail from textures, in the mesh's uv. `normalMap` is a tangent-space normal
+    // map in the OpenGL convention (green = +v); no tangents are needed, the frame comes from
+    // the uv's screen derivatives. `normalScale` scales its bumps (0 = flat, < 0 inverts).
+    // `roughnessMap` is glTF's metallic-roughness texture: green multiplies `roughness`,
+    // blue multiplies `metalness`. Standard shading only.
+    std::string normalMap;
+    DynamicTexturePtr dynamicNormalMap;     // or one made by code (wins over `normalMap`)
+    float normalScale = 1;
+    std::string roughnessMap;
+
     Shading shading = Shading::Standard;
     struct Toon {
         int bands = 2;              // lit steps per light above the shadow (1 = lit or unlit)
@@ -204,16 +226,88 @@ struct Instance {
     float frame = 0;
     int clipStart = 0, clipLength = 1;
     float shade = 1;                        // brightness multiplier
+    Color tint = WHITE;                     // colour multiplier (alpha unused): tint x shade per
+                                            // channel is kept to 8 bits over 0..2
+    // Coverage as a screen door (steps of 1/32): 1 = whole; f > 0 keeps a fraction f of the
+    // pixels, f < 0 the other 1 + f, so a body at u and its stand-in at -u fill each pixel
+    // once (dithered cross-fades between tiers, no popping). Shadows fade the same way.
+    float fade = 1;
 };
 
 // An object's instances: `up` refills `list` each frame from t (pure, like any `up`). They
-// are drawn in the object's space with its `material` (opaque only; the colour comes from the
-// mesh's vertex colours, multiplied by the material's). Each one is culled on its own (see
+// are drawn in the object's space with its `material` (opaque or cut out, not blended; the
+// colour comes from the mesh's vertex colours, multiplied by the material's and each
+// instance's tint and shade). Each one is culled on its own (see
 // Object3D::cullRadius), shadow footprint included, so only what can show is submitted.
 struct Instances {
     std::shared_ptr<AnimatedMesh> mesh;
     std::vector<Instance> list;
 };
+
+// ------------------------------------------------------------------ fields (grass)
+// Grass at landscape scale: every blade is made on the GPU from its tile and its number, so
+// nothing per blade is stored or sent, and a million blades cost what their pixels cost.
+// The area is cut into square tiles; each frame the CPU keeps the tiles that can show (their
+// shadows included) and picks a level for each from its distance, and the vertex shader
+// places, shapes, colours and bends each blade. The same seed makes the same field, in any
+// frame order; the wind is a function of position and time, never integrated.
+//
+// Blade k of a tile sits at point k of a low-discrepancy sequence, so any first n blades of a
+// tile cover it evenly. Far away fewer are drawn (by rank, each shrinking away over a band
+// rather than popping) and the ones left grow wider, so the cover holds until the fade.
+// `mask`, `ground` and `tall` are sampled over the area once, into a texture of
+// `mapResolution` squared, when the field is first drawn: change them, then bump `revision`.
+// Drawn with the object's material (its colour multiplies the blade colours; translucency,
+// roughness and receiveShadow apply); always double-sided.
+struct Field {
+    Vector2 min{ -10, -10 }, max{ 10, 10 };     // the area: x and z in the object's space
+    float density = 400;                        // blades per square metre where `mask` is 1
+    uint32_t seed = 1;
+
+    float height = 0.3f;                        // metres
+    float heightVariation = 0.35f;              // +- this fraction, per blade
+    float width = 0.012f;                       // metres at the root; blades taper to a point
+    float lean = 0.25f;                         // resting bend: the tip's offset over the height
+    int segments = 4;                           // along a near blade (far blades have one)
+    Color root{ 38, 66, 24, 255 }, tip{ 128, 168, 64, 255 };    // colour from root to tip
+    float colorVariation = 0.3f;                // per-blade brightness spread, 0..1
+    Color dry{ 176, 156, 86, 255 };             // straw colour...
+    float dryness = 0.12f;                      // ...and the fraction of blades turning to it
+    int colorBands = 0;                         // > 1: root to tip in this many flat bands (toon looks)
+
+    std::function<float(float x, float z)> ground;      // ground height (null = 0)
+    std::function<float(float x, float z)> mask;        // density, 0..1 (null = 1)
+    std::function<float(float x, float z)> tall;        // height multiplier (null = 1)
+    // Growth: each spot's grass rises when `grow` (0..1, may follow t) passes its arrival
+    // (0..1; null = 0, all at once), over 0.15 of `grow`; so blades rise rather than pop.
+    // flora::arrivalFrom / arrivalAlong / arrivalInto make the usual fronts.
+    std::function<float(float x, float z)> arrival;
+    float grow = 1;
+    int mapResolution = 256;
+    int revision = 0;                           // bump after changing the four maps above
+
+    Vector2 windDirection{ 1, 0.3f };           // x, z; normalised when drawn
+    float sway = 0.12f;                         // steady lean downwind and flutter, tip offset / height
+    float gust = 0.35f;                         // extra bend while a gust passes
+    float gustSpeed = 5;                        // metres a second the gust fronts travel downwind
+    float gustScale = 14;                       // metres between gust fronts
+    float fps = 30;                             // the film's frames per second: wind moves in seconds
+
+    float tileSize = 4;                         // metres
+    float detailDistance = 14;                  // nearer tiles get full blades, further one segment
+    float fadeStart = 35, fadeEnd = 70;         // blades thin out over this band (metres from the camera)
+    float shadowDistance = 18;                  // tiles nearer than this cast shadows (all receive)
+
+    // What the shader draws, mirrored on the CPU for tests and placement: blade k of tile
+    // (tx, tz) has its root at x, z in the object's space (before masks and fading).
+    Vector2 bladeRoot(int tx, int tz, uint32_t k) const;
+    int tilesX() const;
+    int tilesZ() const;
+    uint32_t bladesPerTile() const;             // density * tileSize^2, rounded
+};
+// Blades the last rendered frame submitted in its main pass, over every field (before the
+// shader thins them by mask and distance; shadow passes not counted): for measuring budgets.
+long long fieldBladesSubmitted();
 
 // ------------------------------------------------------------------ gaussian splats
 // A cloud of Gaussian splats (see splat.hpp) drawn in the object's space: one instanced quad
@@ -351,6 +445,7 @@ struct Object3D {
     // geometry itself is not drawn.
     std::shared_ptr<const fx::Emitter3D> emitter;
     std::shared_ptr<Instances> instances;               // many copies of one baked mesh
+    std::shared_ptr<Field> field;                       // grass made on the GPU
     std::shared_ptr<Splats> splats;                     // a Gaussian splat cloud
     std::shared_ptr<Surface> surface;                   // a 2D picture (with its own geometry and dynamicMap)
     std::shared_ptr<Lines> lines;                       // strokes and arrows
@@ -363,6 +458,7 @@ struct Object3D {
     Object3D* add(fx::Emitter3D e);                    // particles (billboards, streaks, quads)
     Object3D* add(fx::Emitter3D e, GeometryPtr g, Material m = {});   // mesh particles
     Object3D* add(std::shared_ptr<Instances> i, Material m = {});      // instanced bodies
+    Object3D* add(std::shared_ptr<Field> f, Material m = {});          // a grass field
     Object3D* add(std::shared_ptr<Splats> s);                          // a splat cloud
     Object3D* add(std::shared_ptr<Surface> s);                         // a 2D picture
     Object3D* add(std::shared_ptr<Lines> l);                           // strokes and arrows
@@ -553,6 +649,7 @@ struct Scene {
     Object3D* add(fx::Emitter3D e);
     Object3D* add(fx::Emitter3D e, GeometryPtr g, Material m = {});
     Object3D* add(std::shared_ptr<Instances> i, Material m = {});
+    Object3D* add(std::shared_ptr<Field> f, Material m = {});
     Object3D* add(std::shared_ptr<Splats> s);
     Object3D* add(std::shared_ptr<Surface> s);
     Object3D* add(std::shared_ptr<g3d::Lines> l);    // strokes and arrows (not `lines`, the ink outlines)
@@ -571,6 +668,10 @@ std::function<Image()> studioEnvironment(Color top, Color horizon, Color bottom,
 // ctx; empty = the whole composition), composited with ctx opacity. `camera` overrides
 // scene.camera, e.g. several views of one scene. Outside presentFrame it does nothing.
 void render(Scene& scene, int t, const Ctx& c, Rectangle viewport = {}, Camera* camera = nullptr);
+
+// Inside an `up` callback: the camera of the view being drawn, after its own `up` (so tiers
+// by distance, billboards and the like can follow it). A default camera outside a draw.
+const Camera& drawingCamera();
 
 // The camera as render() sees it at frame t: `camera` with its `up` applied (to a copy).
 Camera cameraAt(const Camera& camera, int t);

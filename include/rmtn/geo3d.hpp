@@ -28,6 +28,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "flora.hpp"
 #include "geo.hpp"
 #include "geomap.hpp"
 #include "globe.hpp"
@@ -86,6 +87,24 @@ using geo::Values;                      // by ISO code (a2 or a3), id or name
 std::vector<Datum> byCountry(const Values& values, const geo::Layer& layer = geo::countries());
 
 using geo::Scale;                       // values to colours (rmtn/geomap.hpp)
+
+// ---- forest cover
+
+// Trees scattered over regions (Poisson disk in longitude and latitude), standing up from
+// the surface wherever the morph has it, as low-poly instanced trees: map scale. A region
+// is a geo::Geometry: a country's (geo::countries().get("FIN").geometry), a GeoJSON area's.
+struct ForestCover {
+    float spacing = 0.6f;               // degrees between trees
+    float height = 0.025f;              // world units, a tree's height
+    float heightVariation = 0.35f;
+    std::vector<flora::TreePtr> trees;  // empty: low-poly oak, birch and pine
+    std::function<float(int t)> grow;   // 0..1: the cover rises in (default: 1)
+    float stagger = 0.4f;               // with grow: the eastmost tree starts this much of u later
+    uint32_t seed = 1;
+    int limit = 100000;                 // most trees; the scatter is thinned evenly beyond it
+};
+g3d::Object3D* forest(g3d::Object3D& parent, SurfacePtr s, const std::vector<geo::Geometry>& regions,
+                      const ForestCover& st = {});
 
 // ---- marks at places
 

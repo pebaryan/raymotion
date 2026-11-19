@@ -94,6 +94,10 @@ add_library(rmtn_engine STATIC
   src/engine/rig_creature.cpp
   src/engine/rig_skin.cpp
   src/engine/crowd.cpp
+  src/engine/flora.cpp
+  src/engine/flora_tree.cpp
+  src/engine/flora2d.cpp
+  src/engine/flora_prefabs.cpp
   src/engine/crowd_rig.cpp
   src/engine/voxel.cpp
   src/engine/splat.cpp
@@ -199,6 +203,7 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/own_compute_v2.cpp
     examples/showcase/promo.cpp
     examples/showcase/npr.cpp
+    examples/showcase/flora.cpp
     examples/showcase/diagrams.cpp
     examples/showcase/particles.cpp
     examples/showcase/particles3d.cpp
@@ -387,6 +392,9 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   add_executable(raymotion_crowd_tests tests/crowd_tests.cpp)
   target_link_libraries(raymotion_crowd_tests PRIVATE rmtn_engine)
   add_test(NAME crowd COMMAND raymotion_crowd_tests)
+  add_executable(raymotion_flora_tests tests/flora_tests.cpp)
+  target_link_libraries(raymotion_flora_tests PRIVATE rmtn_engine)
+  add_test(NAME flora COMMAND raymotion_flora_tests)
   add_executable(raymotion_voxel_tests tests/voxel_tests.cpp)
   target_link_libraries(raymotion_voxel_tests PRIVATE rmtn_engine)
   add_test(NAME voxel COMMAND raymotion_voxel_tests)
@@ -413,6 +421,9 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   add_executable(raymotion_path_render_tests tests/path_render_tests.cpp)
   target_link_libraries(raymotion_path_render_tests PRIVATE rmtn_engine)
   add_test(NAME path_rendering COMMAND raymotion_path_render_tests)
+  add_executable(raymotion_flora2d_render_tests tests/flora2d_render_tests.cpp)
+  target_link_libraries(raymotion_flora2d_render_tests PRIVATE rmtn_engine)
+  add_test(NAME flora2d_rendering COMMAND raymotion_flora2d_render_tests)
   add_executable(raymotion_math_render_tests tests/math_render_tests.cpp)
   target_link_libraries(raymotion_math_render_tests PRIVATE rmtn_engine)
   add_test(NAME math_rendering COMMAND raymotion_math_render_tests)
@@ -446,7 +457,7 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   target_compile_definitions(raymotion_feed_tests PRIVATE RAYMOTION_FEED_STATE=1 RAYMOTION_FEED_RENDER=1)
   add_test(NAME ht_feed COMMAND raymotion_feed_tests)
 
-  set_tests_properties(renderer_regressions layer_compositing scene3d media diagram_rendering path_rendering math_rendering plot_rendering space_rendering code_rendering text_animation motion_blur icons ht_plain_layout ht_feed PROPERTIES LABELS gl SKIP_RETURN_CODE 77)
+  set_tests_properties(renderer_regressions layer_compositing scene3d media diagram_rendering path_rendering math_rendering plot_rendering space_rendering code_rendering text_animation motion_blur icons ht_plain_layout ht_feed flora2d_rendering PROPERTIES LABELS gl SKIP_RETURN_CODE 77)
   # media takes ~3 s; it has hung intermittently on Linux CI, so fail fast instead of at 1500 s.
   set_tests_properties(media PROPERTIES TIMEOUT 120)
   # CPU checks first, then GL ones; without a window they exit 77 after the CPU half.

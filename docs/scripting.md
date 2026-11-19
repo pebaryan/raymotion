@@ -436,7 +436,7 @@ adds the same computed pose as a native animated 3D character subtree. See
 changes, face tracks, outfit textures, and mounted carriers, use
 `Scene3D.addCharacter(characterJson, fps)` or `Object3D.addCharacter(characterJson, fps)`;
 both attach the native animated rig and return its root object handle.
-For GPU instancing of a procedural rig, `Scene3D.addRigInstances` and `Object3D.addRigInstances` bake a JSON look and an array of named clips directly with native `rig::bakeAnimated`, then attach repeated instances without supplying vertex arrays. Each clip object has `name`, `frames`, `seconds`, and optional `options`; each instance has `position`, optional orientation, scale, shade, and either a `clip` index or explicit `clipStart` / `clipLength`. Clip indices map to their baked frame ranges automatically. `coarse` defaults to true for smaller meshes; use false for the full native tessellation. The native baker omits model-backed and translucent parts.
+For GPU instancing of a procedural rig, `Scene3D.addRigInstances` and `Object3D.addRigInstances` bake a JSON look and an array of named clips directly with native `rig::bakeAnimated`, then attach repeated instances without supplying vertex arrays. Each clip object has `name`, `frames`, `seconds`, and optional `options`; each instance has `position`, optional orientation, scale, shade, `tint`, and either a `clip` index or explicit `clipStart` / `clipLength`. Clip indices map to their baked frame ranges automatically. `coarse` defaults to true for smaller meshes; use false for the full native tessellation. The native baker omits model-backed and translucent parts.
 Custom model-backed rig parts can be registered during `configure` with
 `rig::registerModelPart(name, slot, file, jointIndex, x, y, z, rotationX, rotationY,
 rotationZ, scale, svg, width, height)`. The optional SVG and size provide the 2D puppet
@@ -566,6 +566,16 @@ uses the same callback signature, and `g3d::upScene()` provides the active scene
 it, allowing frame-derived scene and camera settings.
 `modelPath()` reads a model object's source path. In draw callbacks, `modelMaterialCount()`, `modelMeshCount()` and `modelMeshMaterial(meshIndex)` inspect imported material slots and submesh assignments; `modelMaterialBaseColor(index)` reads a slot's diffuse RGBA color. `modelMaterialTint(index)` reads the per-object multiplier (white by default), and `modelMaterialTint(index, rgba)` sets it without changing the shared model asset or its texture. The tint combines with the imported diffuse color and the object's material tint while `usesModelMaterials()` is true. `materialSnapshot()` returns a detached `Material3D` value copy so scripts can inspect the material assigned to an object.
 `childCount()` and `childAt(index)` inspect and traverse object subtrees. `contentFlags()` reports whether an object contains geometry, a model, particles, instances, or splats; `geometryHandle()` returns its reusable geometry handle when present.
+Materials for leaves, grass and other thin surfaces: the JSON keys `alphaCutoff` (0..1; texels
+whose alpha is below it are holes, in the picture, the shadows and the ink lines),
+`translucency` (0 and up) with `translucencyColor` (light from behind showing through),
+`normalMap` with `normalScale` (a tangent-space normal map, OpenGL convention, no tangents
+needed) and `roughnessMap` (glTF metallic-roughness: green scales roughness, blue
+metalness). `Material3D` sets them with `alphaCutoff(cutoff)`, `translucency(amount, color)`,
+`normalMap(file, scale)` and `roughnessMap(file)`, and reads them with `alphaCutoffValue`,
+`translucencyValue`, `translucencyColorValue`, `normalMapPath`, `normalScaleValue` and
+`roughnessMapPath`. Give a cut-out texture's clear texels the surface colour with alpha 0,
+not black, or filtering draws a dark fringe. See `examples/scripts/leaf_cards.as`.
 `Material3D.colorValue`, `roughnessValue`, `metalnessValue`, `emissiveValue`, `opacityValue`,
 `shadingName`, `mapPath`, `hasDynamicMap`, `isUnlit`, `isDoubleSided`, `castsShadow`, and
 `receivesShadow` read base controls. `toonState`, `goochColors`, `hatchState`, `clipState`, and
@@ -688,13 +698,84 @@ absolute animation. Primitive geometry descriptors expose the native tessellatio
 `tubularSegments`/`radialSegments`/`p`/`q`). Objects also accept `cullRadius` and
 `cullCentre`, and scenes accept `cullFloor`, matching the native shadow-aware culling fields.
 Geometry objects can use an `instances` descriptor with `items` carrying position, yaw,
-pitch, bank, scale, baked `frame`, clip start/length, and shade. Optional `frames`, `positions`
+pitch, bank, scale, baked `frame`, clip start/length, shade, and `tint` (a colour multiplying the
+mesh; tint x shade is kept to 8 bits a channel over 0..2). Optional `frames`, `positions`
 and `normals` arrays expose native baked vertex animation (frame-major xyz triples); omitted
 arrays use the primitive geometry as a static one-frame mesh. See the instanced swarm in
 `examples/scripts/material_controls.as` and `examples/scripts/physics_scene.as`. Within a
 draw callback, `g3d::geometryData(geometryJson, vertices, normals)` samples a native primitive's
 CPU mesh as flattened xyz triples, so scripts can derive baked deformation frames without
 guessing the tessellator's vertex order.
+An object with a `grass` descriptor is a grass field made on the GPU (`g3d::Field`): `preset`
+(`lawn`, `meadow`, `tall` or `dry`), `min` and `max` (`[x, z]` corners of the area), `seed`,
+and any field value by name to override the preset: `density` (blades a square metre),
+`height`, `heightVariation`, `width`, `lean`, `segments`, colours `root`, `tip` and `dry`,
+`colorVariation`, `dryness`, wind `windDirection` (`[x, z]`), `sway`, `gust`, `gustSpeed`,
+`gustScale`, `fps`, and detail `tileSize`, `detailDistance`, `fadeStart`, `fadeEnd`,
+`shadowDistance`, `mapResolution`. Optional grids over the area, `mask` (density 0..1),
+`ground` (height) and `tall` (height multiplier), are `{"width": w, "height": h, "values":
+[...]}` row by row from `min` to `max`, read bilinearly. The object's `material` starts from
+the grass material (translucent, matt, no ink lines) and changes only what it names. The field
+is kept between frames while its area, `tileSize`, `mapResolution` and grids stay the same,
+so its maps are made once; the rest may follow `t`. See `examples/scripts/flora_meadow.as`.
+An `area` descriptor (`flora::Area`) says where plants grow: `min` and `max`, or `polygon`
+(one ring of `[x, z]`) or `polygons` (rings; inside an odd number of them, so holes are
+rings too); `exclude` (rings), `clearings` (`[x, z, radius]`), `strips` (`{"points": [[x, z],
+...], "width": w}` for roads and paths), `edge` (metres of fade-in), `maxSlope` (degrees),
+`minAltitude`, `maxAltitude`; `ground` as a grid or `{"hills": {"height", "scale", "seed",
+"base"}}`, and `density` as a grid or `{"noise": {"scale", "seed", "low", "high"}}`. Grass
+takes it as `"area"` in place of `min`/`max` and the `mask`/`ground` grids. The geometry
+`"terrain"` with an `area` (and `resX`, `resZ`, 1..254) is its ground as a mesh. An
+`instances` descriptor with `scatter` in place of `items` places bodies over an `area`:
+`spacing` (Poisson-disk, metres), `clumping` (0..1, groves and clearings) and `clumpScale`,
+`scaleMin`, `scaleMax`, `seed`, `lift` (raises each body by this times its scale, for meshes
+centred on their origin), `tints` (colour strings, one picked per body) and
+`shadeVariation`; at most 100000 bodies. Placements depend only on the bounds, spacing and
+seed, so editing a road or density removes bodies without moving the others. See
+`examples/scripts/flora_scatter.as`.
+A `forest` object grows trees and places them: `trees` (1..8 preset names, or objects with
+`preset` and any `flora::TreeSpec` field: `height`, `trunkRadius`, `crownBase`,
+`crownRadius`, `crownShape`, `crownLength`, `stems`, `gnarl`, `branchDensity`, `whorls`,
+`droop`, `lean`, `leafSize`, `leafDensity`, `bark`, `barkMarks`, `barkRings`, `leafColor`,
+`autumnColor`, `colorVariation`, `deciduous`, `season`, `sway`, `seed`), then `scatter` (as for
+instances; it picks a tree per spot) or `at` (`[[x, y, z, yaw, scale, tree], ...]`); the
+levels `reducedFrom`, `impostorFrom`, `blend`, `hideFrom`; the wind `windDirection`, `wind`,
+`gust`, `gustSpeed`, `gustScale`; `impostorShadows`; and `build` (`frames`, `loopSeconds`,
+`views`, `viewSize`, `reducedLeaves`). A built tree is kept while its description stays the
+same; each build takes a few hundred milliseconds, so step `season` rather than animate it
+every frame. See `examples/scripts/flora_forest.as`.
+Growth: grass takes `grow` (0..1, may follow `t`) and `arrival` (`{"from": [x, z], "reach":
+r}`, `{"along": [[x, z], ...], "reach": r}`, `{"into": area, "depth": d}` or a grid);
+blades come up where `grow` passes their arrival. A `forest` with `grow` grows its trees
+(at most 64, each its own mesh): `growFrom` (`[x, z]`) and `growReach` start the nearer
+ones first. See `examples/scripts/flora_growth.as`.
+Styles: a forest's `build` takes `"style"` (`realistic`, `lowpoly`, `paper`, `splat`) and
+`"shading"` (`standard`, `toon`, `gooch`, `hatch`); the `toon` grass preset has flat colour
+bands. Splat forests are one object a tree (at most 256). See
+`examples/scripts/flora_styles.as`.
+
+2D vegetation: `flora2d::draw(descriptor, frame)` draws `items` in order (far first):
+`{"ground": {...}}`, `{"grass": {...}}`, `{"meadow": {"shape": [[x, y], ...]}}`,
+`{"tuft": {"at": [x, y], "count": n}}`, `{"shrub": {...}}` and `{"tree": {"preset": "oak" |
+"birch" | "pine", ...}}`. Ground and grass take a `"line"` of points or `"hills"` (`x0`,
+`x1`, `y`, `amplitude`, `wavelength`, `seed`); a shrub or tree takes `"at"`, or `"x"` to
+stand on the last line. Each item can set `"u"` (growth), `"seed"`, `"depth"` (0 near .. 1
+far: shifted by the top-level `"camera"` and faded into `"haze"`) and style keys (heights,
+widths, colours, `silhouette`). `"wind"` sets `strength`, `direction`, `sway`, `gust`,
+`gustSpeed` and `gustWidth`. See `examples/scripts/flora_2d.as`.
+
+Plants in cities and on maps: a 3D scene's `city` takes `"plants": true` or `{"trees",
+"cover", "treeHeight", "shrubHeight", "shrubSpacing", "grass", "style", "wind", "seed"}`
+(its trees then draw as trees, not solids; see `examples/scripts/city_plants.as`). A
+`geo3d` descriptor takes `"forest": {"regions": ["FIN", [west, south, east, north]],
+"spacing", "height", "heightVariation", "stagger", "seed", "limit"}` with the usual
+`start`/`duration` or `progress` reveal, and `geo3d::forest(parent, surface, regionsJson,
+styleJson)` does the same on a handle; see `examples/scripts/geo_forest.as`.
+
+The vegetation prefabs `flora-meadow`, `flora-tree-grow` and `flora-2d-hill` work through
+`prefab::use` like any other (props in [flora.md](flora.md); see
+`examples/scripts/flora_prefabs.as`).
+
 The `physics` namespace exposes native Rope and Cloth solver handles, `PhysicsParams`, Sphere/Plane/Capsule/Box colliders, seeded wind, pins, bending/stretching, tearing, self collision and frame sampling. `physics::rope` and `physics::cloth` accept an optional params handle; omitting it uses the native defaults. See `examples/scripts/physics_scene.as` for the descriptor
 path and `examples/scripts/physics_callbacks.as` for direct callback-driven handles.
 `PhysicsParams.state(values)` returns
