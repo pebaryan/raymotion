@@ -320,6 +320,58 @@ void draw(int frame) { flora2d::draw("''' + literal + '''", frame); }
         self.assertIn("needs \"at\"", self.run_cli("still", "flat", "--script", self.path, "--png", "x.png", ok=False))
 
     @unittest.skipUnless(GL, "needs OpenGL")
+    def test_flora_city_and_map(self):
+        # A city's vegetation as plants, and forest cover on a map: each changes the picture,
+        # and bad descriptors are refused by name.
+        (self.cwd / "green.city.json").write_text(json.dumps({
+            "type": "CityJSON", "version": "2.0", "transform": {"scale": [1, 1, 1], "translate": [0, 0, 0]},
+            "CityObjects": {
+                "oak": {"type": "SolitaryVegetationObject", "attributes": {"height": 9},
+                        "geometry": [{"type": "MultiPoint", "lod": "1", "boundaries": [0]}]},
+                "lawn": {"type": "PlantCover", "geometry": [{"type": "MultiSurface", "lod": "1", "boundaries": [[[1, 2, 3, 4]]]}]}},
+            "vertices": [[0, 0, 0], [-8, -8, 0], [8, -8, 0], [8, 8, 0], [-8, 8, 0]]}))
+
+        def write(scene):
+            literal = json.dumps(scene).replace("\\", "\\\\").replace('"', '\\"')
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "green"; c.w = 160; c.h = 90; c.fps = 30; c.duration = 10; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) { g3d::draw("''' + literal + '''", frame, 0, 0, 160, 90); }
+''')
+
+        def town(plants):
+            d = {"camera": {"position": [0, 6, 20], "target": [0, 3, 0]},
+                 "lights": [{"type": "directional", "position": [5, 10, 5]}],
+                 "city": {"file": "green.city.json"}}
+            if plants is not None:
+                d["city"]["plants"] = plants
+            return d
+        write(town(None))
+        self.run_cli("still", "green", "--script", self.path, "--at", 2, "--png", "solids.png")
+        write(town({"style": "lowpoly", "wind": 0}))
+        self.run_cli("still", "green", "--script", self.path, "--at", 2, "--png", "plants.png", timeout=120)
+        self.assertNotEqual((self.cwd / "solids.png").read_bytes(), (self.cwd / "plants.png").read_bytes())
+        write(town({"style": "cubist"}))
+        self.assertIn("realistic, lowpoly, paper or splat", self.run_cli("still", "green", "--script", self.path, "--png", "x.png", ok=False))
+
+        def globe(forest):
+            g = {"projection": "equirectangular", "centerLon": 18, "centerLat": 62, "mapWidth": 256}
+            if forest is not None:
+                g["forest"] = forest
+            return {"camera": {"position": [0, 0.2, 2.4], "target": [0, 0, 0]},
+                    "lights": [{"type": "directional", "position": [-2, 3, 4]}], "geo3d": g}
+        write(globe(None))
+        self.run_cli("still", "green", "--script", self.path, "--at", 2, "--png", "bare.png")
+        write(globe({"regions": ["FIN", [5, 58, 12, 63]], "spacing": 1, "height": 0.03}))
+        self.run_cli("still", "green", "--script", self.path, "--at", 2, "--png", "wooded.png", timeout=120)
+        self.assertNotEqual((self.cwd / "bare.png").read_bytes(), (self.cwd / "wooded.png").read_bytes())
+        write(globe({"regions": ["Atlantis"]}))
+        self.assertIn("no country", self.run_cli("still", "green", "--script", self.path, "--png", "x.png", ok=False))
+        write(globe({"regions": [[10, 60, 5, 50]]}))
+        self.assertIn("[west, south, east, north]", self.run_cli("still", "green", "--script", self.path, "--png", "x.png", ok=False))
+
+    @unittest.skipUnless(GL, "needs OpenGL")
     def test_map_helpers_draw(self):
         # geo::base, choropleth, colorbar, labels, highlight, markers, route, fly, focus,
         # valuesAt and the geo-route / geo-flyto prefabs: every frame sampled must draw.

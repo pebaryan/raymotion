@@ -2,6 +2,7 @@
 // (docs/flora-plan.md, M3). Everything here runs on the CPU and is a function of the spec.
 #include "rmtn/flora.hpp"
 #include "rmtn/splat.hpp"
+#include "rmtn/geo3d.hpp"
 #include <raymath.h>
 #include <algorithm>
 #include <array>
@@ -1751,4 +1752,108 @@ g3d::Object3D* addGrowingTree(g3d::Scene& scene, TreePtr tree, Vector3 position,
 }
 
 }  // namespace flora
+
+namespace geo3d {
+
+g3d::Object3D* forest(g3d::Object3D& parent, SurfacePtr s, const std::vector<geo::Geometry>& regions, const ForestCover& st) {
+    if (!s) throw std::invalid_argument("geo3d::forest: no surface");
+    std::vector<flora::TreePtr> trees = st.trees;
+    trees.erase(std::remove(trees.begin(), trees.end(), nullptr), trees.end());
+    if (trees.empty()) {
+        flora::TreeBuild b;
+        b.style = flora::TreeStyle::LowPoly;
+        b.frames = 1;
+        b.views = 1;
+        b.viewSize = 16;
+        for (const char* n : { "oak", "birch", "pine" }) trees.push_back(flora::makeTree(flora::tree(n), b));
+    }
+    // Where: every region's trees, in longitude (x) and latitude (z).
+    struct Tree { geo::LonLat at; float scale; int kind; float late; };
+    auto list = std::make_shared<std::vector<Tree>>();
+    const float spacing = std::max(st.spacing, 1e-3f);
+    float west = 1e30f, east = -1e30f;
+    for (size_t r = 0; r < regions.size(); r++) {
+        if (regions[r].polygons.empty()) continue;
+        const flora::Area area = flora::region(regions[r], [](geo::LonLat p) { return Vector2{ (float)p.lon, (float)p.lat }; });
+        flora::ScatterSpec sc;
+        sc.spacing = spacing;
+        sc.scaleMin = 1 - st.heightVariation * 0.5f;
+        sc.scaleMax = 1 + st.heightVariation * 0.5f;
+        sc.variants = (int)trees.size();
+        for (const flora::Placement& p : flora::scatter(area, sc, st.seed + (uint32_t)r * 7919u)) {
+            const size_t kind = (size_t)p.variant % trees.size();
+            list->push_back({ { p.position.x, p.position.z }, st.height * p.scale / std::max(trees[kind]->top, 0.01f), (int)kind, 0 });
+            west = std::min(west, p.position.x);
+            east = std::max(east, p.position.x);
+        }
+    }
+    if ((int)list->size() > std::max(st.limit, 1)) {               // thin evenly, keeping order
+        std::vector<Tree> kept;
+        const double step = (double)list->size() / std::max(st.limit, 1);
+        for (double i = 0; i < (double)list->size() && (int)kept.size() < st.limit; i += step) kept.push_back((*list)[(size_t)i]);
+        *list = std::move(kept);
+    }
+    for (Tree& t : *list) t.late = east > west ? std::clamp(st.stagger, 0.f, 0.95f) * (float)(t.at.lon - west) / (east - west) : 0;
+
+    // Instance::pitch and bank that turn the tree's +y to a unit direction. Which axis turns
+    // first and the signs are raymath's (MatrixRotateXYZ), found by trying each on probes.
+    struct Tilt {
+        bool zFirst; float sa, sb;
+        Vector2 of(Vector3 u) const {                  // (pitch, bank), radians
+            if (zFirst) return { sa * std::atan2(u.z, u.y), sb * std::asin(std::clamp(u.x, -1.f, 1.f)) };
+            return { sa * std::asin(std::clamp(u.z, -1.f, 1.f)), sb * std::atan2(u.x, u.y) };
+        }
+    };
+    Tilt tilt{ false, 1, 1 };
+    float best = -1e9f;
+    for (bool zFirst : { false, true })
+        for (float sa : { 1.f, -1.f })
+            for (float sb : { 1.f, -1.f }) {
+                const Tilt c{ zFirst, sa, sb };
+                float score = 0;
+                for (Vector3 probe : { Vector3{ 0.3f, 0.8f, 0.5f }, Vector3{ -0.6f, -0.5f, 0.62f }, Vector3{ 0.5f, -0.7f, -0.5f } }) {
+                    probe = Vector3Normalize(probe);
+                    const Vector2 ab = c.of(probe);
+                    score += Vector3DotProduct(Vector3Transform({ 0, 1, 0 }, MatrixRotateXYZ({ ab.x, 0, ab.y })), probe);
+                }
+                if (score > best) { best = score; tilt = c; }
+            }
+
+    g3d::Object3D* group = parent.add();
+    group->name = "forest";
+    struct Part { std::shared_ptr<g3d::Instances> in; int kind; };
+    auto parts = std::make_shared<std::vector<Part>>();
+    for (size_t k = 0; k < trees.size(); k++)
+        for (int leaves = 0; leaves < 2; leaves++) {
+            const auto& mesh = leaves ? trees[k]->hero.leaves : trees[k]->hero.wood;
+            if (!mesh || mesh->frames <= 0) continue;
+            auto in = std::make_shared<g3d::Instances>();
+            in->mesh = mesh;
+            g3d::Material m = leaves ? trees[k]->leaves : trees[k]->wood;
+            group->add(in, m);
+            parts->push_back({ in, (int)k });
+        }
+    const auto grow = st.grow;
+    group->up = [s, list, parts, grow, tilt](int t, g3d::Object3D&) {
+        const float u = grow ? std::clamp(grow(t), 0.f, 1.f) : 1.f;
+        for (Part& p : *parts) p.in->list.clear();
+        for (const Tree& tr : *list) {
+            const float k = std::clamp((u - tr.late) / std::max(1 - tr.late, 1e-3f), 0.f, 1.f);
+            if (k <= 0) continue;
+            const float e = k * k * (3 - 2 * k);
+            const Vector3 up = s->up(tr.at);
+            g3d::Instance in;
+            in.position = s->point(tr.at, 0);
+            const Vector2 ab = tilt.of(up);
+            in.pitch = ab.x * RAD2DEG;
+            in.bank = ab.y * RAD2DEG;
+            in.scale = tr.scale * e;
+            for (Part& p : *parts)
+                if (p.kind == tr.kind) p.in->list.push_back(in);
+        }
+    };
+    return group;
+}
+
+}  // namespace geo3d
 }  // namespace rmtn

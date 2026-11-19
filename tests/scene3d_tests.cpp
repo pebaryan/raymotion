@@ -2334,6 +2334,108 @@ static void trees() {
         std::printf("[scene3d] sky alone (%d %d %d), after a forest (%d %d %d)\n", clean.r, clean.g, clean.b, after.r, after.g, after.b);
         CHECK(clean.r + clean.g + clean.b > 150 && std::abs(after.r - clean.r) + std::abs(after.g - clean.g) + std::abs(after.b - clean.b) < 6);
     }
+    {   // city plants: trees from SolitaryVegetationObjects (height, species, points), cover as grass or shrubs
+        const city::Model town = city::parse(R"({"type":"CityJSON","version":"2.0","transform":{"scale":[1,1,1],"translate":[0,0,0]},
+          "CityObjects":{
+            "house":{"type":"Building","geometry":[{"type":"MultiSurface","lod":"1","boundaries":[[[0,1,2,3]]]}]},
+            "pine":{"type":"SolitaryVegetationObject","attributes":{"species":"Pinus sylvestris","height":"18 m"},
+                    "geometry":[{"type":"MultiPoint","lod":"1","boundaries":[4]}]},
+            "row":{"type":"SolitaryVegetationObject","geometry":[{"type":"MultiPoint","lod":"1","boundaries":[5,6,7]}]},
+            "lawn":{"type":"PlantCover","attributes":{"averageHeight":0.3},
+                    "geometry":[{"type":"MultiSurface","lod":"1","boundaries":[[[8,9,10,11]]]}]},
+            "bed":{"type":"PlantCover","attributes":{"averageHeight":2},
+                   "geometry":[{"type":"MultiSurface","lod":"1","boundaries":[[[12,13,14,15]]]}]}},
+          "vertices":[[30,30,0],[34,30,0],[34,34,0],[30,34,0],
+                      [-12,0,0],[4,-2,0],[10,-2,0],[16,-2,0],
+                      [-20,-14,0],[-4,-14,0],[-4,-6,0],[-20,-6,0],
+                      [8,-16,0],[18,-16,0],[18,-10,0],[8,-10,0]]})");
+        int plants = 0;
+        for (const city::Object& o : town.objects) plants += city::isPlant(o);
+        CHECK(plants == 4);
+        auto s = noShadows(treeStage());
+        s->camera.position = { 0, 9, 46 };
+        s->camera.target = { 0, 7, 0 };
+        city::Plants p;
+        p.forest.wind = 0;
+        p.build = { 4, 4, 4, 32 };
+        g3d::Object3D* green = city::addPlants(*s, town, p);
+        int fields = 0, forests = 0;
+        for (const auto& ch : green->children) { fields += ch->field != nullptr; forests += !ch->children.empty(); }
+        Comp c = longComp(s, 320, 200);
+        Image img = render(c, 3);
+        dumpField("city-plants.png", img);
+        // The pine (x -12, 18 m) stands taller than the 10 m street trees (x 4..16).
+        auto topOf = [&](int x0, int x1) {
+            for (int y = 0; y < img.height; y++)
+                for (int x = x0; x < x1; x++) if (isTree(GetImageColor(img, x, y))) return y;
+            return img.height;
+        };
+        const int pineTop = topOf(0, 90), rowTop = topOf(110, 250);           // the left third; the middle
+        std::printf("[scene3d] city plants: %d grass field(s), %d forest(s); pine top at y %d, street trees at y %d; %d tree px\n",
+                    fields, forests, pineTop, rowTop, coverage(img));
+        CHECK(fields == 1 && forests == 2);
+        CHECK(pineTop < rowTop - 10 && rowTop < img.height);
+        UnloadImage(img);
+    }
+    {   // geo3d forest cover: trees stand along the surface's up, globe or map, and grow in
+        auto surface = std::make_shared<geo3d::Surface>(geo::Projection::equirectangular(), geo::LonLat{ 20, 55 }, 1);
+        geo::Geometry patch;
+        patch.polygons.push_back({ { { 5, 45 }, { 35, 45 }, { 35, 65 }, { 5, 65 }, { 5, 45 } } });
+        auto s = std::make_shared<g3d::Scene>();
+        s->lights.push_back(g3d::Light::directional({ 1, 2, 3 }, WHITE, 1.4f, false));
+        g3d::Object3D* world = s->add();
+        g3d::Material ground;
+        ground.color = { 200, 40, 200, 255 };
+        geo3d::base(*world, surface, ground, 64);
+        float u = 1;
+        geo3d::ForestCover cover;
+        cover.spacing = 1.2f;
+        cover.height = 0.05f;
+        cover.grow = [&u](int) { return u; };
+        g3d::Object3D* trees = geo3d::forest(*world, surface, { patch }, cover);
+        auto standing = [&](float morph) {
+            surface->morph = morph;
+            trees->up(0, *trees);
+            float worst = 1;
+            size_t n = 0;
+            for (const auto& ch : trees->children)
+                for (const g3d::Instance& in : ch->instances->list) {
+                    const Vector3 dir = Vector3Transform({ 0, 1, 0 }, MatrixRotateXYZ(Vector3Scale({ in.pitch, 0, in.bank }, DEG2RAD)));
+                    // the tree's base is where the surface is; compare its +y with the surface's up there
+                    float bestDot = -2;
+                    for (float lon = 5; lon <= 35; lon += 0.25f)
+                        for (float lat = 45; lat <= 65; lat += 0.25f)
+                            if (Vector3DistanceSqr(surface->point({ lon, lat }), in.position) < 1e-4f)
+                                bestDot = std::max(bestDot, Vector3DotProduct(dir, surface->up({ lon, lat })));
+                    if (bestDot > -2) worst = std::min(worst, bestDot);
+                    n++;
+                }
+            return std::make_pair(n, worst);
+        };
+        const auto globe = standing(0), half = standing(0.5f), flat = standing(1);
+        u = 0;
+        const auto none = standing(0);
+        u = 1;
+        std::printf("[scene3d] map forest: %zu tree parts; up vs surface up, worst cosine %.4f globe, %.4f half, %.4f map; %zu at grow 0\n",
+                    globe.first, globe.second, half.second, flat.second, none.first);
+        CHECK(globe.first > 300 && none.first == 0);
+        CHECK(globe.second > 0.995f && half.second > 0.995f && flat.second > 0.995f);
+        surface->morph = 0;
+        s->camera.position = Vector3Scale(surface->onGlobe({ 20, 55 }), 2.6f);
+        s->camera.target = { 0, 0, 0 };
+        Comp c = longComp(s, 320, 240);
+        Image img = render(c, 2);
+        dumpField("map-forest.png", img);
+        int green = 0;
+        for (int y = 0; y < img.height; y++)
+            for (int x = 0; x < img.width; x++) {
+                const Color q = GetImageColor(img, x, y);
+                green += q.g > q.r && q.g > q.b && q.g > 30;
+            }
+        std::printf("[scene3d] map forest on the globe: %d green px\n", green);
+        CHECK(green > 800);
+        UnloadImage(img);
+    }
     {   // grass growth: blades come up from a point outwards; none at grow 0, rising, not popping
         auto field = [&](float grow) {
             auto s = meadow([grow](g3d::Field& f) {

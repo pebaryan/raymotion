@@ -334,6 +334,11 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   far layers). Wind leans, sways and sends gusts along x; every plant grows by `u` as in
   3D. Parallax layers: `parallax` (a context shifted by the camera), `hazed` colours,
   `groundLine`/`ground` for rolling hills and `softness` (a blur filter for a layer).
+* Plants in cities and on maps: `city::addPlants` turns a CityJSON model's
+  SolitaryVegetationObjects into trees (as tall as their `height`; conifers by species)
+  and its PlantCover into grass or shrubs (`isPlant` to filter the solids out);
+  `geo3d::forest` scatters low-poly trees over countries or boxes, standing along the
+  surface's up on a globe, a map or between, and growing in west to east.
 * Lights: up to 8 directional/point/spot lights with range falloff. Any of them can cast
   PCF shadows; they share one shadow atlas (`shadowMapSize` per tile, a tile per
   directional/spot light and six per point light, 16 tiles), with `shadowBias` in world

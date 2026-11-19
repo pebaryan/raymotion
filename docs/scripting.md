@@ -764,6 +764,14 @@ far: shifted by the top-level `"camera"` and faded into `"haze"`) and style keys
 widths, colours, `silhouette`). `"wind"` sets `strength`, `direction`, `sway`, `gust`,
 `gustSpeed` and `gustWidth`. See `examples/scripts/flora_2d.as`.
 
+Plants in cities and on maps: a 3D scene's `city` takes `"plants": true` or `{"trees",
+"cover", "treeHeight", "shrubHeight", "shrubSpacing", "grass", "style", "wind", "seed"}`
+(its trees then draw as trees, not solids; see `examples/scripts/city_plants.as`). A
+`geo3d` descriptor takes `"forest": {"regions": ["FIN", [west, south, east, north]],
+"spacing", "height", "heightVariation", "stagger", "seed", "limit"}` with the usual
+`start`/`duration` or `progress` reveal, and `geo3d::forest(parent, surface, regionsJson,
+styleJson)` does the same on a handle; see `examples/scripts/geo_forest.as`.
+
 The `physics` namespace exposes native Rope and Cloth solver handles, `PhysicsParams`, Sphere/Plane/Capsule/Box colliders, seeded wind, pins, bending/stretching, tearing, self collision and frame sampling. `physics::rope` and `physics::cloth` accept an optional params handle; omitting it uses the native defaults. See `examples/scripts/physics_scene.as` for the descriptor
 path and `examples/scripts/physics_callbacks.as` for direct callback-driven handles.
 `PhysicsParams.state(values)` returns

@@ -1,6 +1,6 @@
 # 0.12 plan: vegetation (`flora::`)
 
-Status: M0-M6 done 2026-11-19 (see below); M7 next. Set 2026-11-18; owner's decisions the same day:
+Status: M0-M7 done 2026-11-19 (see below); M8 in part (bindings, examples and docs landed with each milestone; prefabs, the C++ showcase and docs/flora.md remain). Set 2026-11-18; owner's decisions the same day:
 
 1. **Realistic first, then stylised.** Cards with alpha cutout, translucency and PBR leaves
    come first; low-poly / toon presets follow on the same scatter and wind.
@@ -270,6 +270,27 @@ direction), `test_script.py` (`test_flora_2d`).
   `PlantCover` as grass or shrub scatter, opt-in through `city::Style`.
 - `geo3d`: forest cover on a map or globe from regions (impostors/splats at map scale).
 - Check with `Sky`, fog, tilt-shift, `Filter::film`; no new code expected.
+
+**Done 2026-11-19.** `city::addPlants` (opt-in, beside `city::add`; `city::Plants`):
+SolitaryVegetationObjects become an oak, birch, pine or spruce (conifers when "species",
+"class", "function" or "name" says so), one at each point of a MultiPoint, as tall as the
+"height" attribute (numbers or "18 m"), else the geometry, else `treeHeight`. PlantCover
+becomes grass over its flat faces (either winding), or shrubs scattered there when its
+"averageHeight" is over `shrubHeight`; the PlantCover surfaces stay as the ground under the
+grass and the trees' own solids are filtered out (`isPlant`, or by type). `geo3d::forest`
+(`geo3d::ForestCover`): Poisson-disk trees in longitude and latitude over `geo::Geometry`
+regions, low-poly and instanced, repositioned every frame from `Surface::point` and `up` so
+they follow the morph. The pitch and bank that stand a tree along the surface's up are
+found by trying raymath's axis order and signs on probes. Growth rises in, with a stagger
+from west to east. Sky, fog, tilt-shift and `Filter::film` checked on
+`flora_growth.as`; no code needed. Script: city `"plants"`, geo3d `"forest"` and
+`geo3d::forest`; `examples/scripts/city_plants.as` and `geo_forest.as`. Tests:
+`scene3d_tests` (a city with a building, a species-named 18 m pine, a three-point row,
+a lawn and a 2 m shrub bed: one grass field, two forests, the pine taller than the row;
+a map forest: 463 tree parts, every one along the surface's up at morph 0, 0.5 and 1
+(worst cosine 1.0000), none at grow 0, 3,545 green px on the globe), `test_script.py`
+(`test_flora_city_and_map`). Not done: map-scale impostors or splats (low-poly instances
+are cheap enough up to the 100,000-tree default limit).
 
 ## M8. Scripts, examples, docs
 

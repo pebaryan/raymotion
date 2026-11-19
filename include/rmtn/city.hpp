@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 #include "json.hpp"
+#include "flora.hpp"
 #include "scene3d.hpp"
 
 namespace rmtn {
@@ -136,6 +137,33 @@ void frame(g3d::Camera& camera, const Model& m, float azimuth = 200, float eleva
 // The same for a box in CityJSON axes (e.g. m.bounds() kept for an orbit in camera.up).
 void frame(g3d::Camera& camera, BoundingBox local, float azimuth = 200, float elevation = 35,
            float margin = 0.1f, float aspect = 16.f / 9.f);
+
+// ---- plants (opt-in): vegetation objects as flora:: trees and grass
+//
+//     auto* blocks = city::add(*scene, town.filter([](const city::Object& o) { return o.type != "SolitaryVegetationObject"; }));
+//     auto* green = city::addPlants(*scene, town);
+//
+// A SolitaryVegetationObject becomes a tree at its base (or one at each of its points), as
+// tall as its "height" attribute, else its geometry, else `treeHeight`; a "species" or
+// "class" naming a conifer (pine, spruce, fir, larch, cedar, Pinus, Picea, Abies, Larix,
+// conifer, needle) gives a pine or a spruce, anything else an oak or a birch. A PlantCover
+// becomes grass over its upward faces, or shrubs scattered there when its "averageHeight"
+// is over `shrubHeight`. Draw the trees instead of their solids (filter them out of
+// city::add, as above) and keep PlantCover surfaces as the ground the grass stands on.
+bool isPlant(const Object& o);                // SolitaryVegetationObject or PlantCover
+struct Plants {
+    bool trees = true, cover = true;
+    float treeHeight = 10;                    // metres, when nothing says
+    float shrubHeight = 1.2f;                 // PlantCover averageHeight above this: shrubs
+    float shrubSpacing = 2.2f;                // metres between shrubs
+    g3d::Field grass = flora::meadow();
+    flora::ForestSpec forest;                 // wind and levels for the trees and shrubs
+    flora::TreeBuild build;                   // style, shading, impostor views
+    uint32_t seed = 1;
+    std::string lod;                          // empty: each object's most detailed geometry
+};
+g3d::Object3D* addPlants(g3d::Scene& scene, const Model& m, const Plants& p = {});
+g3d::Object3D* addPlants(g3d::Object3D& parent, const Model& m, const Plants& p = {});
 
 // ---- paths through the model (CityJSON axes; e.g. a MultiLineString's line, a route)
 
