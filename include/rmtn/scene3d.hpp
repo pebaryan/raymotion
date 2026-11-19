@@ -277,8 +277,13 @@ struct Field {
     std::function<float(float x, float z)> ground;      // ground height (null = 0)
     std::function<float(float x, float z)> mask;        // density, 0..1 (null = 1)
     std::function<float(float x, float z)> tall;        // height multiplier (null = 1)
+    // Growth: each spot's grass rises when `grow` (0..1, may follow t) passes its arrival
+    // (0..1; null = 0, all at once), over 0.15 of `grow`; so blades rise rather than pop.
+    // flora::arrivalFrom / arrivalAlong / arrivalInto make the usual fronts.
+    std::function<float(float x, float z)> arrival;
+    float grow = 1;
     int mapResolution = 256;
-    int revision = 0;                           // bump after changing the three above
+    int revision = 0;                           // bump after changing the four maps above
 
     Vector2 windDirection{ 1, 0.3f };           // x, z; normalised when drawn
     float sway = 0.12f;                         // steady lean downwind and flutter, tip offset / height

@@ -250,6 +250,48 @@ static void treesCpu() {
     CHECK(leafVerts(flora::pine(), 1) == leafVerts(flora::pine(), 0.35f));
 }
 
+// Growth on the CPU: u = 1 is the tree at rest exactly, u = 0 is nothing (every triangle
+// collapsed), the wood grows out from the stem, and leaves come last.
+static void growthCpu() {
+    const flora::TreePtr t = flora::makeTree(flora::oak(), { 8, 4, 4, 32 });
+    const flora::TreePose full = flora::grownPositions(*t, 1);
+    bool exact = full.wood.size() == (size_t)t->hero.wood->vertices && full.leaves.size() == (size_t)t->hero.leaves->vertices;
+    for (size_t i = 0; exact && i < full.wood.size(); i++)
+        exact = full.wood[i].x == t->hero.wood->positions[i * 3] && full.wood[i].y == t->hero.wood->positions[i * 3 + 1] &&
+                full.wood[i].z == t->hero.wood->positions[i * 3 + 2];
+    for (size_t i = 0; exact && i < full.leaves.size(); i++)
+        exact = full.leaves[i].x == t->hero.leaves->positions[i * 3] && full.leaves[i].y == t->hero.leaves->positions[i * 3 + 1];
+    CHECK(exact);
+    // u = 0: every vertex of a ring or card sits on its pivot, so nothing has area.
+    const flora::TreePose none = flora::grownPositions(*t, 0);
+    float spread = 0;
+    for (size_t i = 1; i < none.leaves.size(); i++)
+        if (i % 4) spread = std::max(spread, Vector3Distance(none.leaves[i], none.leaves[i - 1]));
+    CHECK(spread < 1e-5f);
+    float top0 = 0;
+    for (const Vector3& p : none.wood) top0 = std::max(top0, p.y);
+    // Part way: the stem is up before the crown's tips, and leaves wait for 0.6.
+    auto highest = [](const std::vector<Vector3>& v) { float h = 0; for (const Vector3& p : v) h = std::max(h, p.y); return h; };
+    auto leafArea = [](const std::vector<Vector3>& v) {
+        double a = 0;
+        for (size_t i = 0; i + 3 < v.size(); i += 4) a += Vector3Length(Vector3CrossProduct(Vector3Subtract(v[i + 1], v[i]), Vector3Subtract(v[i + 3], v[i])));
+        return a;
+    };
+    const flora::TreePose third = flora::grownPositions(*t, 0.3f), late = flora::grownPositions(*t, 0.8f);
+    std::printf("[flora] oak growing: wood top %.2f m at u 0, %.2f at 0.3, %.2f at 0.8, %.2f at 1; leaf area %.0f, %.0f, %.0f m^2\n",
+                top0, highest(third.wood), highest(late.wood), highest(full.wood), leafArea(third.leaves), leafArea(late.leaves), leafArea(full.leaves));
+    CHECK(top0 < 0.5f);
+    CHECK(highest(third.wood) > 2 && highest(third.wood) < highest(late.wood) && highest(late.wood) <= highest(full.wood) + 1e-3f);
+    CHECK(leafArea(third.leaves) < 1e-3 && leafArea(late.leaves) > 0.1 * leafArea(full.leaves) && leafArea(late.leaves) < leafArea(full.leaves));
+    // Grass fronts: 0 at the start, 1 at the reach and beyond.
+    const auto from = flora::arrivalFrom({ 2, 0 }, 10);
+    NEAR(from(2, 0), 0, 1e-6); NEAR(from(7, 0), 0.5, 1e-6); NEAR(from(40, 0), 1, 1e-6);
+    const auto along = flora::arrivalAlong({ { 0, 0 }, { 10, 0 } }, 4);
+    NEAR(along(5, 2), 0.5, 1e-6);
+    const auto into = flora::arrivalInto(flora::rect({ 0, 0 }, { 10, 10 }), 5);
+    NEAR(into(5, 5), 1, 1e-6); NEAR(into(1, 5), 0.2, 1e-6);
+}
+
 int main() try {
     areas();
     noise();
@@ -258,6 +300,7 @@ int main() try {
     regions();
     fields();
     treesCpu();
+    growthCpu();
     if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }
     std::puts("flora tests passed");
     return 0;

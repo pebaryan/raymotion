@@ -467,6 +467,21 @@ std::vector<Placement> scatter(const Area& area, const ScatterSpec& spec, uint32
     return out;
 }
 
+std::function<float(float, float)> arrivalFrom(Vector2 centre, float reach) {
+    const float r = std::max(std::isfinite(reach) ? reach : 1.f, 1e-3f);
+    return [centre, r](float x, float z) { return std::min(Vector2Distance({ x, z }, centre) / r, 1.f); };
+}
+std::function<float(float, float)> arrivalAlong(std::vector<Vector2> line, float reach) {
+    const float r = std::max(std::isfinite(reach) ? reach : 1.f, 1e-3f);
+    if (line.empty()) line.push_back({ 0, 0 });
+    const Strip s{ std::move(line), 0 };
+    return [s, r](float x, float z) { return std::min(stripDistance(s, { x, z }) / r, 1.f); };
+}
+std::function<float(float, float)> arrivalInto(Area area, float depth) {
+    const float d = std::max(std::isfinite(depth) ? depth : 1.f, 1e-3f);
+    return [area = std::move(area), d](float x, float z) { return std::min(area.edgeDistance(x, z) / d, 1.f); };
+}
+
 void fit(g3d::Field& field, const Area& area) {
     auto shared = std::make_shared<Area>(area);
     field.min = area.min;

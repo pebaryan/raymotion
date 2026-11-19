@@ -415,7 +415,7 @@ void growConifer(const TreeSpec& s, Skeleton& sk, Rng& r) {
     sk.crownRadii = { s.crownRadius, std::max((H - yb) * 0.5f, 0.1f), s.crownRadius };
 }
 
-struct Frond { std::vector<Vector3> spine; Vector3 across; int node; };
+struct Frond { std::vector<Vector3> spine; Vector3 across; int node, base; };
 
 void growPalm(const TreeSpec& s, Skeleton& sk, Rng& r, std::vector<Frond>& fronds) {
     const float H = s.height;
@@ -447,6 +447,7 @@ void growPalm(const TreeSpec& s, Skeleton& sk, Rng& r, std::vector<Frond>& frond
             if (k > 0) prev = addNode(sk, p, prev);
         }
         fr.node = prev;
+        fr.base = at;
         fronds.push_back(fr);
     }
     sk.crownCentre = top;
@@ -502,6 +503,11 @@ struct Vert {
     float branch = 0, reach = 0;
     Vector3 anchor{ 0, 0, 0 }, flutterAxis{ 0, 0, 0 };
     float flutter = 0;      // > 0 for leaves: phase
+    // Growth: the node it rides on, the node whose size scales it, the point it scales about,
+    // and (leaves) when it starts to unfold.
+    int node = 0, sizer = 0;
+    Vector3 pivot{ 0, 0, 0 };
+    float appear = -1;
 };
 
 struct Soup {
@@ -562,6 +568,9 @@ void woodMesh(const TreeSpec& s, const Skeleton& sk, Soup& out, float minRadius,
                 v.c = scaleColor(tone, occlusion(sk, nd.p));
                 v.branch = (float)(k == 0 && sn.parent >= 0 ? sk.nodes[(size_t)sn.parent].branch : owner.branch);
                 v.reach = k == 0 && sn.parent >= 0 ? sk.nodes[(size_t)sn.parent].reach : owner.reach;
+                v.node = chain[k];
+                v.sizer = k == 0 && sn.parent >= 0 ? (int)start : chain[k];
+                v.pivot = nd.p;
                 out.v.push_back(v);
             }
         }
@@ -660,6 +669,9 @@ void leafMesh(const TreeSpec& s, const Skeleton& sk, const std::vector<Card>& cs
             v.anchor = c.at;
             v.flutterAxis = right;
             v.flutter = c.phase + 1e-3f;
+            v.node = v.sizer = c.node;
+            v.pivot = c.at;
+            v.appear = 0.6f + 0.26f * c.rank;
             out.v.push_back(v);
         }
         for (unsigned short q : { 0, 1, 2, 0, 2, 3 }) out.idx.push_back((unsigned short)(first + q));
@@ -672,7 +684,7 @@ void frondMesh(const TreeSpec& s, const Skeleton& sk, const std::vector<Frond>& 
     for (const Frond& f : fronds) {
         Color c;
         if (!seasonal(s, r.unit(), r.unit(), c)) continue;
-        const float width = s.leafSize, phase = r.range(0, TAU);
+        const float width = s.leafSize, phase = r.range(0, TAU), unfold = r.unit();
         const Node& tip = sk.nodes[(size_t)f.node];
         const size_t first = out.v.size();
         const size_t m = f.spine.size();
@@ -697,6 +709,9 @@ void frondMesh(const TreeSpec& s, const Skeleton& sk, const std::vector<Frond>& 
                 v.anchor = f.spine[k];
                 v.flutterAxis = dir;
                 v.flutter = phase + 1e-3f;
+                v.node = v.sizer = f.base;
+                v.pivot = f.spine[0];
+                v.appear = 0.6f + 0.26f * unfold;
                 out.v.push_back(v);
             }
         }
@@ -709,7 +724,7 @@ void frondMesh(const TreeSpec& s, const Skeleton& sk, const std::vector<Frond>& 
 
 // The wind loop: frame f of `frames` moves a vertex by the stem's bend (a function of
 // height), its branch's lag (a phase per branch, more further out) and its card's flutter.
-Vector3 windAt(const TreeSpec& s, const Vert& v, int f, int frames) {
+Vector3 windAt(const TreeSpec& s, const Vert& v, float f, int frames) {
     const float ph = TAU * f / frames, H = std::max(s.height, 0.1f);
     const float h = std::max(v.p.y, 0.f) / H;
     const float bend = 0.014f * s.sway * H * h * h;
@@ -726,29 +741,8 @@ Vector3 windAt(const TreeSpec& s, const Vert& v, int f, int frames) {
     return d;
 }
 
-std::shared_ptr<g3d::AnimatedMesh> bake(const TreeSpec& s, const Soup& soup, int frames) {
-    auto am = std::make_shared<g3d::AnimatedMesh>();
-    if (soup.v.empty()) return am;
-    am->frames = frames;
-    am->vertices = (int)soup.v.size();
-    am->positions.resize((size_t)frames * soup.v.size() * 3);
-    am->normals.resize(am->positions.size());
-    Vector3 lo{ 1e9f, 1e9f, 1e9f }, hi{ -1e9f, -1e9f, -1e9f };
-    for (int f = 0; f < frames; f++)
-        for (size_t i = 0; i < soup.v.size(); i++) {
-            const Vert& v = soup.v[i];
-            const Vector3 p = Vector3Add(v.p, windAt(s, v, f, frames));
-            float* q = &am->positions[((size_t)f * soup.v.size() + i) * 3];
-            q[0] = p.x; q[1] = p.y; q[2] = p.z;
-            float* n = &am->normals[((size_t)f * soup.v.size() + i) * 3];
-            n[0] = v.n.x; n[1] = v.n.y; n[2] = v.n.z;
-            lo = Vector3Min(lo, p); hi = Vector3Max(hi, p);
-        }
-    am->centre = Vector3Scale(Vector3Add(lo, hi), 0.5f);
-    am->radius = Vector3Distance(lo, hi) * 0.5f + 0.05f;
-    auto verts = std::make_shared<std::vector<Vert>>(soup.v);
-    auto idx = std::make_shared<std::vector<unsigned short>>(soup.idx);
-    am->rest = std::make_shared<g3d::Geometry>([verts, idx] {
+g3d::GeometryPtr geometryOf(std::shared_ptr<const std::vector<Vert>> verts, std::shared_ptr<const std::vector<unsigned short>> idx) {
+    return std::make_shared<g3d::Geometry>([verts, idx] {
         Mesh m{};
         m.vertexCount = (int)verts->size();
         m.triangleCount = (int)idx->size() / 3;
@@ -768,6 +762,30 @@ std::shared_ptr<g3d::AnimatedMesh> bake(const TreeSpec& s, const Soup& soup, int
         UploadMesh(&m, false);
         return m;
     });
+}
+
+std::shared_ptr<g3d::AnimatedMesh> bake(const TreeSpec& s, const Soup& soup, int frames) {
+    auto am = std::make_shared<g3d::AnimatedMesh>();
+    if (soup.v.empty()) return am;
+    am->frames = frames;
+    am->vertices = (int)soup.v.size();
+    am->positions.resize((size_t)frames * soup.v.size() * 3);
+    am->normals.resize(am->positions.size());
+    Vector3 lo{ 1e9f, 1e9f, 1e9f }, hi{ -1e9f, -1e9f, -1e9f };
+    for (int f = 0; f < frames; f++)
+        for (size_t i = 0; i < soup.v.size(); i++) {
+            const Vert& v = soup.v[i];
+            // Relative to frame 0, so frame 0 is the tree at rest (and a still forest is exact).
+            const Vector3 p = Vector3Add(v.p, Vector3Subtract(windAt(s, v, (float)f, frames), windAt(s, v, 0, frames)));
+            float* q = &am->positions[((size_t)f * soup.v.size() + i) * 3];
+            q[0] = p.x; q[1] = p.y; q[2] = p.z;
+            float* n = &am->normals[((size_t)f * soup.v.size() + i) * 3];
+            n[0] = v.n.x; n[1] = v.n.y; n[2] = v.n.z;
+            lo = Vector3Min(lo, p); hi = Vector3Max(hi, p);
+        }
+    am->centre = Vector3Scale(Vector3Add(lo, hi), 0.5f);
+    am->radius = Vector3Distance(lo, hi) * 0.5f + 0.05f;
+    am->rest = geometryOf(std::make_shared<std::vector<Vert>>(soup.v), std::make_shared<std::vector<unsigned short>>(soup.idx));
     return am;
 }
 
@@ -913,6 +931,77 @@ std::shared_ptr<g3d::AnimatedMesh> quad(float side, float u0, float u1) {
 
 }  // namespace
 
+// ---- growth ------------------------------------------------------------------------------
+// The skeleton as growth sees it: each node's rest position, parent, distance from the root
+// along the wood, and the length of wood beyond it; plus the full tree's vertices.
+struct TreeGrowth {
+    TreeSpec spec;
+    int frames = 1;
+    std::vector<Vector3> rest;
+    std::vector<int> parent;
+    std::vector<float> dist, beyond;
+    float longest = 1;
+    std::shared_ptr<const std::vector<Vert>> wood, leaves;
+    std::shared_ptr<const std::vector<unsigned short>> woodIdx, leafIdx;
+};
+
+namespace {
+
+constexpr float WOOD_SPAN = 0.7f;      // the wood grows over u in [0, 0.7]; leaves unfold after 0.6
+constexpr float LEAF_SPAN = 0.12f;     // a card's unfolding
+
+// Per node at growth u: how far it is displaced from rest (it rides on its parent, and is
+// pulled back towards it until the front has passed), how big its wood is, and when the
+// front reached it.
+struct NodeGrowth { std::vector<Vector3> offset; std::vector<float> size, born; };
+
+void growNodes(const TreeGrowth& g, float u, NodeGrowth& out) {
+    const size_t n = g.rest.size();
+    out.offset.assign(n, { 0, 0, 0 });
+    out.size.assign(n, 0.f);
+    out.born.assign(n, 0.f);
+    const float front = std::clamp(u / WOOD_SPAN, 0.f, 1.f) * g.longest;
+    const float start = std::clamp(u / 0.04f, 0.f, 1.f);              // nothing at all at u = 0
+    for (size_t i = 0; i < n; i++) {
+        const int p = g.parent[i];
+        float e = 1;
+        if (p >= 0) {
+            const float len = g.dist[i] - g.dist[(size_t)p];
+            e = len > 1e-6f ? std::clamp((front - g.dist[(size_t)p]) / len, 0.f, 1.f) : (front >= g.dist[i] ? 1.f : 0.f);
+            out.offset[i] = Vector3Add(out.offset[(size_t)p], Vector3Scale(Vector3Subtract(g.rest[i], g.rest[(size_t)p]), e - 1));
+        }
+        // Thickening behind the front: full once the wood beyond this node has all grown.
+        float k = front >= g.dist[i] + g.beyond[i] ? 1.f : g.beyond[i] > 1e-6f ? std::clamp((front - g.dist[i]) / g.beyond[i], 0.f, 1.f) : 0.f;
+        const float sz = front >= g.dist[i] ? 0.12f + 0.88f * std::pow(k, 0.7f) : 0.12f * e;
+        out.size[i] = sz * start;
+        out.born[i] = g.dist[i] / std::max(g.longest, 1e-6f) * WOOD_SPAN;
+    }
+}
+
+// A vertex at growth u. At u = 1 every term below is exactly zero, so the rest pose comes back.
+Vector3 grownVertex(const NodeGrowth& ng, const Vert& v, float u) {
+    float scale = ng.size[(size_t)v.sizer];
+    if (v.appear >= 0) {
+        const float from = std::max(v.appear, ng.born[(size_t)v.node]);
+        scale = smoothstep(from, from + LEAF_SPAN, u);
+    }
+    return Vector3Add(Vector3Add(v.p, ng.offset[(size_t)v.node]), Vector3Scale(Vector3Subtract(v.p, v.pivot), scale - 1));
+}
+
+}  // namespace
+
+TreePose grownPositions(const Tree& tree, float u) {
+    TreePose pose;
+    if (!tree.growth) return pose;
+    const TreeGrowth& g = *tree.growth;
+    u = std::isfinite(u) ? std::clamp(u, 0.f, 1.f) : 1.f;
+    NodeGrowth ng;
+    growNodes(g, u, ng);
+    for (const Vert& v : *g.wood) pose.wood.push_back(grownVertex(ng, v, u));
+    for (const Vert& v : *g.leaves) pose.leaves.push_back(grownVertex(ng, v, u));
+    return pose;
+}
+
 // ---- presets -----------------------------------------------------------------------------
 TreeSpec oak() {
     TreeSpec s;
@@ -1044,6 +1133,28 @@ TreePtr makeTree(const TreeSpec& specIn, const TreeBuild& buildIn) {
     t->reducedTriangles = (long long)(lowWood.idx.size() + lowLeaves.idx.size()) / 3;
     for (const Soup* so : { &heroWood, &heroLeaves })
         for (const Vert& v : so->v) { t->top = std::max(t->top, v.p.y); t->radius = std::max(t->radius, std::hypot(v.p.x, v.p.z)); }
+    {
+        auto g = std::make_shared<TreeGrowth>();
+        g->spec = s;
+        g->frames = b.frames;
+        const size_t n = sk.nodes.size();
+        g->rest.resize(n); g->parent.resize(n); g->dist.assign(n, 0.f); g->beyond.assign(n, 0.f);
+        for (size_t i = 0; i < n; i++) {
+            const Node& nd = sk.nodes[i];
+            g->rest[i] = nd.p;
+            g->parent[i] = nd.parent;
+            if (nd.parent >= 0) g->dist[i] = g->dist[(size_t)nd.parent] + Vector3Distance(nd.p, sk.nodes[(size_t)nd.parent].p);
+        }
+        std::vector<float> farthest(g->dist);
+        for (size_t i = n; i-- > 0;)
+            if (g->parent[i] >= 0) farthest[(size_t)g->parent[i]] = std::max(farthest[(size_t)g->parent[i]], farthest[i]);
+        for (size_t i = 0; i < n; i++) { g->beyond[i] = farthest[i] - g->dist[i]; g->longest = std::max(g->longest, farthest[i]); }
+        g->wood = std::make_shared<const std::vector<Vert>>(heroWood.v);
+        g->leaves = std::make_shared<const std::vector<Vert>>(heroLeaves.v);
+        g->woodIdx = std::make_shared<const std::vector<unsigned short>>(heroWood.idx);
+        g->leafIdx = std::make_shared<const std::vector<unsigned short>>(heroLeaves.idx);
+        t->growth = g;
+    }
 
     const Baked baked = bakeViews(heroWood, heroLeaves, *barkPic, *leafPic, b.views, b.viewSize, t->top, t->radius);
     for (int k = 0; k < b.views; k++) {
@@ -1079,7 +1190,6 @@ struct ForestState {
     std::vector<TreePtr> trees;
     ForestSpec spec;
     std::vector<size_t> first;      // each kind's first child
-    float bankX = 1, pitchZ = 1;    // which way a positive bank / pitch tips the top
 };
 
 // Children per tree kind, in this order.
@@ -1089,6 +1199,24 @@ float gustAt(const ForestSpec& f, Vector2 wind, Vector3 p, float seconds) {
     const float x = (p.x * wind.x + p.z * wind.y - f.gustSpeed * seconds) / std::max(f.gustScale, 1.f);
     const float wave = 0.5f + 0.5f * std::sin(TAU * x) * (0.6f + 0.4f * noise(p.x, p.z, f.gustScale * 2, 9));
     return wave * wave * wave;
+}
+
+// A tree's wind for a frame: the loop's position (its phase travels downwind) and the lean
+// as instance pitch and bank (in its own frame, before its yaw). Wind 0 holds it at rest.
+struct Sway { float frame = 0, pitch = 0, bank = 0; };
+Sway swayOf(const ForestSpec& f, Vector2 wind, const Placement& p, const Tree& tree, float seconds) {
+    Sway out;
+    if (f.wind == 0) return out;
+    const float bankX = Vector3Transform({ 0, 1, 0 }, MatrixRotateXYZ({ 0, 0, 0.1f })).x > 0 ? 1.f : -1.f;
+    const float pitchZ = Vector3Transform({ 0, 1, 0 }, MatrixRotateXYZ({ 0.1f, 0, 0 })).z > 0 ? 1.f : -1.f;
+    const float travel = (p.position.x * wind.x + p.position.z * wind.y) / std::max(f.gustScale, 1.f);
+    const float frames = (float)tree.build.frames;
+    out.frame = (seconds / tree.build.loopSeconds - travel * 0.5f) * frames + hashUnit(p.id, 3) * frames;
+    const float lean = f.wind * tree.spec.sway * (1.2f + 4.f * f.gust * gustAt(f, wind, p.position, seconds));
+    const Vector3 local = Vector3Transform({ wind.x, 0, wind.y }, MatrixRotateXYZ({ 0, -p.yaw * DEG2RAD, 0 }));
+    out.pitch = lean * local.z * pitchZ;
+    out.bank = lean * local.x * bankX;
+    return out;
 }
 
 void place(g3d::Object3D& group, const std::shared_ptr<ForestState>& st, int t) {
@@ -1112,21 +1240,15 @@ void place(g3d::Object3D& group, const std::shared_ptr<ForestState>& st, int t) 
         const float toLow = ramp(d, f.reducedFrom), toFar = ramp(d, f.impostorFrom);
         const float shown = f.hideFrom > 0 ? 1 - ramp(d, f.hideFrom) : 1;
         if (shown <= 0) continue;
-        // Wind: the loop's clock plus a phase that travels downwind; gusts lean further.
-        const float travel = (p.position.x * wind.x + p.position.z * wind.y) / std::max(f.gustScale, 1.f);
-        const float frames = (float)tree.build.frames;
-        const float frame = (seconds / tree.build.loopSeconds - travel * 0.5f) * frames + hashUnit(p.id, 3) * frames;
-        const float lean = f.wind * tree.spec.sway * (1.2f + 4.f * f.gust * gustAt(f, wind, p.position, seconds));
-        // The wind in the tree's own frame, for the tilt (applied before its yaw).
-        const Vector3 local = Vector3Transform({ wind.x, 0, wind.y }, MatrixRotateXYZ({ 0, -p.yaw * DEG2RAD, 0 }));
+        const Sway sway = swayOf(f, wind, p, tree, seconds);
         g3d::Instance in;
         in.position = p.position;
         in.yaw = p.yaw;
         in.scale = p.scale;
-        in.frame = frame;
+        in.frame = sway.frame;
         in.clipLength = tree.build.frames;
-        in.pitch = lean * local.z * st->pitchZ;
-        in.bank = lean * local.x * st->bankX;
+        in.pitch = sway.pitch;
+        in.bank = sway.bank;
         // Screen doors: hero keeps [0, a), reduced [a, b), impostor [b, shown).
         const float a = 1 - toLow, bnd = std::max(a, 1 - toFar);
         auto put = [&](int child, float from, float to, const g3d::Instance& i0) {
@@ -1173,8 +1295,6 @@ g3d::Object3D* forestInto(g3d::Object3D* group, const std::vector<Placement>& at
     st->spec = spec;
     // Which way Instance::yaw turns: +z towards +x or towards -x.
     st->yawSign = Vector3Transform({ 0, 0, 1 }, MatrixRotateXYZ({ 0, 90 * DEG2RAD, 0 })).x > 0 ? 1.f : -1.f;
-    st->bankX = Vector3Transform({ 0, 1, 0 }, MatrixRotateXYZ({ 0, 0, 0.1f })).x > 0 ? 1.f : -1.f;
-    st->pitchZ = Vector3Transform({ 0, 1, 0 }, MatrixRotateXYZ({ 0.1f, 0, 0 })).z > 0 ? 1.f : -1.f;
     for (const TreePtr& tr : trees) {
         st->first.push_back(group->children.size());
         auto add = [&](const std::shared_ptr<g3d::AnimatedMesh>& mesh, const g3d::Material& m) {
@@ -1206,6 +1326,101 @@ g3d::Object3D* addForest(g3d::Object3D& parent, const std::vector<Placement>& at
 g3d::Object3D* addTree(g3d::Scene& scene, TreePtr tree, Vector3 position, float yaw, float scale, ForestSpec spec) {
     Placement p{ position, yaw, scale, 0, 1 };
     return addForest(scene, { p }, { std::move(tree) }, spec);
+}
+
+namespace {
+
+struct Growing {
+    std::vector<Placement> at;
+    std::vector<TreePtr> trees;
+    std::function<float(int, const Placement&)> grow;
+    ForestSpec spec;
+    struct Body { g3d::Object3D *holder, *tilt; g3d::GeometryPtr wood, leaves; size_t kind; };
+    std::vector<Body> bodies;
+};
+
+// Rewrites a growing tree's meshes for growth u and wind loop position `frame`.
+void reshape(const g3d::GeometryPtr& geo, std::shared_ptr<const TreeGrowth> g, bool leaves, float u, float frame, bool still) {
+    if (!geo) return;
+    geo->update([g, leaves, u, frame, still](Mesh& m) {
+        NodeGrowth ng;
+        growNodes(*g, u, ng);
+        const std::vector<Vert>& vs = leaves ? *g->leaves : *g->wood;
+        const int count = std::min(m.vertexCount, (int)vs.size());
+        for (int i = 0; i < count; i++) {
+            const Vert& v = vs[(size_t)i];
+            Vector3 p = grownVertex(ng, v, u);
+            if (!still) p = Vector3Add(p, Vector3Scale(Vector3Subtract(windAt(g->spec, v, frame, g->frames), windAt(g->spec, v, 0, g->frames)), u));
+            m.vertices[i * 3] = p.x; m.vertices[i * 3 + 1] = p.y; m.vertices[i * 3 + 2] = p.z;
+        }
+    });
+}
+
+void growAll(const std::shared_ptr<Growing>& st, int t) {
+    const ForestSpec& f = st->spec;
+    const float seconds = t / std::max(f.fps, 1e-3f);
+    Vector2 wind = f.windDirection;
+    if (Vector2Length(wind) < 1e-6f) wind = { 1, 0 };
+    wind = Vector2Normalize(wind);
+    for (size_t i = 0; i < st->bodies.size(); i++) {
+        Growing::Body& b = st->bodies[i];
+        const Placement& p = st->at[i];
+        float u = st->grow ? st->grow(t, p) : 1.f;
+        u = std::isfinite(u) ? std::clamp(u, 0.f, 1.f) : 1.f;
+        b.holder->visible = u > 0;
+        if (u <= 0) continue;
+        const Tree& tree = *st->trees[b.kind];
+        const Sway sway = swayOf(f, wind, p, tree, seconds);
+        b.tilt->rotation = { sway.pitch * u, 0, sway.bank * u };
+        reshape(b.wood, tree.growth, false, u, sway.frame, f.wind == 0);
+        reshape(b.leaves, tree.growth, true, u, sway.frame, f.wind == 0);
+    }
+}
+
+g3d::Object3D* growingInto(g3d::Object3D* group, const std::vector<Placement>& at, std::vector<TreePtr> trees,
+                           std::function<float(int, const Placement&)> grow, ForestSpec spec) {
+    trees.erase(std::remove(trees.begin(), trees.end(), nullptr), trees.end());
+    if (trees.empty()) throw std::invalid_argument("flora::addGrowingTrees: no trees");
+    if (at.size() > 256) throw std::invalid_argument("flora::addGrowingTrees: at most 256 trees (use addForest for more)");
+    auto st = std::make_shared<Growing>();
+    st->at = at;
+    st->trees = trees;
+    st->grow = std::move(grow);
+    st->spec = spec;
+    for (const Placement& p : at) {
+        Growing::Body b;
+        b.kind = (size_t)std::max(p.variant, 0) % trees.size();
+        const Tree& tree = *trees[b.kind];
+        const TreeGrowth& g = *tree.growth;
+        b.holder = group->add();
+        b.holder->position = p.position;
+        b.holder->rotation = { 0, p.yaw, 0 };
+        b.holder->scale = { p.scale, p.scale, p.scale };
+        b.tilt = b.holder->add();
+        if (!g.wood->empty()) { b.wood = geometryOf(g.wood, g.woodIdx); b.tilt->add(b.wood, tree.wood); }
+        if (!g.leaves->empty()) { b.leaves = geometryOf(g.leaves, g.leafIdx); b.tilt->add(b.leaves, tree.leaves); }
+        st->bodies.push_back(b);
+    }
+    group->up = [st](int t, g3d::Object3D&) { growAll(st, t); };
+    return group;
+}
+
+}  // namespace
+
+g3d::Object3D* addGrowingTrees(g3d::Scene& scene, const std::vector<Placement>& at, std::vector<TreePtr> trees,
+                               std::function<float(int t, const Placement& p)> grow, ForestSpec wind) {
+    return growingInto(scene.add(), at, std::move(trees), std::move(grow), wind);
+}
+g3d::Object3D* addGrowingTrees(g3d::Object3D& parent, const std::vector<Placement>& at, std::vector<TreePtr> trees,
+                               std::function<float(int t, const Placement& p)> grow, ForestSpec wind) {
+    return growingInto(parent.add(), at, std::move(trees), std::move(grow), wind);
+}
+g3d::Object3D* addGrowingTree(g3d::Scene& scene, TreePtr tree, Vector3 position, float yaw, float scale,
+                              std::function<float(int t)> grow, ForestSpec wind) {
+    Placement p{ position, yaw, scale, 0, 1 };
+    std::function<float(int, const Placement&)> g;
+    if (grow) g = [grow](int t, const Placement&) { return grow(t); };
+    return addGrowingTrees(scene, { p }, { std::move(tree) }, std::move(g), wind);
 }
 
 }  // namespace flora

@@ -2209,6 +2209,97 @@ static void trees() {
         CHECK(moved);
         UnloadImage(e); UnloadImage(w); UnloadImage(prev); UnloadImage(next);
     }
+    {   // growth: u = 0 draws nothing, u = 1 is the still tree, coverage rises with u, frames pure
+        auto grown = [&](float u, bool growing) {
+            auto s = noShadows(treeStage());
+            s->camera.position = { 0, 6, 30 };
+            s->camera.target = { 0, 6, 0 };
+            flora::ForestSpec still;
+            still.wind = 0;
+            still.reducedFrom = 200; still.impostorFrom = 300;
+            if (growing) flora::addGrowingTree(*s, built[0], { 0, 0, 0 }, 20, 1, [u](int) { return u; }, still);
+            else flora::addTree(*s, built[0], { 0, 0, 0 }, 20, 1, still);
+            Comp c = longComp(s, 240, 240);
+            return render(c, 5);
+        };
+        Image none = grown(0, true), whole = grown(1, true), reference = grown(1, false);
+        dumpField("grown-1.png", whole);
+        dumpField("still-tree.png", reference);
+        int differ = 0;
+        for (int y = 0; y < whole.height; y++)
+            for (int x = 0; x < whole.width; x++) {
+                const Color a = GetImageColor(whole, x, y), b = GetImageColor(reference, x, y);
+                differ += std::abs(a.r - b.r) + std::abs(a.g - b.g) + std::abs(a.b - b.b) > 6;
+            }
+        std::vector<int> cover;
+        for (float u : { 0.1f, 0.3f, 0.5f, 0.7f, 0.85f, 1.f }) {
+            Image img = grown(u, true);
+            cover.push_back(coverage(img));
+            UnloadImage(img);
+        }
+        std::printf("[scene3d] oak growing: %d px at u 0; coverage %d %d %d %d %d %d at u 0.1..1; %d px differ from the still tree\n",
+                    coverage(none), cover[0], cover[1], cover[2], cover[3], cover[4], cover[5], differ);
+        CHECK(coverage(none) == 0);
+        bool rising = true;
+        for (size_t i = 1; i < cover.size(); i++) rising = rising && cover[i] >= cover[i - 1];
+        CHECK(rising && cover[0] > 0);
+        CHECK(differ < whole.width * whole.height / 200);
+        UnloadImage(none); UnloadImage(whole); UnloadImage(reference);
+
+        auto s = noShadows(treeStage());
+        s->camera.position = { 0, 6, 30 };
+        s->camera.target = { 0, 6, 0 };
+        flora::addGrowingTree(*s, built[1], { 0, 0, 0 }, 0, 1, [](int t) { return t / 20.f; });
+        Comp c = longComp(s, 240, 240);
+        Image prev = render(c, 11), next = render(c, 12);
+        Comp fresh = longComp(s, 240, 240);
+        Image alone = render(fresh, 12);
+        bool same = true;
+        for (int y = 0; y < next.height && same; y++)
+            for (int x = 0; x < next.width && same; x++) {
+                const Color p = GetImageColor(next, x, y), q = GetImageColor(alone, x, y);
+                same = p.r == q.r && p.g == q.g && p.b == q.b;
+            }
+        CHECK(same);
+        UnloadImage(prev); UnloadImage(next); UnloadImage(alone);
+    }
+    {   // grass growth: blades come up from a point outwards; none at grow 0, rising, not popping
+        auto field = [&](float grow) {
+            auto s = meadow([grow](g3d::Field& f) {
+                f.arrival = flora::arrivalFrom({ 0, -4 }, 12);
+                f.grow = grow;
+                f.gust = 0; f.sway = 0;
+            });
+            s->camera.position = { 0, 9, 8 };
+            s->camera.target = { 0, 0, -4 };
+            Comp c = longComp(s, 240, 160);
+            return render(c, 4);
+        };
+        auto blades = [](const Image& img, int* nearCentre = nullptr) {
+            int n = 0, near = 0;
+            for (int y = 0; y < img.height; y++)
+                for (int x = 0; x < img.width; x++) {
+                    const Color c = GetImageColor(img, x, y);
+                    if (c.g > c.r && c.g > c.b) { n++; if (std::abs(x - img.width / 2) < 30 && std::abs(y - img.height / 2) < 30) near++; }
+                }
+            if (nearCentre) *nearCentre = near;
+            return n;
+        };
+        std::vector<int> counts;
+        int nearHalf = 0;
+        for (int k = 0; k <= 10; k++) {
+            Image img = field(k / 10.f);
+            counts.push_back(blades(img, k == 4 ? &nearHalf : nullptr));
+            UnloadImage(img);
+        }
+        int worst = 0;
+        for (size_t i = 1; i < counts.size(); i++) worst = std::max(worst, std::abs(counts[i] - counts[i - 1]));
+        std::printf("[scene3d] grass growing: %d blade px at 0, %d at 0.4 (%d near the start), %d at 1; largest step %d\n",
+                    counts[0], counts[4], nearHalf, counts[10], worst);
+        CHECK(counts[0] == 0);
+        CHECK(counts[4] > 0 && counts[4] < counts[10] && nearHalf > 0);
+        CHECK(worst < counts[10] / 3);
+    }
     {   // a forest: time printed, not checked. 1 km square, ~10^4 trees, with RMTN_FIELD_BENCH.
         const bool bench = std::getenv("RMTN_FIELD_BENCH") != nullptr;
         const float half = bench ? 500.f : 120.f;
@@ -2261,6 +2352,14 @@ static void trees() {
         Image near = render(c, 10, 2);
         dumpField("trees-close.png", near);
         UnloadImage(near);
+        s->objects.pop_back();                                  // an oak growing, u 0.15 .. 1
+        std::vector<flora::Placement> stages;
+        for (int i = 0; i < 6; i++) stages.push_back({ { -30.f + 12 * i, 0, 0 }, 0, 0.8f, i % 2 ? 0 : 3, (uint32_t)i });
+        flora::addGrowingTrees(*s, stages, built, [](int, const flora::Placement& p) { return 0.15f + 0.17f * p.id; });
+        s->camera.position = { 0, 7, 34 };
+        Image strip = render(c, 10, 2);
+        dumpField("growth.png", strip);
+        UnloadImage(strip);
     }
 }
 

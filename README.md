@@ -316,6 +316,12 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   itself from 8 directions). It cross-fades between levels with a screen door
   (`Instance::fade`), so nothing pops. About 11,000 trees at 1080p take 26 ms a frame.
   Impostors turn only about the vertical, so for aerial shots push `impostorFrom` out.
+* Growth, by a reveal `u` = 0..1 as in `plot::` and `geo::`: grass comes up where
+  `g3d::Field::grow` passes each spot's `arrival` (`flora::arrivalFrom` a point,
+  `arrivalAlong` a line, `arrivalInto` an area from its edges), blades rising rather than
+  popping; `flora::addGrowingTree(s)` grows trees: the trunk extends, branches sprout as the
+  front reaches them and thicken behind it, and leaves unfold last. Every frame is a
+  function of `u`, and `u` = 1 is the full tree exactly.
 * Lights: up to 8 directional/point/spot lights with range falloff. Any of them can cast
   PCF shadows; they share one shadow atlas (`shadowMapSize` per tile, a tile per
   directional/spot light and six per point light, 16 tiles), with `shadowBias` in world

@@ -216,6 +216,40 @@ void draw(int frame) { g3d::draw("''' + literal + '''", frame, 0, 0, 160, 90); }
         self.assertIn("views 1..32", self.run_cli("still", "wood", "--script", self.path, "--png", "x.png", ok=False))
 
     @unittest.skipUnless(GL, "needs OpenGL")
+    def test_flora_growth(self):
+        # Grass with an arrival front and a growing grove: at grow 0 both draw nothing (the
+        # picture is the bare ground), part way they show, and a big growing forest is refused.
+        def write(objects):
+            world = json.dumps({
+                "camera": {"position": [0, 10, 26], "target": [0, 2, 0]},
+                "lights": [{"type": "directional", "position": [10, 20, -10], "castShadow": True, "shadowExtent": 30}],
+                "objects": [{"geometry": "plane", "width": 120, "depth": 120, "material": {"color": "#c828c8"}}] + objects})
+            literal = world.replace("\\", "\\\\").replace('"', '\\"')
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "grow"; c.w = 160; c.h = 90; c.fps = 30; c.duration = 10; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) { g3d::draw("''' + literal + '''", frame, 0, 0, 160, 90); }
+''')
+
+        def growing(u, spot=12):
+            return [{"grass": {"preset": "meadow", "min": [-20, -20], "max": [20, 20], "seed": 1,
+                               "arrival": {"from": [0, 0], "reach": 20}, "grow": u}},
+                    {"forest": {"trees": ["shrub"], "build": {"frames": 4, "views": 4, "viewSize": 32},
+                                "scatter": {"area": {"min": [-spot, -spot], "max": [spot, spot]}, "spacing": 6, "seed": 2},
+                                "grow": u, "growFrom": [0, 0], "growReach": 12}}]
+        write([])
+        self.run_cli("still", "grow", "--script", self.path, "--at", 3, "--png", "bare.png")
+        write(growing(0))
+        self.run_cli("still", "grow", "--script", self.path, "--at", 3, "--png", "zero.png", timeout=120)
+        write(growing(0.5))
+        self.run_cli("still", "grow", "--script", self.path, "--at", 3, "--png", "half.png", timeout=120)
+        self.assertEqual((self.cwd / "bare.png").read_bytes(), (self.cwd / "zero.png").read_bytes())
+        self.assertNotEqual((self.cwd / "bare.png").read_bytes(), (self.cwd / "half.png").read_bytes())
+        write(growing(0.5, spot=60))
+        self.assertIn("at most 64", self.run_cli("still", "grow", "--script", self.path, "--png", "x.png", ok=False, timeout=120))
+
+    @unittest.skipUnless(GL, "needs OpenGL")
     def test_map_helpers_draw(self):
         # geo::base, choropleth, colorbar, labels, highlight, markers, route, fly, focus,
         # valuesAt and the geo-route / geo-flyto prefabs: every frame sampled must draw.

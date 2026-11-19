@@ -744,6 +744,11 @@ levels `reducedFrom`, `impostorFrom`, `blend`, `hideFrom`; the wind `windDirecti
 `views`, `viewSize`, `reducedLeaves`). A built tree is kept while its description stays the
 same; each build takes a few hundred milliseconds, so step `season` rather than animate it
 every frame. See `examples/scripts/flora_forest.as`.
+Growth: grass takes `grow` (0..1, may follow `t`) and `arrival` (`{"from": [x, z], "reach":
+r}`, `{"along": [[x, z], ...], "reach": r}`, `{"into": area, "depth": d}` or a grid);
+blades come up where `grow` passes their arrival. A `forest` with `grow` grows its trees
+(at most 64, each its own mesh): `growFrom` (`[x, z]`) and `growReach` start the nearer
+ones first. See `examples/scripts/flora_growth.as`.
 The `physics` namespace exposes native Rope and Cloth solver handles, `PhysicsParams`, Sphere/Plane/Capsule/Box colliders, seeded wind, pins, bending/stretching, tearing, self collision and frame sampling. `physics::rope` and `physics::cloth` accept an optional params handle; omitting it uses the native defaults. See `examples/scripts/physics_scene.as` for the descriptor
 path and `examples/scripts/physics_callbacks.as` for direct callback-driven handles.
 `PhysicsParams.state(values)` returns

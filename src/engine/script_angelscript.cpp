@@ -4657,6 +4657,26 @@ std::function<float(float, float)> jsonFieldGrid(const Json& g, Vector2 lo, Vect
 // kept between frames while its area, tiles and grids stay the same, so its maps are made
 // once; everything else is read every frame (so the wind or the colours can follow t).
 flora::Area jsonArea(const Json& d);
+std::vector<Vector2> jsonAreaRing(const Json& r, const char* what, size_t& budget);
+// When grass comes up (g3d::Field::arrival): {"from": [x, z], "reach": r}, {"along": [[x, z],
+// ...], "reach": r}, {"into": area, "depth": d}, or a grid of 0..1 values.
+std::function<float(float, float)> jsonArrival(const Json& a, Vector2 lo, Vector2 hi) {
+    if (a.isNull()) return {};
+    if (!a.isObject()) throw std::runtime_error("grass arrival must be an object");
+    auto positive = [&a](const char* key) {
+        const float v = (float)a.num(key, 10);
+        if (!std::isfinite(v) || v <= 0) throw std::runtime_error(std::string("grass arrival ") + key + " must be a positive number");
+        return v;
+    };
+    if (a.has("from")) return flora::arrivalFrom(jsonV2(a["from"]), positive("reach"));
+    if (a.has("along")) {
+        size_t budget = 20000;
+        return flora::arrivalAlong(jsonAreaRing(a["along"], "arrival along", budget), positive("reach"));
+    }
+    if (a.has("into")) return flora::arrivalInto(jsonArea(a["into"]), positive("depth"));
+    return jsonFieldGrid(a, lo, hi, "grass arrival");
+}
+
 std::shared_ptr<g3d::Field> jsonGrass(const Json& d, int fps) {
     if (!d.isObject()) throw std::runtime_error("grass must be an object");
     g3d::Field next;
@@ -4672,6 +4692,7 @@ std::shared_ptr<g3d::Field> jsonGrass(const Json& d, int fps) {
     num("dryness", next.dryness); num("sway", next.sway); num("gust", next.gust); num("gustSpeed", next.gustSpeed);
     num("gustScale", next.gustScale); num("tileSize", next.tileSize); num("detailDistance", next.detailDistance);
     num("fadeStart", next.fadeStart); num("fadeEnd", next.fadeEnd); num("shadowDistance", next.shadowDistance);
+    num("grow", next.grow);
     next.fps = (float)d.num("fps", fps);
     next.segments = d.integer("segments", next.segments);
     next.mapResolution = d.integer("mapResolution", next.mapResolution);
@@ -4693,7 +4714,7 @@ std::shared_ptr<g3d::Field> jsonGrass(const Json& d, int fps) {
         throw std::runtime_error("grass takes an area or mask and ground grids, not both (put them in the area)");
     const std::string key = d["min"].dump() + d["max"].dump() + std::to_string(next.tileSize) + ":" +
                             std::to_string(next.mapResolution) + d["mask"].dump() + d["ground"].dump() + d["tall"].dump() +
-                            d["area"].dump();
+                            d["area"].dump() + d["arrival"].dump();
     static thread_local std::unordered_map<std::string, std::shared_ptr<g3d::Field>> cache;
     auto found = cache.find(key);
     if (found == cache.end()) {
@@ -4707,10 +4728,11 @@ std::shared_ptr<g3d::Field> jsonGrass(const Json& d, int fps) {
             made->ground = jsonFieldGrid(d["ground"], lo, hi, "grass ground");
         }
         made->tall = jsonFieldGrid(d["tall"], made->min, made->max, "grass tall");
+        made->arrival = jsonArrival(d["arrival"], made->min, made->max);
         found = cache.emplace(key, made).first;
     }
     g3d::Field& field = *found->second;
-    next.mask = field.mask; next.ground = field.ground; next.tall = field.tall;
+    next.mask = field.mask; next.ground = field.ground; next.tall = field.tall; next.arrival = field.arrival;
     next.min = field.min; next.max = field.max; next.mapResolution = field.mapResolution;
     next.revision = field.revision;
     field = std::move(next);
@@ -4958,6 +4980,21 @@ g3d::Object3D* jsonForest(g3d::Scene& scene, g3d::Object3D* parent, const Json& 
     f.impostorShadows = d.flag("impostorShadows", f.impostorShadows);
     for (float v : { f.reducedFrom, f.impostorFrom, f.blend, f.hideFrom, f.wind, f.gust, f.gustSpeed, f.gustScale, f.fps, f.windDirection.x, f.windDirection.y })
         if (!std::isfinite(v)) throw std::runtime_error("forest values must be finite");
+    if (d.has("grow")) {
+        // Growing trees: each its own mesh, so a patch. With growFrom, nearer trees start first.
+        if (placed->size() > 64) throw std::runtime_error("a growing forest takes at most 64 trees");
+        const float grow = (float)d.num("grow", 1);
+        const bool spread = d.has("growFrom");
+        const Vector2 from = jsonV2(d["growFrom"]);
+        const float reach = (float)d.num("growReach", 30);
+        if (!std::isfinite(grow) || !std::isfinite(reach) || reach <= 0) throw std::runtime_error("forest grow must be a number and growReach positive");
+        std::function<float(int, const flora::Placement&)> g = [grow, spread, from, reach](int, const flora::Placement& p) {
+            if (!spread) return grow;
+            const float late = 0.5f * std::min(Vector2Distance({ p.position.x, p.position.z }, from) / reach, 1.f);
+            return std::clamp((grow - late) / 0.5f, 0.f, 1.f);
+        };
+        return parent ? flora::addGrowingTrees(*parent, *placed, trees, g, f) : flora::addGrowingTrees(scene, *placed, trees, g, f);
+    }
     return parent ? flora::addForest(*parent, *placed, trees, f) : flora::addForest(scene, *placed, trees, f);
 }
 

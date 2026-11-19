@@ -1,6 +1,6 @@
 # 0.12 plan: vegetation (`flora::`)
 
-Status: M0-M3 done 2026-11-19 (see below); M4 next. Set 2026-11-18; owner's decisions the same day:
+Status: M0-M4 done 2026-11-19 (see below); M5 next. Set 2026-11-18; owner's decisions the same day:
 
 1. **Realistic first, then stylised.** Cards with alpha cutout, translucency and PBR leaves
    come first; low-poly / toon presets follow on the same scatter and wind.
@@ -193,6 +193,23 @@ quad's shadow is wrong.
 - Grass field reveal: density radius from a point, a line or a `geo` region, grown by `u`
   (a uniform; blades rise rather than pop).
 - The same `u` reveal convention as `plot::` and `geo::`.
+
+**Done 2026-11-19.** Trees: `flora::grownPositions(tree, u)` and `addGrowingTree(s)` (at
+most 256, each its own mesh rewritten by `Geometry::update` in `up`). A growth front runs
+out along the wood over u 0..0.7. A node rides on its parent until the front passes, and
+its wood thickens as the wood beyond it grows. Each leaf card unfolds over 0.12 of u from
+0.6..0.86 (by rank), never before the front reaches its twig. Every term is zero at u = 1,
+so the full tree comes back bit for bit. The wind is scaled by u, and a forest's `wind` = 0
+now holds trees at rest: baked frames are relative to frame 0. Grass: `Field::arrival`
+(the maps' fourth channel) and `Field::grow`; a blade's height follows a smoothstep over
+0.15 of `grow` past its arrival, and tiles whose earliest arrival is not reached are
+skipped. `flora::arrivalFrom`, `arrivalAlong`, `arrivalInto`. Script: grass `grow` /
+`arrival`, forest `grow` / `growFrom` / `growReach`; `examples/scripts/flora_growth.as`.
+Tests: `flora_tests` (u = 1 bit-exact, u = 0 collapsed, stem before crown, leaves after
+0.6, arrival fronts), `scene3d_tests` (0 px at u = 0, coverage rising with u, u = 1 vs the
+still full tree 0 px different, pure frames; grass 0 px at grow 0, rising in steps under a
+third of the total), `test_script.py` (`test_flora_growth`: grow 0 is the bare picture
+byte for byte).
 
 ## M5. Stylised presets
 

@@ -1,7 +1,8 @@
 // rmtn/flora.hpp -- vegetation (flora::): grass fields at landscape scale with realistic
 // looks to start from, areas (where things grow), scattering (where each plant stands), and
 // trees and shrubs drawn at the detail their distance needs (flora::makeTree, addForest).
-// Growth and 2D vegetation follow (docs/flora-plan.md).
+// All of it can grow in by a reveal u (Field::grow, addGrowingTree). 2D vegetation follows
+// (docs/flora-plan.md).
 //
 //   flora::Area land = flora::rect({ -100, -100 }, { 100, 100 });
 //   land.ground = [](float x, float z) { return 6 * flora::noise(x, z, 60, 3); };      // hills
@@ -181,6 +182,7 @@ struct TreeBuild {
     int viewSize = 192;             // impostor pixels a side
     float reducedLeaves = 0.3f;     // the reduced level keeps this fraction of cards, enlarged
 };
+struct TreeGrowth;
 struct Tree {
     TreeSpec spec;
     TreeBuild build;
@@ -190,6 +192,7 @@ struct Tree {
     g3d::Material wood, leaves, impostor;
     float top = 0, radius = 0;      // highest point; widest reach from the stem
     long long heroTriangles = 0, reducedTriangles = 0;
+    std::shared_ptr<const TreeGrowth> growth;          // what growing needs (flora::addGrowingTree)
 };
 using TreePtr = std::shared_ptr<const Tree>;
 // Builds a tree (CPU only: may run before a window exists). Same spec, same tree.
@@ -205,7 +208,7 @@ struct ForestSpec {
     float blend = 6;
     float hideFrom = 0;             // > 0: trees fade out from here over `blend`
     Vector2 windDirection{ 1, 0 };
-    float wind = 1;                 // lean and sway together
+    float wind = 1;                 // lean and sway together; 0 holds the trees still, at rest
     float gust = 0.6f;              // gust fronts lean the trees further as they pass
     float gustSpeed = 7, gustScale = 50;
     float fps = 30;                 // frames a second, for the wind's clock
@@ -221,5 +224,30 @@ g3d::Object3D* addForest(g3d::Object3D& parent, const std::vector<Placement>& at
 g3d::Object3D* addTree(g3d::Scene& scene, TreePtr tree, Vector3 position, float yaw = 0, float scale = 1,
                        ForestSpec spec = {});
 
+
+// ------------------------------------------------------------------ growth
+// Everything grows by a reveal u = 0..1, as in plot:: and geo:: (0 = nothing, 1 = all).
+//
+// Grass: set g3d::Field::arrival to when each spot comes up (0..1) and Field::grow to u (it
+// may follow t); blades rise rather than pop. The usual fronts:
+std::function<float(float x, float z)> arrivalFrom(Vector2 centre, float reach);     // out from a point
+std::function<float(float x, float z)> arrivalAlong(std::vector<Vector2> line, float reach);   // out from a line
+std::function<float(float x, float z)> arrivalInto(Area area, float depth);          // in from an area's edges
+
+// Trees: the trunk extends first, branches sprout as the growth front reaches them (so in
+// order out from the stem) and thicken behind it, and the leaves unfold last (from u 0.6).
+// Fixed topology: every vertex is a function of u, so any u can be drawn alone.
+struct TreePose { std::vector<Vector3> wood, leaves; };     // the full tree's vertices
+TreePose grownPositions(const Tree& tree, float u);            // u = 1 is the tree at rest
+
+// Trees that grow at the placements (each its own mesh, updated from `grow(t, placement)`
+// every frame, so keep it to a patch: at most 256). Always the full tree; it sways in the
+// spec's wind like a forest (`wind` = 0 holds it still).
+g3d::Object3D* addGrowingTrees(g3d::Scene& scene, const std::vector<Placement>& at, std::vector<TreePtr> trees,
+                               std::function<float(int t, const Placement& p)> grow, ForestSpec wind = {});
+g3d::Object3D* addGrowingTrees(g3d::Object3D& parent, const std::vector<Placement>& at, std::vector<TreePtr> trees,
+                               std::function<float(int t, const Placement& p)> grow, ForestSpec wind = {});
+g3d::Object3D* addGrowingTree(g3d::Scene& scene, TreePtr tree, Vector3 position, float yaw, float scale,
+                              std::function<float(int t)> grow, ForestSpec wind = {});
 }  // namespace flora
 }  // namespace rmtn

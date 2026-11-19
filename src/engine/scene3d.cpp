@@ -124,11 +124,11 @@ uniform ivec2 fieldKey;                  // the tile's column and row
 uniform int fieldSeed;
 uniform vec4 fieldArea;                  // min x, min z, max x, max z: where the maps lie
 uniform vec2 fieldMapFit;                // map uv scale and offset onto texel centres
-uniform sampler2D fieldMaps;             // r ground height, g density, b height multiplier
+uniform sampler2D fieldMaps;             // r ground height, g density, b height multiplier, a arrival
 uniform vec4 fieldBlade;                 // height, height variation, width, lean
 uniform vec4 fieldWind;                  // direction x, z (unit, object space), sway, gust
 uniform vec4 fieldGusts;                 // speed, spacing, time (s), colour variation
-uniform vec4 fieldFade;                  // fade start, fade end, dryness, -
+uniform vec4 fieldFade;                  // fade start, fade end, dryness, grow
 uniform vec3 fieldCam;                   // the viewing camera (world), in the shadow passes too
 uniform vec3 fieldRoot; uniform vec3 fieldTip; uniform vec3 fieldDry;     // sRGB 0..1
 uint fieldHash(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
@@ -145,7 +145,7 @@ bool fieldVertex(vec3 corner, out vec3 pos, out vec3 nrm, out vec4 col) {
     vec2 p = fieldTile.xy + fieldSpot(k, th) * fieldTile.z;
     vec2 a = (p - fieldArea.xy) / (fieldArea.zw - fieldArea.xy);
     if (a.x < 0.0 || a.y < 0.0 || a.x > 1.0 || a.y > 1.0) return false;
-    vec3 maps = textureLod(fieldMaps, a * fieldMapFit.x + fieldMapFit.y, 0.0).rgb;
+    vec4 maps = textureLod(fieldMaps, a * fieldMapFit.x + fieldMapFit.y, 0.0);
     uint h = fieldHash(k * 2654435769u ^ th);
     float r1 = fieldRand(h), r2 = fieldRand(h + 1u), r3 = fieldRand(h + 2u), r4 = fieldRand(h + 3u);
     float r5 = fieldRand(h + 4u), r6 = fieldRand(h + 5u), r7 = fieldRand(h + 6u);
@@ -156,7 +156,8 @@ bool fieldVertex(vec3 corner, out vec3 pos, out vec3 nrm, out vec4 col) {
     const float BAND = 0.12;
     float keep = maps.g * far, rank = (float(k) + 0.5) / fieldTile.w;
     float s = clamp((keep * (1.0 + BAND) - rank) / BAND, 0.0, 1.0);
-    float H = fieldBlade.x * (1.0 + fieldBlade.y * (2.0 * r1 - 1.0)) * maps.b * s;
+    float grown = clamp((fieldFade.w * 1.15 - maps.a) / 0.15, 0.0, 1.0);     // Field::grow past the arrival
+    float H = fieldBlade.x * (1.0 + fieldBlade.y * (2.0 * r1 - 1.0)) * maps.b * s * grown * grown * (3.0 - 2.0 * grown);
     if (H <= 1e-4) return false;
     float W = fieldBlade.z * (0.7 + 0.6 * r2) / max(far, 0.33);        // fewer blades far off, each wider
     float yaw = r3 * 6.2831853;
@@ -1142,6 +1143,7 @@ struct Gpu {
         int revision = 0, res = 0;
         std::weak_ptr<Field> keep;              // held weakly: a field that is gone is dropped (pruneFields)
         std::vector<float> tileDensity, tileLow, tileHigh, tileTall;    // per tile: max mask, ground range, max tall
+        std::vector<float> tileArrival;                                   // and the earliest arrival
     };
     std::map<const Field*, FieldMaps> fields;
     ::Material material{};               // raylib material: owns a MAX_MATERIAL_MAPS maps array
@@ -1688,15 +1690,16 @@ const Gpu::FieldMaps& fieldMapsOf(const std::shared_ptr<Field>& field) {
     m.res = std::clamp(f.mapResolution, 2, 4096);
     const int res = m.res;
     const float w = f.max.x - f.min.x, d = f.max.y - f.min.y;
-    std::vector<float> texels((size_t)res * res * 3);
+    std::vector<float> texels((size_t)res * res * 4);
     auto finite = [](float v, float fallback) { return std::isfinite(v) ? v : fallback; };
     for (int j = 0; j < res; j++)
         for (int i = 0; i < res; i++) {
             const float x = f.min.x + w * i / (res - 1), z = f.min.y + d * j / (res - 1);
-            float* t = &texels[((size_t)j * res + i) * 3];
+            float* t = &texels[((size_t)j * res + i) * 4];
             t[0] = f.ground ? finite(f.ground(x, z), 0.f) : 0.f;
             t[1] = f.mask ? std::clamp(finite(f.mask(x, z), 0.f), 0.f, 1.f) : 1.f;
             t[2] = f.tall ? std::max(finite(f.tall(x, z), 0.f), 0.f) : 1.f;
+            t[3] = f.arrival ? std::clamp(finite(f.arrival(x, z), 0.f), 0.f, 1.f) : 0.f;
         }
     const int nx = f.tilesX(), nz = f.tilesZ();
     const float ts = std::max(f.tileSize, 0.05f);
@@ -1704,6 +1707,7 @@ const Gpu::FieldMaps& fieldMapsOf(const std::shared_ptr<Field>& field) {
     m.tileLow.assign((size_t)nx * nz, 1e30f);
     m.tileHigh.assign((size_t)nx * nz, -1e30f);
     m.tileTall.assign((size_t)nx * nz, 0.f);
+    m.tileArrival.assign((size_t)nx * nz, 1.f);
     auto texelOf = [&](float v, float lo, float span) {   // nearest sample index, unclamped
         return span > 0 ? (int)std::floor((v - lo) / span * (res - 1)) : 0;
     };
@@ -1717,14 +1721,15 @@ const Gpu::FieldMaps& fieldMapsOf(const std::shared_ptr<Field>& field) {
             const size_t ti = (size_t)tz * nx + tx;
             for (int j = j0; j <= j1; j++)
                 for (int i = i0; i <= i1; i++) {
-                    const float* t = &texels[((size_t)j * res + i) * 3];
+                    const float* t = &texels[((size_t)j * res + i) * 4];
                     m.tileLow[ti] = std::min(m.tileLow[ti], t[0]);
                     m.tileHigh[ti] = std::max(m.tileHigh[ti], t[0]);
                     m.tileDensity[ti] = std::max(m.tileDensity[ti], t[1]);
                     m.tileTall[ti] = std::max(m.tileTall[ti], t[2]);
+                    m.tileArrival[ti] = std::min(m.tileArrival[ti], t[3]);
                 }
         }
-    m.tex = rlLoadTexture(texels.data(), res, res, RL_PIXELFORMAT_UNCOMPRESSED_R32G32B32, 1);
+    m.tex = rlLoadTexture(texels.data(), res, res, RL_PIXELFORMAT_UNCOMPRESSED_R32G32B32A32, 1);
     rlTextureParameters(m.tex, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_BILINEAR);
     rlTextureParameters(m.tex, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_BILINEAR);
     rlTextureParameters(m.tex, RL_TEXTURE_WRAP_S, RL_TEXTURE_WRAP_CLAMP);
@@ -1752,6 +1757,7 @@ void gatherField(const Object3D& o, const Matrix& world, const Cull& k, std::vec
         for (int tx = 0; tx < nx; tx++) {
             const size_t ti = (size_t)tz * nx + tx;
             if (maps.tileDensity[ti] <= 0 || maps.tileTall[ti] <= 0) continue;
+            if (f.grow * 1.15f <= maps.tileArrival[ti]) continue;             // nothing has come up yet
             const float top = maps.tileHigh[ti] + tallest * maps.tileTall[ti];
             const Vector3 c{ f.min.x + (tx + 0.5f) * ts, 0.5f * (maps.tileLow[ti] + top), f.min.y + (tz + 0.5f) * ts };
             const float halfY = 0.5f * (top - maps.tileLow[ti]) + tallest;            // bending reaches sideways too
@@ -2038,7 +2044,8 @@ void drawField(const Item& it, Pass pass) {
     set4(L.wind, wd.x, wd.y, f.sway, f.gust);
     const float seconds = (float)(frameTime(gpu.frame) / std::max(f.fps, 1.f));
     set4(L.gusts, f.gustSpeed, std::max(f.gustScale, 0.01f), seconds, std::clamp(f.colorVariation, 0.f, 1.f));
-    set4(L.fade, f.fadeStart, std::max(f.fadeEnd, f.fadeStart + 1e-3f), std::clamp(f.dryness, 0.f, 1.f), 0);
+    set4(L.fade, f.fadeStart, std::max(f.fadeEnd, f.fadeStart + 1e-3f), std::clamp(f.dryness, 0.f, 1.f),
+         std::isfinite(f.grow) ? std::clamp(f.grow, 0.f, 1.f) : 1.f);
     const float cam[3] = { gpu.viewCam.x, gpu.viewCam.y, gpu.viewCam.z };
     rlSetUniform(L.cam, cam, SHADER_UNIFORM_VEC3, 1);
     setColor(L.root, f.root);
