@@ -91,10 +91,12 @@ in mat4 instanceTransform;
 uniform int instanced;
 uniform sampler2D vat;
 uniform int vatWidth; uniform int vatVerts; uniform int vatRows;
-mat4 instM; vec4 instAnim;
+mat4 instM; vec4 instAnim; float instFade = 1.0;
+// The third column's w is the frame blend plus 32 (Instance::fade + 1), quantised to 1/32.
 void setupInstance() {
     instM = instanceTransform;
-    instAnim = vec4(instM[0].w, instM[1].w, instM[2].w, instM[3].w);
+    instAnim = vec4(instM[0].w, instM[1].w, fract(instM[2].w), instM[3].w);
+    instFade = floor(instM[2].w) / 32.0 - 1.0;
     instM[0].w = 0.0; instM[1].w = 0.0; instM[2].w = 0.0; instM[3].w = 1.0;
 }
 vec3 vatFetch(float frame, int row0) {
@@ -407,9 +409,10 @@ void main() {
 )";
 
 const char* LIT_VS_BODY = R"(
-out vec3 fragPos; out vec2 fragTexCoord; out vec3 fragNormal; out vec4 fragColor;
+out vec3 fragPos; out vec2 fragTexCoord; out vec3 fragNormal; out vec4 fragColor; flat out float fragFade;
 void main() {
     fragTexCoord = vertexTexCoord;
+    fragFade = 1.0;
     if (waterMode == 1) {                     // the sea's surface: a mesh round the camera, rolled by the waves
         vec2 p = vertexPosition.xz + waterCentre, g;
         vec4 world = vec4(p.x, waterLevel + waveHeight(p, g), p.y, 1.0);
@@ -437,6 +440,7 @@ void main() {
         fragPos = world.xyz;
         fragNormal = mat3(instM) * instNormal();
         fragColor = vertexColor * vec4(instTint(), 1.0);
+        fragFade = instFade;
         gl_Position = mvp * world;
         return;
     }
@@ -450,9 +454,10 @@ void main() {
 )";
 
 const char* DEPTH_VS_BODY = R"(
-out vec2 fragTexCoord; out float fragAlpha;
+out vec2 fragTexCoord; out float fragAlpha; flat out float fragFade;
 void main() {
     fragTexCoord = vertexTexCoord;
+    fragFade = 1.0;
     fragAlpha = vertexColor.a;
     if (fieldOn == 1) {
         vec3 p, n; vec4 c;
@@ -463,6 +468,7 @@ void main() {
     }
     if (instanced != 0) {
         setupInstance();
+        fragFade = instFade;
         gl_Position = mvp * (instM * vec4(instPosition(), 1.0));
         return;
     }
@@ -482,14 +488,24 @@ bool cutAway(float a, vec2 uv) {
     float mip = max(log2(max(max(d.x, d.y), 1e-6)), 0.0);
     return a * (1.0 + 0.25 * mip) < alphaCutoff;
 }
+// Instance::fade as a screen door: fade f > 0 keeps the pixels whose 4x4 Bayer level is
+// below f, f < 0 those at or above 1 + f, so a body at u and its stand-in at -u tile exactly.
+bool fadedAway(float f) {
+    if (f >= 1.0) return false;
+    ivec2 q = ivec2(gl_FragCoord.xy) & 3;
+    const float bayer[16] = float[16](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
+    float d = (bayer[q.y * 4 + q.x] + 0.5) / 16.0;
+    return f >= 0.0 ? d >= f : d < 1.0 + f;
+}
 )";
 
 const char* DEPTH_FS = R"(#version 330
-in vec2 fragTexCoord; in float fragAlpha;
+in vec2 fragTexCoord; in float fragAlpha; flat in float fragFade;
 uniform sampler2D texture0; uniform vec4 colDiffuse;
 out vec4 finalColor;
 //@CUTOUT_FS@
 void main() {
+    if (fadedAway(fragFade)) discard;
     if (cutAway(texture(texture0, fragTexCoord).a * colDiffuse.a * fragAlpha, fragTexCoord)) discard;
     finalColor = vec4(1.0);
 }
@@ -498,7 +514,7 @@ void main() {
 // Colours arrive as sRGB (texture, colDiffuse, vertex colour) or already linear (scene
 // uniforms, converted on the CPU); lighting is linear and the result is re-encoded.
 const char* LIT_FS = R"(#version 330
-in vec3 fragPos; in vec2 fragTexCoord; in vec3 fragNormal; in vec4 fragColor;
+in vec3 fragPos; in vec2 fragTexCoord; in vec3 fragNormal; in vec4 fragColor; flat in float fragFade;
 uniform sampler2D texture0; uniform vec4 colDiffuse;
 uniform vec3 viewPos;
 uniform vec3 skyColor; uniform vec3 groundColor;
@@ -722,6 +738,7 @@ void main() {
     if (waterMode == 1) { vec4 w = waterSurface(); finalColor = encode(w.rgb, w.a); return; }
     float cutDist = clipPlane.w - dot(fragPos, clipPlane.xyz);     // < 0: beyond the cut
     if (cutDist < 0.0) discard;
+    if (fadedAway(fragFade)) discard;
     vec4 base = texture(texture0, fragTexCoord) * colDiffuse * fragColor;
     if (alphaCutoff > 0.0) {
         if (cutAway(base.a, fragTexCoord)) discard;
@@ -880,7 +897,7 @@ void main() {
 // Ink lines, pass 1: per pixel the view-space normal (octahedral, rg), the line style
 // (b, 0 = no lines) and the object id (a, 255 = outside the viewport).
 const char* GBUF_FS = R"(#version 330
-in vec3 fragPos; in vec2 fragTexCoord; in vec3 fragNormal; in vec4 fragColor;
+in vec3 fragPos; in vec2 fragTexCoord; in vec3 fragNormal; in vec4 fragColor; flat in float fragFade;
 uniform mat4 matView; uniform float objectId; uniform float lineStyle;
 uniform sampler2D texture0; uniform vec4 colDiffuse;
 out vec4 finalColor;
@@ -891,6 +908,7 @@ vec2 octEncode(vec3 n) {
     return e * 0.5 + 0.5;
 }
 void main() {
+    if (fadedAway(fragFade)) discard;
     if (cutAway(texture(texture0, fragTexCoord).a * colDiffuse.a * fragColor.a, fragTexCoord)) discard;
     vec3 n = normalize(mat3(matView) * normalize(fragNormal));
     if (!gl_FrontFacing) n = -n;
@@ -1140,6 +1158,7 @@ struct Gpu {
     long long fieldBlades = 0;                          // blades submitted by the main pass this frame
 };
 Gpu gpu;
+thread_local const Camera* viewing = nullptr;      // drawingCamera()
 
 Texture2D whiteTexture() { return { rlGetTextureIdDefault(), 1, 1, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 }; }
 
@@ -1409,6 +1428,11 @@ Texture2D mapOf(const g3d::Material& m) {
     if (m.dynamicMap) return dynamicTexture(m.dynamicMap);
     return m.map.empty() ? whiteTexture() : texture(m.map);
 }
+// Material::dynamicNormalMap or normalMap, else white (unused: hasNormalMap is 0).
+Texture2D normalMapOf(const g3d::Material& m) {
+    if (m.dynamicNormalMap) return dynamicTexture(m.dynamicNormalMap);
+    return m.normalMap.empty() ? whiteTexture() : texture(m.normalMap);
+}
 
 Vector3 linear3(Color c) {
     return { std::pow(c.r / 255.f, 2.2f), std::pow(c.g / 255.f, 2.2f), std::pow(c.b / 255.f, 2.2f) };
@@ -1622,7 +1646,8 @@ void gatherInstances(const Object3D& o, const Matrix& world, const Cull& k, std:
         const int last = am.frames - 1;
         m.m3 = (float)std::clamp(i.clipStart + a, 0, last);
         m.m7 = (float)std::clamp(i.clipStart + (a + 1) % len, 0, last);
-        m.m11 = f - (float)a;
+        const float fade = std::isfinite(i.fade) ? std::clamp(i.fade, -1.f, 1.f) : 1.f;
+        m.m11 = std::min(f - (float)a, 0.999f) + (float)std::lround((fade + 1) * 32);   // see setupInstance
         m.m15 = packTint(i.tint, i.shade);
         out.push_back(m);
     }
@@ -1831,7 +1856,7 @@ void setMaterial(const g3d::Material& m) {
     SetShaderValue(sh, gpu.L.receiveShadow, &receive, SHADER_UNIFORM_INT);
     const float translucency = std::max(m.translucency, 0.f), normalScale = m.normalScale;
     const Vector3 tc = linear(m.translucencyColor);
-    const int hasRough = m.roughnessMap.empty() ? 0 : 1, hasNormal = m.normalMap.empty() ? 0 : 1;
+    const int hasRough = m.roughnessMap.empty() ? 0 : 1, hasNormal = m.normalMap.empty() && !m.dynamicNormalMap ? 0 : 1;
     SetShaderValue(sh, gpu.L.translucency, &translucency, SHADER_UNIFORM_FLOAT);
     SetShaderValue(sh, gpu.L.translucencyColor, &tc, SHADER_UNIFORM_VEC3);
     SetShaderValue(sh, gpu.L.hasRoughnessMap, &hasRough, SHADER_UNIFORM_INT);
@@ -1883,7 +1908,7 @@ void setMaps(Pass pass, const g3d::Material& m, ::Material& mat) {
     SetShaderValue(sh, gpu.cutoff[p], &cut, SHADER_UNIFORM_FLOAT);
     const bool lit = pass == Pass::Lit;
     mat.maps[MATERIAL_MAP_METALNESS].texture = lit && !m.roughnessMap.empty() ? texture(m.roughnessMap) : whiteTexture();
-    mat.maps[MATERIAL_MAP_NORMAL].texture = lit && !m.normalMap.empty() ? texture(m.normalMap) : whiteTexture();
+    mat.maps[MATERIAL_MAP_NORMAL].texture = lit ? normalMapOf(m) : whiteTexture();
 }
 
 void bindUnit(int slot, unsigned int id);
@@ -1985,7 +2010,7 @@ void drawField(const Item& it, Pass pass) {
     const unsigned int units[3] = {
         mapOf(o.material).id,
         lit && !o.material.roughnessMap.empty() ? texture(o.material.roughnessMap).id : rlGetTextureIdDefault(),
-        lit && !o.material.normalMap.empty() ? texture(o.material.normalMap).id : rlGetTextureIdDefault() };
+        lit ? normalMapOf(o.material).id : rlGetTextureIdDefault() };
     const int samplerLocs[3] = { sh.locs[SHADER_LOC_MAP_DIFFUSE], sh.locs[SHADER_LOC_MAP_METALNESS], sh.locs[SHADER_LOC_MAP_NORMAL] };
     for (int u = 0; u < 3; u++) {
         rlActiveTextureSlot(u);
@@ -3913,6 +3938,11 @@ Vector2 Field::bladeRoot(int tx, int tz, uint32_t k) const {
 }
 long long fieldBladesSubmitted() { return gpu.fieldBlades; }
 
+const Camera& drawingCamera() {
+    static const Camera none{};
+    return viewing ? *viewing : none;
+}
+
 Object3D* Scene::add(std::shared_ptr<Splats> s) {
     Object3D* o = add();
     o->splats = std::move(s);
@@ -4117,6 +4147,11 @@ void render(Scene& s, int t, const Ctx& c, Rectangle viewport, Camera* camera) {
         cull.screenH = viewport.width > 0 && viewport.height > 0 ? viewport.height * c.s : std::max(1.f, cs.y);
         cull.compH = viewport.width > 0 && viewport.height > 0 ? viewport.height : cull.screenH / std::max(1e-4f, c.s);
     }
+    struct Viewing {                                      // drawingCamera() while the scene's `up`s run
+        const Camera* before;
+        explicit Viewing(const Camera* c) : before(viewing) { viewing = c; }
+        ~Viewing() { viewing = before; }
+    } viewingNow(&cam);
     animate(s.objects, t, MatrixIdentity(), cull);
     if (canvasSize().x > 0) {
         sizeSurfaces(s.objects, MatrixIdentity(), cam, cull.screenH * cull.aspect, cull.screenH);

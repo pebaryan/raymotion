@@ -95,6 +95,7 @@ add_library(rmtn_engine STATIC
   src/engine/rig_skin.cpp
   src/engine/crowd.cpp
   src/engine/flora.cpp
+  src/engine/flora_tree.cpp
   src/engine/crowd_rig.cpp
   src/engine/voxel.cpp
   src/engine/splat.cpp

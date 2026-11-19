@@ -204,6 +204,52 @@ static void fields() {
     CHECK(f.mapResolution >= 120);
 }
 
+// Trees on the CPU: presets build within the 16-bit index limit, the same spec gives the same
+// tree, the wind moves the crown but not the foot, seasons turn and drop deciduous leaves.
+static void treesCpu() {
+    const char* names[] = { "oak", "birch", "pine", "spruce", "palm", "tropical", "shrub", "hedge" };
+    for (const char* n : names) {
+        const flora::TreePtr t = flora::makeTree(flora::tree(n), { 8, 4, 4, 32 });
+        CHECK(t->hero.wood->vertices > 0 && t->hero.wood->vertices < 65536);
+        CHECK(t->hero.leaves->vertices > 0 && t->hero.leaves->vertices < 65536);
+        CHECK(t->reducedTriangles < t->heroTriangles);
+        CHECK(t->views.size() == 4);
+        std::printf("[flora] tree %-8s top %.2f m (spec %.1f), reach %.2f m\n", n, t->top, flora::tree(n).height, t->radius);
+        CHECK(t->top > 0.5f * flora::tree(n).height && t->top < 1.2f * flora::tree(n).height + flora::tree(n).leafSize);   // cards stand out
+    }
+    bool threw = false;
+    try { flora::tree("baobab"); } catch (const std::invalid_argument&) { threw = true; }
+    CHECK(threw);
+
+    const flora::TreePtr a = flora::makeTree(flora::oak(), { 8, 4, 4, 32 }), b = flora::makeTree(flora::oak(), { 8, 4, 4, 32 });
+    CHECK(a->hero.leaves->positions == b->hero.leaves->positions && a->hero.wood->positions == b->hero.wood->positions);
+    flora::TreeSpec other = flora::oak();
+    other.seed = 2;
+    CHECK(flora::makeTree(other, { 8, 4, 4, 32 })->hero.wood->positions != a->hero.wood->positions);
+
+    // Wind: frame 2 of 8 differs from frame 0 high in the crown, not at the foot.
+    const auto& w = *a->hero.wood;
+    float foot = 0, crown = 0;
+    for (int v = 0; v < w.vertices; v++) {
+        const float* p0 = &w.positions[(size_t)v * 3];
+        const float* p4 = &w.positions[((size_t)2 * w.vertices + v) * 3];
+        const float d = std::hypot(p4[0] - p0[0], p4[2] - p0[2]);
+        if (p0[1] < 0.3f) foot = std::max(foot, d);
+        if (p0[1] > 9) crown = std::max(crown, d);
+    }
+    std::printf("[flora] oak wind: foot moves %.4f m, crown up to %.3f m\n", foot, crown);
+    CHECK(foot < 0.002f && crown > 0.05f);
+
+    // Seasons: autumn turns leaves warmer; a bare deciduous tree has none; a pine keeps its.
+    auto leafVerts = [](flora::TreeSpec s, float season) {
+        s.season = season;
+        return flora::makeTree(s, { 1, 4, 1, 16 })->hero.leaves->vertices;
+    };
+    CHECK(leafVerts(flora::oak(), 1) == 0);
+    CHECK(leafVerts(flora::oak(), 0.9f) < leafVerts(flora::oak(), 0.35f));
+    CHECK(leafVerts(flora::pine(), 1) == leafVerts(flora::pine(), 0.35f));
+}
+
 int main() try {
     areas();
     noise();
@@ -211,6 +257,7 @@ int main() try {
     meshAreas();
     regions();
     fields();
+    treesCpu();
     if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }
     std::puts("flora tests passed");
     return 0;

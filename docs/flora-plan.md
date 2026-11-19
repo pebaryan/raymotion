@@ -1,6 +1,6 @@
 # 0.12 plan: vegetation (`flora::`)
 
-Status: M0, M1 and M2 done 2026-11-19 (see below); M3 next. Set 2026-11-18; owner's decisions the same day:
+Status: M0-M3 done 2026-11-19 (see below); M4 next. Set 2026-11-18; owner's decisions the same day:
 
 1. **Realistic first, then stylised.** Cards with alpha cutout, translucency and PBR leaves
    come first; low-poly / toon presets follow on the same scatter and wind.
@@ -157,6 +157,33 @@ remove, density and clumps, the 1 km² timing, mesh faces, France by geo region,
   part of the forest canopy blend. Cross-fade between tiers by dithering, not popping.
 - `flora::addForest(scene, placements, specs, seed)`: instanced per tier and variant.
 - `season` (spring → autumn → bare) as a colour ramp and leaf-card fraction.
+
+**Done 2026-11-19.** `flora::TreeSpec` + `makeTree` (CPU only): broadleaf crowns by space
+colonisation in an egg, cone, umbrella or box envelope (several stems for shrubs and
+hedges), conifer whorls with side shoots, palm stems with arching frond ribbons. Radii by
+the pipe model; bark tubes along chains, with the thickest child continuing; leaf cards
+(broad sprays, needle twigs, fronds) painted in code, cut out, translucent, normals
+blended towards the crown's outside, and a crown-occlusion term in the vertex colours.
+Presets: oak, birch, pine, spruce, palm, tropical, shrub, hedge (9-29k triangles at full
+detail, 0.1-1 s to build). Wind is baked into a loop (trunk bend by height, branch lag by
+branch phase and reach, card flutter); `addForest` adds each tree's phase travelling
+downwind and a gust lean (instance pitch/bank) from position and t. Levels: hero, then
+reduced (thicker wood only, 30 % of the cards enlarged), then an impostor. The impostor is
+the hero rasterised on the CPU (in memory, so no files and no `c.assets`) from 8 directions into a colour and tangent-space normal
+atlas, shown on a camera-facing quad, with the two nearest views cross-faded. The camera
+comes from the new `g3d::drawingCamera()`, which works inside `up`.
+Cross-fades use the new `Instance::fade` (a 4x4 Bayer screen door in the lit, depth and
+g-buffer passes; f and -(1-f) tile exactly). Also new: `Material::dynamicNormalMap`.
+Script `forest` object; `examples/scripts/flora_forest.as`. Tests: `flora_tests` (presets
+under the 16-bit index limit, determinism, the wind moves the crown and not the foot,
+seasons), `scene3d_tests` (screen door 6320 = 6320 px, a walk across both level changes
+steps by at most 756 px against 1636 px unblended, impostor silhouettes overlap the full
+tree by 0.80-0.82 from three sides, the crown leans downwind, frames are pure; timing
+10,884 trees at 1080p in 26 ms), `test_script.py` (`test_flora_forest`).
+**Not done:** the "forest canopy blend" tier past the impostors (fog covers it; `hideFrom`
+fades trees out). Impostors only turn about the vertical, so they read as side views from
+above. Impostors cast no shadow by default (`impostorShadows`), because a camera-facing
+quad's shadow is wrong.
 
 ## M4. Growth
 

@@ -1,4 +1,5 @@
 """Runtime loader regressions. Fixtures are generated in a temporary working directory."""
+import json
 import pathlib
 import subprocess
 import sys
@@ -179,6 +180,40 @@ void draw(int frame) {
         self.assertIn("at most", self.run_cli("still", "land", "--script", self.path, "--png", "x.png", ok=False, timeout=90))
         write(hills, grass_extra=',\\"mask\\":{\\"width\\":2,\\"height\\":2,\\"values\\":[1,1,1,1]}')
         self.assertIn("not both", self.run_cli("still", "land", "--script", self.path, "--png", "x.png", ok=False))
+
+    @unittest.skipUnless(GL, "needs OpenGL")
+    def test_flora_forest(self):
+        # A forest from presets over a scattered area, and one at given spots; frames repeat
+        # exactly, and bad trees say what is wrong.
+        def write(forest):
+            world = json.dumps({
+                "camera": {"position": [0, 12, 40], "target": [0, 5, 0]},
+                "lights": [{"type": "directional", "position": [10, 20, -10], "castShadow": True, "shadowExtent": 30}],
+                "objects": [{"geometry": "plane", "width": 120, "depth": 120, "material": {"color": "#c828c8"}},
+                            {"forest": forest}]})
+            literal = world.replace("\\", "\\\\").replace('"', '\\"')
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "wood"; c.w = 160; c.h = 90; c.fps = 30; c.duration = 10; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) { g3d::draw("''' + literal + '''", frame, 0, 0, 160, 90); }
+''')
+        build = {"frames": 4, "views": 4, "viewSize": 32}
+        write({"trees": ["shrub", {"preset": "birch", "height": 8, "season": 0.7, "seed": 3}], "build": build,
+               "scatter": {"area": {"min": [-30, -30], "max": [30, 10]}, "spacing": 6, "clumping": 0.3, "seed": 2},
+               "reducedFrom": 20, "impostorFrom": 45, "windDirection": [1, 0]})
+        for name, frame in (("a", 3), ("b", 7), ("c", 3)):
+            self.run_cli("still", "wood", "--script", self.path, "--at", frame, "--png", f"{name}.png", timeout=120)
+        self.assertEqual((self.cwd / "a.png").read_bytes(), (self.cwd / "c.png").read_bytes())
+        self.assertNotEqual((self.cwd / "a.png").read_bytes(), (self.cwd / "b.png").read_bytes())
+        write({"trees": ["shrub"], "build": build, "at": [[0, 0, 0], [4, 0, -3, 45, 1.5, 0]]})
+        self.run_cli("still", "wood", "--script", self.path, "--png", "at.png", timeout=120)
+        write({"trees": ["baobab"], "build": build, "at": [[0, 0, 0]]})
+        self.assertIn("unknown preset", self.run_cli("still", "wood", "--script", self.path, "--png", "x.png", ok=False))
+        write({"trees": [], "at": [[0, 0, 0]]})
+        self.assertIn("1..8 trees", self.run_cli("still", "wood", "--script", self.path, "--png", "x.png", ok=False))
+        write({"trees": ["oak"], "build": {"views": 99}, "at": [[0, 0, 0]]})
+        self.assertIn("views 1..32", self.run_cli("still", "wood", "--script", self.path, "--png", "x.png", ok=False))
 
     @unittest.skipUnless(GL, "needs OpenGL")
     def test_map_helpers_draw(self):

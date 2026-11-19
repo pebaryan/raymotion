@@ -733,6 +733,17 @@ centred on their origin), `tints` (colour strings, one picked per body) and
 `shadeVariation`; at most 100000 bodies. Placements depend only on the bounds, spacing and
 seed, so editing a road or density removes bodies without moving the others. See
 `examples/scripts/flora_scatter.as`.
+A `forest` object grows trees and places them: `trees` (1..8 preset names, or objects with
+`preset` and any `flora::TreeSpec` field: `height`, `trunkRadius`, `crownBase`,
+`crownRadius`, `crownShape`, `crownLength`, `stems`, `gnarl`, `branchDensity`, `whorls`,
+`droop`, `lean`, `leafSize`, `leafDensity`, `bark`, `barkMarks`, `barkRings`, `leafColor`,
+`autumnColor`, `colorVariation`, `deciduous`, `season`, `sway`, `seed`), then `scatter` (as for
+instances; it picks a tree per spot) or `at` (`[[x, y, z, yaw, scale, tree], ...]`); the
+levels `reducedFrom`, `impostorFrom`, `blend`, `hideFrom`; the wind `windDirection`, `wind`,
+`gust`, `gustSpeed`, `gustScale`; `impostorShadows`; and `build` (`frames`, `loopSeconds`,
+`views`, `viewSize`, `reducedLeaves`). A built tree is kept while its description stays the
+same; each build takes a few hundred milliseconds, so step `season` rather than animate it
+every frame. See `examples/scripts/flora_forest.as`.
 The `physics` namespace exposes native Rope and Cloth solver handles, `PhysicsParams`, Sphere/Plane/Capsule/Box colliders, seeded wind, pins, bending/stretching, tearing, self collision and frame sampling. `physics::rope` and `physics::cloth` accept an optional params handle; omitting it uses the native defaults. See `examples/scripts/physics_scene.as` for the descriptor
 path and `examples/scripts/physics_callbacks.as` for direct callback-driven handles.
 `PhysicsParams.state(values)` returns

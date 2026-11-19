@@ -164,6 +164,7 @@ struct Material {
     // `roughnessMap` is glTF's metallic-roughness texture: green multiplies `roughness`,
     // blue multiplies `metalness`. Standard shading only.
     std::string normalMap;
+    DynamicTexturePtr dynamicNormalMap;     // or one made by code (wins over `normalMap`)
     float normalScale = 1;
     std::string roughnessMap;
 
@@ -227,6 +228,10 @@ struct Instance {
     float shade = 1;                        // brightness multiplier
     Color tint = WHITE;                     // colour multiplier (alpha unused): tint x shade per
                                             // channel is kept to 8 bits over 0..2
+    // Coverage as a screen door (steps of 1/32): 1 = whole; f > 0 keeps a fraction f of the
+    // pixels, f < 0 the other 1 + f, so a body at u and its stand-in at -u fill each pixel
+    // once (dithered cross-fades between tiers, no popping). Shadows fade the same way.
+    float fade = 1;
 };
 
 // An object's instances: `up` refills `list` each frame from t (pure, like any `up`). They
@@ -657,6 +662,10 @@ std::function<Image()> studioEnvironment(Color top, Color horizon, Color bottom,
 // ctx; empty = the whole composition), composited with ctx opacity. `camera` overrides
 // scene.camera, e.g. several views of one scene. Outside presentFrame it does nothing.
 void render(Scene& scene, int t, const Ctx& c, Rectangle viewport = {}, Camera* camera = nullptr);
+
+// Inside an `up` callback: the camera of the view being drawn, after its own `up` (so tiers
+// by distance, billboards and the like can follow it). A default camera outside a draw.
+const Camera& drawingCamera();
 
 // The camera as render() sees it at frame t: `camera` with its `up` applied (to a copy).
 Camera cameraAt(const Camera& camera, int t);

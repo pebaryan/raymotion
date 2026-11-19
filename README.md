@@ -306,6 +306,16 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   `flora::scatter` places plants on it with Poisson-disk spacing and clumps into groves.
   Placements depend only on the bounds, spacing and seed, so moving a road removes or
   restores plants without shifting the rest (33,000 over a square kilometre in about 0.1 s).
+* Trees and shrubs (`flora::makeTree`, presets `oak`, `birch`, `pine`, `spruce`, `palm`,
+  `tropical`, `shrub`, `hedge`): grown from a seed (space colonisation for broadleaf crowns,
+  whorls for conifers, fronds for palms), with bark tubes and cut-out leaf cards that let
+  light through. All textures are made in code. Wind is baked into a loop: the trunk bends,
+  branches lag and leaves flutter, and gusts lean the trees as they pass. `season` turns
+  and drops deciduous leaves. `flora::addForest` draws each tree at the detail its distance
+  from the camera needs: the full tree, a reduced one, then an impostor (a lit picture of
+  itself from 8 directions). It cross-fades between levels with a screen door
+  (`Instance::fade`), so nothing pops. About 11,000 trees at 1080p take 26 ms a frame.
+  Impostors turn only about the vertical, so for aerial shots push `impostorFrom` out.
 * Lights: up to 8 directional/point/spot lights with range falloff. Any of them can cast
   PCF shadows; they share one shadow atlas (`shadowMapSize` per tile, a tile per
   directional/spot light and six per point light, 16 tiles), with `shadowBias` in world

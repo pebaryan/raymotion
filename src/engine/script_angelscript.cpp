@@ -4818,13 +4818,14 @@ flora::Area jsonArea(const Json& d) {
     return a;
 }
 
-std::shared_ptr<g3d::Instances> jsonScatterInstances(const g3d::GeometryPtr& rest, const Json& descriptor) {
-    const Json& s = descriptor["scatter"];
-    if (!s.isObject()) throw std::runtime_error("instances scatter must be an object");
+// Placements from a scatter descriptor ({area, spacing, clumping, clumpScale, scaleMin,
+// scaleMax, seed}), kept between frames while the descriptor stays the same.
+std::shared_ptr<const std::vector<flora::Placement>> jsonScatter(const Json& s, int variants, const char* what) {
+    if (!s.isObject()) throw std::runtime_error(std::string(what) + " scatter must be an object");
     static thread_local std::unordered_map<std::string, std::shared_ptr<const std::vector<flora::Placement>>> cache;
     const std::string key = s["area"].dump() + "|" + std::to_string(s.num("spacing", 3)) + "|" + std::to_string(s.num("clumping", 0)) + "|" +
                             std::to_string(s.num("clumpScale", 25)) + "|" + std::to_string(s.num("scaleMin", 0.8)) + "|" +
-                            std::to_string(s.num("scaleMax", 1.25)) + "|" + s["tints"].dump() + "|" + s["seed"].dump();
+                            std::to_string(s.num("scaleMax", 1.25)) + "|" + std::to_string(variants) + "|" + s["seed"].dump();
     auto found = cache.find(key);
     if (found == cache.end()) {
         flora::ScatterSpec spec;
@@ -4833,20 +4834,26 @@ std::shared_ptr<g3d::Instances> jsonScatterInstances(const g3d::GeometryPtr& res
         spec.clumpScale = (float)s.num("clumpScale", spec.clumpScale);
         spec.scaleMin = (float)s.num("scaleMin", spec.scaleMin);
         spec.scaleMax = (float)s.num("scaleMax", spec.scaleMax);
-        const auto& tints = s["tints"];
-        spec.variants = tints.isArray() && tints.size() > 0 ? (int)tints.size() : 1;
+        spec.variants = std::max(1, variants);
         for (float v : { spec.spacing, spec.clumping, spec.clumpScale, spec.scaleMin, spec.scaleMax })
-            if (!std::isfinite(v)) throw std::runtime_error("instances scatter values must be finite");
+            if (!std::isfinite(v)) throw std::runtime_error(std::string(what) + " scatter values must be finite");
         if (spec.spacing < 0.05f || spec.clumpScale <= 0 || spec.scaleMin <= 0 || spec.scaleMax < spec.scaleMin)
-            throw std::runtime_error("instances scatter needs spacing >= 0.05, a positive clumpScale and 0 < scaleMin <= scaleMax");
+            throw std::runtime_error(std::string(what) + " scatter needs spacing >= 0.05, a positive clumpScale and 0 < scaleMin <= scaleMax");
         std::vector<flora::Placement> placed;
         try { placed = flora::scatter(jsonArea(s["area"]), spec, (uint32_t)scriptUnsigned64(s["seed"], 1, "scatter seed")); }
         catch (const std::invalid_argument& e) { throw std::runtime_error(e.what()); }
         if (placed.size() > 100000)
-            throw std::runtime_error("instances scatter placed " + std::to_string(placed.size()) + " bodies; at most 100000 (widen the spacing)");
+            throw std::runtime_error(std::string(what) + " scatter placed " + std::to_string(placed.size()) + "; at most 100000 (widen the spacing)");
         if (cache.size() >= 16) cache.clear();
         found = cache.emplace(key, std::make_shared<const std::vector<flora::Placement>>(std::move(placed))).first;
     }
+    return found->second;
+}
+
+std::shared_ptr<g3d::Instances> jsonScatterInstances(const g3d::GeometryPtr& rest, const Json& descriptor) {
+    const Json& s = descriptor["scatter"];
+    const auto& tintList = s["tints"];
+    const auto placements = jsonScatter(s, tintList.isArray() && tintList.size() > 0 ? (int)tintList.size() : 1, "instances");
     std::vector<Color> tints;
     if (s["tints"].isArray())
         for (const auto& t : s["tints"].asArray()) {
@@ -4857,8 +4864,8 @@ std::shared_ptr<g3d::Instances> jsonScatterInstances(const g3d::GeometryPtr& res
     if (!std::isfinite(lift) || !std::isfinite(shadeVariation)) throw std::runtime_error("instances scatter lift and shadeVariation must be finite");
     auto out = std::make_shared<g3d::Instances>();
     out->mesh = cachedScriptAnimatedMesh(rest, descriptor);
-    out->list.reserve(found->second->size());
-    for (const flora::Placement& p : *found->second) {
+    out->list.reserve(placements->size());
+    for (const flora::Placement& p : *placements) {
         g3d::Instance i;
         i.position = { p.position.x, p.position.y + lift * p.scale, p.position.z };
         i.yaw = p.yaw;
@@ -4870,6 +4877,88 @@ std::shared_ptr<g3d::Instances> jsonScatterInstances(const g3d::GeometryPtr& res
         out->list.push_back(i);
     }
     return out;
+}
+
+// A tree: a preset name, or {"preset": name, any TreeSpec field by name}. Built trees are kept
+// while their descriptor stays the same (a build takes a few hundred milliseconds).
+flora::TreePtr jsonTree(const Json& d, const Json& build) {
+    static thread_local std::unordered_map<std::string, flora::TreePtr> cache;
+    const std::string key = d.dump() + "|" + build.dump();
+    auto found = cache.find(key);
+    if (found != cache.end()) return found->second;
+    if (!d.isString() && !d.isObject()) throw std::runtime_error("forest trees must be preset names or objects");
+    flora::TreeSpec t;
+    try { t = flora::tree(d.isString() ? d.asString() : d.str("preset", "oak")); }
+    catch (const std::invalid_argument& e) { throw std::runtime_error(e.what()); }
+    if (d.isObject()) {
+        auto num = [&d](const char* key, float& out) { out = (float)d.num(key, out); };
+        num("height", t.height); num("trunkRadius", t.trunkRadius); num("crownBase", t.crownBase); num("crownRadius", t.crownRadius);
+        num("crownShape", t.crownShape); num("crownLength", t.crownLength); num("gnarl", t.gnarl); num("branchDensity", t.branchDensity);
+        num("droop", t.droop); num("lean", t.lean); num("leafSize", t.leafSize); num("leafDensity", t.leafDensity);
+        num("barkMarks", t.barkMarks); num("barkRings", t.barkRings); num("colorVariation", t.colorVariation);
+        num("season", t.season); num("sway", t.sway);
+        t.stems = d.integer("stems", t.stems);
+        t.whorls = d.integer("whorls", t.whorls);
+        t.bark = d.color("bark", t.bark); t.leafColor = d.color("leafColor", t.leafColor); t.autumnColor = d.color("autumnColor", t.autumnColor);
+        t.deciduous = d.flag("deciduous", t.deciduous);
+        t.seed = (uint32_t)scriptUnsigned64(d["seed"], t.seed, "tree seed");
+        for (float v : { t.height, t.trunkRadius, t.crownBase, t.crownRadius, t.crownShape, t.crownLength, t.gnarl, t.branchDensity,
+                         t.droop, t.lean, t.leafSize, t.leafDensity, t.barkMarks, t.barkRings, t.colorVariation, t.season, t.sway })
+            if (!std::isfinite(v)) throw std::runtime_error("tree values must be finite");
+    }
+    flora::TreeBuild b;
+    if (!build.isNull() && !build.isObject()) throw std::runtime_error("forest build must be an object");
+    b.frames = build.integer("frames", b.frames);
+    b.views = build.integer("views", b.views);
+    b.viewSize = build.integer("viewSize", b.viewSize);
+    b.reducedLeaves = (float)build.num("reducedLeaves", b.reducedLeaves);
+    b.loopSeconds = (float)build.num("loopSeconds", b.loopSeconds);
+    if (b.frames < 1 || b.frames > 64 || b.views < 1 || b.views > 32 || b.viewSize < 16 || b.viewSize > 512 || !std::isfinite(b.reducedLeaves) ||
+        !std::isfinite(b.loopSeconds) || b.loopSeconds <= 0)
+        throw std::runtime_error("forest build needs frames 1..64, views 1..32, viewSize 16..512 and a positive loopSeconds");
+    flora::TreePtr made;
+    try { made = flora::makeTree(t, b); }
+    catch (const std::invalid_argument& e) { throw std::runtime_error(e.what()); }
+    if (cache.size() >= 24) cache.clear();
+    return cache.emplace(key, made).first->second;
+}
+
+// A forest: {"trees": [...], "scatter": {...} or "at": [[x, y, z, yaw, scale, tree], ...],
+// level distances, wind and "build"}. See docs/scripting.md.
+g3d::Object3D* jsonForest(g3d::Scene& scene, g3d::Object3D* parent, const Json& d, int fps) {
+    if (!d.isObject()) throw std::runtime_error("forest must be an object");
+    const auto& list = d["trees"];
+    if (!list.isArray() || list.size() < 1 || list.size() > 8) throw std::runtime_error("forest trees must be an array of 1..8 trees");
+    std::vector<flora::TreePtr> trees;
+    for (const auto& t : list.asArray()) trees.push_back(jsonTree(t, d["build"]));
+    std::shared_ptr<const std::vector<flora::Placement>> placed;
+    if (d.has("scatter")) placed = jsonScatter(d["scatter"], (int)trees.size(), "forest");
+    else {
+        const auto& at = d["at"];
+        if (!at.isArray() || at.size() > 100000) throw std::runtime_error("forest needs scatter, or at: an array of at most 100000 [x, y, z, yaw, scale, tree]");
+        std::vector<flora::Placement> own;
+        uint32_t id = 1;
+        for (const auto& p : at.asArray()) {
+            if (!p.isArray() || p.size() < 3) throw std::runtime_error("forest at entries must be [x, y, z, yaw, scale, tree]");
+            auto n = [&p](size_t i, double fallback) { return i < p.size() && p[i].isNumber() ? p[i].asNumber() : fallback; };
+            const flora::Placement q{ { (float)n(0, 0), (float)n(1, 0), (float)n(2, 0) }, (float)n(3, 0), (float)n(4, 1), (int)n(5, 0), id++ };
+            if (!std::isfinite(q.position.x) || !std::isfinite(q.position.y) || !std::isfinite(q.position.z) || !std::isfinite(q.yaw) ||
+                !std::isfinite(q.scale) || q.scale <= 0)
+                throw std::runtime_error("forest at entries need finite numbers and a positive scale");
+            own.push_back(q);
+        }
+        placed = std::make_shared<const std::vector<flora::Placement>>(std::move(own));
+    }
+    flora::ForestSpec f;
+    auto num = [&d](const char* key, float& out) { out = (float)d.num(key, out); };
+    num("reducedFrom", f.reducedFrom); num("impostorFrom", f.impostorFrom); num("blend", f.blend); num("hideFrom", f.hideFrom);
+    num("wind", f.wind); num("gust", f.gust); num("gustSpeed", f.gustSpeed); num("gustScale", f.gustScale);
+    f.fps = (float)d.num("fps", fps);
+    f.windDirection = jsonV2(d["windDirection"], f.windDirection);
+    f.impostorShadows = d.flag("impostorShadows", f.impostorShadows);
+    for (float v : { f.reducedFrom, f.impostorFrom, f.blend, f.hideFrom, f.wind, f.gust, f.gustSpeed, f.gustScale, f.fps, f.windDirection.x, f.windDirection.y })
+        if (!std::isfinite(v)) throw std::runtime_error("forest values must be finite");
+    return parent ? flora::addForest(*parent, *placed, trees, f) : flora::addForest(scene, *placed, trees, f);
 }
 
 g3d::GeometryPtr jsonTerrain(const Json& object) {
@@ -4886,6 +4975,8 @@ g3d::GeometryPtr jsonTerrain(const Json& object) {
 void addJsonObject(g3d::Scene& scene,g3d::Object3D* parent,const Json& source,int depth,int& count,int fps) {
     if(depth>12 || ++count>512) throw std::runtime_error("3D scene exceeds 512 objects or nesting depth 12"); auto material=jsonMaterial(source["material"]); g3d::Object3D* object=nullptr; int specialized=0; const auto particles=source.str("particles",""); if(!particles.empty()) {
         ++specialized; const auto seed=scriptUnsigned64(source["seed"],1,"particle seed"); fx::Emitter3D emitter; if(particles=="burst") emitter=fx::burst3d(source.integer("count",150)); else if(particles=="sparks") emitter=fx::sparks3d(); else if(particles=="fountain") emitter=fx::fountain3d(); else if(particles=="confetti") emitter=fx::confetti3d((float)source.num("width",6),(float)source.num("depth",6)); else if(particles=="snow") emitter=fx::snow3d((float)source.num("width",10),(float)source.num("depth",10),(float)source.num("height",5)); else if(particles=="rain") emitter=fx::rain3d((float)source.num("width",10),(float)source.num("depth",10),(float)source.num("height",5)); else if(particles=="fire") emitter=fx::fire3d((float)source.num("radius",0.25)); else if(particles=="smoke") emitter=fx::smoke3d((float)source.num("radius",0.2)); else if(particles=="embers") emitter=fx::embers3d((float)source.num("radius",0.4)); else if(particles=="debris") emitter=fx::debris3d(source.integer("count",40)); else throw std::runtime_error("unknown 3D particle preset: "+particles); emitter.seed=seed; if(source.has("particleConfig")) emitter=particleEmitter3D(source["particleConfig"],std::move(emitter)); object=parent?parent->add(emitter):scene.add(emitter); }
+    const auto& forestDesc=source["forest"]; if(!forestDesc.isNull()) {
+        ++specialized; object=jsonForest(scene,parent,forestDesc,fps); }
     const auto& grassDesc=source["grass"]; if(!grassDesc.isNull()) {
         ++specialized; auto field=jsonGrass(grassDesc,fps); const auto look=jsonMaterial(source["material"],flora::grassMaterial()); object=parent?parent->add(field,look):scene.add(field,look); }
     const auto splatFile=source.str("splatPly",""); if(!splatFile.empty()) {
