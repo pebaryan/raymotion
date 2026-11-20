@@ -135,6 +135,8 @@ uniform vec4 fieldFade;                  // fade start, fade end, dryness, grow
 uniform vec3 fieldCam;                   // the viewing camera (world), in the shadow passes too
 uniform vec3 fieldRoot; uniform vec3 fieldTip; uniform vec3 fieldDry;     // sRGB 0..1
 uniform float fieldBands;                // Field::colorBands (0 = smooth)
+uniform float fieldWiden;                // blade width multiplier: 1, more in the shadow pass (thinned blades)
+uniform int fieldPick;                   // > 0 in a shadow pass: instance i draws blade hash(i) mod fieldPick, a random share of them (the first n would show the sequence's lattice)
 uint fieldHash(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
 float fieldRand(uint x) { return float(fieldHash(x) >> 8) / 16777216.0; }
 // Point k of the R2 sequence (Roberts 2018) in the unit square, shifted per tile: any first n
@@ -144,7 +146,7 @@ vec2 fieldSpot(uint k, uint th) {
     return vec2(float(x >> 8), float(z >> 8)) / 16777216.0;
 }
 bool fieldVertex(vec3 corner, out vec3 pos, out vec3 nrm, out vec4 col) {
-    uint k = uint(gl_InstanceID);
+    uint k = fieldPick > 0 ? fieldHash(uint(gl_InstanceID) * 2654435769u + 40503u) % uint(fieldPick) : uint(gl_InstanceID);
     uint th = fieldHash(uint(fieldKey.x) * 73856093u ^ uint(fieldKey.y) * 19349663u ^ uint(fieldSeed) * 83492791u);
     vec2 p = fieldTile.xy + fieldSpot(k, th) * fieldTile.z;
     vec2 a = (p - fieldArea.xy) / (fieldArea.zw - fieldArea.xy);
@@ -163,7 +165,7 @@ bool fieldVertex(vec3 corner, out vec3 pos, out vec3 nrm, out vec4 col) {
     float grown = clamp((fieldFade.w * 1.15 - maps.a) / 0.15, 0.0, 1.0);     // Field::grow past the arrival
     float H = fieldBlade.x * (1.0 + fieldBlade.y * (2.0 * r1 - 1.0)) * maps.b * s * grown * grown * (3.0 - 2.0 * grown);
     if (H <= 1e-4) return false;
-    float W = fieldBlade.z * (0.7 + 0.6 * r2) / max(far, 0.33);        // fewer blades far off, each wider
+    float W = fieldBlade.z * (0.7 + 0.6 * r2) / max(far, 0.33) * fieldWiden;        // fewer blades far off, each wider
     float yaw = r3 * 6.2831853;
     vec3 side = vec3(cos(yaw), 0.0, sin(yaw));
     vec2 face = vec2(-side.z, side.x), wd = fieldWind.xy;
@@ -1109,7 +1111,7 @@ struct InstLocs { int instanced = -1, vat = -1, width = -1, verts = -1, rows = -
 constexpr int VAT_SLOT = 12;             // the baked-animation texture (material maps use 0..11)
 // A field's uniforms in one program (see FIELD_VS); its maps share the VAT_SLOT unit.
 struct FieldLocs { int on = -1, world = -1, tile = -1, key = -1, seed = -1, area = -1, mapFit = -1, maps = -1,
-                   blade = -1, wind = -1, gusts = -1, fade = -1, cam = -1, root = -1, tip = -1, dry = -1, bands = -1; };
+                   blade = -1, wind = -1, gusts = -1, fade = -1, cam = -1, root = -1, tip = -1, dry = -1, bands = -1, widen = -1, pick = -1; };
 constexpr int FIELD_MAX_SEGMENTS = 8;
 struct LineLocs { int depthTex, texel, zNear, zFar, ortho, pixelWorld, pxScale, styles, maxRadius, creaseCos,
                   depthThreshold, wobble, wobbleScale, seed; };
@@ -1173,6 +1175,7 @@ struct Gpu {
     int frame = 0;                                      // the frame being drawn (for dynamic maps)
     Vector3 viewCam{ 0, 0, 0 };                         // the frame's camera position (fields)
     long long fieldBlades = 0;                          // blades submitted by the main pass this frame
+    long long fieldShadowBlades = 0;                    // and by the shadow passes
     long long instanceBodies = 0, instanceTriangles = 0;   // instanced bodies (and their triangles) the main pass drew
 };
 Gpu gpu;
@@ -1295,7 +1298,7 @@ void ensureGpu() {
             auto f = [&b](const char* name) { return GetShaderLocation(b, name); };
             gpu.F[i] = { f("fieldOn"), f("fieldWorld"), f("fieldTile"), f("fieldKey"), f("fieldSeed"), f("fieldArea"),
                          f("fieldMapFit"), f("fieldMaps"), f("fieldBlade"), f("fieldWind"), f("fieldGusts"),
-                         f("fieldFade"), f("fieldCam"), f("fieldRoot"), f("fieldTip"), f("fieldDry"), f("fieldBands") };
+                         f("fieldFade"), f("fieldCam"), f("fieldRoot"), f("fieldTip"), f("fieldDry"), f("fieldBands"), f("fieldWiden"), f("fieldPick") };
         }
     }
     auto nloc = [](const char* name) { return GetShaderLocation(gpu.line, name); };
@@ -1701,7 +1704,9 @@ Vector3 linear(Color c, float k = 1) {
 // ---- scene traversal -----------------------------------------------------------------
 // A mesh particle is an item of its emitter object with its own transform, fade and tint.
 // One tile of a field this frame: which, how many of its blades, at what detail.
-struct FieldTile { int tx, tz; int count; int segments; bool shadow; };
+// `shadowCount` is how many of its blades go into the shadow maps (0 = none); `seen` is false
+// for a tile kept only for the shadow it casts into view.
+struct FieldTile { int tx, tz; int count; int segments; int shadowCount; bool seen; };
 struct Item {
     Object3D* obj; Matrix world; float viewDepth;
     float alpha = 1;
@@ -1952,10 +1957,15 @@ void gatherField(const Object3D& o, const Matrix& world, const Cull& k, std::vec
             const float nearest = std::max(0.f, Vector3Distance(cw, k.cam->position) - r);
             const float keep = maps.tileDensity[ti] * fieldFar(f, nearest);
             if (keep <= 0) continue;
-            if (k.on && !inSight(k, cw, r)) continue;
+            // Seen; or, only when the grass casts shadows, casting one that can fall into view.
+            const bool seen = !k.on || visibleSphere(*k.cam, k.aspect, cw, r);
+            if (!seen && !(f.castShadows && inSight(k, cw, r))) continue;
             const int count = (int)std::min<double>(full, std::ceil(full * keep * (1 + FIELD_BAND)));
             if (count <= 0) continue;
-            out.push_back({ tx, tz, count, nearest < f.detailDistance ? segments : 1, nearest < f.shadowDistance });
+            int shadowCount = 0;     // the first blades by rank, as the main pass has them
+            if (f.castShadows && nearest < f.shadowDistance && (!k.on || inFootprint(k, cw, r)))
+                shadowCount = std::max(1, (int)std::ceil(count * std::clamp(f.shadowDensity, 0.02f, 1.f)));
+            out.push_back({ tx, tz, count, nearest < f.detailDistance ? segments : 1, shadowCount, seen });
         }
 }
 
@@ -2243,17 +2253,25 @@ void drawField(const Item& it, Pass pass) {
     setColor(L.dry, f.dry);
     const float bands = (float)std::clamp(f.colorBands, 0, 16);
     rlSetUniform(L.bands, &bands, SHADER_UNIFORM_FLOAT, 1);
+    // Thinned blades in a shadow map are widened to keep the shadow's weight (at most 3 times).
+    const float widen = pass == Pass::Depth ? std::min(3.f, 1.f / std::clamp(f.shadowDensity, 0.02f, 1.f)) : 1.f;
+    rlSetUniform(L.widen, &widen, SHADER_UNIFORM_FLOAT, 1);
 
     const float ts = std::max(f.tileSize, 0.05f);
     const float full = (float)f.bladesPerTile();
     rlEnableVertexArray(gpu.fieldVao);
     for (const FieldTile& t : *it.tiles) {
-        if (pass == Pass::Depth && !t.shadow) continue;
+        const int n = pass == Pass::Depth ? t.shadowCount : t.seen ? t.count : 0;
+        if (n <= 0) continue;
         set4(L.tile, f.min.x + t.tx * ts, f.min.y + t.tz * ts, ts, full);
         const int key[2] = { t.tx, t.tz };
         rlSetUniform(L.key, key, SHADER_UNIFORM_IVEC2, 1);
-        rlDrawVertexArrayInstanced(gpu.fieldFirst[t.segments], gpu.fieldCount[t.segments], t.count);
-        if (pass == Pass::Lit) gpu.fieldBlades += t.count;
+        // A thinned shadow pass draws a random share of the tile's blades, not its first ones.
+        const int pick = pass == Pass::Depth && n < t.count ? t.count : 0;
+        rlSetUniform(L.pick, &pick, SHADER_UNIFORM_INT, 1);
+        rlDrawVertexArrayInstanced(gpu.fieldFirst[t.segments], gpu.fieldCount[t.segments], n);
+        if (pass == Pass::Lit) gpu.fieldBlades += n;
+        else if (pass == Pass::Depth) gpu.fieldShadowBlades += n;
     }
     rlDisableVertexArray();
     const int off = 0;
@@ -2540,7 +2558,9 @@ Shadows renderShadows(const Scene& s, const std::vector<Item>& items) {
         t.rect = { (float)col / grid, (float)row / grid, 1.f / grid, 1.f / grid };
         rlViewport(col * tile, row * tile, tile, tile);
         for (const Item& it : items)
-            if (it.obj->material.castShadow && opacityOf(it) >= 1.f && !it.obj->material.unlit) drawItem(it, Pass::Depth);
+            if (it.obj->material.castShadow && opacityOf(it) >= 1.f && !it.obj->material.unlit &&
+                !(it.tiles && !it.obj->field->castShadows))
+                drawItem(it, Pass::Depth);
         out.tiles.push_back(t);
     };
     for (int i = 0; i < count; i++) {
@@ -3414,6 +3434,7 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     std::deque<std::vector<FieldTile>> fieldStore;            // and the fields' tiles
     gpu.viewCam = cam.position;                              // fields thin out by distance from it, in every pass
     gpu.fieldBlades = 0;
+    gpu.fieldShadowBlades = 0;
     gpu.instanceBodies = gpu.instanceTriangles = 0;
     pruneFields();
     collect(s.objects, MatrixIdentity(), items, emitters, ft, cull, instanceStore, fieldStore);
@@ -4139,6 +4160,7 @@ Vector2 Field::bladeRoot(int tx, int tz, uint32_t k) const {
     return { min.x + (tx + (float)(x >> 8) / 16777216.f) * ts, min.y + (tz + (float)(z >> 8) / 16777216.f) * ts };
 }
 long long fieldBladesSubmitted() { return gpu.fieldBlades; }
+long long fieldShadowBladesSubmitted() { return gpu.fieldShadowBlades; }
 long long instanceBodiesSubmitted() { return gpu.instanceBodies; }
 long long instanceTrianglesSubmitted() { return gpu.instanceTriangles; }
 

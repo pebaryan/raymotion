@@ -4872,7 +4872,8 @@ std::shared_ptr<g3d::Field> jsonGrass(const Json& d, int fps) {
     num("dryness", next.dryness); num("sway", next.sway); num("gust", next.gust); num("gustSpeed", next.gustSpeed);
     num("gustScale", next.gustScale); num("tileSize", next.tileSize); num("detailDistance", next.detailDistance);
     num("fadeStart", next.fadeStart); num("fadeEnd", next.fadeEnd); num("shadowDistance", next.shadowDistance);
-    num("grow", next.grow);
+    num("grow", next.grow); num("shadowDensity", next.shadowDensity);
+    next.castShadows = d.flag("castShadows", next.castShadows);
     next.fps = (float)d.num("fps", fps);
     next.segments = d.integer("segments", next.segments);
     next.mapResolution = d.integer("mapResolution", next.mapResolution);
@@ -4881,7 +4882,7 @@ std::shared_ptr<g3d::Field> jsonGrass(const Json& d, int fps) {
     next.windDirection = jsonV2(d["windDirection"], next.windDirection);
     for (float v : { next.density, next.height, next.heightVariation, next.width, next.lean, next.colorVariation, next.dryness,
                      next.sway, next.gust, next.gustSpeed, next.gustScale, next.tileSize, next.detailDistance, next.fadeStart,
-                     next.fadeEnd, next.shadowDistance, next.fps, next.windDirection.x, next.windDirection.y })
+                     next.fadeEnd, next.shadowDistance, next.shadowDensity, next.fps, next.windDirection.x, next.windDirection.y })
         if (!std::isfinite(v)) throw std::runtime_error("grass values must be finite");
     if (next.density < 0 || next.density > 20000 || next.tileSize < 0.25f || next.tileSize > 64 || next.height < 0 || next.width < 0)
         throw std::runtime_error("grass density must be 0..20000 a square metre, tileSize 0.25..64, height and width >= 0");

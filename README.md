@@ -299,6 +299,9 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   gusts downwind as a function of time. About 1.5 million blades a frame at 1080p took
   12 ms with shadows on the development GPU (`RMTN_FIELD_BENCH=1` runs that measurement in
   `scene3d_tests`). Grass shadows want a fine shadow map (`shadowMapSize` 4096) under a low sun.
+  `Field::castShadows` (on, script key `castShadows`) draws the blades into the shadow maps, so a
+  tall tuft shades the grass behind it; `shadowDensity` below 1 (default 1) draws a random share of
+  them for less time, at the cost of a blocky weave of blade shadows on the soil near the camera.
 * Where plants grow (`flora::Area`): a rectangle or polygons with holes, less buildings,
   clearings and roads (strips), over a ground (hills from `flora::noise`, a mesh's upward
   faces, a geo region through a projection), thinned by density, slope and altitude, with a

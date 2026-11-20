@@ -723,7 +723,7 @@ and any field value by name to override the preset: `density` (blades a square m
 `height`, `heightVariation`, `width`, `lean`, `segments`, colours `root`, `tip` and `dry`,
 `colorVariation`, `dryness`, wind `windDirection` (`[x, z]`), `sway`, `gust`, `gustSpeed`,
 `gustScale`, `fps`, and detail `tileSize`, `detailDistance`, `fadeStart`, `fadeEnd`,
-`shadowDistance`, `mapResolution`. Optional grids over the area, `mask` (density 0..1),
+`shadowDistance`, `mapResolution`, and `castShadows` (default `true`: the blades go into the shadow maps, so a tall tuft shades the grass behind it; `false` stops it) and `shadowDensity` (default 1, every blade; below 1 is a cheaper random share, with a weave of blade shadows on the soil near the camera as its cost; see docs/flora.md). Optional grids over the area, `mask` (density 0..1),
 `ground` (height) and `tall` (height multiplier), are `{"width": w, "height": h, "values":
 [...]}` row by row from `min` to `max`, read bilinearly. The object's `material` starts from
 the grass material (translucent, matt, no ink lines) and changes only what it names. The field

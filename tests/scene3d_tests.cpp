@@ -2152,6 +2152,57 @@ static g3d::ScenePtr meadow(std::function<void(g3d::Field&)> edit = {}, bool wit
     s->lights.push_back(sun);
     return s;
 }
+// A tall tuft (a dense disc of 1.5 m blades) in short grass, seen from straight above, lit by a sun
+// `elevation` degrees up in compass direction `azimuth` (its shadow runs the other way).
+static Vector3 sunSide(float azimuth) { return { std::cos(azimuth * DEG2RAD), 0, std::sin(azimuth * DEG2RAD) }; }
+static g3d::ScenePtr tuftScene(float azimuth, bool cast, float elevation = 25, float shadowDensity = 0.35f) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = { 0, 24, 4 };      // not straight down: the engine and raylib pick different up vectors there
+    s->camera.target = { 0, 0, 0 };
+    s->camera.fov = 20;
+    s->ambient = 0.3f;
+    s->shadowMapSize = 2048;
+    g3d::Material ground;
+    ground.color = { 190, 190, 190, 255 };
+    ground.roughness = 1;
+    s->add(g3d::Geometry::plane(80, 80), ground);
+    g3d::Material grass;
+    grass.roughness = 0.8f;
+    grass.translucency = 0.8f;
+    grass.translucencyColor = { 255, 236, 160, 255 };
+    grass.lineWidth = 0;
+    auto lawn = std::make_shared<g3d::Field>();
+    lawn->min = { -6, -6 }; lawn->max = { 6, 6 };
+    lawn->density = 300; lawn->height = 0.25f; lawn->tileSize = 2;
+    lawn->castShadows = cast; lawn->shadowDensity = shadowDensity; lawn->shadowDistance = 80;   // the camera is 24 m up
+    s->add(lawn, grass);
+    auto tuft = std::make_shared<g3d::Field>();
+    tuft->min = { -0.5f, -0.5f }; tuft->max = { 0.5f, 0.5f };
+    tuft->mask = [](float x, float z) { return x * x + z * z < 0.25f ? 1.f : 0.f; };
+    tuft->density = 2500; tuft->height = 1.5f; tuft->heightVariation = 0.2f; tuft->width = 0.02f; tuft->tileSize = 1;
+    tuft->castShadows = cast; tuft->shadowDensity = shadowDensity; tuft->shadowDistance = 80;
+    s->add(tuft, grass);
+    const Vector3 up = sunSide(azimuth);
+    const float e = elevation * DEG2RAD;
+    g3d::Light sun = g3d::Light::directional({ up.x * std::cos(e) * 20, std::sin(e) * 20, up.z * std::cos(e) * 20 },
+                                             { 255, 240, 220, 255 }, 2.2f, true);
+    sun.target = { 0, 0, 0 };
+    sun.shadowExtent = 6;
+    s->lights.push_back(sun);
+    return s;
+}
+// Mean luma of the square of half-size `half` metres centred on the ground point `c`.
+static double boxLuma(const Image& img, const g3d::Camera& cam, Vector3 c, float half) {
+    const Vector2 a = project(cam, { c.x - half, 0, c.z - half }, img.width, img.height);
+    const Vector2 b = project(cam, { c.x + half, 0, c.z + half }, img.width, img.height);
+    const int x0 = (int)std::min(a.x, b.x), x1 = (int)std::max(a.x, b.x), y0 = (int)std::min(a.y, b.y), y1 = (int)std::max(a.y, b.y);
+    double sum = 0;
+    int n = 0;
+    for (int y = std::max(y0, 0); y < std::min(y1, img.height); y++)
+        for (int x = std::max(x0, 0); x < std::min(x1, img.width); x++) { sum += luma(GetImageColor(img, x, y)); n++; }
+    return n ? sum / n : 0;
+}
+
 static void grassField() {
     {   // placement: a tile holds density * size^2 blades; any first n of them spread evenly
         g3d::Field f;
@@ -2355,6 +2406,159 @@ static void grassField() {
         std::printf("[scene3d] grass area: lowest blade row %d, the plateau's near edge at %d, 0.3 m below it at %d\n", lowest, plateau, below);
         CHECK(lowest >= plateau - 2 && lowest < below);
         UnloadImage(img);
+    }
+    {   // castShadows: a tall tuft shades the grass and ground behind it, on the side away from the sun,
+        // and does not when the switch is off. Two sun azimuths, so the direction is checked.
+        const int w = 480, h = 270;
+        for (float az : { 40.f, 150.f }) {
+            double on[3], off[3];
+            for (int cast = 0; cast < 2; cast++) {
+                auto s = tuftScene(az, cast != 0);
+                Comp c = longComp(s, w, h);
+                Image img = render(c, 20);
+                if (az == 40.f) dumpField(cast ? "tuft_on.png" : "tuft_off.png", img);
+                const Vector3 d = sunSide(az), across = { -d.z, 0, d.x };
+                double* out = cast ? on : off;
+                out[0] = boxLuma(img, s->camera, Vector3Scale(d, -2.2f), 0.3f);        // behind the tuft, away from the sun
+                out[1] = boxLuma(img, s->camera, Vector3Scale(d, 2.2f), 0.3f);         // the same distance on the sun side
+                out[2] = boxLuma(img, s->camera, Vector3Scale(across, 2.2f), 0.3f);    // the same distance across the sun
+                UnloadImage(img);
+            }
+            std::printf("[scene3d] grass shadow, sun azimuth %.0f: luma behind / sun side / across: on %.1f / %.1f / %.1f (%.2f), "
+                        "off %.1f / %.1f / %.1f (%.2f)\n", az, on[0], on[1], on[2], on[0] / on[1], off[0], off[1], off[2], off[0] / off[1]);
+            CHECK(on[0] < 0.8 * on[1]);                                        // clearly darker away from the sun
+            CHECK(on[2] > 0.9 * on[1] && on[2] < 1.1 * on[1]);                 // and not across it: the direction is right
+            CHECK(off[0] > 0.93 * off[1] && off[0] < 1.07 * off[1]);           // off: no difference beyond the grain
+        }
+    }
+    {   // castShadows: how much to thin the blades in the shadow map (printed, not checked): the shadow's
+        // darkness against its cost, for the tuft of the test above.
+        const int w = 480, h = 270;
+        for (float frac : { 1.f, 0.5f, 0.35f, 0.2f, 0.1f }) {
+            auto s = tuftScene(40, true, 25, frac);
+            Comp c = longComp(s, w, h);
+            Image img = render(c, 20);
+            const Vector3 d = sunSide(40);
+            const double behind = boxLuma(img, s->camera, Vector3Scale(d, -2.2f), 0.3f), lit = boxLuma(img, s->camera, Vector3Scale(d, 2.2f), 0.3f);
+            const long long blades = g3d::fieldShadowBladesSubmitted();
+            UnloadImage(img);
+            std::printf("[scene3d] grass shadow density %.2f: %lld blades in the shadow map, behind / sun side %.2f\n", frac, blades, behind / lit);
+        }
+    }
+    {   // castShadows: the shadow pass draws blades in step with the main pass, and the count is exact
+        const bool bench = std::getenv("RMTN_FIELD_BENCH") != nullptr;
+        auto build = [bench](bool cast, float share) {
+            auto s = meadow([&](g3d::Field& f) {
+                f.min = { -200, -200 }; f.max = { 200, 200 }; f.density = bench ? 600.f : 120.f;
+                if (share >= 0) { f.castShadows = cast; f.shadowDensity = share; }   // share < 0: the defaults
+            });
+            s->camera.position = { 0, 1.7f, 6 };
+            s->camera.target = { 0, 1.2f, -10 };
+            s->objects[0]->material.color = { 70, 92, 40, 255 };
+            return s;
+        };
+        const int w = bench ? 1920 : 480, h = bench ? 1080 : 270, frames = bench ? 12 : 4;
+        long long main[4] = {}, shadow[4] = {};
+        const struct { bool cast; float share; const char* name; } modes[4] = { { false, 0.35f, "off" }, { true, 1.f, "on, all blades" }, { true, 0.35f, "on, 0.35" }, { true, -1.f, "defaults" } };
+        for (int m = 0; m < 4; m++) {
+            Comp c = longComp(build(modes[m].cast, modes[m].share), w, h);
+            UnloadImage(render(c, 30));                                       // warm up (shaders, maps)
+            main[m] = g3d::fieldBladesSubmitted();
+            shadow[m] = g3d::fieldShadowBladesSubmitted();
+            double best = 1e9, mean = 0;
+            for (int f = 31; f < 31 + frames; f++) {
+                const auto t0 = std::chrono::steady_clock::now();
+                UnloadImage(render(c, f));
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                best = std::min(best, ms);
+                mean += ms / frames;
+            }
+            std::printf("[scene3d] grass shadows %s, %dx%d: %lld blades in the main pass, %lld in the shadow pass; "
+                        "%.1f ms best of %d, %.1f mean (with readback)\n", modes[m].name, w, h, main[m], shadow[m], best, frames, mean);
+        }
+        CHECK(main[0] > 0 && main[0] == main[1] && main[1] == main[2] && main[2] == main[3]);   // the switch changes only the shadow pass
+        CHECK(shadow[0] == 0);
+        CHECK(shadow[1] > 0);
+        CHECK(shadow[2] >= 0.35 * shadow[1] && shadow[2] <= 0.35 * shadow[1] + 400);   // the share, rounded up a tile at a time
+        const g3d::Field defaults;                                             // as before 0.13: on, every blade, no pick
+        CHECK(defaults.castShadows && defaults.shadowDensity == 1.f);
+        CHECK(shadow[3] == shadow[1] && shadow[3] > 0);
+    }
+    {   // castShadows: frames stay pure
+        Comp again = longComp(tuftScene(40, true), 480, 270);
+        Image before = render(again, 39), after = render(again, 40);
+        Comp fresh = longComp(tuftScene(40, true), 480, 270);
+        Image alone = render(fresh, 40);
+        CHECK(same(after, alone));
+        CHECK(!same(before, after));
+        UnloadImage(before); UnloadImage(after); UnloadImage(alone);
+    }
+    {   // castShadows: the shadow follows the blades in the wind. A dense tuft of red blades, 1 m tall, a sun
+        // from +x, a gust along +z: at frame 21 no gust bends the blades, at 63 it bends them 0.9 of their
+        // height. The shadow's mean z (across the shadow's own direction) must move as the blades' does.
+        const int w = 640, h = 360;
+        auto make = [](bool cast) {
+            auto s = std::make_shared<g3d::Scene>();
+            s->camera.position = { 0, 30, 4 };
+            s->camera.target = { 0, 0, 0 };
+            s->camera.fov = 14;
+            s->ambient = 0.25f;
+            s->shadowMapSize = 2048;
+            g3d::Material ground;
+            ground.color = { 220, 220, 220, 255 };
+            ground.roughness = 1;
+            s->add(g3d::Geometry::plane(80, 80), ground);
+            auto f = std::make_shared<g3d::Field>();
+            f->min = { -0.5f, -0.5f }; f->max = { 0.5f, 0.5f };
+            f->mask = [](float x, float z) { return x * x + z * z < 0.0625f ? 1.f : 0.f; };
+            f->density = 6000; f->height = 1; f->heightVariation = 0; f->lean = 0; f->width = 0.03f; f->tileSize = 1;
+            f->sway = 0; f->gust = 0.9f; f->gustSpeed = 5; f->gustScale = 14; f->windDirection = { 0, 1 };
+            f->root = { 150, 0, 0, 255 }; f->tip = { 255, 30, 30, 255 };
+            f->colorVariation = 0; f->dryness = 0;
+            f->castShadows = cast; f->shadowDistance = 80;
+            g3d::Material grass;
+            grass.roughness = 0.8f;
+            grass.lineWidth = 0;
+            s->add(f, grass);
+            g3d::Light sun = g3d::Light::directional({ 20 * std::cos(30 * DEG2RAD), 10, 0 }, WHITE, 2.4f, true);
+            sun.target = { 0, 0, 0 };
+            sun.shadowExtent = 5;
+            s->lights.push_back(sun);
+            return s;
+        };
+        auto scene = make(true);
+        Comp c = longComp(scene, w, h);
+        auto zOf = [&](const Image& img, double& shadowZ, double& bladeZ, int& shadowPx, int& bladePx) {
+            const Vector2 o = project(scene->camera, { 0, 0, 0 }, w, h), one = project(scene->camera, { 0, 0, 1 }, w, h);
+            const double perM = one.y - o.y;
+            double lit = 0;
+            for (int y = 0; y < 20; y++) for (int x = 0; x < 20; x++) lit += luma(GetImageColor(img, x, y)) / 400.0;
+            double sz = 0, bz = 0;
+            shadowPx = bladePx = 0;
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++) {
+                    const Color p = GetImageColor(img, x, y);
+                    if (p.r > p.g + 40) { bz += (y - o.y) / perM; bladePx++; }
+                    else if (luma(p) < 0.7 * lit) { sz += (y - o.y) / perM; shadowPx++; }
+                }
+            shadowZ = shadowPx ? sz / shadowPx : 0;
+            bladeZ = bladePx ? bz / bladePx : 0;
+        };
+        double sz[2], bz[2];
+        int sp[2], bp[2];
+        const int frames[2] = { 21, 63 };
+        for (int i = 0; i < 2; i++) {
+            Image img = render(c, frames[i]);
+            zOf(img, sz[i], bz[i], sp[i], bp[i]);
+            dumpField(i ? "gust_lean.png" : "gust_upright.png", img);
+            UnloadImage(img);
+        }
+        const double shiftShadow = sz[1] - sz[0], shiftBlade = bz[1] - bz[0];
+        std::printf("[scene3d] grass shadow in a gust: blades' mean z %.2f -> %.2f (%d, %d px), shadow's %.2f -> %.2f (%d, %d px); shift %.2f m against %.2f m\n",
+                    bz[0], bz[1], bp[0], bp[1], sz[0], sz[1], sp[0], sp[1], shiftShadow, shiftBlade);
+        CHECK(bp[0] > 100 && bp[1] > 100 && sp[0] > 500 && sp[1] > 500);
+        CHECK(std::fabs(shiftBlade) > 0.15);                                                // the gust really bends the blades
+        CHECK(shiftShadow / shiftBlade > 0.6 && shiftShadow / shiftBlade < 1.6);   // and the shadow goes with them
     }
     {   // landscape: a 400 m square; time printed, not checked. Full size (600 blades a square
         // metre at 1080p) with RMTN_FIELD_BENCH set; smaller by default, for software GL on CI.

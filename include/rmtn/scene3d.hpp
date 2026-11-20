@@ -310,7 +310,17 @@ struct Field {
     float tileSize = 4;                         // metres
     float detailDistance = 14;                  // nearer tiles get full blades, further one segment
     float fadeStart = 35, fadeEnd = 70;         // blades thin out over this band (metres from the camera)
-    float shadowDistance = 18;                  // tiles nearer than this cast shadows (all receive)
+    float shadowDistance = 18;                  // with castShadows: only tiles nearer than this to the camera cast (all receive)
+    // Blades into the shadow maps, so a tall tuft shades the grass behind it and the ground. On
+    // by default, every blade the main pass draws. Each tile within `shadowDistance` of the camera
+    // and inside a directional light's shadowExtent is drawn into the maps with the same wind at
+    // the same t. A `shadowDensity` below 1 is a saving: a random share of the blades, each widened
+    // by 1 / shadowDensity (at most 3 times) so the shadow keeps its weight. The cost is a
+    // blocky weave of blade shadows on the soil in the nearest metres under a low sun (shadow-map
+    // texels, worse as the share falls). Blades both cast and receive: the lit shader's normal
+    // offset and slope bias keep them from speckling themselves. Off: the grass casts nothing.
+    bool castShadows = true;
+    float shadowDensity = 1;                    // 0.02..1, the share of blades drawn into the shadow maps
 
     // What the shader draws, mirrored on the CPU for tests and placement: blade k of tile
     // (tx, tz) has its root at x, z in the object's space (before masks and fading).
@@ -322,6 +332,10 @@ struct Field {
 // Blades the last rendered frame submitted in its main pass, over every field (before the
 // shader thins them by mask and distance; shadow passes not counted): for measuring budgets.
 long long fieldBladesSubmitted();
+// Blades the last rendered frame submitted to its shadow passes, over every field (a tile
+// counted once for each shadow map it is drawn into): a deterministic measure of what
+// Field::castShadows costs.
+long long fieldShadowBladesSubmitted();
 // Instanced bodies (trees, say) the last rendered frame drew in its main pass, culled ones not
 // counted, and the triangles they came to: a deterministic measure of what a forest costs.
 long long instanceBodiesSubmitted();

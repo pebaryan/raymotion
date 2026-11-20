@@ -34,6 +34,16 @@ fade distance the field gives way to the ground's colour.
   `gustSpeed`.
 - **Maps over the area:** `mask` (density), `ground` (height) and `tall` (height
   multiplier). Bump `revision` after changing them.
+- **Shadows:** `castShadows` (on, as before) draws the blades into the shadow maps, so a
+  tall tuft shades the grass behind it and the ground, and the lawn's blades shade the soil
+  between them under a low sun. Only tiles nearer than `shadowDistance` to the camera and
+  inside a directional light's `shadowExtent` are drawn, with the same wind at the same t as
+  the main pass. `shadowDensity` (1: every blade, as always) is the saving: below 1 a random
+  share of the blades is drawn, each widened by 1 / `shadowDensity` (at most 3 times) so the
+  shadow keeps its weight. At 0.25 the shadow pass costs a quarter of the blades, and under a
+  low sun the soil seen between blades from 1.5 m up shows a blocky weave of blade shadows
+  in the nearest metres; leave it at 1 where that shows. `castShadows` false stops the grass
+  casting at all. A high camera (aerial shots) needs `shadowDistance` above its height.
 
 ## Areas and scattering
 
@@ -327,6 +337,13 @@ milestone's tests print them, so they can be measured again.
 
 - **Grass:** about 1.47 million blades submitted at 1080p with shadows, 12–13 ms a frame
   including readback (`RMTN_FIELD_BENCH=1 raymotion_scene3d_tests`).
+- **Grass shadows (`castShadows`)**, the same 1.47 million blades at 1920x1080, a 28 m shadow
+  map, best of 12 frames with readback (a noisy GPU: the mean is 1 ms more): off 9.8 ms, 0
+  blades in the shadow pass; on at `shadowDensity` 1, 10.5 ms and 230,400 blades; at 0.35,
+  9.9 ms and 80,640. The shadow-pass counts are exact (`fieldShadowBladesSubmitted()`); the
+  tests check them and print the times. Darkness behind a 1.5 m tuft at a 25-degree sun
+  against the sun side, 480x270, azimuth 40: 0.56 at density 1, 0.55 at 0.5, 0.35 and 0.2,
+  0.63 at 0.1. Off, the same boxes read 1.01. The default stays 1 (the old path: no random pick, no widening).
 - **Forest:** 10,884 trees at 1080p in 26 ms a frame, with levels and impostors. The GPU
   timings are noisy; the best frames of two runs (`RMTN_FIELD_BENCH=1`) were 24–27 ms with
   one row of impostor pictures, 28–29 ms with three rows, and 31–46 ms with three rows and
@@ -392,6 +409,10 @@ Tests: `flora_tests`, `scene3d_tests`, `flora2d_render_tests` and `test_script.p
   - Spread, mask, fade and purity.
   - Tips move and roots stay.
   - A gust arrives 4 m downwind 30 frames later.
+  - `castShadows`: a 1.5 m tuft darkens the grass 2.2 m behind it to 0.55 of the sun side's
+    luma at two sun azimuths, and not across the sun (1.0); off, 1.01. The shadow's mean
+    position moves 0.57 m in a gust that moves the blades' 0.43 m; with the shadow pass's wind
+    frozen it moved 0.01 m. The shadow-pass blade counts are exact, the frame is pure.
 - **Forests:**
   - A level change steps by at most 756 px, against 1,636 px without the blend.
   - Impostor silhouettes overlap the full tree by 0.80–0.83 from the side, at least 0.75 from 60 degrees above.
@@ -438,8 +459,13 @@ Tests: `flora_tests`, `scene3d_tests`, `flora2d_render_tests` and `test_script.p
   directions leaning to the viewer); a low or backlit sun will show it off. A picture is of a
   tree at one elevation, so between rows a
   tall trunk shows doubled (the crown is aligned, the trunk is not).
-- Grass doesn't shadow itself beyond the darkening at its roots. It has no ink lines unless
-  you ask for them.
+- Grass shadows (`castShadows`) are only as fine as the shadow map: a blade is about 1.7
+  texels wide at `shadowExtent` 14 and a 4096 map, so under a low sun the soil seen between
+  blades from 1.5 m up shows a blocky basket-weave of blade shadows in the nearest metres
+  (the map's texels; it gets worse as `shadowDensity` falls below 1 and is gone at 1). A smaller
+  `shadowExtent` or a bigger `shadowMapSize` sharpens it. Only directional lights' footprints
+  are tested; a spot or point light draws every tile within `shadowDistance`. Grass has no ink
+  lines unless you ask for them.
 - Map forests have no impostors or splats. Low-poly instances are cheap enough up to the
   default limit.
 - The `flora` showcase is an engine demo, not a film: it has no brief, script or QC review.

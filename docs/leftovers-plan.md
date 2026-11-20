@@ -169,6 +169,22 @@ together. Patches may be missing in a reflection that sees cells the main camera
   - Grass behind a tall tuft is darker on its side away from the sun.
   - Time per frame is measured and recorded.
 
+**Done 2026-11-20.** `Field::castShadows` (on, as before) and `shadowDensity` (1); script keys the same.
+Grass already cast shadows before this (every tile within `shadowDistance` of the camera, at the
+main pass's density), so the defaults keep that: with them the shadow pass is the old path, no
+pick and no widening. `castShadows` false stops the grass casting (and skips it in the shadow
+passes). A tile now also has to be inside a directional light's `shadowExtent`. `shadowDensity`
+below 1 is the new saving: a random share of the blades (a hash of the instance, not the first n:
+the first n showed the placement sequence's lattice as a weave on the ground), widened 1/density
+(at most 3x). Tiles kept only for the shadow they cast into view are no longer drawn in the main
+pass. The same wind and t reach both passes. Tuft behind/sun side luma 0.55 on, 1.01 off; shadow
+moved 0.57 m with blades 0.43 m (0.01 m with the shadow pass's wind frozen). 1.47 M blades at
+1080p: 9.8 ms off, 10.5 ms on at 1, 9.9 ms at 0.35 (best of 12, noisy); shadow-pass blades
+230,400 at 1 and 80,640 at 0.35.
+Limits: below 1, the soil seen between blades from 1.5 m up shows a blocky weave of blade shadows
+in the nearest metres under a low sun (shadow-map texels, 1.7 per blade at extent 14 / 4096;
+absent at 1); no acne on the blades themselves in a blade-level close-up.
+
 ## L6. Map forests at a distance
 
 `geo3d::forest` moves to an impostor level by the tree's distance on screen, reusing
