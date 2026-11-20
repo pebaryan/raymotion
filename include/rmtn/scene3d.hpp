@@ -142,7 +142,11 @@ struct Material {
     bool unlit = false;             // flat base colour (no lights, shadows or fog)
     bool doubleSided = false;
     bool castShadow = true, receiveShadow = true;
-    std::string map;                // optional base-colour texture file
+    bool normalAlphaShade = false;  // the normal map's alpha is the share of direct light that reaches each
+                                    // texel (a baked self-shadow; impostors use it): scales every light but the ambient
+    bool shadowOnly = false;        // drawn into the shadow maps only: a stand-in that casts what
+                                    // the lit object would, from another pose (impostor shadows)
+    std::string map;               // optional base-colour texture file
     DynamicTexturePtr dynamicMap;   // or a texture made per frame (wins over `map`); its alpha
                                     // multiplies opacity: give a see-through overlay opacity
                                     // just under 1 so it draws with the transparent objects
@@ -232,6 +236,10 @@ struct Instance {
     // pixels, f < 0 the other 1 + f, so a body at u and its stand-in at -u fill each pixel
     // once (dithered cross-fades between tiers, no popping). Shadows fade the same way.
     float fade = 1;
+    // With fade > 0: also drop the pixels below this level (0..1, steps of 1/32), so the body
+    // keeps the band [fadeFrom, fade) of the screen door. Several stand-ins can then share a
+    // pixel between them, each in its own band.
+    float fadeFrom = 0;
 };
 
 // An object's instances: `up` refills `list` each frame from t (pure, like any `up`). They
@@ -689,6 +697,9 @@ void render(Scene& scene, int t, const Ctx& c, Rectangle viewport = {}, Camera* 
 // Inside an `up` callback: the camera of the view being drawn, after its own `up` (so tiers
 // by distance, billboards and the like can follow it). A default camera outside a draw.
 const Camera& drawingCamera();
+// Inside an `up` callback: the scene being drawn (its lights are final for this frame), or null
+// outside a draw.
+const Scene* drawingScene();
 
 // The camera as render() sees it at frame t: `camera` with its `up` applied (to a copy).
 Camera cameraAt(const Camera& camera, int t);

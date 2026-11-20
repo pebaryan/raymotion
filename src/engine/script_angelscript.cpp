@@ -5112,6 +5112,7 @@ flora::TreePtr jsonTree(const Json& d, const Json& build) {
     b.frames = build.integer("frames", b.frames);
     b.views = build.integer("views", b.views);
     b.viewSize = build.integer("viewSize", b.viewSize);
+    b.elevations = build.integer("elevations", b.elevations);
     b.reducedLeaves = (float)build.num("reducedLeaves", b.reducedLeaves);
     b.loopSeconds = (float)build.num("loopSeconds", b.loopSeconds);
     {
@@ -5127,9 +5128,9 @@ flora::TreePtr jsonTree(const Json& d, const Json& build) {
         else if (shading == "hatch") b.shading = g3d::Shading::Hatch;
         else if (shading != "standard") throw std::runtime_error("forest build shading must be standard, toon, gooch or hatch");
     }
-    if (b.frames < 1 || b.frames > 64 || b.views < 1 || b.views > 32 || b.viewSize < 16 || b.viewSize > 512 || !std::isfinite(b.reducedLeaves) ||
+    if (b.frames < 1 || b.frames > 64 || b.views < 1 || b.views > 32 || b.viewSize < 16 || b.viewSize > 512 || b.elevations < 1 || b.elevations > 8 || !std::isfinite(b.reducedLeaves) ||
         !std::isfinite(b.loopSeconds) || b.loopSeconds <= 0)
-        throw std::runtime_error("forest build needs frames 1..64, views 1..32, viewSize 16..512 and a positive loopSeconds");
+        throw std::runtime_error("forest build needs frames 1..64, views 1..32, viewSize 16..512, elevations 1..8 and a positive loopSeconds");
     flora::TreePtr made;
     try { made = flora::makeTree(t, b); }
     catch (const std::invalid_argument& e) { throw std::runtime_error(e.what()); }

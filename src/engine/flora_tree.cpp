@@ -8,7 +8,9 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 
 namespace rmtn {
@@ -96,6 +98,10 @@ g3d::DynamicTexturePtr texture(std::shared_ptr<const Picture> pic) {
     return t;
 }
 
+struct LazyBake;
+// Defined after Baked and LazyBake: a texture whose picture is one of a lazy bake's.
+g3d::DynamicTexturePtr lazyTexture(std::shared_ptr<LazyBake> lazy, bool normal);
+
 // Distance from p to the segment ab, and where along it (0..1).
 float segment(Vector2 p, Vector2 a, Vector2 b, float& along) {
     const Vector2 ab = Vector2Subtract(b, a);
@@ -119,8 +125,12 @@ template <class F> std::shared_ptr<Picture> paint(int w, int h, F f) {
             p[0] = p[1] = p[2] = (unsigned char)std::clamp(std::lround(g * 255), 0l, 255l);
             p[3] = (unsigned char)std::lround(cover / 4 * 255);
         }
-    // Spread colour into the clear texels so mipmaps don't darken the edges.
+    // Spread colour into every clear texel, so mipmaps (a far tree's leaves) don't darken: a
+    // clear texel left black drags each coarser level's average down by the empty share of the card.
+    // Eight passes spread the nearest colour past the edges; the texels still clear after that
+    // take the covered texels' mean, which is what the coarse levels average towards anyway.
     for (int pass = 0; pass < 8; pass++) {
+        bool changed = false;
         std::vector<unsigned char> next = pic->px;
         for (int y = 0; y < h; y++)
             for (int x = 0; x < w; x++) {
@@ -133,10 +143,17 @@ template <class F> std::shared_ptr<Picture> paint(int w, int h, F f) {
                         const unsigned char* q = pic->at(xx, yy);
                         if (q[1] > 0) { sum += q[1]; n++; }
                     }
-                if (n) { const unsigned char g = (unsigned char)(sum / n); unsigned char* o = &next[((size_t)y * w + x) * 4]; o[0] = o[1] = o[2] = g; }
+                if (n) { const unsigned char g = (unsigned char)std::max(1, sum / n); unsigned char* o = &next[((size_t)y * w + x) * 4]; o[0] = o[1] = o[2] = g; changed = true; }
             }
         pic->px.swap(next);
+        if (!changed) break;
     }
+    double sum = 0, n = 0;
+    for (size_t i = 0; i < pic->px.size(); i += 4)
+        if (pic->px[i + 3] > 0) { sum += pic->px[i + 1] * (double)pic->px[i + 3]; n += pic->px[i + 3]; }
+    const unsigned char mean = (unsigned char)std::clamp(n > 0 ? std::lround(sum / n) : 1l, 1l, 255l);
+    for (size_t i = 0; i < pic->px.size(); i += 4)
+        if (pic->px[i + 1] == 0 && pic->px[i + 3] == 0) pic->px[i] = pic->px[i + 1] = pic->px[i + 2] = mean;
     return pic;
 }
 
@@ -505,6 +522,7 @@ struct Vert {
     float branch = 0, reach = 0;
     Vector3 anchor{ 0, 0, 0 }, flutterAxis{ 0, 0, 0 };
     float flutter = 0;      // > 0 for leaves: phase
+    float vis = 1;          // impostor bake: the share of direct light that reaches it through the crown
     // Growth: the node it rides on, the node whose size scales it, the point it scales about,
     // and (leaves) when it starts to unfold.
     int node = 0, sizer = 0;
@@ -929,25 +947,162 @@ std::shared_ptr<g3d::AnimatedMesh> bake(const TreeSpec& s, const Soup& soup, int
     return am;
 }
 
-// ---- impostors: the hero tree drawn on the CPU from `views` directions round it -----------
-struct Baked { std::shared_ptr<Picture> colour, normal; float side = 1; };
+// ---- impostors: the hero tree drawn on the CPU from `views` directions round it, at each of
+// `elevations` heights above the horizon ---------------------------------------------------
+// The atlas is `views` pictures wide and `elevations` tall (row 0, the horizon, at the top).
+// Every picture is an orthographic view centred on the point (0, pivot, 0), with image up
+// being the world's up projected on the view plane, so a quad turned to face the viewer fully
+// (its centre on that point) shows it undistorted there. The pivot is the crown's middle, where
+// the pictures of one tree agree best (a tall bare trunk below it is what they disagree on).
+// With one row the picture is as it always was: the ground at its foot, the pivot at side / 2.
+struct LazyBake;
+struct Baked {
+    std::shared_ptr<Picture> colour, normal;
+    float side = 1;                     // the horizon row's quad side
+    float pivot = 0;                    // height of the point every picture is centred on
+    std::vector<float> rowSide;         // each row's quad side
+    std::shared_ptr<LazyBake> lazy;   // the pictures, if they are made on first use
+};
 
-Baked bakeViews(const Soup& wood, const Soup& leaves, const Picture& bark, const Picture& leaf, int views, int size, float top, float reach,
-                bool cutLeaves = true) {
-    const int S = size, SS = size * 2;
+// The pictures of a Baked made on first use. call_once makes it once however many threads ask;
+// what it makes depends only on what the tree was built from, not on who asks first.
+struct LazyBake {
+    std::once_flag once;
+    std::function<Baked()> run;
+    Baked result;
+    const Baked& get() { std::call_once(once, [this] { result = run(); run = nullptr; }); return result; }
+};
+
+g3d::DynamicTexturePtr lazyTexture(std::shared_ptr<LazyBake> lazy, bool normal) {
+    auto t = std::make_shared<g3d::DynamicTexture>();
+    t->every = 1 << 30;
+    t->make = [lazy, normal](int) {
+        const Baked& b = lazy->get();
+        const Picture& pic = normal ? *b.normal : *b.colour;
+        Image img{};
+        img.width = pic.w; img.height = pic.h; img.mipmaps = 1;
+        img.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+        img.data = MemAlloc((unsigned)pic.px.size());
+        std::memcpy(img.data, pic.px.data(), pic.px.size());
+        return img;
+    };
+    return t;
+}
+
+float impostorElevation(int row, int rows) {
+    if (rows <= 1) return 0;
+    return (rows == 2 ? 50.f : 70.f) * row / (rows - 1);
+}
+
+
+// The light a picture of the crown would lack. A full tree is shadowed inside by the shadow
+// map; a picture of it is not, so the baked colours carry it. The leaf cards are binned into a
+// grid by area; from each vertex a fan of rays towards the viewer's side of the sky is marched
+// through it (a lit crown is seen on the side the light comes from more often than not), and
+// the colour is scaled by the fraction of light left. Only for impostors with several rows:
+// one row stays as it always was.
+struct CrownLight {
+    Vector3 lo{ 0, 0, 0 };
+    float cell = 1, span = 1, strength = 1;
+    int nx = 0, ny = 0, nz = 0;
+    std::vector<float> area;
+
+    float cover = 0.5f;                                          // the share of a card that is leaf
+    CrownLight(const Soup& leaves, float power, float leafCover) : strength(power), cover(leafCover) {
+        if (leaves.v.empty()) return;
+        Vector3 hi = lo = leaves.v[0].p;
+        for (const Vert& v : leaves.v) { lo = Vector3Min(lo, v.p); hi = Vector3Max(hi, v.p); }
+        const Vector3 size = Vector3Subtract(hi, lo);
+        span = std::max({ size.x, size.y, size.z });
+        cell = std::max(span / 32.f, 0.05f);
+        nx = (int)(size.x / cell) + 2; ny = (int)(size.y / cell) + 2; nz = (int)(size.z / cell) + 2;
+        area.assign((size_t)nx * ny * nz, 0.f);
+        for (size_t t = 0; t + 2 < leaves.idx.size(); t += 3) {
+            const Vector3 a = leaves.v[leaves.idx[t]].p, b = leaves.v[leaves.idx[t + 1]].p, c = leaves.v[leaves.idx[t + 2]].p;
+            int x, y, z;
+            if (at(Vector3Scale(Vector3Add(Vector3Add(a, b), c), 1.f / 3), x, y, z))
+                area[((size_t)z * ny + y) * nx + x] += 0.5f * Vector3Length(Vector3CrossProduct(Vector3Subtract(b, a), Vector3Subtract(c, a)));
+        }
+    }
+    bool at(Vector3 p, int& x, int& y, int& z) const {
+        x = (int)std::floor((p.x - lo.x) / cell); y = (int)std::floor((p.y - lo.y) / cell); z = (int)std::floor((p.z - lo.z) / cell);
+        return x >= 0 && y >= 0 && z >= 0 && x < nx && y < ny && z < nz;
+    }
+    // Scales the colours of `soup` for a viewer in direction `to` (unit, from the tree).
+    void apply(Soup& soup, Vector3 to) const {
+        if (area.empty()) return;
+        const float volume = cell * cell * cell;
+        const float lean = 0.7f;                                // the sky seen over the shoulder, towards the viewer
+        const Vector3 axis = Vector3Normalize(Vector3Add(Vector3Scale({ to.x, 0, to.z }, lean), { 0, 1, 0 }));
+        const Vector3 side = Vector3Normalize(Vector3CrossProduct(axis, { 0.31f, 0.9f, 0.3f })), other = Vector3CrossProduct(axis, side);
+        std::vector<Vector3> rays{ axis };
+        for (int k = 0; k < 6; k++) {
+            const float a = TAU * k / 6;
+            rays.push_back(Vector3Add(Vector3Scale(axis, 0.77f), Vector3Add(Vector3Scale(side, 0.64f * std::cos(a)), Vector3Scale(other, 0.64f * std::sin(a)))));
+        }
+        for (Vert& v : soup.v) {
+            float sum = 0;
+            for (const Vector3& r : rays) {
+                float depth = 0;
+                for (float s = cell * 0.75f; s < span * 2; s += cell * 0.5f) {
+                    int x, y, z;
+                    if (!at(Vector3Add(v.p, Vector3Scale(r, s)), x, y, z)) break;
+                    depth += area[((size_t)z * ny + y) * nx + x] / volume * cell * 0.5f;
+                }
+                sum += std::exp(-cover * depth);
+            }
+            const float f = std::pow(std::clamp(sum / (float)rays.size(), 0.02f, 1.f), strength);
+            v.vis = f;
+        }
+    }
+};
+
+// Where the pictures stand, without the pictures: the horizon row's quad side, the point every
+// picture is centred on, and each row's quad side.
+Baked impostorLayout(float top, float reach, int elevations, float crownMiddle) {
     Baked b;
     b.side = std::max(top, 2 * reach) * 1.06f;
-    b.colour = std::make_shared<Picture>(S * views, S);
-    b.normal = std::make_shared<Picture>(S * views, S);
+    const bool one = elevations == 1;                            // the picture the engine always had
+    b.pivot = one || crownMiddle <= 0 ? b.side * 0.5f : crownMiddle;
+    for (int row = 0; row < elevations; row++) {
+        const float elev = impostorElevation(row, elevations) * DEG2RAD;
+        // The outline's reach from the pivot: sideways the tree's reach, up and down the picture its
+        // height range times cos plus its reach times sin.
+        float side = b.side;
+        if (!one) {
+            const float far = std::max(b.pivot, top - b.pivot);
+            side = 2 * 1.06f * std::max(reach, far * std::cos(elev) + reach * std::sin(elev));
+        }
+        b.rowSide.push_back(side);
+    }
+    return b;
+}
+
+Baked bakeViews(const Soup& wood, const Soup& leaves, const Picture& bark, const Picture& leaf, int views, int size, float top, float reach,
+                bool cutLeaves = true, int elevations = 1, float crownMiddle = 0, const CrownLight* shade = nullptr) {
+    const int S = size, SS = size * 2;
+    Baked b = impostorLayout(top, reach, elevations, crownMiddle);
+    const bool one = elevations == 1;
+    b.colour = std::make_shared<Picture>(S * views, S * elevations);
+    b.normal = std::make_shared<Picture>(S * views, S * elevations);
+    const Vector3 pivot{ 0, b.pivot, 0 };
+    for (int row = 0; row < elevations; row++) {
+    const float elev = impostorElevation(row, elevations) * DEG2RAD;
+    const float side = b.rowSide[(size_t)row];
     for (int k = 0; k < views; k++) {
         const float th = TAU * k / views;
-        const Vector3 dir{ std::sin(th), 0, std::cos(th) }, up{ 0, 1, 0 };
-        const Vector3 right = Vector3CrossProduct(Vector3Negate(dir), up);
+        const float ce = std::cos(elev), se = std::sin(elev);
+        const Vector3 dir{ std::sin(th) * ce, se, std::cos(th) * ce }, world{ 0, 1, 0 };
+        Vector3 right = Vector3CrossProduct(Vector3Negate(dir), world);
+        Vector3 up = world;                                       // image up in the world
+        if (!one) { right = Vector3Normalize(right); up = Vector3CrossProduct(dir, right); }
         std::vector<float> depth((size_t)SS * SS, -1e30f);
         std::vector<Vector4> col((size_t)SS * SS, { 0, 0, 0, 0 });
         std::vector<Vector3> nor((size_t)SS * SS, { 0, 0, 0 });
+        std::vector<float> visPx((size_t)SS * SS, 1.f);
         auto toScreen = [&](Vector3 p) {
-            return Vector3{ (Vector3DotProduct(p, right) / b.side + 0.5f) * SS, (1 - p.y / b.side) * SS, Vector3DotProduct(p, dir) };
+            const float v = one ? p.y / side : Vector3DotProduct(Vector3Subtract(p, pivot), up) / side + 0.5f;   // the horizon row as it always was
+            return Vector3{ (Vector3DotProduct(p, right) / side + 0.5f) * SS, (1 - v) * SS, Vector3DotProduct(p, dir) };
         };
         auto raster = [&](const Soup& soup, const Picture& pic, bool cut) {
             for (size_t t = 0; t + 2 < soup.idx.size(); t += 3) {
@@ -979,32 +1134,38 @@ Baked bakeViews(const Soup& wood, const Soup& leaves, const Picture& bark, const
                         Vector3 n = Vector3Normalize(Vector3Add(Vector3Add(Vector3Scale(A.n, w0), Vector3Scale(B.n, w1)), Vector3Scale(C.n, w2)));
                         if (cut && facing < 0) n = Vector3Negate(n);
                         nor[at] = n;
+                        visPx[at] = w0 * A.vis + w1 * B.vis + w2 * C.vis;
                     }
             }
         };
-        raster(wood, bark, false);
-        raster(leaves, leaf, cutLeaves);
+        Soup shadedWood, shadedLeaves;                           // the share of light each vertex gets, for this view
+        if (shade) { shadedWood = wood; shadedLeaves = leaves; shade->apply(shadedWood, dir); shade->apply(shadedLeaves, dir); }
+        raster(shade ? shadedWood : wood, bark, false);
+        raster(shade ? shadedLeaves : leaves, leaf, cutLeaves);
         // 2x2 down to the cell; colour averaged over what is covered, coverage as alpha.
         for (int y = 0; y < S; y++)
             for (int x = 0; x < S; x++) {
                 Vector4 sum{ 0, 0, 0, 0 };
                 Vector3 ns{ 0, 0, 0 };
+                float visSum = 0;
                 for (int j = 0; j < 2; j++)
                     for (int i = 0; i < 2; i++) {
                         const size_t at = (size_t)(y * 2 + j) * SS + (x * 2 + i);
                         if (col[at].w <= 0) continue;
                         sum = { sum.x + col[at].x, sum.y + col[at].y, sum.z + col[at].z, sum.w + 1 };
                         ns = Vector3Add(ns, nor[at]);
+                        visSum += visPx[at];
                     }
-                unsigned char* c = b.colour->at(k * S + x, y);
-                unsigned char* nn = b.normal->at(k * S + x, y);
+                unsigned char* c = b.colour->at(k * S + x, row * S + y);
+                unsigned char* nn = b.normal->at(k * S + x, row * S + y);
                 // Tangent space of the quad: u along `right`, v down, out towards the viewer.
-                const Vector3 n = sum.w > 0 ? Vector3Normalize(ns) : dir;
-                const Vector3 tsn{ Vector3DotProduct(n, right), -n.y, Vector3DotProduct(n, dir) };
+                // Many to a texel: more than one way the surface faces. The mean keeps its length (the spread) when there are rows.
+                const Vector3 n = sum.w <= 0 ? dir : one ? Vector3Normalize(ns) : Vector3Scale(ns, 1.f / sum.w);
+                const Vector3 tsn{ Vector3DotProduct(n, right), -(one ? n.y : Vector3DotProduct(n, up)), Vector3DotProduct(n, dir) };
                 nn[0] = (unsigned char)std::lround((tsn.x * 0.5f + 0.5f) * 255);
                 nn[1] = (unsigned char)std::lround((tsn.y * 0.5f + 0.5f) * 255);
                 nn[2] = (unsigned char)std::lround((tsn.z * 0.5f + 0.5f) * 255);
-                nn[3] = 255;
+                nn[3] = sum.w > 0 ? (unsigned char)std::lround(std::clamp(visSum / sum.w, 0.f, 1.f) * 255) : 255;
                 if (sum.w > 0) {
                     c[0] = (unsigned char)std::lround(sum.x / sum.w * 255);
                     c[1] = (unsigned char)std::lround(sum.y / sum.w * 255);
@@ -1013,17 +1174,18 @@ Baked bakeViews(const Soup& wood, const Soup& leaves, const Picture& bark, const
                 c[3] = (unsigned char)std::lround(sum.w / 4 * 255);
             }
     }
+    }
     // Spread colours and normals into the clear texels (mipmaps), within each cell.
     for (int pass = 0; pass < 6; pass++) {
         Picture cn = *b.colour, nn = *b.normal;
-        for (int y = 0; y < S; y++)
+        for (int y = 0; y < S * elevations; y++)
             for (int x = 0; x < S * views; x++) {
                 if (b.colour->at(x, y)[3] > 0 || cn.at(x, y)[0] + cn.at(x, y)[1] + cn.at(x, y)[2] > 0) continue;
                 int sc[3] = { 0, 0, 0 }, sn[3] = { 0, 0, 0 }, n = 0;
                 for (int dy = -1; dy <= 1; dy++)
                     for (int dx = -1; dx <= 1; dx++) {
                         const int xx = x + dx, yy = y + dy;
-                        if (yy < 0 || yy >= S || xx < 0 || xx >= S * views || xx / S != x / S) continue;
+                        if (yy < 0 || yy >= S * elevations || xx < 0 || xx >= S * views || xx / S != x / S || yy / S != y / S) continue;
                         const unsigned char* q = b.colour->at(xx, yy);
                         if (q[0] + q[1] + q[2] == 0) continue;
                         for (int ch = 0; ch < 3; ch++) { sc[ch] += q[ch]; sn[ch] += b.normal->at(xx, yy)[ch]; }
@@ -1038,7 +1200,7 @@ Baked bakeViews(const Soup& wood, const Soup& leaves, const Picture& bark, const
     return b;
 }
 
-std::shared_ptr<g3d::AnimatedMesh> quad(float side, float u0, float u1) {
+std::shared_ptr<g3d::AnimatedMesh> quad(float side, float u0, float u1, float v0 = 0, float v1 = 1) {
     auto am = std::make_shared<g3d::AnimatedMesh>();
     am->frames = 1;
     am->vertices = 4;
@@ -1048,7 +1210,7 @@ std::shared_ptr<g3d::AnimatedMesh> quad(float side, float u0, float u1) {
     am->centre = { 0, h, 0 };
     am->radius = side * 0.72f;
     const std::vector<float> pos = am->positions;
-    am->rest = std::make_shared<g3d::Geometry>([pos, u0, u1] {
+    am->rest = std::make_shared<g3d::Geometry>([pos, u0, u1, v0, v1] {
         Mesh m{};
         m.vertexCount = 4;
         m.triangleCount = 2;
@@ -1059,7 +1221,7 @@ std::shared_ptr<g3d::AnimatedMesh> quad(float side, float u0, float u1) {
         m.indices = (unsigned short*)MemAlloc(6 * sizeof(unsigned short));
         std::copy(pos.begin(), pos.end(), m.vertices);
         for (int k = 0; k < 4; k++) { m.normals[k * 3] = 0; m.normals[k * 3 + 1] = 0; m.normals[k * 3 + 2] = 1; }
-        const float uv[8] = { u0, 1, u1, 1, u1, 0, u0, 0 };
+        const float uv[8] = { u0, v1, u1, v1, u1, v0, u0, v0 };
         std::copy(uv, uv + 8, m.texcoords);
         std::memset(m.colors, 255, 16);
         const unsigned short id[6] = { 0, 1, 2, 0, 2, 3 };
@@ -1313,6 +1475,7 @@ TreePtr makeTree(const TreeSpec& specIn, const TreeBuild& buildIn) {
     b.frames = std::clamp(b.frames, 1, 64);
     b.views = std::clamp(b.views, 1, 32);
     b.viewSize = std::clamp(b.viewSize, 16, 512);
+    b.elevations = std::clamp(b.elevations, 1, 8);
     b.reducedLeaves = std::clamp(b.reducedLeaves, 0.05f, 1.f);
     if (!(b.loopSeconds > 0.05f)) b.loopSeconds = 4;
 
@@ -1418,11 +1581,38 @@ TreePtr makeTree(const TreeSpec& specIn, const TreeBuild& buildIn) {
     Baked baked;
     if (b.style != TreeStyle::PaperCut && b.style != TreeStyle::Splat) {   // a paper card is its own picture; splats stay near
         const bool solid = b.style == TreeStyle::LowPoly;
-        baked = bakeViews(heroWood, heroLeaves, solid ? white : *barkPic, solid ? white : *leafPic, b.views, b.viewSize, t->top, t->radius, !solid);
-        for (int k = 0; k < b.views; k++) {
-            // Half a texel in from each cell's edge, so mipmaps of one view don't take the next's.
-            const float pad = 1.5f / (b.viewSize * b.views);
-            t->views.push_back(quad(baked.side, (float)k / b.views + pad, (float)(k + 1) / b.views - pad));
+        // The crown's middle: the mean height of its leaf vertices (half the height if bare).
+        float crown = 0;
+        for (const Vert& v : heroLeaves.v) crown += v.p.y;
+        crown = heroLeaves.v.empty() ? t->top * 0.5f : crown / (float)heroLeaves.v.size();
+        float leafShare = 0;
+        for (size_t px = 3; px < leafPic->px.size(); px += 4) leafShare += leafPic->px[px] / 255.f;
+        leafShare = std::clamp(leafShare / std::max<float>(1, (float)(leafPic->px.size() / 4)), 0.05f, 1.f);
+        // The pictures are made when a texture first needs them (a draw), not here: building a tree
+        // for a list or a prepare costs nothing for them. They depend only on what is captured.
+        baked = impostorLayout(t->top, t->radius, b.elevations, crown);
+        auto lazy = std::make_shared<LazyBake>();
+        auto hw = std::make_shared<const Soup>(heroWood), hl = std::make_shared<const Soup>(heroLeaves);
+        const float top = t->top, reach = t->radius;
+        lazy->run = [=] {
+            Picture one(1, 1);
+            one.px = { 255, 255, 255, 255 };
+            const CrownLight inside(*hl, 0.7f, leafShare);
+            return bakeViews(*hw, *hl, solid ? one : *barkPic, solid ? one : *leafPic, b.views, b.viewSize, top, reach, !solid,
+                             b.elevations, crown, b.elevations > 1 ? &inside : nullptr);
+        };
+        baked.lazy = lazy;
+        t->viewPivot = baked.pivot;
+        for (int row = 0; row < b.elevations; row++) {
+            t->viewElevation.push_back(impostorElevation(row, b.elevations));
+            t->viewSide.push_back(baked.rowSide[(size_t)row]);
+            for (int k = 0; k < b.views; k++) {
+                // Half a texel in from each cell's edge, so mipmaps of one view don't take the next's.
+                // (Vertically only where there are rows to take from: one row keeps its whole height.)
+                const float pad = 1.5f / (b.viewSize * b.views), padV = b.elevations > 1 ? 1.5f / (b.viewSize * b.elevations) : 0.f;
+                t->views.push_back(quad(baked.rowSide[(size_t)row], (float)k / b.views + pad, (float)(k + 1) / b.views - pad,
+                                        (float)row / b.elevations + padV, (float)(row + 1) / b.elevations - padV));
+            }
         }
     }
 
@@ -1441,10 +1631,10 @@ TreePtr makeTree(const TreeSpec& specIn, const TreeBuild& buildIn) {
         leaves.translucency = 0.2f; leaves.translucencyColor = { 255, 245, 190, 255 };
     }
     g3d::Material imp = leaves;
-    if (baked.colour) {
-        imp.dynamicMap = texture(baked.colour);
-        imp.dynamicNormalMap = texture(baked.normal);
-        imp.alphaCutoff = 0.5f; imp.doubleSided = true; imp.lineWidth = 0;
+    if (baked.lazy) {
+        imp.dynamicMap = lazyTexture(baked.lazy, false);
+        imp.dynamicNormalMap = lazyTexture(baked.lazy, true);
+        imp.alphaCutoff = 0.5f; imp.doubleSided = true; imp.lineWidth = 0; imp.normalAlphaShade = b.elevations > 1;
         imp.translucency = 0.4f;
     }
     if (b.style == TreeStyle::PaperCut) {                      // one cut-out card, lit flat
@@ -1472,10 +1662,47 @@ struct ForestState {
     ForestSpec spec;
     std::vector<size_t> first;      // each kind's first child
     std::vector<g3d::Object3D*> canopies;   // per placement: its splat crown's tilt (or null)
+    float pitchSign = 1;            // Instance::pitch's sign that tips a quad's top towards +z
 };
 
-// Children per tree kind, in this order.
+// Children per tree kind, in this order: the four levels, then one child per impostor picture
+// (VIEWS + row * views + direction), then, with impostorShadows, the same again for the
+// shadow-only copies that face the light (VIEWS + pictures + the same index).
 constexpr int HERO_WOOD = 0, HERO_LEAVES = 1, LOW_WOOD = 2, LOW_LEAVES = 3, VIEWS = 4;
+
+// Which pictures of an impostor a direction falls between: the two nearest directions round
+// the tree (v0, v1; weight w on v1), the two nearest elevation rows (r0, r1; weight e on r1),
+// and the direction's own elevation in degrees.
+struct ViewPick { int v0 = 0, v1 = 0, r0 = 0, r1 = 0; float w = 0, e = 0, elevation = 0; };
+
+// `to` points from the tree to the viewer (or the light), in the forest's space; `turn` is the
+// cosine and sine of the tree's own yaw, which the pictures turn with.
+ViewPick pickView(const Tree& tree, Vector3 to, Vector2 turn) {
+    ViewPick k;
+    const float seenX = to.x * turn.x - to.z * turn.y, seenZ = to.x * turn.y + to.z * turn.x;   // `to` turned by -yaw
+    const float local = std::atan2(seenX, seenZ) * RAD2DEG;             // round the tree
+    const int views = tree.build.views;
+    float pos = local / 360.f * views;
+    pos -= std::floor(pos / views) * views;
+    k.v0 = (int)std::floor(pos) % views;
+    k.v1 = (k.v0 + 1) % views;
+    k.w = pos - std::floor(pos);
+    const int rows = (int)tree.viewElevation.size();
+    k.elevation = std::max(0.f, std::atan2(to.y, std::hypot(to.x, to.z)) * RAD2DEG);
+    k.r0 = k.r1 = 0;
+    for (int r = 0; r + 1 < rows; r++)
+        if (k.elevation >= tree.viewElevation[(size_t)r]) {
+            k.r0 = r;
+            k.r1 = r + 1;
+            // Between two rows the pictures disagree more than neighbouring directions do (a tree's
+            // height shows differently from each), so their blend is narrowed to the middle half of
+            // the way, smoothly: near a row it shows that row alone, which is also fewer draws.
+            const float u = std::clamp((k.elevation - tree.viewElevation[(size_t)r]) / (tree.viewElevation[(size_t)r + 1] - tree.viewElevation[(size_t)r]), 0.f, 1.f);
+            const float t = std::clamp((u - 0.25f) / 0.5f, 0.f, 1.f);
+            k.e = t * t * (3 - 2 * t);
+        }
+    return k;
+}
 
 float gustAt(const ForestSpec& f, Vector2 wind, Vector3 p, float seconds) {
     const float x = (p.x * wind.x + p.z * wind.y - f.gustSpeed * seconds) / std::max(f.gustScale, 1.f);
@@ -1511,6 +1738,21 @@ void place(g3d::Object3D& group, const std::shared_ptr<ForestState>& st, int t) 
     const size_t kinds = st->trees.size();
     for (auto& child : group.children) if (child->instances) child->instances->list.clear();
     const float blend = std::max(f.blend, 0.01f);
+    // The light the impostors' shadows are drawn for: the first that casts one.
+    struct { bool on = false, directional = true; Vector3 toward{ 0, 1, 0 }, at{ 0, 0, 0 }, target{ 0, 0, 0 }; float extent = 0; } caster;
+    if (f.impostorShadows)
+        if (const g3d::Scene* scene = g3d::drawingScene())
+            for (const g3d::Light& l : scene->lights) {
+                if (!l.castShadow) continue;
+                caster.on = true;
+                caster.directional = l.type == g3d::Light::Type::Directional;
+                caster.at = l.position;
+                caster.target = l.target;
+                caster.extent = l.shadowExtent;
+                const Vector3 away = Vector3Subtract(l.position, l.target);
+                caster.toward = Vector3Length(away) > 1e-6f ? Vector3Normalize(away) : Vector3{ 0, 1, 0 };
+                break;
+            }
     for (const Placement& p : st->at) {
         const size_t kind = (size_t)std::max(p.variant, 0) % kinds;
         const Tree& tree = *st->trees[kind];
@@ -1548,33 +1790,83 @@ void place(g3d::Object3D& group, const std::shared_ptr<ForestState>& st, int t) 
             const float lo = std::min(from, shown), hi = std::min(to, shown);
             if (hi - lo < 1.f / 64) return;
             g3d::Instance i = i0;
-            // One screen door per pair of neighbours: a band [lo, hi) is either [0, hi) or [lo, 1).
+            // A band [lo, hi) of the screen door: [0, hi), [lo, 1), or between (Instance::fadeFrom).
             if (lo <= 1e-4f) i.fade = hi;
             else if (hi >= 1 - 1e-4f) i.fade = -(1 - lo);
-            else i.fade = hi;                         // three-way overlaps are short: favour the nearer
+            else { i.fade = hi; i.fadeFrom = lo; }
             group.children[base + (size_t)child]->instances->list.push_back(i);
         };
         if (a > 0) { put(HERO_WOOD, 0, a, in); put(HERO_LEAVES, 0, a, in); }
         if (bnd > a) { put(LOW_WOOD, a, bnd, in); put(LOW_LEAVES, a, bnd, in); }
         if (bnd < 1) {
-            // Impostor: faces the camera; the two nearest views share it by a screen door.
-            const Vector3 to = Vector3Subtract(eye, p.position);
-            const float face = st->yawSign * std::atan2(to.x, to.z) * RAD2DEG;
-            const Vector3 seen = Vector3Transform(to, MatrixRotateXYZ({ 0, -p.yaw * DEG2RAD, 0 }));
-            const float local = std::atan2(seen.x, seen.z) * RAD2DEG;            // round the tree
-            const int views = tree.build.views;
-            float pos = local / 360.f * views;
-            pos -= std::floor(pos / views) * views;
-            const int v0 = (int)std::floor(pos) % views, v1 = (v0 + 1) % views;
-            const float w = pos - std::floor(pos);
-            g3d::Instance im = in;
-            im.yaw = face; im.pitch = 0; im.bank = 0; im.frame = 0; im.clipLength = 1;
+            // Impostor: faces the camera (fully, from above); the four nearest pictures share it.
+            const int views = tree.build.views, rows = (int)tree.viewElevation.size(), pictures = views * rows;
+            const Vector3 pivot{ p.position.x, p.position.y + tree.viewPivot * p.scale, p.position.z };
+            const Vector2 turn{ std::cos(p.yaw * DEG2RAD), std::sin(p.yaw * DEG2RAD) };
+            // Turning a picture's quad to face along a direction `to` (from the tree): the yaw, the
+            // tilt (none with one row: it only turns about the vertical, as it always did) and where
+            // the quad's up axis points after both, which moves its middle onto the tree's pivot.
+            struct Pose { float yaw = 0, pitch = 0; Vector3 up{ 0, 1, 0 }; };
+            auto poseFor = [&](Vector3 to, float elevation) {
+                Pose q;
+                q.yaw = st->yawSign * std::atan2(to.x, to.z) * RAD2DEG;
+                if (rows > 1) {
+                    q.pitch = -st->pitchSign * elevation;
+                    // The top leans back from the viewer: up is (0, cos e, -sin e) turned by the yaw
+                    // (Instance turns about y: (x, z) -> (z sin yaw, z cos yaw) for x = 0).
+                    const float back = -std::sin(elevation * DEG2RAD);
+                    q.up = { back * std::sin(q.yaw * DEG2RAD), std::cos(elevation * DEG2RAD), back * std::cos(q.yaw * DEG2RAD) };
+                }
+                return q;
+            };
+            // The picture on row `row`, its centre on the pivot (moved by `shift`).
+            auto standIn = [&](int row, const Pose& q, Vector3 shift) {
+                g3d::Instance im = in;
+                im.yaw = q.yaw;
+                im.pitch = q.pitch; im.bank = 0; im.frame = 0; im.clipLength = 1;
+                // The quad stands on its bottom edge and tilts about it.
+                if (rows > 1) im.position = Vector3Subtract(Vector3Add(pivot, shift), Vector3Scale(q.up, 0.5f * tree.viewSide[(size_t)row] * p.scale));
+                return im;
+            };
+            const Vector3 to = Vector3Subtract(eye, pivot);
+            const ViewPick k = pickView(tree, to, turn);
+            const Pose face = poseFor(to, k.elevation);
             const float lo = bnd, hi = shown;
-            if (lo <= 1e-4f && hi >= 1 - 1e-4f) {        // wholly impostor: split by the view
-                if (w < 1.f / 64) put(VIEWS + v0, 0, 1, im);
-                else if (w > 63.f / 64) put(VIEWS + v1, 0, 1, im);
-                else { put(VIEWS + v0, 0, 1 - w, im); put(VIEWS + v1, 1 - w, 1, im); }
-            } else put(VIEWS + (w < 0.5f ? v0 : v1), lo, hi, im);
+            if (lo <= 1e-4f && hi >= 1 - 1e-4f) {        // wholly impostor: split by the pictures
+                if (rows == 1) {
+                    const float w = k.w;
+                    if (w < 1.f / 64) put(VIEWS + k.v0, 0, 1, standIn(0, face, {}));
+                    else if (w > 63.f / 64) put(VIEWS + k.v1, 0, 1, standIn(0, face, {}));
+                    else { put(VIEWS + k.v0, 0, 1 - w, standIn(0, face, {})); put(VIEWS + k.v1, 1 - w, 1, standIn(0, face, {})); }
+                } else {
+                    struct Pic { int row, v; float weight; };
+                    const Pic pic[4] = { { k.r0, k.v0, (1 - k.w) * (1 - k.e) }, { k.r0, k.v1, k.w * (1 - k.e) },
+                                         { k.r1, k.v0, (1 - k.w) * k.e }, { k.r1, k.v1, k.w * k.e } };
+                    // Bands in order, their edges on the screen door's 16 levels so neighbours tile; a
+                    // picture with less than a level to itself is left out.
+                    float sum = 0, from = 0;
+                    for (int i = 0; i < 4; i++) {
+                        sum += pic[i].weight;
+                        const float edge = i == 3 ? 1.f : std::min(1.f, std::round(sum * 16.f) / 16.f);
+                        if (edge - from < 1.f / 64) continue;
+                        put(VIEWS + pic[i].row * views + pic[i].v, from, edge, standIn(pic[i].row, face, {}));
+                        from = edge;
+                    }
+                }
+            } else put(VIEWS + (k.e < 0.5f ? k.r0 : k.r1) * views + (k.w < 0.5f ? k.v0 : k.v1), lo, hi, standIn(k.e < 0.5f ? k.r0 : k.r1, face, {}));
+            // Its shadow: a copy that faces the light and shows the picture nearest the light's
+            // direction, centred on the same pivot (the picture drawn does not receive shadows, so
+            // the copy cannot shadow it). Only where the light's map reaches: a directional light's
+            // covers shadowExtent round its target.
+            // (Only where the light's map reaches: a directional light's covers shadowExtent round its target.)
+            const Vector3 rel = Vector3Subtract(pivot, caster.target);
+            if (caster.on && (!caster.directional || Vector3Length(Vector3Subtract(rel, Vector3Scale(caster.toward, Vector3DotProduct(rel, caster.toward)))) <=
+                                                       caster.extent * 1.4143f + tree.radius * p.scale + tree.top * p.scale)) {
+                const Vector3 toLight = caster.directional ? caster.toward : Vector3Normalize(Vector3Subtract(caster.at, pivot));
+                const ViewPick s = pickView(tree, toLight, turn);
+                const int row = s.e < 0.5f ? s.r0 : s.r1, v = s.w < 0.5f ? s.v0 : s.v1;
+                put(VIEWS + pictures + row * views + v, lo, hi, standIn(row, poseFor(toLight, s.elevation), {}));
+            }
         }
     }
 }
@@ -1588,6 +1880,7 @@ g3d::Object3D* forestInto(g3d::Object3D* group, const std::vector<Placement>& at
     st->spec = spec;
     // Which way Instance::yaw turns: +z towards +x or towards -x.
     st->yawSign = Vector3Transform({ 0, 0, 1 }, MatrixRotateXYZ({ 0, 90 * DEG2RAD, 0 })).x > 0 ? 1.f : -1.f;
+    st->pitchSign = Vector3Transform({ 0, 1, 0 }, MatrixRotateXYZ({ 0.1f, 0, 0 })).z > 0 ? 1.f : -1.f;
     for (const TreePtr& tr : trees) {
         st->first.push_back(group->children.size());
         auto add = [&](const std::shared_ptr<g3d::AnimatedMesh>& mesh, const g3d::Material& m) {
@@ -1601,8 +1894,16 @@ g3d::Object3D* forestInto(g3d::Object3D* group, const std::vector<Placement>& at
         add(tr->reduced.wood, tr->wood);
         add(tr->reduced.leaves, tr->leaves);
         g3d::Material imp = tr->impostor;
-        imp.castShadow = spec.impostorShadows;
+        imp.castShadow = false;                                  // what is seen casts nothing
+        // With copies that cast, the picture would be shadowed by its own copy (they cross at the
+        // pivot), so it receives no shadow; without them it is as impostors always were.
+        if (spec.impostorShadows) imp.receiveShadow = false;
         for (const auto& v : tr->views) add(v, imp);
+        if (spec.impostorShadows) {                              // the copies that face the light
+            imp.castShadow = true;
+            imp.shadowOnly = true;
+            for (const auto& v : tr->views) add(v, imp);
+        }
     }
     // Splat crowns: one object a tree, after every kind's instanced children.
     size_t crowns = 0;

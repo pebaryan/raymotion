@@ -313,9 +313,11 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   branches lag and leaves flutter, and gusts lean the trees as they pass. `season` turns
   and drops deciduous leaves. `flora::addForest` draws each tree at the detail its distance
   from the camera needs: the full tree, a reduced one, then an impostor (a lit picture of
-  itself from 8 directions). It cross-fades between levels with a screen door
-  (`Instance::fade`), so nothing pops. About 11,000 trees at 1080p take 26 ms a frame.
-  Impostors turn only about the vertical, so for aerial shots push `impostorFrom` out.
+  itself from 8 directions at 3 elevations, `TreeBuild::elevations`, so it still reads as a
+  tree seen from above). It cross-fades between levels with a screen door
+  (`Instance::fade`), so nothing pops, and impostors cast the shadow of their picture as
+  seen from the light (`ForestSpec::impostorShadows`, within the light's `shadowExtent`).
+  About 11,000 trees at 1080p take 26 ms a frame.
 * Growth, by a reveal `u` = 0..1 as in `plot::` and `geo::`: grass comes up where
   `g3d::Field::grow` passes each spot's `arrival` (`flora::arrivalFrom` a point,
   `arrivalAlong` a line, `arrivalInto` an area from its edges), blades rising rather than

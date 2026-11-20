@@ -60,6 +60,24 @@ Today impostors turn only about the vertical, so from above they read as side vi
   above. Then require the overlap there to rise to at least 0.75. The 0.80–0.82 overlap
   from the side must not drop.
 
+**Done 2026-11-20.** `TreeBuild::elevations` (default 3; 1 is the old impostor exactly). Each
+picture is centred on the crown's middle. Quads face the camera fully, and four pictures blend
+by the screen door with a new `Instance::fadeFrom` band. Elevations blend over the middle half
+between rows, because a wider blend ghosts.
+
+The overlap from 60 degrees rose from 0.48 / 0.71 / 0.47 to 0.85 / 0.77 / 0.80 (oak / birch /
+pine). From the side, it is unchanged.
+
+Brightness had been 1.4–4.2 times the full tree's. There were two causes:
+- Leaf pictures left clear texels black, so the full tree's leaf mipmaps darkened with
+  distance. Clear texels now take the nearest colour, then the mean.
+- The pictures lacked the crown's inner shade. A per-texel visibility term is now baked into
+  the normal map's alpha (`Material::normalAlphaShade`).
+
+The luminance ratio is now 0.85–1.17 across three species at 0, 30, 60 and 80 degrees, with a
+test band of 0.80–1.25. The atlas is baked lazily at the first draw, so building a tree and
+`raymotion list` don't pay for it.
+
 ## L3. Impostor shadows
 
 - In the shadow pass, an impostor faces the light instead of the camera.
@@ -67,6 +85,22 @@ Today impostors turn only about the vertical, so from above they read as side vi
 - `impostorShadows` becomes true by default.
 - **Test:** an impostor's shadow area must be within 15 % of the full tree's, from two sun
   heights.
+
+**Done 2026-11-20.** Each impostor gets a shadow-only copy (`Material::shadowOnly`). The copy
+faces the first shadow-casting light and uses the picture nearest the light's direction. It is
+only submitted within that light's `shadowExtent`.
+
+Shadow area against the full tree, with the sun at 25 and 55 degrees:
+- oak 1.00 / 0.99;
+- birch 0.92 / 0.84;
+- pine 1.13 / 0.95.
+
+Centroids are within 2.5%. The test holds the oak to 15% and the others to 30%. The purity
+test passes.
+
+Limit: while it is on, a visible impostor doesn't receive shadows, since its own copy would
+shade it. Cost: best-of frames for 10,884 trees at 1080p rose from 24–29 ms to 31–46 ms, so
+the docs say to turn it off where far shadows don't show.
 
 ## L4. Far canopy
 

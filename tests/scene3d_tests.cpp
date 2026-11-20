@@ -2497,6 +2497,194 @@ static void trees() {
             UnloadImage(a); UnloadImage(b);
         }
     }
+    // Silhouette overlap (intersection over union of tree pixels) of a tree forced to its
+    // impostor against the same tree at full detail, from `elev` degrees above the horizon.
+    auto overlapFrom = [&](const flora::TreePtr& tree, float yaw, float elev) {
+        auto shot = [&](bool far) {
+            auto s = noShadows(treeStage());
+            const float e = elev * DEG2RAD;
+            s->camera.position = { 0, 6 + 30 * std::sin(e), 30 * std::cos(e) };
+            s->camera.target = { 0, 6, 0 };
+            flora::ForestSpec fs;
+            fs.wind = 0; fs.gust = 0;
+            if (far) { fs.reducedFrom = 1; fs.impostorFrom = 2; fs.blend = 0.1f; }
+            else { fs.reducedFrom = 200; fs.impostorFrom = 300; }
+            flora::addTree(*s, tree, { 0, 0, 0 }, yaw, 1, fs);
+            Comp c = longComp(s, 240, 240);
+            return render(c, 0);
+        };
+        Image a = shot(false), b = shot(true);
+        int both = 0, either = 0;
+        for (int y = 0; y < a.height; y++)
+            for (int x = 0; x < a.width; x++) {
+                const Color ca = GetImageColor(a, x, y), cb = GetImageColor(b, x, y);
+                const bool p = isTree(ca), q = isTree(cb);
+                both += p && q; either += p || q;
+            }
+        UnloadImage(a); UnloadImage(b);
+        return either ? (float)both / either : 0.f;
+    };
+    {   // from above: the impostor still stands for the tree (mean over three turns of the tree)
+        const float elevs[] = { 0, 30, 45, 60, 80 };
+        for (int k : { 0, 1, 2 }) {                    // oak, birch, pine
+            std::printf("[scene3d] %-5s impostor overlap by elevation:", names[k]);
+            float worst60 = 1;
+            for (float elev : elevs) {
+                float sum = 0, low = 1;
+                for (float yaw : { 0.f, 70.f, 200.f }) {
+                    const float iou = overlapFrom(built[(size_t)k], yaw, elev);
+                    sum += iou; low = std::min(low, iou);
+                }
+                std::printf("  %.0f deg: mean %.2f (min %.2f)", elev, sum / 3, low);
+                if (elev == 0) CHECK(sum / 3 > (k == 0 ? 0.84f : k == 1 ? 0.86f : 0.61f));   // the side view: at least what it was
+                if (elev == 60) worst60 = low;
+            }
+            std::printf("\n");
+            CHECK(worst60 >= 0.75f);
+            // The same tree with one row of pictures (what impostors were before): 60 degrees, and the side.
+            flora::TreeBuild one;
+            one.elevations = 1;
+            const flora::TreePtr flat = flora::makeTree(flora::tree(names[k]), one);
+            float flat0 = 0, flat60 = 0;
+            for (float yaw : { 0.f, 70.f, 200.f }) { flat0 += overlapFrom(flat, yaw, 0) / 3; flat60 += overlapFrom(flat, yaw, 60) / 3; }
+            std::printf("[scene3d] %-5s with elevations = 1: overlap %.2f from the side, %.2f from 60 deg\n", names[k], flat0, flat60);
+            CHECK(flat60 + 0.05f < worst60);
+            // Atlas memory: colour and normal pictures, 4 bytes a texel, views x elevations cells of viewSize^2.
+            const auto atlasBytes = [](const flora::Tree& t) {
+                return (long long)t.build.views * t.build.elevations * t.build.viewSize * t.build.viewSize * 4 * 2;
+            };
+            std::printf("[scene3d] %-5s impostor atlas: %lld KiB with one row, %lld KiB with %d\n", names[k], atlasBytes(*flat) / 1024,
+                        atlasBytes(*built[(size_t)k]) / 1024, built[(size_t)k]->build.elevations);
+        }
+    }
+    {   // brightness: under the default sun (shadows on) the crown pixels both a full tree and its
+        // impostor cover have about the same mean linear luminance, and about the same colour.
+        auto linear = [](unsigned char c) { return std::pow(c / 255.0, 2.2); };
+        for (int k : { 0, 1, 2 }) {
+            std::printf("[scene3d] %-5s impostor / full crown luminance:", names[k]);
+            for (float elev : { 0.f, 30.f, 60.f, 80.f }) {
+                double ratio = 0;
+                double rgbA[3] = { 0, 0, 0 }, rgbB[3] = { 0, 0, 0 };
+                int n = 0;
+                for (float yaw : { 0.f, 70.f, 200.f }) {
+                    auto shot = [&](bool far) {
+                        auto s = treeStage();                                // the default sun, with shadows
+                        const float e = elev * DEG2RAD;
+                        s->camera.position = { 0, 6 + 30 * std::sin(e), 30 * std::cos(e) };
+                        s->camera.target = { 0, 6, 0 };
+                        flora::ForestSpec fs;
+                        fs.wind = 0; fs.gust = 0;
+                        if (far) { fs.reducedFrom = 1; fs.impostorFrom = 2; fs.blend = 0.1f; }
+                        else { fs.reducedFrom = 200; fs.impostorFrom = 300; }
+                        flora::addTree(*s, built[(size_t)k], { 0, 0, 0 }, yaw, 1, fs);
+                        Comp c = longComp(s, 240, 240);
+                        return render(c, 0);
+                    };
+                    Image a = shot(false), b = shot(true);
+                    double ya = 0, yb = 0;
+                    for (int y = 0; y < a.height; y++)
+                        for (int x = 0; x < a.width; x++) {
+                            const Color ca = GetImageColor(a, x, y), cb = GetImageColor(b, x, y);
+                            if (!isTree(ca) || !isTree(cb)) continue;
+                            ya += 0.2126 * linear(ca.r) + 0.7152 * linear(ca.g) + 0.0722 * linear(ca.b);
+                            yb += 0.2126 * linear(cb.r) + 0.7152 * linear(cb.g) + 0.0722 * linear(cb.b);
+                            rgbA[0] += ca.r; rgbA[1] += ca.g; rgbA[2] += ca.b; rgbB[0] += cb.r; rgbB[1] += cb.g; rgbB[2] += cb.b;
+                            n++;
+                        }
+                    ratio += (ya > 0 ? yb / ya : 0) / 3;
+                    UnloadImage(a); UnloadImage(b);
+                }
+                std::printf("  %.0f deg %.2f (rgb full %.0f %.0f %.0f, impostor %.0f %.0f %.0f)", elev, ratio, rgbA[0] / std::max(n, 1), rgbA[1] / std::max(n, 1),
+                            rgbA[2] / std::max(n, 1), rgbB[0] / std::max(n, 1), rgbB[1] / std::max(n, 1), rgbB[2] / std::max(n, 1));
+                CHECK(ratio > 0.8 && ratio < 1.25);
+            }
+            std::printf("\n");
+        }
+    }
+    {   // impostor shadows: a tree at impostor distance casts about the shadow of the full tree,
+        // in the same place, from a low and a higher sun. Seen from straight above (orthographic),
+        // the shadowed ground is what is darker than the same ground with no tree, outside both
+        // trees' own pixels.
+        struct Shadow { long long px = 0; double cx = 0, cz = 0; int x0 = 1 << 30, x1 = -1, y0 = 1 << 30, y1 = -1; };
+        const int N = 600;
+        const float span = 60;                                       // metres across the picture
+        auto ground = [&](const flora::TreePtr& tree, float sunElevation, bool far, bool withTree) {
+            auto s = treeStage();
+            const float az = 35 * DEG2RAD, el = sunElevation * DEG2RAD;
+            s->lights[0].position = { 60 * std::cos(az) * std::cos(el), 60 * std::sin(el), 60 * std::sin(az) * std::cos(el) };
+            s->lights[0].shadowExtent = 40;
+            s->camera.position = { -9, 60, -5.99f };
+            s->camera.target = { -9, 0, -6 };
+            s->camera.orthographic = true;
+            s->camera.orthoHeight = span;
+            flora::ForestSpec fs;
+            fs.wind = 0; fs.gust = 0;
+            if (far) { fs.reducedFrom = 1; fs.impostorFrom = 2; fs.blend = 0.1f; }
+            else { fs.reducedFrom = 500; fs.impostorFrom = 600; }
+            if (withTree) flora::addTree(*s, tree, { 0, 0, 0 }, 20, 1, fs);
+            Comp c = longComp(s, N, N);
+            return render(c, 0);
+        };
+        auto lum = [](Color c) { return c.r + c.g + c.b; };
+        auto shadowOf = [&](const Image& bare, const Image& a, const Image& b, bool useB) {
+            Shadow out;
+            for (int y = 0; y < N; y++)
+                for (int x = 0; x < N; x++) {
+                    const Color base = GetImageColor(bare, x, y), ca = GetImageColor(a, x, y), cb = GetImageColor(b, x, y);
+                    if (isTree(ca) || isTree(cb)) continue;                       // under either tree's own pixels
+                    if (lum(useB ? cb : ca) < 0.6f * lum(base)) {
+                        out.px++; out.cx += x; out.cz += y;
+                        out.x0 = std::min(out.x0, x); out.x1 = std::max(out.x1, x); out.y0 = std::min(out.y0, y); out.y1 = std::max(out.y1, y);
+                    }
+                }
+            if (out.px) { out.cx /= out.px; out.cz /= out.px; }
+            return out;
+        };
+        const float px2 = (span / N) * (span / N);                     // m^2 a pixel
+        for (int k : { 0, 1, 2 }) {                                     // oak, birch, pine
+            for (float sun : { 25.f, 55.f }) {
+                Image bare = ground(built[(size_t)k], sun, false, false);
+                Image full = ground(built[(size_t)k], sun, false, true), imp = ground(built[(size_t)k], sun, true, true);
+                const Shadow f = shadowOf(bare, full, imp, false), i = shadowOf(bare, full, imp, true);
+                const double diag = std::hypot(f.x1 - f.x0, f.y1 - f.y0);
+                const double off = std::hypot(f.cx - i.cx, f.cz - i.cz);
+                std::printf("[scene3d] %-5s shadow, sun %2.0f deg: full %.1f m2, impostor %.1f m2 (ratio %.2f); centroid %.2f m apart (%.1f%% of the shadow's %.1f m)\n",
+                            names[k], sun, f.px * px2, i.px * px2, f.px ? (double)i.px / f.px : 0., off * span / N, diag ? 100 * off / diag : 0., diag * span / N);
+                if (k == 0) {
+                    CHECK(f.px * px2 > 20);
+                    CHECK(std::fabs((double)i.px / std::max(1LL, f.px) - 1) < 0.15);
+                    CHECK(off < 0.06 * diag);
+                } else CHECK(std::fabs((double)i.px / std::max(1LL, f.px) - 1) < 0.30);
+                UnloadImage(bare); UnloadImage(full); UnloadImage(imp);
+            }
+        }
+    }
+    {   // impostor forest frames are pure (shadows included): a frame drawn alone is the frame after another
+        auto s = noShadows(treeStage());
+        s->lights[0].castShadow = true;
+        s->camera.position = { 0, 25, 60 };
+        s->camera.target = { 0, 4, 0 };
+        flora::ForestSpec fs;
+        fs.reducedFrom = 1; fs.impostorFrom = 2; fs.blend = 0.1f; fs.wind = 3; fs.gust = 0.5f;
+        std::vector<flora::Placement> at;
+        for (int i = 0; i < 12; i++) at.push_back({ { -18.f + 7 * (i % 6), 0, -6.f + 12 * (i / 6) }, 30.f * i, 1, i % 3, (uint32_t)i + 1 });
+        flora::addForest(*s, at, { built[0], built[1], built[2] }, fs);
+        Comp a = longComp(s, 320, 240), b = longComp(s, 320, 240);
+        Image alone = render(a, 12);
+        UnloadImage(render(b, 11));
+        Image after = render(b, 12);
+        int differ = 0, tree = 0;
+        for (int y = 0; y < alone.height; y++)
+            for (int x = 0; x < alone.width; x++) {
+                const Color p = GetImageColor(alone, x, y), q = GetImageColor(after, x, y);
+                differ += p.r != q.r || p.g != q.g || p.b != q.b;
+                tree += isTree(p);
+            }
+        std::printf("[scene3d] impostor forest: %d tree px, %d differ between a frame alone and after another\n", tree, differ);
+        CHECK(tree > 500);
+        CHECK(differ == 0);
+        UnloadImage(alone); UnloadImage(after);
+    }
     {   // wind: the crown leans downwind, frames are pure, and the wind moves it
         auto windy = [&](Vector2 dir) {
             auto s = noShadows(treeStage());
@@ -2793,21 +2981,40 @@ static void trees() {
     {   // a forest: time printed, not checked. 1 km square, ~10^4 trees, with RMTN_FIELD_BENCH.
         const bool bench = std::getenv("RMTN_FIELD_BENCH") != nullptr;
         const float half = bench ? 500.f : 120.f;
-        auto s = treeStage({ 70, 92, 40, 255 });
-        s->camera.position = { 0, 30, half + 20 };
-        s->camera.target = { 0, 6, half - 60 };
-        s->camera.fov = 55;
         const auto placed = flora::scatter(flora::rect({ -half, -half }, { half, half }), { 7.f, 0.3f, 60, 0.8f, 1.2f, 4 }, 3);
-        flora::addForest(*s, placed, { built[0], built[1], built[2], built[3] });
-        Comp c = longComp(s, bench ? 1920 : 480, bench ? 1080 : 270);
-        Image first = render(c, 30);
-        dumpField("forest.png", first);
-        UnloadImage(first);
-        const int frames = bench ? 5 : 2;
-        const auto t0 = std::chrono::steady_clock::now();
-        for (int f = 31; f < 31 + frames; f++) UnloadImage(render(c, f));
-        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / frames;
-        std::printf("[scene3d] forest %dx%d: %zu trees, %.1f ms a frame (with readback)\n", c.w, c.h, placed.size(), ms);
+        // Impostors as they were (one row of pictures, no shadows) against the new ones without and with shadows.
+        flora::TreeBuild oneRow;
+        oneRow.elevations = 1;
+        std::vector<flora::TreePtr> legacy;
+        for (int k = 0; k < 4; k++) legacy.push_back(flora::makeTree(flora::tree(names[k]), oneRow));
+        struct Variant { const char* name; bool old; bool shadows; };
+        for (const Variant v : { Variant{ "one row, no shadows (as before)", true, false }, Variant{ "three rows, impostor shadows off", false, false },
+                                 Variant{ "three rows, impostor shadows on", false, true } }) {
+            const bool shadows = v.shadows;
+            auto s = treeStage({ 70, 92, 40, 255 });
+            s->camera.position = { 0, 30, half + 20 };
+            s->camera.target = { 0, 6, half - 60 };
+            s->camera.fov = 55;
+            flora::ForestSpec fs;
+            fs.impostorShadows = shadows;
+            const std::vector<flora::TreePtr>& kinds = v.old ? legacy : std::vector<flora::TreePtr>{ built[0], built[1], built[2], built[3] };
+            flora::addForest(*s, placed, kinds, fs);
+            Comp c = longComp(s, bench ? 1920 : 480, bench ? 1080 : 270);
+            Image first = render(c, 30);
+            if (shadows) dumpField("forest.png", first);
+            UnloadImage(first);
+            const int frames = bench ? 12 : 2;
+            double total = 0, best = 1e30;
+            for (int f = 31; f < 31 + frames; f++) {
+                const auto t0 = std::chrono::steady_clock::now();
+                UnloadImage(render(c, f));
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                total += ms;
+                best = std::min(best, ms);
+            }
+            std::printf("[scene3d] forest %dx%d: %zu trees, %.1f ms a frame (best %.1f, with readback), %s\n", c.w, c.h,
+                        placed.size(), total / frames, best, v.name);
+        }
     }
     if (std::getenv("RMTN_FIELD_DUMP")) {     // the presets in a row, near enough for the full trees
         auto s = treeStage({ 92, 104, 60, 255 });
@@ -2862,6 +3069,12 @@ int main() try {
     // folder, which a sandboxed shell may not let it write to.
     const fs::path dir = fs::current_path() / "raymotion-scene3d-test";
     fs::create_directories(dir);
+    if (std::getenv("RMTN_TREES_ONLY")) {            // while working on trees: just those
+        trees();
+        shutdownGraphics();
+        CloseWindow();
+        return failures ? 1 : 0;
+    }
     geometryExtents();
     placementAndDepth();
     supersampledPlacement();

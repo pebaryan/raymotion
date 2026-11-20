@@ -181,12 +181,19 @@ TreeSpec tree(const std::string& name);
 
 // What a tree is built into: two meshes per detail level (wood, leaves) with the wind baked
 // into `frames` frames looping every `loopSeconds`, and impostors (pictures of the tree from
-// `views` directions around it, with normals so they are lit) for the distance.
+// `views` directions around it, with normals so they are lit) for the distance. The pictures
+// are taken at `elevations` heights too, so a tree seen from above is not a side view.
 struct TreeBuild {
     int frames = 24;
     float loopSeconds = 4;
-    int views = 8;                  // impostor directions
-    int viewSize = 192;             // impostor pixels a side
+    int views = 8;                  // impostor directions round the tree
+    int viewSize = 192;             // impostor pixels a side, per view
+    // Impostor heights above the horizon, in equal steps from 0 degrees to 70 (two: 0 and 50).
+    // 3 is 0, 35 and 70; 1 is the horizon only (the quad only turns about the vertical, as
+    // before). The atlas holds views x elevations pictures: memory grows with the product.
+    // The pictures are drawn the first time a draw needs them, not by makeTree, so building a tree
+    // (a list, a prepare) stays cheap; the result does not depend on which frame asks first.
+    int elevations = 3;
     float reducedLeaves = 0.3f;     // the reduced level keeps this fraction of cards, enlarged
     TreeStyle style = TreeStyle::Realistic;
     g3d::Shading shading = g3d::Shading::Standard;   // for the wood, leaf and impostor materials
@@ -197,7 +204,13 @@ struct Tree {
     TreeBuild build;
     struct Level { std::shared_ptr<g3d::AnimatedMesh> wood, leaves; };
     Level hero, reduced;
-    std::vector<std::shared_ptr<g3d::AnimatedMesh>> views;   // impostor quads, one per direction
+    // Impostor quads, one per picture: views[row * build.views + k] is direction k (turning from
+    // +z towards +x) at elevation row `row`. Empty for styles with no impostor.
+    std::vector<std::shared_ptr<g3d::AnimatedMesh>> views;
+    std::vector<float> viewElevation;   // degrees above the horizon of each row
+    std::vector<float> viewSide;        // each row's quad side in metres (taller rows are larger,
+                                        // as the tree's outline is taller from above)
+    float viewPivot = 0;                // height of the point every picture is centred on
     g3d::Material wood, leaves, impostor;
     float top = 0, radius = 0;      // highest point; widest reach from the stem
     long long heroTriangles = 0, reducedTriangles = 0;
@@ -211,8 +224,11 @@ TreePtr makeTree(const TreeSpec& spec, const TreeBuild& build = {});
 // How a forest is drawn. Each tree picks its level from its distance to the camera of the view
 // being drawn (g3d::drawingCamera, so a function of t): the full tree, the reduced one, then
 // the impostor, cross-faded over `blend` metres by a screen door (Instance::fade), never
-// popping. Impostors cross-fade between their two nearest directions too. Distances are
-// measured in the forest's own space: leave its object untransformed.
+// popping. Impostors turn to face the camera fully (from above too), and cross-fade between
+// the four nearest pictures (two directions x two elevations) by the same screen door. With
+// `impostorShadows`, each impostor also casts its shadow from a copy of itself that faces the
+// light and uses the picture nearest the light's direction (the first shadow-casting light).
+// Distances are measured in the forest's own space: leave its object untransformed.
 struct ForestSpec {
     float reducedFrom = 30, impostorFrom = 80;
     float blend = 6;
@@ -222,7 +238,7 @@ struct ForestSpec {
     float gust = 0.6f;              // gust fronts lean the trees further as they pass
     float gustSpeed = 7, gustScale = 50;
     float fps = 30;                 // frames a second, for the wind's clock
-    bool impostorShadows = false;   // impostors face the camera, so their shadows are poor
+    bool impostorShadows = true;    // far trees cast the shadow of their picture, seen from the light
 };
 // Trees at the placements (Placement::variant picks from `trees`, wrapping round). Returns
 // the forest's group; its children are the instanced levels.

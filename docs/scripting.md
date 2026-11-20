@@ -751,8 +751,12 @@ A `forest` object grows trees and places them: `trees` (1..8 preset names, or ob
 `autumnColor`, `colorVariation`, `deciduous`, `season`, `sway`, `seed`), then `scatter` (as for
 instances; it picks a tree per spot) or `at` (`[[x, y, z, yaw, scale, tree], ...]`); the
 levels `reducedFrom`, `impostorFrom`, `blend`, `hideFrom`; the wind `windDirection`, `wind`,
-`gust`, `gustSpeed`, `gustScale`; `impostorShadows`; and `build` (`frames`, `loopSeconds`,
-`views`, `viewSize`, `reducedLeaves`). A built tree is kept while its description stays the
+`gust`, `gustSpeed`, `gustScale`; `impostorShadows` (default true: far trees cast the shadow of
+their picture, seen from the first shadow-casting light, within its `shadowExtent`); and `build`
+(`frames`, `loopSeconds`,
+`views`, `viewSize`, `elevations` (1..8, default 3: rows of impostor pictures at 0, 35 and 70
+degrees above the horizon; 1 keeps the old horizon-only picture), `reducedLeaves`). A built tree
+is kept while its description stays the
 same; each build takes a few hundred milliseconds, so step `season` rather than animate it
 every frame. See `examples/scripts/flora_forest.as`.
 Growth: grass takes `grow` (0..1, may follow `t`) and `arrival` (`{"from": [x, z], "reach":

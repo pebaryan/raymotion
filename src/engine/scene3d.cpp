@@ -96,7 +96,10 @@ mat4 instM; vec4 instAnim; float instFade = 1.0;
 void setupInstance() {
     instM = instanceTransform;
     instAnim = vec4(instM[0].w, instM[1].w, fract(instM[2].w), instM[3].w);
-    instFade = floor(instM[2].w) / 32.0 - 1.0;
+    // Whole part: fade + 1 in 1/32 steps (0..64), plus 65 per 1/32 of Instance::fadeFrom, which
+    // fadedAway() reads back from the fade as 4 per step (fade itself lies in -1..1).
+    float code = floor(instM[2].w), from = floor(code / 65.0);
+    instFade = (code - 65.0 * from) / 32.0 - 1.0 + 4.0 * from;
     instM[0].w = 0.0; instM[1].w = 0.0; instM[2].w = 0.0; instM[3].w = 1.0;
 }
 vec3 vatFetch(float frame, int row0) {
@@ -493,11 +496,17 @@ bool cutAway(float a, vec2 uv) {
 }
 // Instance::fade as a screen door: fade f > 0 keeps the pixels whose 4x4 Bayer level is
 // below f, f < 0 those at or above 1 + f, so a body at u and its stand-in at -u tile exactly.
+// A fade above 1 carries a lower bound too: fade + 4 * k keeps the pixels from k / 32 up.
 bool fadedAway(float f) {
-    if (f >= 1.0) return false;
+    if (f == 1.0) return false;
     ivec2 q = ivec2(gl_FragCoord.xy) & 3;
     const float bayer[16] = float[16](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
     float d = (bayer[q.y * 4 + q.x] + 0.5) / 16.0;
+    float k = floor((f + 2.0) / 4.0);
+    if (k > 0.0) {
+        f -= 4.0 * k;
+        if (d < k / 32.0) return true;
+    }
     return f >= 0.0 ? d >= f : d < 1.0 + f;
 }
 )";
@@ -565,6 +574,7 @@ vec3 mapNormal(vec3 n, vec3 p, vec2 uv) {
 }
 
 const float PI = 3.14159265;
+const float SPREAD_POW = 1.5;
 
 // ---- shadows: atlas tiles; params = (near, far, perspective, texel size per unit depth)
 float linearDepth(float d, vec4 prm) {
@@ -752,7 +762,7 @@ void main() {
     vec3 n = normalize(fragNormal);
     if (!gl_FrontFacing && fieldOn == 0) n = -n;                    // a field's blades face the camera already
     vec3 v = normalize(viewPos - fragPos);
-    if (hasNormalMap == 1 && shading == 0) n = mapNormal(n, fragPos, fragTexCoord);
+    if (hasNormalMap >= 1 && shading == 0) n = mapNormal(n, fragPos, fragTexCoord);
 
     vec3 color;
     if (shading == 1) color = toon(albedo, n, v);
@@ -776,11 +786,13 @@ void main() {
             color = diffColor * env(n, blurLod) + env(r, rough * blurLod) * envBRDF(specColor, rough, ndv) * reflection;
         } else color = mix(groundColor, skyColor, n.y * 0.5 + 0.5) * albedo;
 
+        float sunVis = 1.0;                                         // baked self-shadow, and the spread of the normals a texel stands for
+        if (hasNormalMap == 2) { vec4 bk = texture(texture2, fragTexCoord); sunVis = bk.a * pow(clamp(length(bk.xyz * 2.0 - 1.0), 0.0, 1.0), SPREAD_POW); }
         float shininess = exp2(10.0 * (1.0 - rough) + 1.0);
         for (int i = 0; i < 8; i++) {
             if (i >= lightCount) break;
             vec3 l; float ndl;
-            float atten = lightAt(i, n, l, ndl);
+            float atten = lightAt(i, n, l, ndl) * sunVis;
             if (atten <= 0.0) {
                 // Translucency: the light falls on the far side; it comes through diffused,
                 // and more of it when looking towards the light (forward scattering).
@@ -790,7 +802,7 @@ void main() {
                 if (back <= 0.0) continue;
                 float forward = pow(clamp(dot(v, -lb), 0.0, 1.0), 6.0);
                 color += diffColor * translucencyColor * lightColor[i] * waterLight(i) * back
-                       * translucency * (0.6 * ndlb + 1.4 * forward);
+                       * translucency * sunVis * (0.6 * ndlb + 1.4 * forward);
                 continue;
             }
             vec3 h = normalize(l + v);
@@ -1020,6 +1032,7 @@ uniform vec3 haze; uniform float hazeAmount;
 uniform float stars; uniform float clouds; uniform vec3 cloudColor; uniform vec3 cloudShade;
 uniform float cloudScale; uniform vec2 cloudOffset; uniform float frame; uniform float seed;
 const float PI = 3.14159265;
+const float SPREAD_POW = 1.5;
 float hash(vec3 p) { p = fract(p * 0.3183099 + vec3(0.71, 0.113, 0.419) + seed * 0.0137); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
 float vnoise(vec2 x) {
     vec2 i = floor(x), f = fract(x), u = f * f * (3.0 - 2.0 * f);
@@ -1163,6 +1176,7 @@ struct Gpu {
 };
 Gpu gpu;
 thread_local const Camera* viewing = nullptr;      // drawingCamera()
+thread_local const Scene* viewingScene = nullptr;  // drawingScene()
 
 Texture2D whiteTexture() { return { rlGetTextureIdDefault(), 1, 1, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 }; }
 
@@ -1710,6 +1724,8 @@ struct Cull {
     const Camera* cam = nullptr;
     float aspect = 1, floorY = 0;
     std::vector<Vector3> shadowDirs;     // unit: the way the shadows of each shadowing light run
+    struct Footprint { Vector3 target, dir; float extent; };
+    std::vector<Footprint> footprints;   // what each shadowing light's map covers: the shadowExtent round its target
     float screenH = 1080;                // canvas px the view covers, top to bottom (surfaces)
     float compH = 1080;                  // composition px the view covers, top to bottom (line widths)
 };
@@ -1752,6 +1768,16 @@ void animate(std::vector<std::unique_ptr<Object3D>>& list, int t, const Matrix& 
     }
 }
 
+// Within a shadowing light's map: the shadowExtent box round its target, as the circle that holds it.
+bool inFootprint(const Cull& k, Vector3 c, float r) {
+    for (const Cull::Footprint& f : k.footprints) {
+        const Vector3 rel = Vector3Subtract(c, f.target);
+        const Vector3 across = Vector3Subtract(rel, Vector3Scale(f.dir, Vector3DotProduct(rel, f.dir)));
+        if (Vector3Length(across) <= f.extent * 1.4143f + r) return true;
+    }
+    return false;
+}
+
 // Instance::tint x Instance::shade as the shader's instTint() reads it.
 float packTint(Color tint, float shade) {
     auto q = [shade](unsigned char c) {
@@ -1779,6 +1805,8 @@ void gatherInstances(const Object3D& o, const Matrix& world, const Cull& k, std:
                                         std::sqrt(m.m4 * m.m4 + m.m5 * m.m5 + m.m6 * m.m6),
                                         std::sqrt(m.m8 * m.m8 + m.m9 * m.m9 + m.m10 * m.m10) });
             if (!inSight(k, Vector3Transform(am.centre, m), am.radius * sc)) continue;
+            // A copy that only casts is of use where a shadow map covers it.
+            if (o.material.shadowOnly && !inFootprint(k, Vector3Transform(am.centre, m), am.radius * sc)) continue;
         }
         const int len = std::max(1, i.clipLength);
         float f = std::fmod(i.frame, (float)len);
@@ -1788,7 +1816,8 @@ void gatherInstances(const Object3D& o, const Matrix& world, const Cull& k, std:
         m.m3 = (float)std::clamp(i.clipStart + a, 0, last);
         m.m7 = (float)std::clamp(i.clipStart + (a + 1) % len, 0, last);
         const float fade = std::isfinite(i.fade) ? std::clamp(i.fade, -1.f, 1.f) : 1.f;
-        m.m11 = std::min(f - (float)a, 0.999f) + (float)std::lround((fade + 1) * 32);   // see setupInstance
+        const float from = std::isfinite(i.fadeFrom) && fade > 0 ? std::clamp(i.fadeFrom, 0.f, 1.f) : 0.f;
+        m.m11 = std::min(f - (float)a, 0.999f) + (float)std::lround((fade + 1) * 32) + 65.f * (float)std::lround(from * 32);   // see setupInstance
         m.m15 = packTint(i.tint, i.shade);
         out.push_back(m);
     }
@@ -2001,7 +2030,7 @@ void setMaterial(const g3d::Material& m) {
     SetShaderValue(sh, gpu.L.receiveShadow, &receive, SHADER_UNIFORM_INT);
     const float translucency = std::max(m.translucency, 0.f), normalScale = m.normalScale;
     const Vector3 tc = linear(m.translucencyColor);
-    const int hasRough = m.roughnessMap.empty() ? 0 : 1, hasNormal = m.normalMap.empty() && !m.dynamicNormalMap ? 0 : 1;
+    const int hasRough = m.roughnessMap.empty() ? 0 : 1, hasNormal = m.normalMap.empty() && !m.dynamicNormalMap ? 0 : m.normalAlphaShade ? 2 : 1;
     SetShaderValue(sh, gpu.L.translucency, &translucency, SHADER_UNIFORM_FLOAT);
     SetShaderValue(sh, gpu.L.translucencyColor, &tc, SHADER_UNIFORM_VEC3);
     SetShaderValue(sh, gpu.L.hasRoughnessMap, &hasRough, SHADER_UNIFORM_INT);
@@ -3377,6 +3406,7 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     rlMatrixMode(RL_PROJECTION);
     rlPushMatrix();
     const Shadows shadows = renderShadows(s, items);
+    items.erase(std::remove_if(items.begin(), items.end(), [](const Item& it) { return it.obj->material.shadowOnly; }), items.end());
 
     // Main pass, into the target or (for depth of field) a target with a depth texture.
     const int fbW = target.texture.width, fbH = target.texture.height;
@@ -4091,6 +4121,7 @@ const Camera& drawingCamera() {
     static const Camera none{};
     return viewing ? *viewing : none;
 }
+const Scene* drawingScene() { return viewingScene; }
 
 Object3D* Scene::add(std::shared_ptr<Splats> s) {
     Object3D* o = add();
@@ -4288,7 +4319,10 @@ void render(Scene& s, int t, const Ctx& c, Rectangle viewport, Camera* camera) {
             if (!l.castShadow) continue;
             if (l.type != Light::Type::Directional) { cull.on = false; break; }
             const Vector3 d = Vector3Subtract(l.target, l.position);
-            if (Vector3Length(d) > 1e-6f) cull.shadowDirs.push_back(Vector3Normalize(d));
+            if (Vector3Length(d) > 1e-6f) {
+                cull.shadowDirs.push_back(Vector3Normalize(d));
+                cull.footprints.push_back({ l.target, Vector3Normalize(d), l.shadowExtent });
+            }
         }
     }
     {
@@ -4298,9 +4332,10 @@ void render(Scene& s, int t, const Ctx& c, Rectangle viewport, Camera* camera) {
     }
     struct Viewing {                                      // drawingCamera() while the scene's `up`s run
         const Camera* before;
-        explicit Viewing(const Camera* c) : before(viewing) { viewing = c; }
-        ~Viewing() { viewing = before; }
-    } viewingNow(&cam);
+        const Scene* sceneBefore;
+        Viewing(const Camera* c, const Scene* s) : before(viewing), sceneBefore(viewingScene) { viewing = c; viewingScene = s; }
+        ~Viewing() { viewing = before; viewingScene = sceneBefore; }
+    } viewingNow(&cam, &s);
     animate(s.objects, t, MatrixIdentity(), cull);
     if (canvasSize().x > 0) {
         sizeSurfaces(s.objects, MatrixIdentity(), cam, cull.screenH * cull.aspect, cull.screenH);

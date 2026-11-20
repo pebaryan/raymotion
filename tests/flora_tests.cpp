@@ -213,9 +213,41 @@ static void treesCpu() {
         CHECK(t->hero.wood->vertices > 0 && t->hero.wood->vertices < 65536);
         CHECK(t->hero.leaves->vertices > 0 && t->hero.leaves->vertices < 65536);
         CHECK(t->reducedTriangles < t->heroTriangles);
-        CHECK(t->views.size() == 4);
+        CHECK(t->views.size() == 4 * 3 && t->viewElevation.size() == 3);   // 4 directions at 3 elevations
+        CHECK(t->viewElevation[0] == 0 && std::fabs(t->viewElevation[1] - 35) < 1e-3f && std::fabs(t->viewElevation[2] - 70) < 1e-3f);
+        CHECK(t->viewSide.size() == 3 && t->viewSide[2] > 0 && t->viewSide[0] > 0 && t->viewPivot > 0 && t->viewPivot < t->top);
         std::printf("[flora] tree %-8s top %.2f m (spec %.1f), reach %.2f m\n", n, t->top, flora::tree(n).height, t->radius);
         CHECK(t->top > 0.5f * flora::tree(n).height && t->top < 1.2f * flora::tree(n).height + flora::tree(n).leafSize);   // cards stand out
+    }
+    {   // elevations: 1 is the horizon only (pivot at half the quad, as before), 2 is 0 and 50, memory grows with the rows
+        flora::TreeBuild one{ 8, 4, 4, 32 }, two = one, three = one;
+        one.elevations = 1; two.elevations = 2; three.elevations = 3;
+        const flora::TreePtr a1 = flora::makeTree(flora::oak(), one), a2 = flora::makeTree(flora::oak(), two), a3 = flora::makeTree(flora::oak(), three);
+        CHECK(a1->views.size() == 4 && a2->views.size() == 8 && a3->views.size() == 12);
+        CHECK(a1->viewElevation == std::vector<float>{ 0 } && a2->viewElevation.size() == 2 && std::fabs(a2->viewElevation[1] - 50) < 1e-3f);
+        CHECK(std::fabs(a1->viewPivot - 0.5f * a1->viewSide[0]) < 1e-4f);
+        // The old formula: a square of side max(height, 2 * reach) * 1.06, its foot on the ground (the quad
+        // is bottom-anchored), the same for every direction, and every row of a taller stack no smaller.
+        CHECK(std::fabs(a1->viewSide[0] - std::max(a1->top, 2 * a1->radius) * 1.06f) < 1e-3f);
+        for (const auto& q : a1->views) {
+            float lo = 1e9f, hi = -1e9f;
+            for (int v = 0; v < q->vertices; v++) { lo = std::min(lo, q->positions[(size_t)v * 3 + 1]); hi = std::max(hi, q->positions[(size_t)v * 3 + 1]); }
+            CHECK(std::fabs(lo) < 1e-4f && std::fabs(hi - a1->viewSide[0]) < 1e-3f);
+        }
+        CHECK(a3->viewSide[0] != a1->viewSide[0] || a3->viewPivot != a1->viewPivot);   // more rows is not the same picture
+    }
+    {   // what the impostor rows cost to build (printed, not checked: it depends on the machine)
+        for (const char* n : { "oak", "birch", "pine", "spruce" }) {
+            double ms[2];
+            for (int k = 0; k < 2; k++) {
+                flora::TreeBuild b;
+                b.elevations = k == 0 ? 1 : 3;
+                const auto t0 = std::chrono::steady_clock::now();
+                flora::makeTree(flora::tree(n), b);
+                ms[k] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            }
+            std::printf("[flora] makeTree %-7s default build: %.0f ms with 1 row, %.0f ms with 3 (%.2fx)\n", n, ms[0], ms[1], ms[1] / std::max(ms[0], 1e-3));
+        }
     }
     bool threw = false;
     try { flora::tree("baobab"); } catch (const std::invalid_argument&) { threw = true; }
@@ -305,7 +337,7 @@ static void stylesCpu() {
                     l->heroTriangles, p->heroTriangles, r->top, l->top, p->top);
         CHECK(l->heroTriangles > 20 && (std::string(n) == "palm" || l->heroTriangles * 3 < r->heroTriangles));
         CHECK(l->top > 0.75f * r->top && l->top < 1.25f * r->top);
-        CHECK((int)l->views.size() == 4 && l->leaves.alphaCutoff == 0 && !l->leaves.dynamicMap);
+        CHECK((int)l->views.size() == 4 * 3 && l->leaves.alphaCutoff == 0 && !l->leaves.dynamicMap);
         CHECK(p->heroTriangles == 2 && p->views.empty() && p->wood.dynamicMap && p->wood.alphaCutoff > 0);
         CHECK(p->top >= r->top * 0.99f);                                // the card holds the whole tree
         const flora::TreePose full = flora::grownPositions(*l, 1);

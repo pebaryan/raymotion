@@ -69,12 +69,27 @@ flora::addForest(*scene, flora::scatter(land, sc, 7), kinds);
   - painted leaf cards (cut out and translucent);
   - wind baked into a loop;
   - three levels: the full tree, a reduced tree, and an impostor (pictures of the tree
-    from 8 directions, with normals so they are lit).
+    from 8 directions at each of 3 elevations, 0, 35 and 70 degrees above the horizon, with
+    normals so they are lit). `TreeBuild::elevations` sets the rows: 1 is the horizon only,
+    2 is 0 and 50. The atlas grows with the rows: the default oak's is 2.25 MiB with one row
+    and 6.75 MiB with three (colour and normals, before mipmaps).
 
 **`addForest`:**
 - Picks a level for each tree by its distance from the camera being drawn, and
   cross-fades between levels with a screen door, so trees never pop.
 - Adds each tree's own phase in the wind and a gust lean.
+- An impostor turns to face the camera fully, from above too, with its picture centred
+  on the middle of the crown, and shows the four nearest pictures (two directions, two
+  elevations) by a screen door. Directions blend linearly; elevations blend over the
+  middle half of the way between two rows only, because two rows disagree more (a tall
+  trunk shows differently from each) than neighbouring directions do.
+- With `impostorShadows` (on by default), each impostor also casts its shadow from a copy
+  that faces the first shadow-casting light and shows the picture nearest the light's
+  direction and elevation. The copy is only drawn into the shadow maps. It is submitted
+  only inside a directional light's `shadowExtent`, so a forest far outside the map costs
+  nothing extra. Set `shadowExtent` wide enough to reach the impostors you want shadows from.
+  The impostor itself then receives no shadows (its own copy would shadow half of it); turn
+  `impostorShadows` off to have far trees receive them again.
 - `ForestSpec` sets:
   - the level distances (`reducedFrom`, `impostorFrom`, `blend`, `hideFrom`);
   - the wind;
@@ -215,7 +230,20 @@ milestone's tests print them, so they can be measured again.
 
 - **Grass:** about 1.47 million blades submitted at 1080p with shadows, 12–13 ms a frame
   including readback (`RMTN_FIELD_BENCH=1 raymotion_scene3d_tests`).
-- **Forest:** 10,884 trees at 1080p in 26 ms a frame, with levels and impostors.
+- **Forest:** 10,884 trees at 1080p in 26 ms a frame, with levels and impostors. The GPU
+  timings are noisy; the best frames of two runs (`RMTN_FIELD_BENCH=1`) were 24–27 ms with
+  one row of impostor pictures, 28–29 ms with three rows, and 31–46 ms with three rows and
+  impostor shadows. So three rows cost about 10%, and impostor shadows up to about 50% more
+  on top; turn `impostorShadows` off where the far trees' shadows don't show. The test prints
+  all three.
+- **Impostors from above:** the silhouette of an impostor against the full tree (intersection
+  over union, oak / birch / pine, mean of three turns) from 60 degrees above the horizon
+  rose from 0.48 / 0.71 / 0.47 with one row to 0.85 / 0.78 / 0.80 with three. From the
+  side it stays 0.87 / 0.90 / 0.65 (the pine's is low because the thin trunk and the
+  sparse crown dominate the outline).
+- **Impostor shadows:** from a sun at 25 and 55 degrees the shadowed ground under an oak
+  at impostor distance is 1.00 and 0.99 of the full tree's, its centroid within 0.1 m;
+  birch 0.92 and 0.84, pine 1.13 and 0.95.
 - **Scatter:** about 33,000 placements over 1 km² in 0.12 s, measured on the CPU.
 - **Tree build:** 0.1–1 s per preset. A full tree is 9,000–29,000 triangles; the low-poly
   oak is 860 and the paper oak is 2.
@@ -246,7 +274,8 @@ Tests: `flora_tests`, `scene3d_tests`, `flora2d_render_tests` and `test_script.p
   - A gust arrives 4 m downwind 30 frames later.
 - **Forests:**
   - A level change steps by at most 756 px, against 1,636 px without the blend.
-  - Impostor silhouettes overlap the full tree by 0.80–0.82.
+  - Impostor silhouettes overlap the full tree by 0.80–0.83 from the side, at least 0.75 from 60 degrees above.
+  - An impostor's shadow on the ground is within 15% of the full oak's at two sun heights.
   - Crowns lean downwind.
 - **Growth:**
   - `u = 1` gives the full tree bit for bit.
@@ -273,8 +302,19 @@ Tests: `flora_tests`, `scene3d_tests`, `flora2d_render_tests` and `test_script.p
 
 - Past the impostors, nothing replaces far trees (no canopy blend). Fog covers that range,
   or `hideFrom` fades trees out.
-- Impostors only turn about the vertical axis, so from high above they read as side views.
-- Impostors cast no shadow by default.
+- Impostor brightness follows the full tree to about 15 to 20% (mean linear luminance of the
+  pixels both cover, default sun with shadows: 0.85 to 1.21 for oak, birch and pine at 0, 30,
+  60 and 80 degrees; `tests/scene3d_tests.cpp` prints all twelve). Two things were behind it.
+  The leaf pictures left clear texels black, so a full tree's leaf mipmaps darkened with
+  distance (fixed: colour is spread into every clear texel, which also makes full trees at a
+  distance a little lighter than before). And a picture has no shadow inside the crown, nor
+  the spread of facings a texel stands for: the bake stores, in the normal map's alpha, how
+  much direct light reaches each texel through the crown (`Material::normalAlphaShade`), and
+  keeps the length of the mean normal, which scales direct light. Ambient is not touched. The
+  sun's direction is not known at bake time, so the shade is an average one (a fan of sky
+  directions leaning to the viewer); a low or backlit sun will show it off. A picture is of a
+  tree at one elevation, so between rows a
+  tall trunk shows doubled (the crown is aligned, the trunk is not).
 - Grass doesn't shadow itself beyond the darkening at its roots. It has no ink lines unless
   you ask for them.
 - Map forests have no impostors or splats. Low-poly instances are cheap enough up to the
