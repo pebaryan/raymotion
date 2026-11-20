@@ -278,6 +278,28 @@ There is no audio. The map helpers don't clip to a box, so side-by-side maps nee
 - `docs/scene3d` notes for the cube skybox.
 - README, then a release.
 
+**Done 2026-11-20 (everything but the release).**
+- **Pole fix.** `prepareTexture` still repeats; environments use `prepareEnvironmentTexture`
+  (repeat in u, clamp in v). A file used as an environment has its own cache key (`env:path`), so
+  the same file as a material map still repeats. The generated environment, the cube path and the
+  procedural sky target use it too. Test `environmentPoles` (`RMTN_POLES_ONLY=1`): the worst
+  distance from the top or bottom colour over the whole image looking straight up or down was 53
+  levels before the fix and is 0 after, for a file and a generator; a material quad with u 0..2
+  reads u 1.3 as 0.3 (same colour) and 1.7 as 0.7.
+- **Docs.** `docs/flora.md`: "What is not done" rewritten against the code (canopy for low
+  cameras only, map forests do have pictures, impostor shadows' cost); a misplaced line in the
+  canopy section fixed; the impostor brightness range corrected to 0.85-1.17. Cube skybox and
+  pole notes in `skills/raymotion/references/3d.md` (there is no `docs/scene3d*.md`; scene3d is
+  documented in the README and that reference). README: map forest timings, 2D path meadow and
+  motion blur.
+- **Examples.** `test_script.py` now uses `canopyBelow`, `canopyMaxElevation`, `elevations` (and
+  its error), `impostorShadows`, grass `castShadows` and `shadowDensity`, and the map forest's
+  `pictureSpeckle`. The cube-skybox and path-meadow keys already had examples and tests.
+- **Release.** Notes are written on the GitHub release (generated notes are only the changelog
+  link; earlier releases carry a hand-written body). The version lives in
+  `skills/raymotion/templates/CMakeLists.txt` (`GIT_TAG v0.12.0`); the root `CMakeLists.txt` has no
+  version. Not bumped.
+
 ## Order and size
 
 L1 and L7 are small. L2, L3 and L6 share code, so they go together. L4 is the largest.

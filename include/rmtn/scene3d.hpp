@@ -639,7 +639,9 @@ struct Scene {
     float ambient = 0.35f;          // hemisphere light from sky (above) and ground (below)
     // Image-based lighting from an equirectangular image (PNG/JPG, or HDR for linear
     // radiance). It replaces the hemisphere: diffuse from its blurred mips, reflections
-    // sharp to blurry with roughness.
+    // sharp to blurry with roughness. It repeats round the azimuth and is clamped over the
+    // poles, so straight up shows the top row only (the same file used as a material map
+    // keeps repeating).
     std::string environment;
     // A skybox given as cube faces instead of one equirectangular image. Either six files in
     // the order +x, -x, +y, -y, +z, -z, or ONE file holding a horizontal cross (a 4x3 grid of

@@ -339,16 +339,17 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
 * 2D vegetation (`flora2d::`, drawn with the node's context, so flat compositions and
   `g3d::Surface` alike): grass along a ground line, tufts, a meadow filling a shape (smaller
   toward its back), shrubs, and branching trees (oak, birch, pine; a silhouette option for
-  far layers). Wind leans, sways and sends gusts along x; every plant grows by `u` as in
-  3D. Parallax layers: `parallax` (a context shifted by the camera), `hazed` colours,
+  far layers); a meadow fills a polygon or a `vg::Path`. Wind leans, sways and sends gusts
+  along x, and with motion blur the blade tips blur; every plant grows by `u` as in 3D. Parallax layers: `parallax` (a context shifted by the camera), `hazed` colours,
   `groundLine`/`ground` for rolling hills and `softness` (a blur filter for a layer).
 * Plants in cities and on maps: `city::addPlants` turns a CityJSON model's
   SolitaryVegetationObjects into trees (as tall as their `height`; conifers by species)
   and its PlantCover into grass or shrubs (`isPlant` to filter the solids out);
   `geo3d::forest` scatters low-poly trees over countries or boxes, standing along the
   surface's up on a globe, a map or between, and growing in west to east. Far trees become
-  pictures of themselves by their size on screen (and the farthest merge), so 100,000 of them
-  stay cheap zoomed out.
+  pictures of themselves by their size on screen (and the farthest merge): 100,000 trees at
+  720p take 7-8 ms a frame at 7 globe radii and 21-24 ms at 3.5, against 60-70 ms as meshes
+  (`impostorBelow` and `mergeBelow` of 0 give meshes only).
 * Vegetation prefabs `flora-meadow`, `flora-tree-grow` and `flora-2d-hill`, and an engine
   showcase (`raymotion render flora`: a meadow, a 5,000-tree fly-over, a growing tree, a 2D
   hillside). The whole vegetation API, measured budgets and what is verified are in

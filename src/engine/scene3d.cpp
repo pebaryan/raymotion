@@ -1373,22 +1373,33 @@ DepthTarget& lineTarget(int w, int h) {
     return t;
 }
 
-// Mipmapped, trilinear and repeating: right for material maps and environments alike.
+// Mipmapped, trilinear and repeating: right for material maps (environments clamp in v).
 void prepareTexture(Texture2D& tex) {
     GenTextureMipmaps(&tex);
     SetTextureFilter(tex, TEXTURE_FILTER_TRILINEAR);
     SetTextureWrap(tex, TEXTURE_WRAP_REPEAT);
 }
 
-Texture2D texture(const std::string& path) {
-    auto it = gpu.textures.find(path);
+// An equirectangular environment: repeating in u (the azimuth wraps) but clamped in v, or the
+// top row would blend with the bottom one at the poles.
+void prepareEnvironmentTexture(Texture2D& tex) {
+    prepareTexture(tex);
+    rlTextureParameters(tex.id, RL_TEXTURE_WRAP_T, RL_TEXTURE_WRAP_CLAMP);
+}
+
+// `environment` selects the environment's sampler state. It has its own cache key, since a
+// file may serve as a material map too and that must keep repeating.
+Texture2D texture(const std::string& path, bool environment = false) {
+    const std::string key = environment ? "env:" + path : path;
+    auto it = gpu.textures.find(key);
     if (it != gpu.textures.end()) return it->second;
     Image img = media::loadImage(path);      // resolved like other media; JPG and HDR included
     Texture2D tex = LoadTextureFromImage(img);
     UnloadImage(img);
     if (!IsTextureValid(tex)) throw std::runtime_error("g3d: cannot load texture: " + path);
-    prepareTexture(tex);
-    gpu.textures[path] = tex;
+    if (environment) prepareEnvironmentTexture(tex);
+    else prepareTexture(tex);
+    gpu.textures[key] = tex;
     return tex;
 }
 
@@ -1535,6 +1546,7 @@ Texture2D renderSky(const Scene& s, double frame, unsigned int callerFbo, int fb
     gpu.skyTarget.texture.mipmaps = tex.mipmaps;
     SetTextureFilter(gpu.skyTarget.texture, TEXTURE_FILTER_TRILINEAR);
     SetTextureWrap(gpu.skyTarget.texture, TEXTURE_WRAP_REPEAT);
+    rlTextureParameters(gpu.skyTarget.texture.id, RL_TEXTURE_WRAP_T, RL_TEXTURE_WRAP_CLAMP);   // not over the poles
     return gpu.skyTarget.texture;
 }
 
@@ -1661,7 +1673,7 @@ Image loadEnvironmentFaces(const std::vector<std::string>& files) {
 }
 
 Texture2D environmentTexture(const Scene& s) {
-    if (!s.environment.empty()) return texture(s.environment);
+    if (!s.environment.empty()) return texture(s.environment, true);
     if (!s.environmentFaces.empty()) {
         std::string key = "cube:";
         for (const auto& f : s.environmentFaces) key += f + "|";
@@ -1671,9 +1683,7 @@ Texture2D environmentTexture(const Scene& s) {
         Texture2D tex = LoadTextureFromImage(img);
         UnloadImage(img);
         if (!IsTextureValid(tex)) throw std::runtime_error("g3d: cannot make the environment from its faces");
-        prepareTexture(tex);
-        // No wrap over the poles: repeating in v would blend the top row into the bottom one.
-        rlTextureParameters(tex.id, RL_TEXTURE_WRAP_T, RL_TEXTURE_WRAP_CLAMP);
+        prepareEnvironmentTexture(tex);
         gpu.textures[key] = tex;
         return tex;
     }
@@ -1684,7 +1694,7 @@ Texture2D environmentTexture(const Scene& s) {
     Texture2D tex = LoadTextureFromImage(img);
     UnloadImage(img);
     if (!IsTextureValid(tex)) throw std::runtime_error("g3d: environment generator produced no image");
-    prepareTexture(tex);
+    prepareEnvironmentTexture(tex);
     gpu.generated[&s] = tex;
     return tex;
 }

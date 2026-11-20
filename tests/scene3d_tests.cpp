@@ -379,6 +379,74 @@ static void environment(const fs::path& dir) {
     UnloadImage(img);
 }
 
+// ---- the poles of an equirectangular environment (L9)
+// Environments must not wrap in v (the top row would blend with the bottom one at the poles);
+// material maps must still repeat. Both share the texture cache, so both are checked.
+static void environmentPoles(const fs::path& dir) {
+    const Color top = { 220, 40, 40, 255 }, bottom = { 40, 40, 220, 255 };
+    Image eq = GenImageColor(256, 128, top);
+    ImageDrawRectangle(&eq, 0, 64, 256, 64, bottom);
+    const std::string path = (dir / "poles-eq.png").string();
+    ExportImage(eq, path.c_str());
+    UnloadImage(eq);
+
+    // Largest per-channel distance from `want` over the whole image.
+    auto worst = [](const Image& img, Color want) {
+        int m = 0;
+        for (int y = 0; y < img.height; y++)
+            for (int x = 0; x < img.width; x++) {
+                Color p = GetImageColor(img, x, y);
+                m = std::max({ m, std::abs(p.r - want.r), std::abs(p.g - want.g), std::abs(p.b - want.b) });
+            }
+        return m;
+    };
+    for (int generated = 0; generated < 2; generated++)
+        for (int up = 1; up >= 0; up--) {
+            auto s = std::make_shared<g3d::Scene>();
+            s->camera.position = { 0, 0, 0 };
+            s->camera.target = { 0, up ? 1.f : -1.f, 0 };
+            s->camera.upVector = { 0, 0, 1 };
+            s->camera.fov = 60;
+            s->showEnvironment = true;
+            if (generated)
+                s->environmentGenerator = [path] { return LoadImage(path.c_str()); };
+            else
+                s->environment = path;
+            Comp c = sceneComp(s);
+            Image img = render(c, 0);
+            const int dev = worst(img, up ? top : bottom);
+            std::printf("[scene3d] %s equirect looking %s: worst distance from the %s colour %d levels\n",
+                        generated ? "generated" : "file", up ? "up" : "down", up ? "top" : "bottom", dev);
+            CHECK(dev <= 2);
+            UnloadImage(img);
+        }
+
+    // A material texture on a quad still repeats: u runs 0..2, so u = 1.3 reads like 0.3.
+    Image half = GenImageColor(64, 64, RED);
+    ImageDrawRectangle(&half, 32, 0, 32, 64, BLUE);
+    const std::string tex = (dir / "poles-half.png").string();
+    ExportImage(half, tex.c_str());
+    UnloadImage(half);
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = { 0, 6, 0 };
+    s->camera.target = { 0, 0, 0 };
+    s->camera.upVector = { 0, 0, -1 };
+    s->camera.fov = 40;
+    g3d::Material m = unlit(WHITE);
+    m.map = tex;
+    auto plane = g3d::Geometry::plane(4, 4);
+    plane->update([](Mesh& mesh) { for (int i = 0; i < mesh.vertexCount; i++) mesh.texcoords[2 * i] *= 2; }, g3d::Geometry::TexcoordBuffer);
+    s->add(plane, m);
+    Comp c = sceneComp(s);
+    Image img = render(c, 0);
+    auto at = [&](float f) { return px(img, project(s->camera, { -2 + 4 * f, 0, 0 })); };
+    const Color a = at(0.15f), b = at(0.65f), cc = at(0.35f), d = at(0.85f);
+    std::printf("[scene3d] material repeat: u 0.3/1.3 -> %d,%d,%d / %d,%d,%d; u 0.7/1.7 -> %d,%d,%d / %d,%d,%d\n",
+                a.r, a.g, a.b, b.r, b.g, b.b, cc.r, cc.g, cc.b, d.r, d.g, d.b);
+    CHECK(close(a, b, 6) && close(cc, d, 6) && !close(a, cc, 60));
+    UnloadImage(img);
+}
+
 // ---- cube-face skybox (L1)
 namespace cube {
 using DirFn = std::function<Color(Vector3)>;
@@ -4621,6 +4689,12 @@ int main() try {
     // folder, which a sandboxed shell may not let it write to.
     const fs::path dir = fs::current_path() / "raymotion-scene3d-test";
     fs::create_directories(dir);
+    if (std::getenv("RMTN_POLES_ONLY")) {
+        environmentPoles(dir);
+        shutdownGraphics();
+        CloseWindow();
+        return failures ? 1 : 0;
+    }
     if (std::getenv("RMTN_MAPFOREST_ONLY")) {
         mapForestTests();
         shutdownGraphics();
@@ -4653,6 +4727,7 @@ int main() try {
     vegetationMaterials(dir);
     waterTest();
     environment(dir);
+    environmentPoles(dir);
     cubeSkybox(dir);
     skyAndFog();
     depthOfField();

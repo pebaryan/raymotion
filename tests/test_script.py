@@ -213,6 +213,12 @@ void draw(int frame) {
         self.assertIn("strip points", self.run_cli("still", "land", "--script", self.path, "--png", "x.png", ok=False))
         write(hills.replace('"min":[-25,-25],"max":[25,25]', '"min":[-900,-900],"max":[900,900]'), spacing=4)
         self.assertIn("at most", self.run_cli("still", "land", "--script", self.path, "--png", "x.png", ok=False, timeout=90))
+        # Grass shadows: off, and at half density, are accepted (the pixel effect is measured in
+        # scene3d_tests; at this size the shadows hardly show).
+        write(hills, grass_extra=',\\"castShadows\\":false')
+        self.run_cli("still", "land", "--script", self.path, "--at", 3, "--png", "noshadow.png")
+        write(hills, grass_extra=',\\"shadowDensity\\":0.5')
+        self.run_cli("still", "land", "--script", self.path, "--at", 3, "--png", "half.png")
         write(hills, grass_extra=',\\"mask\\":{\\"width\\":2,\\"height\\":2,\\"values\\":[1,1,1,1]}')
         self.assertIn("not both", self.run_cli("still", "land", "--script", self.path, "--png", "x.png", ok=False))
 
@@ -253,6 +259,16 @@ void draw(int frame) { g3d::draw("''' + literal + '''", frame, 0, 0, 160, 90); }
         self.run_cli("still", "wood", "--script", self.path, "--at", 3, "--png", "far2.png", timeout=120)
         self.assertNotEqual((self.cwd / "far0.png").read_bytes(), (self.cwd / "far1.png").read_bytes())
         self.assertEqual((self.cwd / "far1.png").read_bytes(), (self.cwd / "far2.png").read_bytes())
+        # Far canopy by size on screen (canopyBelow), with no height limit, and with a lone row of
+        # impostor pictures and no impostor shadows: all accepted, and each repeats exactly.
+        write(dict(far, canopyBelow=7, canopyMaxElevation=0))
+        self.run_cli("still", "wood", "--script", self.path, "--at", 3, "--png", "far3.png", timeout=120)
+        self.run_cli("still", "wood", "--script", self.path, "--at", 3, "--png", "far4.png", timeout=120)
+        self.assertEqual((self.cwd / "far3.png").read_bytes(), (self.cwd / "far4.png").read_bytes())
+        write(dict(far, build=dict(build, elevations=1), impostorShadows=False, impostorFrom=30))
+        self.run_cli("still", "wood", "--script", self.path, "--at", 3, "--png", "rows.png", timeout=120)
+        write(dict(far, build=dict(build, elevations=9)))
+        self.assertIn("elevations", self.run_cli("still", "wood", "--script", self.path, "--png", "x.png", ok=False))
         write({"trees": ["baobab"], "build": build, "at": [[0, 0, 0]]})
         self.assertIn("unknown preset", self.run_cli("still", "wood", "--script", self.path, "--png", "x.png", ok=False))
         write({"trees": [], "at": [[0, 0, 0]]})
@@ -460,7 +476,7 @@ void draw(int frame) { g3d::draw("''' + literal + '''", frame, 0, 0, 160, 90); }
         write(globe(dict(far, impostorBelow=0, mergeBelow=0)))
         self.run_cli("still", "green", "--script", self.path, "--at", 2, "--png", "meshes.png", timeout=120)
         self.assertNotEqual((self.cwd / "levels.png").read_bytes(), (self.cwd / "meshes.png").read_bytes())
-        write(globe(dict(far, impostorBelow=20, blend=0.5, mergeBelow=6, dropBelow=1)))
+        write(globe(dict(far, impostorBelow=20, blend=0.5, mergeBelow=6, dropBelow=1, pictureSpeckle=0)))
         self.run_cli("still", "green", "--script", self.path, "--at", 2, "--png", "tuned.png", timeout=120)
         write(globe({"regions": ["Atlantis"]}))
         self.assertIn("no country", self.run_cli("still", "green", "--script", self.path, "--png", "x.png", ok=False))
