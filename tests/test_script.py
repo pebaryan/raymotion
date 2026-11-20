@@ -243,6 +243,16 @@ void draw(int frame) { g3d::draw("''' + literal + '''", frame, 0, 0, 160, 90); }
         self.assertNotEqual((self.cwd / "a.png").read_bytes(), (self.cwd / "b.png").read_bytes())
         write({"trees": ["shrub"], "build": build, "at": [[0, 0, 0], [4, 0, -3, 45, 1.5, 0]]})
         self.run_cli("still", "wood", "--script", self.path, "--png", "at.png", timeout=120)
+        # Far canopy: with canopyFrom inside the forest the picture changes, and repeats exactly.
+        far = {"trees": ["shrub", "birch"], "build": build, "wind": 0,
+               "scatter": {"area": {"min": [-60, -60], "max": [60, 60]}, "spacing": 5, "seed": 2}}
+        write(far)
+        self.run_cli("still", "wood", "--script", self.path, "--at", 3, "--png", "far0.png", timeout=120)
+        write(dict(far, canopyFrom=20, canopyCell=16, canopyDetail=2, canopyBlend=4, canopyShadows=False))
+        self.run_cli("still", "wood", "--script", self.path, "--at", 3, "--png", "far1.png", timeout=120)
+        self.run_cli("still", "wood", "--script", self.path, "--at", 3, "--png", "far2.png", timeout=120)
+        self.assertNotEqual((self.cwd / "far0.png").read_bytes(), (self.cwd / "far1.png").read_bytes())
+        self.assertEqual((self.cwd / "far1.png").read_bytes(), (self.cwd / "far2.png").read_bytes())
         write({"trees": ["baobab"], "build": build, "at": [[0, 0, 0]]})
         self.assertIn("unknown preset", self.run_cli("still", "wood", "--script", self.path, "--png", "x.png", ok=False))
         write({"trees": [], "at": [[0, 0, 0]]})

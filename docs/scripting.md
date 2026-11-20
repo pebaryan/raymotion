@@ -751,7 +751,7 @@ A `forest` object grows trees and places them: `trees` (1..8 preset names, or ob
 `autumnColor`, `colorVariation`, `deciduous`, `season`, `sway`, `seed`), then `scatter` (as for
 instances; it picks a tree per spot) or `at` (`[[x, y, z, yaw, scale, tree], ...]`); the
 levels `reducedFrom`, `impostorFrom`, `blend`, `hideFrom`; the wind `windDirection`, `wind`,
-`gust`, `gustSpeed`, `gustScale`; `impostorShadows` (default true: far trees cast the shadow of
+`gust`, `gustSpeed`, `gustScale`; the far canopy (`canopyMaxElevation`, degrees, default 20: a higher camera keeps the trees) `canopyBelow` (pixels, about 7; 0 = off: cells well inside the forest are replaced by one height-field patch where their trees are under that many px tall, and those trees are not drawn) and `canopyFrom` (metres), `canopyCell` (128), `canopyDetail` (3), `canopyBlend` (0 = half a cell) and `canopyShadows` (false); `impostorShadows` (default true: far trees cast the shadow of
 their picture, seen from the first shadow-casting light, within its `shadowExtent`); and `build`
 (`frames`, `loopSeconds`,
 `views`, `viewSize`, `elevations` (1..8, default 3: rows of impostor pictures at 0, 35 and 70

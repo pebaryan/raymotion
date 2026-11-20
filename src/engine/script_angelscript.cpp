@@ -5168,11 +5168,13 @@ g3d::Object3D* jsonForest(g3d::Scene& scene, g3d::Object3D* parent, const Json& 
     flora::ForestSpec f;
     auto num = [&d](const char* key, float& out) { out = (float)d.num(key, out); };
     num("reducedFrom", f.reducedFrom); num("impostorFrom", f.impostorFrom); num("blend", f.blend); num("hideFrom", f.hideFrom);
+    num("canopyFrom", f.canopyFrom); num("canopyBelow", f.canopyBelow); num("canopyCell", f.canopyCell); num("canopyDetail", f.canopyDetail); num("canopyMaxElevation", f.canopyMaxElevation); num("canopyBlend", f.canopyBlend);
     num("wind", f.wind); num("gust", f.gust); num("gustSpeed", f.gustSpeed); num("gustScale", f.gustScale);
     f.fps = (float)d.num("fps", fps);
     f.windDirection = jsonV2(d["windDirection"], f.windDirection);
     f.impostorShadows = d.flag("impostorShadows", f.impostorShadows);
-    for (float v : { f.reducedFrom, f.impostorFrom, f.blend, f.hideFrom, f.wind, f.gust, f.gustSpeed, f.gustScale, f.fps, f.windDirection.x, f.windDirection.y })
+    f.canopyShadows = d.flag("canopyShadows", f.canopyShadows);
+    for (float v : { f.reducedFrom, f.impostorFrom, f.blend, f.hideFrom, f.canopyFrom, f.canopyBelow, f.canopyCell, f.canopyDetail, f.canopyBlend, f.wind, f.gust, f.gustSpeed, f.gustScale, f.fps, f.windDirection.x, f.windDirection.y })
         if (!std::isfinite(v)) throw std::runtime_error("forest values must be finite");
     if (d.has("grow")) {
         // Growing trees: each its own mesh, so a patch. With growFrom, nearer trees start first.

@@ -90,8 +90,56 @@ flora::addForest(*scene, flora::scatter(land, sc, 7), kinds);
   nothing extra. Set `shadowExtent` wide enough to reach the impostors you want shadows from.
   The impostor itself then receives no shadows (its own copy would shadow half of it); turn
   `impostorShadows` off to have far trees receive them again.
+- **Far canopy** (`ForestSpec::canopyBelow` in pixels, or `canopyFrom` in metres; off by
+  default): where a cell's trees are only a few pixels tall they give way to one canopy
+  patch, and the trees there are not drawn.
+  - The hand-over follows screen size, as the map forests do: a cell's patch takes over where
+    its trees' mean height is under `canopyBelow` px (`height x drawingViewportHeight / (2 d tan(fov/2))`;
+    7 is a good value: a 15 m tree at 1080 px and 40 degrees is 7 px at about 1.5 km). `canopyFrom`
+    stays as a distance in metres (and a floor when both are set). At 25-30 px the impostors are
+    right and a height field is not.
+  - The ground is cut into square cells of `canopyCell` metres (default 128). Only cells well
+    inside the forest get a patch: the cell and its eight neighbours must hold a quarter of the
+    median tree count. The forest's boundary and its clearings keep their trees whatever the
+    distance, so the edge a viewer sees is trees, never the edge of a height field.
+  - A patch is a height field sampled every `canopyDetail` metres (3): a broadleaf crown is a
+    dome, a conifer a cone, outlines pushed in and out by noise, with relief on top; between
+    crowns the surface closes at 0.62 of the crown's height. Quads are triangulated with the
+    diagonal either way by a hash, so the grid leaves no regular pattern.
+  - Colour is the crown colour of each node's tallest tree (`Tree::crownColour`), darker towards
+    the crown base and on steep sides, with a grain picture of non-repeating noise (a 512 px
+    picture covering 24 m, its uv sheared by height so sides do not streak). Normals are
+    (Cameras higher than `canopyMaxElevation`, default 20 degrees, seen from the forest middle, keep all trees: the patches are for low views.)
+    flattened, the patch receives no shadows and casts none unless `canopyShadows` (default
+    false: at 128 m cells it made the canopy as slow as trees, and far cells are mostly outside
+    `shadowExtent`).
+  - The cell's trees and patch share one screen door by the distance to the cell's trees over
+    `canopyBlend` metres (default half a cell); a whole cell fades together.
+  - Brightness follows the view and the sun. A field of crowns behaves like a field of lit
+    spheres: lighter looking down-sun, darker into it, darker still under a low sun, where
+    crowns shade each other; a flat patch is lit by the sun's height alone, so one gain cannot
+    fit both. Each patch's `Instance::shade` is looked up per frame from a table over view
+    elevation, sun elevation and the angle between sun and camera (5 x 5 x 5, blended in log
+    space), measured once by `canopyTests` with `RMTN_L4_CALIBRATE=1` (trees against patches at
+    two shades over the grid, one refinement) and hard-coded as `CANOPY_SHADE` in
+    `flora_tree.cpp`. It uses the first directional light; with none, shade is 1. `canopyShade`
+    (> 0) fixes it for calibrating. Patch normals are nearly flat (0.12 of the slope), so a
+    cone's dark side no longer shows by azimuth; colour is half the tree's crown colour, half
+    the forest's mean, so one dark pine does not darken a whole cell.
+  - Each cell's hand-over distance is jittered by a stable hash (+-25%), so cells in a row cross
+    over in a ragged front, not a line.
+  - Patches are built the first frame a cell is wanted; `addForest` only makes empty cells, so
+    building a forest and `raymotion list` pay nothing. A frame is still a function of `t`.
+  - Cost: each patch is one draw. A 77,000-tree forest 0.8-4 km away in a 480x270 picture
+    submits 145,094 bodies as impostors, 16,053 as canopy in 64 m cells (x0.11) and 20,259 in
+    128 m cells (x0.14); triangles 290,188 / 1,263,398 against 403,980,860 as reduced trees.
+    Frame time in a 720p bench (39,245 trees, 1.2 x 3 km): trees 29-43 ms best-of-8, canopy 25-47,
+    canopy with shadows 27-42, 64 m cells 30-62 (very noisy run to run): no clear gain at that size, because the draw
+    count, the impostor pass and the trees nearer than the hand-over dominate. It is a gain in
+    bodies and triangles, not yet in milliseconds.
 - `ForestSpec` sets:
   - the level distances (`reducedFrom`, `impostorFrom`, `blend`, `hideFrom`);
+  - the far canopy (`canopyBelow`, `canopyFrom`, `canopyCell`, `canopyDetail`, `canopyBlend`, `canopyShadows`);
   - the wind;
   - `impostorShadows`.
 
@@ -349,6 +397,7 @@ Tests: `flora_tests`, `scene3d_tests`, `flora2d_render_tests` and `test_script.p
   - Impostor silhouettes overlap the full tree by 0.80–0.83 from the side, at least 0.75 from 60 degrees above.
   - An impostor's shadow on the ground is within 15% of the full oak's at two sun heights.
   - Crowns lean downwind.
+  - Far canopy against the trees it replaces where they are 5-8 px tall (canopyBelow 7), from 7, 30 and 60 degrees, sun 25 and 55: luminance 1.12 / 1.05 / 1.06 and 1.10 / 1.13 / 1.09; the 1280x720 30-degree shot under a 25-degree sun: canopy / trees 0.91-1.01 by 16-row window (far half 0.95), biggest step between windows 0.029; strongest repeat under 0.35 (hatch measure checked on a synthetic hatch: 0.76); bodies -89% in a far forest.
 - **Growth:**
   - `u = 1` gives the full tree bit for bit.
   - `u = 0` draws nothing.
@@ -372,7 +421,9 @@ Tests: `flora_tests`, `scene3d_tests`, `flora2d_render_tests` and `test_script.p
 
 ## What is not done
 
-- Past the impostors, nothing replaces far trees (no canopy blend). Fog covers that range,
+- Far canopy: a few cells in a 30-degree high shot still read darker or greener than the trees around them; clearings smaller than a cell are filled in; the shade table is measured for one forest and rig (5 px trees) with a 1.08 fudge, so a very different forest or ambient may need recalibrating (RMTN_L4_CALIBRATE=1); it saves bodies and triangles (-89%) but no clear frame time at 720p. See docs/leftovers-plan.md L4.
+- Past the impostors, and past the canopy where it is off, nothing replaces far trees.
+  Fog covers that range,
   or `hideFrom` fades trees out.
 - Impostor brightness follows the full tree to about 15 to 20% (mean linear luminance of the
   pixels both cover, default sun with shadows: 0.85 to 1.21 for oak, birch and pine at 0, 30,

@@ -317,7 +317,10 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   tree seen from above). It cross-fades between levels with a screen door
   (`Instance::fade`), so nothing pops, and impostors cast the shadow of their picture as
   seen from the light (`ForestSpec::impostorShadows`, within the light's `shadowExtent`).
-  About 11,000 trees at 1080p take 26 ms a frame.
+  About 11,000 trees at 1080p take 26 ms a frame. With `ForestSpec::canopyBelow` set (px; about 7), far cells of trees
+  are replaced by one canopy patch each (a height field over the crowns; the forest's edge keeps its trees), so a far forest is
+  far fewer bodies (-89% in the far-forest test), not yet fewer milliseconds. It is for low
+  cameras: above `canopyMaxElevation` (20 degrees) every tree is kept, since from higher up the patches show as blotches.
 * Growth, by a reveal `u` = 0..1 as in `plot::` and `geo::`: grass comes up where
   `g3d::Field::grow` passes each spot's `arrival` (`flora::arrivalFrom` a point,
   `arrivalAlong` a line, `arrivalInto` an area from its edges), blades rising rather than

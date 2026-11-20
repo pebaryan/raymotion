@@ -3,6 +3,7 @@
 #include "rmtn/raymotion.hpp"
 #include <raymath.h>
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -3060,6 +3061,870 @@ static void trees() {
     }
 }
 
+// ---- far canopy (ForestSpec::canopyFrom): patches over a cell's crowns, in place of its trees
+struct CanopyRig {
+    std::vector<flora::TreePtr> kinds;
+    std::vector<flora::Placement> at;
+    flora::ForestSpec spec;
+    Color ground{ 200, 40, 200, 255 };
+    float sun = 35, sunAzimuth = 40;
+    bool shadows = true;
+    Vector3 from{ 0, 40, 350 }, to{ 0, 6, 0 };
+    float fov = 22;
+    bool sky = true;                // a day sky: its diffuse light reaches trees and patches differently from the plain ambient (calibrate with it)
+    float shadowExtent = 160;
+};
+static g3d::ScenePtr canopyScene(const CanopyRig& r) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->ambient = 0.4f;
+    g3d::Material g;
+    g.color = r.ground;
+    g.roughness = 1;
+    s->add(g3d::Geometry::plane(8000, 8000), g);
+    const float az = r.sunAzimuth * DEG2RAD, el = r.sun * DEG2RAD;
+    g3d::Light sun = g3d::Light::directional({ r.to.x + 600 * std::cos(az) * std::cos(el), 600 * std::sin(el), r.to.z + 600 * std::sin(az) * std::cos(el) },
+                                             { 255, 240, 220, 255 }, 2.2f, r.shadows);
+    sun.target = r.to;
+    sun.shadowExtent = r.shadowExtent;
+    s->lights.push_back(sun);
+    s->camera.position = r.from;
+    s->camera.target = r.to;
+    s->camera.fov = r.fov;
+    s->camera.farPlane = 6000;
+    if (r.sky) s->sky = g3d::Sky::day();
+    flora::addForest(*s, r.at, r.kinds, r.spec);
+    return s;
+}
+static bool forestPixel(Color c) { return !(c.r > 1.3f * c.g && c.b > 1.3f * c.g) && c.r + c.g + c.b > 12; }
+
+// What an image of forest looks like: mean colour, grain, silhouette and seams along cell lines.
+struct CanopyLook {
+    double rgb[3] = { 0, 0, 0 }, lin = 0, grain = 0, spread = 0, topVar = 0, topStep = 0;
+    int px = 0;
+};
+static double linLuma(Color c) { return 0.2126 * std::pow(c.r / 255.0, 2.2) + 0.7152 * std::pow(c.g / 255.0, 2.2) + 0.0722 * std::pow(c.b / 255.0, 2.2); }
+// `x0..x1` is the image's columns the forest's far edge is measured over.
+static CanopyLook canopyLook(const Image& img, int x0, int x1, const std::function<bool(int, int)>& inside = nullptr) {
+    CanopyLook L;
+    const int w = img.width, h = img.height;
+    std::vector<unsigned char> m((size_t)w * h), mAll((size_t)w * h);
+    std::vector<float> lum((size_t)w * h);
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            const Color c = GetImageColor(img, x, y);
+            mAll[(size_t)y * w + x] = forestPixel(c);
+            m[(size_t)y * w + x] = forestPixel(c) && (!inside || inside(x, y));
+            lum[(size_t)y * w + x] = (float)luma(c);
+            if (m[(size_t)y * w + x]) { L.rgb[0] += c.r; L.rgb[1] += c.g; L.rgb[2] += c.b; L.lin += linLuma(c); L.px++; }
+        }
+    for (double& v : L.rgb) v /= std::max(L.px, 1);
+    L.lin /= std::max(L.px, 1);
+    // Grain: |pixel - its 5x5 mean|, where all 25 are forest.
+    double g = 0;
+    long gn = 0;
+    for (int y = 2; y < h - 2; y++)
+        for (int x = 2; x < w - 2; x++) {
+            double s = 0;
+            bool all = true;
+            for (int j = -2; j <= 2 && all; j++)
+                for (int i = -2; i <= 2; i++) {
+                    if (!m[(size_t)(y + j) * w + x + i]) { all = false; break; }
+                    s += lum[(size_t)(y + j) * w + x + i];
+                }
+            if (!all) continue;
+            g += std::fabs(lum[(size_t)y * w + x] - s / 25);
+            gn++;
+        }
+    L.grain = gn ? g / gn : 0;
+    // Spread of 8 x 8 px cell means (fully forest cells): the blotchiness at crown scale.
+    std::vector<double> cm;
+    for (int y = 0; y + 8 <= h; y += 8)
+        for (int x = 0; x + 8 <= w; x += 8) {
+            double s = 0;
+            bool all = true;
+            for (int j = 0; j < 8 && all; j++)
+                for (int i = 0; i < 8; i++) {
+                    if (!m[(size_t)(y + j) * w + x + i]) { all = false; break; }
+                    s += lum[(size_t)(y + j) * w + x + i];
+                }
+            if (all) cm.push_back(s / 64);
+        }
+    if (cm.size() > 4) {
+        double mean = 0, var = 0;
+        for (double v : cm) mean += v / cm.size();
+        for (double v : cm) var += (v - mean) * (v - mean) / cm.size();
+        L.spread = std::sqrt(var);
+    }
+    // The far edge: each column's first run of three forest pixels from the top, minus its straight-line trend.
+    std::vector<double> top;
+    std::vector<int> cols;
+    for (int x = x0; x < x1; x++) {
+        for (int y = 0; y < h - 3; y++)
+            if (mAll[(size_t)y * w + x] && mAll[(size_t)(y + 1) * w + x] && mAll[(size_t)(y + 2) * w + x]) { top.push_back(y); cols.push_back(x); break; }
+    }
+    if (top.size() > 20) {
+        double sx = 0, sy = 0, sxx = 0, sxy = 0;
+        const double n = (double)top.size();
+        for (size_t i = 0; i < top.size(); i++) { sx += cols[i]; sy += top[i]; sxx += (double)cols[i] * cols[i]; sxy += cols[i] * top[i]; }
+        const double slope = (n * sxy - sx * sy) / std::max(n * sxx - sx * sx, 1e-9), icpt = (sy - slope * sx) / n;
+        double var = 0, step = 0;
+        for (size_t i = 0; i < top.size(); i++) {
+            const double r = top[i] - (slope * cols[i] + icpt);
+            var += r * r / n;
+            if (i && cols[i] == cols[i - 1] + 1) step += std::fabs(top[i] - top[i - 1]) / n;
+        }
+        L.topVar = std::sqrt(var);
+        L.topStep = step;
+    }
+    return L;
+}
+
+// The strongest repeat in the picture: the normalised autocorrelation of luma over the pixels `inside` (and forest),
+// at offsets of 10-30 px (a visibly tiled texture shows as a peak at its period). Random foliage stays low.
+static double autocorrPeak(const Image& img, const std::function<bool(int, int)>& inside) {
+    const int w = img.width, h = img.height;
+    std::vector<float> lum((size_t)w * h);
+    std::vector<unsigned char> in((size_t)w * h);
+    double mean = 0;
+    long n = 0;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            const Color c = GetImageColor(img, x, y);
+            lum[(size_t)y * w + x] = (float)luma(c);
+            in[(size_t)y * w + x] = forestPixel(c) && (!inside || inside(x, y));
+            if (in[(size_t)y * w + x]) { mean += lum[(size_t)y * w + x]; n++; }
+        }
+    {   // high-pass: take out the slow light and dark (a 33 px box mean), so only the texture's own repeat is left
+        std::vector<double> sum((size_t)(w + 1) * (h + 1), 0.0);
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) sum[(size_t)(y + 1) * (w + 1) + x + 1] = lum[(size_t)y * w + x] + sum[(size_t)y * (w + 1) + x + 1] + sum[(size_t)(y + 1) * (w + 1) + x] - sum[(size_t)y * (w + 1) + x];
+        std::vector<float> hp(lum.size());
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                const int x0 = std::max(0, x - 16), x1 = std::min(w, x + 17), y0 = std::max(0, y - 16), y1 = std::min(h, y + 17);
+                const double s = sum[(size_t)y1 * (w + 1) + x1] - sum[(size_t)y0 * (w + 1) + x1] - sum[(size_t)y1 * (w + 1) + x0] + sum[(size_t)y0 * (w + 1) + x0];
+                hp[(size_t)y * w + x] = lum[(size_t)y * w + x] - (float)(s / ((x1 - x0) * (y1 - y0)));
+            }
+        lum = hp;
+    }
+    mean = 0;
+    for (size_t i = 0; i < lum.size(); i++) if (in[i]) mean += lum[i];
+    if (n < 2000) return -1;
+    mean /= n;
+    double var = 0;
+    for (size_t i = 0; i < lum.size(); i++) if (in[i]) var += (lum[i] - mean) * (lum[i] - mean);
+    double best = 0;
+    for (int dy = 0; dy <= 30; dy++)
+        for (int dx = -30; dx <= 30; dx++) {
+            if (dy == 0 && dx <= 0) continue;
+            if (std::hypot(dx, dy) < 10 || std::hypot(dx, dy) > 30) continue;
+            double s = 0, vs = 0;
+            for (int y = 0; y + dy < h; y++)
+                for (int x = std::max(0, -dx); x + dx < w && x < w; x++) {
+                    const size_t a = (size_t)y * w + x, b = (size_t)(y + dy) * w + x + dx;
+                    if (in[a] && in[b]) { s += (lum[a] - mean) * (lum[b] - mean); vs += 1; }
+                }
+            if (vs > 1000) best = std::max(best, s / vs / (var / n));
+        }
+    return best;
+}
+
+// Brightness steps along the cells' boundary lines against lines 1/4, 1/2 and 3/4 of a cell off: along a line, in pieces
+// of 8 points (16 m, 5 m up), the mean luma of the forest pixels 3-9 px to one side against the other side, |difference|
+// averaged over the pieces. Averaging over a piece takes the grain out, so a cell that is lighter than its neighbour
+// shows; ~1 where no seam shows.
+static double cellSeamRatio(const Image& img, const g3d::Camera& cam, float minX, float minZ, float C, float x0, float x1, float z0, float z1) {
+    auto across = [&](float offset) {
+        double sum = 0;
+        long pieces = 0;
+        for (int k = 1; k < 8; k++) {
+            for (int axis = 0; axis < 2; axis++) {
+                const float fixed = (axis == 0 ? minX : minZ) + (k + offset) * C;
+                const float lo = axis == 0 ? z0 : x0, hi = axis == 0 ? z1 : x1;
+                if (fixed < (axis == 0 ? x0 : z0) + 4 || fixed > (axis == 0 ? x1 : z1) - 4) continue;
+                double sa = 0, sb = 0;
+                long na = 0, nb = 0;
+                int inPiece = 0;
+                auto flush = [&] {
+                    if (na >= 12 && nb >= 12) { sum += std::fabs(sa / na - sb / nb); pieces++; }
+                    sa = sb = 0; na = nb = 0; inPiece = 0;
+                };
+                for (float u = lo + 4; u < hi - 4; u += 2) {
+                    const Vector3 a = axis == 0 ? Vector3{ fixed, 5, u } : Vector3{ u, 5, fixed };
+                    const Vector3 b = axis == 0 ? Vector3{ fixed, 5, u + 2 } : Vector3{ u + 2, 5, fixed };
+                    const Vector2 pa = project(cam, a, img.width, img.height), pb = project(cam, b, img.width, img.height);
+                    Vector2 t = Vector2Subtract(pb, pa);
+                    const float len = Vector2Length(t);
+                    if (len >= 0.2f) {                                         // else edge-on: no tangent to cross
+                        t = Vector2Scale(t, 1 / len);
+                        const Vector2 nrm{ -t.y, t.x };
+                        for (float d : { 3.f, 5.f, 7.f, 9.f })
+                            for (int side = 0; side < 2; side++) {
+                                const Vector2 p = side ? Vector2Subtract(pa, Vector2Scale(nrm, d)) : Vector2Add(pa, Vector2Scale(nrm, d));
+                                if (p.x < 1 || p.y < 1 || p.x > img.width - 2 || p.y > img.height - 2) continue;
+                                const Color c = px(img, p);
+                                if (!forestPixel(c)) continue;
+                                (side ? sb : sa) += luma(c);
+                                (side ? nb : na)++;
+                            }
+                    }
+                    if (++inPiece == 8) flush();
+                }
+            }
+        }
+        return pieces > 8 ? sum / pieces : -1.0;
+    };
+    const double on = across(0), off = (across(0.5f) + across(0.25f) + across(0.75f)) / 3;
+    return on > 0 && off > 0 ? on / off : -1;
+}
+// Is (x, y) inside the convex quad `q` (corners in order)?
+static bool insideQuad(const Vector2 q[4], int x, int y) {
+    bool pos = false, neg = false;
+    for (int i = 0; i < 4; i++) {
+        const Vector2 a = q[i], b = q[(i + 1) % 4];
+        const float cr = (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x);
+        pos = pos || cr > 0;
+        neg = neg || cr < 0;
+    }
+    return !(pos && neg);
+}
+
+static void canopyTests() {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    const char* dumpDir = std::getenv("RMTN_L4_DUMP");
+    auto dump = [&](const std::string& name, const Image& img) {
+        if (!dumpDir) return;
+        fs::create_directories(dumpDir);
+        ExportImage(img, (fs::path(dumpDir) / name).string().c_str());
+    };
+    std::vector<flora::TreePtr> kinds;
+    for (const char* n : { "oak", "birch", "pine" }) kinds.push_back(flora::makeTree(flora::tree(n)));
+    auto forest = [&](Vector2 lo, Vector2 hi, uint32_t seed) {
+        flora::ScatterSpec sc;
+        sc.spacing = 7; sc.clumping = 0.3f; sc.clumpScale = 60; sc.scaleMin = 0.8f; sc.scaleMax = 1.2f; sc.variants = 3;
+        return flora::scatter(flora::rect(lo, hi), sc, seed);
+    };
+    auto shoot = [&](CanopyRig r, int w, int h, int frame = 12) {
+        Comp c = longComp(canopyScene(r), w, h);
+        return render(c, frame);
+    };
+    flora::ForestSpec trees;                       // as every forest is today
+    trees.wind = 0; trees.gust = 0;
+    flora::ForestSpec canopy = trees;
+    canopy.canopyBelow = 7;                        // the hand-over: trees under 7 px tall
+    canopy.canopyMaxElevation = 0;                 // the tests below exercise the patches at any view; the limit has its own check in (f)
+    flora::ForestSpec nearCanopy = trees;          // by distance instead, for close looks at the patches
+    nearCanopy.canopyFrom = 80; nearCanopy.canopyCell = 64;
+
+    for (float sunEl : { 25.f, 55.f }) {   // (f) the hand-over seen from 30 degrees up (the case a high camera shows): rows of the picture
+        // trees-only frame against canopy frame, same pixels. The brightness must not step across it, and there is no row-wise step.
+        CanopyRig r;
+        r.kinds = kinds;
+        r.at = forest({ -1200, -3000 }, { 1200, 0 }, 21);
+        r.sun = sunEl; r.sunAzimuth = 140; r.shadowExtent = 500;
+        if (std::getenv("RMTN_L4_NOSH")) r.shadows = false;
+        if (std::getenv("RMTN_L4_SKY")) r.sky = true;
+        r.from = Vector3Add({ 0, 10, -1400 }, Vector3Scale({ 0, 0.5f, 0.866f }, 1800));
+        r.to = { 0, 10, -1400 };
+        r.fov = 40;
+        r.spec = trees;
+        Image a = shoot(r, 1280, 720);
+        {   // the default limit (20 degrees): from 30 degrees up every tree stays, the picture is the trees' own (a few edge pixels aside)
+            flora::ForestSpec gated = canopy;
+            gated.canopyMaxElevation = 20;
+            r.spec = gated;
+            Image g = shoot(r, 1280, 720);
+            long diff = 0;
+            for (int y = 0; y < 720; y++)
+                for (int x = 0; x < 1280; x++) {
+                    const Color p = GetImageColor(a, x, y), q = GetImageColor(g, x, y);
+                    diff += p.r != q.r || p.g != q.g || p.b != q.b;
+                }
+            std::printf("[scene3d] canopy at 30 deg, sun %.0f, canopyMaxElevation 20: %ld px differ from the trees-only frame\n", sunEl, diff);
+            CHECK(diff < 200);                       // a few edge pixels: the canopy forest draws its trees cell by cell (another draw order)
+            UnloadImage(g);
+            // The study below (the hand-over seen from 30 degrees with the limit off) is opt-in: it records how far the patches are from the
+            // trees there (block means off by up to 25-40% with a sky lighting the trees), which is why the limit exists. Its checks fail by design.
+            if (!std::getenv("RMTN_L4_HIGH")) { UnloadImage(a); continue; }
+        }
+        r.spec = canopy;
+        Image b = shoot(r, 1280, 720);
+        char sn[24]; std::snprintf(sn, sizeof sn, "strip_sun%02.0f_", sunEl); dump(std::string(sn) + "trees.png", a); dump(std::string(sn) + "canopy.png", b);
+        const int x0 = 240, x1 = 1040;
+        std::vector<double> ratio;                                  // per row: canopy / trees mean linear luma over pixels that are forest in both
+        std::vector<int> rowsDiffer;
+        for (int y = 0; y < 720; y++) {
+            double sa = 0, sb = 0;
+            int n = 0, differs = 0;
+            for (int x = x0; x < x1; x++) {
+                const Color p = GetImageColor(a, x, y), q = GetImageColor(b, x, y);
+                if (!forestPixel(p) || !forestPixel(q)) continue;
+                sa += linLuma(p); sb += linLuma(q); n++;
+                differs += std::abs(p.r - q.r) + std::abs(p.g - q.g) + std::abs(p.b - q.b) > 12;
+            }
+            ratio.push_back(n > (x1 - x0) / 2 ? sb / std::max(sa, 1e-9) : -1.0);
+            rowsDiffer.push_back(n > 0 && differs * 20 > n ? 1 : 0);
+        }
+        // 16-row windows
+        std::vector<double> win;
+        for (int y = 0; y + 16 <= 720; y += 8) {
+            double s = 0;
+            int n = 0;
+            for (int k = 0; k < 16; k++) if (ratio[(size_t)y + k] > 0) { s += ratio[(size_t)y + k]; n++; }
+            win.push_back(n >= 12 ? s / n : -1.0);
+        }
+        double stepMax = 0, lo = 9, hi = 0;
+        int changed = 0, first = -1, last = -1;
+        for (int y = 0; y < 720; y++) if (rowsDiffer[(size_t)y]) { changed++; if (first < 0) first = y; last = y; }
+        for (size_t i = 0; i + 1 < win.size(); i++) {
+            if (win[i] < 0 || win[i + 1] < 0) continue;
+            stepMax = std::max(stepMax, std::fabs(win[i + 1] - win[i]));
+        }
+        double farMean = 0;
+        int farN = 0;
+        for (size_t i = 0; i < win.size(); i++) if (win[i] > 0) { lo = std::min(lo, win[i]); hi = std::max(hi, win[i]); if ((int)i * 8 + 16 <= (first + last) / 2) { farMean += win[i]; farN++; } }
+        {   // canopy / trees luma against the screen height of the trees there (diagnostic print): row -> distance by projecting the ground
+            const g3d::Camera cam = canopyScene(r)->camera;
+            std::vector<std::pair<float, float>> rowDist;       // (row, distance)
+            for (float z = 150; z > -3100; z -= 10) rowDist.push_back({ project(cam, { 0, 10, z }, 1280, 720).y, Vector3Distance(r.from, { 0, 10, z }) });
+            const float perMetre = 720.f / (2.f * std::tan(r.fov * 0.5f * DEG2RAD));
+            for (size_t i = 0; i < win.size(); i += 3) {
+                const float yc = (float)i * 8 + 8;
+                float best = 1e9f, dist = 0;
+                for (auto& rd : rowDist) if (std::fabs(rd.first - yc) < best) { best = std::fabs(rd.first - yc); dist = rd.second; }
+                std::printf("[scene3d]   sun %.0f row %3.0f: distance %4.0f m, trees %.1f px tall, canopy/trees %.3f\n", sunEl, yc, dist, 15.f * perMetre / std::max(dist, 1.f), win[i]);
+            }
+        }
+        {   // diagnostic: forest coverage (share of pixels that are not ground) per 24-row band, trees against canopy, and the forest-pixel luma ratio
+            for (int y0 = 120; y0 < 720; y0 += 48) {
+                long na = 0, nb = 0, n = 0;
+                double la = 0, lb = 0;
+                for (int y = y0; y < y0 + 24; y++)
+                    for (int x = x0; x < x1; x++) {
+                        const Color p = GetImageColor(a, x, y), q = GetImageColor(b, x, y);
+                        n++;
+                        if (forestPixel(p)) { na++; la += linLuma(p); }
+                        if (forestPixel(q)) { nb++; lb += linLuma(q); }
+                    }
+                std::printf("[scene3d]   sun %.0f rows %3d: coverage %.3f trees, %.3f canopy; forest-pixel luma %.4f trees, %.4f canopy (x%.3f)\n", sunEl, y0, (double)na / n, (double)nb / n, la / std::max(na, 1L), lb / std::max(nb, 1L), (lb / std::max(nb, 1L)) / (la / std::max(na, 1L) + 1e-12));
+            }
+        }
+        std::printf("[scene3d] hand-over at 30 deg, sun %.0f: rows %d-%d differ (%d rows); canopy / trees luma per 16-row window %.3f-%.3f, the far half %.3f; biggest step between neighbouring windows %.3f\n",
+                    sunEl, first, last, changed, lo, hi, farN ? farMean / farN : 0.0, stepMax);
+        CHECK(changed > 100);                                         // the canopy is really in the picture
+        CHECK(lo > 0.9 && hi < 1.1);
+        CHECK(stepMax < 0.06);
+        {   // cell-scale structure. The picture as a viewer sees it (green ground, sky, every pixel inside the forest's outline): block means
+            // (48 x 32 px, about a 128 m cell here) of linear luma, canopy frame against trees frame. Two forests of the same kind with different
+            // seeds differ by block too (crowns fall differently), so the reference is trees against trees of another seed; the canopy may be
+            // off by little more than that, and its blocks must show no pattern (a band, a frame, rectangles) the other seed does not.
+            CanopyRig vr = r;
+            vr.ground = { 78, 96, 52, 255 };
+            vr.sky = true;
+            vr.spec = trees;
+            Image va = shoot(vr, 1280, 720);
+            vr.spec = canopy;
+            Image vb = shoot(vr, 1280, 720);
+            vr.at = forest({ -1200, -3000 }, { 1200, 0 }, 22);
+            vr.spec = trees;
+            Image vc = shoot(vr, 1280, 720);
+            if (dumpDir) {
+                char vn[40];
+                std::snprintf(vn, sizeof vn, "view_sun%02.0f_", sunEl);
+                dump(std::string(vn) + "trees.png", va);
+                dump(std::string(vn) + "canopy.png", vb);
+                dump(std::string(vn) + "trees_seed22.png", vc);
+            }
+            const g3d::Camera vcam = canopyScene(vr)->camera;
+            const Vector2 vquad[4] = { project(vcam, { -1100, 12, -2900 }, 1280, 720), project(vcam, { 1100, 12, -2900 }, 1280, 720), project(vcam, { 1100, 12, -100 }, 1280, 720), project(vcam, { -1100, 12, -100 }, 1280, 720) };
+            const int bw = 48, bh = 32, nx = 1280 / bw, ny = 720 / bh;
+            struct Blocks { std::vector<double> m; };
+            auto blocks = [&](const Image& img) {
+                Blocks B;
+                B.m.assign((size_t)nx * ny, -1);
+                for (int by = 0; by < ny; by++)
+                    for (int bx = 0; bx < nx; bx++) {
+                        const int cx[4] = { bx * bw, (bx + 1) * bw - 1, bx * bw, (bx + 1) * bw - 1 }, cy[4] = { by * bh, by * bh, (by + 1) * bh - 1, (by + 1) * bh - 1 };
+                        bool inside = true;
+                        for (int k = 0; k < 4; k++) inside = inside && insideQuad(vquad, cx[k], cy[k]);
+                        if (!inside) continue;
+                        double s = 0;
+                        for (int y = by * bh; y < (by + 1) * bh; y++)
+                            for (int x = bx * bw; x < (bx + 1) * bw; x++) s += linLuma(GetImageColor(img, x, y));
+                        B.m[(size_t)by * nx + bx] = s / (bw * bh);
+                    }
+                return B;
+            };
+            const Blocks ba = blocks(va), bb = blocks(vb), bc = blocks(vc);
+            struct Cmp { double mean, sd, off, worst; int n; double rowBand; };
+            auto compare = [&](const Blocks& p, const Blocks& q, const char* heatName) {
+                Cmp c{ 0, 0, 0, 0, 0, 0 };
+                std::vector<double> rr;
+                for (size_t k = 0; k < p.m.size(); k++) if (p.m[k] > 0 && q.m[k] > 0 && (int)(k / nx) >= 3) rr.push_back(q.m[k] / p.m[k]);
+                c.n = (int)rr.size();
+                for (double v : rr) { c.mean += v / std::max(c.n, 1); c.off += std::fabs(v - 1) > 0.12; c.worst = std::max(c.worst, std::fabs(v - 1)); }
+                for (double v : rr) c.sd += (v - c.mean) * (v - c.mean) / std::max(c.n, 1);
+                c.sd = std::sqrt(c.sd);
+                c.off /= std::max(c.n, 1);
+                if (dumpDir && heatName) {
+                    Image heat = GenImageColor(nx, ny, BLACK);
+                    for (int by = 0; by < ny; by++)
+                        for (int bx = 0; bx < nx; bx++) {
+                            const size_t k = (size_t)by * nx + bx;
+                            if (p.m[k] <= 0 || q.m[k] <= 0) continue;
+                            const float t = std::clamp((float)(q.m[k] / p.m[k] - 1) / 0.35f, -1.f, 1.f);
+                            ImageDrawPixel(&heat, bx, by, { (unsigned char)(128 + 127 * std::max(t, 0.f)), (unsigned char)(128 - 60 * std::fabs(t)), (unsigned char)(128 + 127 * std::max(-t, 0.f)), 255 });
+                        }
+                    ImageResizeNN(&heat, nx * 24, ny * 24);
+                    char hn[48];
+                    std::snprintf(hn, sizeof hn, "%s_sun%02.0f.png", heatName, sunEl);
+                    dump(hn, heat);
+                    UnloadImage(heat);
+                }
+                return c;
+            };
+            const Cmp canopyCmp = compare(ba, bb, "blockratio_canopy"), seedCmp = compare(ba, bc, "blockratio_seed");
+            std::printf("[scene3d] cell-scale blocks at 30 deg, sun %.0f (%d blocks), against the trees: canopy mean %.3f spread %.3f, %.1f%% off by more than 12%%, worst %.2f; another seed of trees mean %.3f spread %.3f, %.1f%% off, worst %.2f\n",
+                        sunEl, canopyCmp.n, canopyCmp.mean, canopyCmp.sd, 100 * canopyCmp.off, 1 + canopyCmp.worst, seedCmp.mean, seedCmp.sd, 100 * seedCmp.off, 1 + seedCmp.worst);
+            CHECK(canopyCmp.n > 150);
+            CHECK(canopyCmp.sd < 1.25 * seedCmp.sd + 0.01);
+            CHECK(canopyCmp.off < 1.5 * seedCmp.off + 0.02);
+            CHECK(canopyCmp.worst < seedCmp.worst + 0.1);
+            CHECK(std::fabs(canopyCmp.mean - 1) < 0.05);
+            UnloadImage(va); UnloadImage(vb); UnloadImage(vc);
+        }
+        UnloadImage(a); UnloadImage(b);
+    }
+    if (std::getenv("RMTN_L4_FONLY")) return;
+
+    if (std::getenv("RMTN_L4_CALIBRATE")) {   // offline: the shade that makes patches as bright as trees, over view and sun; prints CANOPY_SHADE
+        CanopyRig r;
+        r.kinds = kinds;
+        r.at = forest({ -500, -450 }, { 500, 450 }, 5);
+        float minX = 1e9f, minZ = 1e9f, maxX = -1e9f, maxZ = -1e9f;
+        for (const auto& p : r.at) { minX = std::min(minX, p.position.x); minZ = std::min(minZ, p.position.z); maxX = std::max(maxX, p.position.x); maxZ = std::max(maxZ, p.position.z); }
+        const float ix0 = minX + 128, ix1 = minX + std::floor((maxX - minX) / 128) * 128, iz0 = minZ + 128, iz1 = minZ + std::floor((maxZ - minZ) / 128) * 128;
+        r.to = { 0, 6, 0 };
+        r.fov = 22;
+        const float views[5] = { 7, 20, 35, 50, 70 }, suns[5] = { 15, 25, 40, 55, 70 }, rels[5] = { 0, 45, 90, 135, 180 };
+        static float table[5][5][5];
+        auto lookAt = [&](float elev, float sunEl, float rel, const flora::ForestSpec& spec) {
+            r.sun = sunEl; r.sunAzimuth = 90 - rel;
+            r.from = Vector3Add(r.to, Vector3Scale({ 0, std::sin(elev * DEG2RAD), std::cos(elev * DEG2RAD) }, 2900));
+            r.spec = spec;
+            Image img = shoot(r, 640, 360);
+            const g3d::Camera cam = canopyScene(r)->camera;
+            Vector2 quad[4] = { project(cam, { ix0, 8, iz0 }, 640, 360), project(cam, { ix1, 8, iz0 }, 640, 360), project(cam, { ix1, 8, iz1 }, 640, 360), project(cam, { ix0, 8, iz1 }, 640, 360) };
+            const CanopyLook l = canopyLook(img, 0, 640, [&](int x, int y) { return insideQuad(quad, x, y); });
+            UnloadImage(img);
+            return l;
+        };
+        for (int v = 0; v < 5; v++)
+            for (int s = 0; s < 5; s++)
+                for (int a = 0; a < 5; a++) {
+                    flora::ForestSpec one = canopy, two = canopy;
+                    one.canopyShade = 1; two.canopyShade = 0.6f;
+                    const CanopyLook lt = lookAt(views[v], suns[s], rels[a], trees), l1 = lookAt(views[v], suns[s], rels[a], one), l2 = lookAt(views[v], suns[s], rels[a], two);
+                    float sh = 1;
+                    if (lt.px >= 1500 && l1.px >= 1500) {
+                        const double resp = std::max(std::log(l2.lin / std::max(l1.lin, 1e-9)) / std::log(0.6), 0.5);   // light goes as shade^resp
+                        sh = (float)std::pow(lt.lin / std::max(l1.lin, 1e-9), 1.0 / resp);
+                        flora::ForestSpec fix = canopy;
+                        fix.canopyShade = sh;
+                        const CanopyLook lf = lookAt(views[v], suns[s], rels[a], fix);       // one refinement from what that shade really gives
+                        sh *= (float)std::pow(lt.lin / std::max(lf.lin, 1e-9), 1.0 / resp);
+                    }
+                    table[v][s][a] = sh;
+                    std::printf("[calib] view %2.0f sun %2.0f rel %3.0f: trees %.1f plain %.1f -> shade %.2f\n", views[v], suns[s], rels[a], lt.lin * 1000, l1.lin * 1000, sh);
+                }
+        std::printf("// shade by view elevation (7 20 35 50 70), sun elevation (15 25 40 55 70), angle between sun and camera, seen from above (0 45 90 135 180)\nconstexpr float CANOPY_SHADE[5][5][5] = {\n");
+        for (int v = 0; v < 5; v++) {
+            std::printf("    {\n");
+            for (int s = 0; s < 5; s++) {
+                std::printf("        {");
+                for (int a = 0; a < 5; a++) std::printf(" %.2ff%s", table[v][s][a], a < 4 ? "," : "");
+                std::printf(" },\n");
+            }
+            std::printf("    },\n");
+        }
+        std::printf("};\n");
+    }
+
+    if (const char* fitFile = std::getenv("RMTN_L4_FIT")) {   // offline: fit a smooth model to the calibration table's lines ([calib] view v sun s rel r ... shade x)
+        std::ifstream in(fitFile);
+        std::string line;
+        std::vector<std::array<double, 9>> rows;            // features..., log shade
+        while (std::getline(in, line)) {
+            float v, s, r, sh;
+            if (std::sscanf(line.c_str(), "[calib] view %f sun %f rel %f: trees %*f plain %*f -> shade %f", &v, &s, &r, &sh) != 4) continue;
+            if (sh >= 1.99f || sh <= 0.01f) continue;       // clamped or failed
+            const double az = (90 - r) * DEG2RAD, se = s * DEG2RAD, ve = v * DEG2RAD;
+            const Vector3 toSun = { (float)(std::cos(az) * std::cos(se)), (float)std::sin(se), (float)(std::sin(az) * std::cos(se)) }, toEye = { 0, (float)std::sin(ve), (float)std::cos(ve) };
+            const double cg = Vector3DotProduct(toSun, toEye), g = std::acos(std::clamp(cg, -1.0, 1.0)), phase = (std::sin(g) + (PI - g) * cg) / PI;
+            rows.push_back({ 1.0, toSun.y, phase, toEye.y, phase * toSun.y, toSun.y * toSun.y, toEye.y * toSun.y, phase * toEye.y, std::log(sh) });
+        }
+        const int NF = 8;
+        for (int use : { 5, 6, 8 }) {                       // the first `use` features
+            double A[NF][NF + 1] = {};
+            for (const auto& row : rows)
+                for (int i = 0; i < use; i++) { for (int j = 0; j < use; j++) A[i][j] += row[i] * row[j]; A[i][use] += row[i] * row[NF]; }
+            for (int i = 0; i < use; i++) {
+                int p = i;
+                for (int k = i + 1; k < use; k++) if (std::fabs(A[k][i]) > std::fabs(A[p][i])) p = k;
+                for (int j = 0; j <= use; j++) std::swap(A[i][j], A[p][j]);
+                for (int k = 0; k < use; k++) {
+                    if (k == i) continue;
+                    const double m = A[k][i] / A[i][i];
+                    for (int j = i; j <= use; j++) A[k][j] -= m * A[i][j];
+                }
+            }
+            double c[NF] = {}, rss = 0, worst = 0;
+            for (int i = 0; i < use; i++) c[i] = A[i][use] / A[i][i];
+            for (const auto& row : rows) {
+                double s = 0;
+                for (int i = 0; i < use; i++) s += c[i] * row[i];
+                rss += (s - row[NF]) * (s - row[NF]);
+                worst = std::max(worst, std::fabs(std::exp(s - row[NF]) - 1));
+            }
+            std::printf("[fit] %d features, %zu samples: rms log residual %.3f, worst %.0f%%; coefficients", use, rows.size(), std::sqrt(rss / rows.size()), 100 * worst);
+            for (int i = 0; i < use; i++) std::printf(" %.4f", c[i]);
+            std::printf("\n");
+        }
+        return;
+    }
+
+    {   // the repeat measure itself: a diagonal hatch (period 12 px, under noise) must read high, noise alone low
+        Image hatch = GenImageColor(256, 256, { 60, 90, 40, 255 }), noise = GenImageColor(256, 256, { 60, 90, 40, 255 });
+        for (int y = 0; y < 256; y++)
+            for (int x = 0; x < 256; x++) {
+                const float nz = 30.f * (rnd01(3u, (unsigned long long)(y * 256 + x)) - 0.5f);
+                const float st = 22.f * std::sin((x + y) * TAU / 12.f);
+                ImageDrawPixel(&hatch, x, y, { (unsigned char)std::clamp(70 + st + nz, 0.f, 255.f), (unsigned char)std::clamp(100 + st + nz, 0.f, 255.f), (unsigned char)std::clamp(50 + st + nz, 0.f, 255.f), 255 });
+                ImageDrawPixel(&noise, x, y, { (unsigned char)std::clamp(70 + nz, 0.f, 255.f), (unsigned char)std::clamp(100 + nz, 0.f, 255.f), (unsigned char)std::clamp(50 + nz, 0.f, 255.f), 255 });
+            }
+        const double ph = autocorrPeak(hatch, nullptr), pn = autocorrPeak(noise, nullptr);
+        std::printf("[scene3d] repeat measure: hatch %.2f, noise %.2f\n", ph, pn);
+        CHECK(ph > 0.5 && pn < 0.2);
+        UnloadImage(hatch); UnloadImage(noise);
+    }
+
+    {   // (c) the canopy against the trees it replaces where trees are 5-8 px tall (the forest 2.1-3.2 km away, a 640 x 360
+        // picture at 22 degrees), from a camera 7, 30 and 60 degrees over it. Colour, grain and blotchiness are measured
+        // inside the cells that have patches (the forest's rim keeps its trees, the same on both sides).
+        CanopyRig r;
+        r.kinds = kinds;
+        r.at = forest({ -700, -600 }, { 700, 600 }, 5);
+        float minX = 1e9f, minZ = 1e9f, maxX = -1e9f, maxZ = -1e9f;
+        for (const auto& p : r.at) { minX = std::min(minX, p.position.x); minZ = std::min(minZ, p.position.z); maxX = std::max(maxX, p.position.x); maxZ = std::max(maxZ, p.position.z); }
+        const float C = 128;
+        const float ix0 = minX + C, ix1 = minX + std::floor((maxX - minX) / C) * C, iz0 = minZ + C, iz1 = minZ + std::floor((maxZ - minZ) / C) * C;
+        r.to = { 0, 6, 0 };
+        r.fov = 22;
+        for (float sunEl : { 25.f, 55.f })
+        for (float elev : { 7.f, 30.f, 60.f }) {
+            r.sun = sunEl;
+            r.from = Vector3Add(r.to, Vector3Scale({ 0, std::sin(elev * DEG2RAD), std::cos(elev * DEG2RAD) }, 2900));
+            r.spec = trees;
+            Image a = shoot(r, 640, 360);
+            r.spec = canopy;
+            Image b = shoot(r, 640, 360);
+            const g3d::Camera cam = canopyScene(r)->camera;
+            Vector2 quad[4] = { project(cam, { ix0, 8, iz0 }, 640, 360), project(cam, { ix1, 8, iz0 }, 640, 360), project(cam, { ix1, 8, iz1 }, 640, 360), project(cam, { ix0, 8, iz1 }, 640, 360) };
+            auto inside = [&](int x, int y) { return insideQuad(quad, x, y); };
+            const CanopyLook la = canopyLook(a, 0, 640, inside), lb = canopyLook(b, 0, 640, inside);
+            const double pa = autocorrPeak(a, inside), pb = autocorrPeak(b, inside);
+            long long differ = 0;
+            for (int y = 0; y < 360; y++)
+                for (int x = 0; x < 640; x++) { const Color p = GetImageColor(a, x, y), q = GetImageColor(b, x, y); differ += std::abs(p.r - q.r) + std::abs(p.g - q.g) + std::abs(p.b - q.b) > 12; }
+            char n0[64];
+            std::snprintf(n0, sizeof n0, "look_%02.0f_sun%02.0f_trees.png", elev, sunEl); dump(n0, a);
+            std::snprintf(n0, sizeof n0, "look_%02.0f_sun%02.0f_canopy.png", elev, sunEl); dump(n0, b);
+            std::printf("[scene3d] canopy at %2.0f deg sun %2.0f: %d / %d px in the patches' cells (trees / canopy); mean rgb %.0f %.0f %.0f / %.0f %.0f %.0f; linear luma ratio %.2f\n",
+                        elev, sunEl, la.px, lb.px, la.rgb[0], la.rgb[1], la.rgb[2], lb.rgb[0], lb.rgb[1], lb.rgb[2], lb.lin / std::max(la.lin, 1e-9));
+            std::printf("[scene3d] canopy at %2.0f deg sun %2.0f: grain %.2f / %.2f (x%.2f); 8px-cell spread %.2f / %.2f (x%.2f); far edge variation %.2f / %.2f px, step %.2f / %.2f px; strongest repeat %.2f / %.2f; %lld px differ by > 12\n",
+                        elev, sunEl, la.grain, lb.grain, lb.grain / std::max(la.grain, 1e-3), la.spread, lb.spread, lb.spread / std::max(la.spread, 1e-3),
+                        la.topVar, lb.topVar, la.topStep, lb.topStep, pa, pb, differ);
+            CHECK(la.px > 5000 && lb.px > 5000);
+            CHECK((double)lb.px / la.px > 0.8 && (double)lb.px / la.px < 1.4);
+            CHECK(lb.lin / la.lin > 0.85 && lb.lin / la.lin < 1.15);
+            CHECK(std::fabs(lb.rgb[1] / lb.rgb[0] - la.rgb[1] / la.rgb[0]) < 0.18 && std::fabs(lb.rgb[2] / lb.rgb[1] - la.rgb[2] / la.rgb[1]) < 0.18);
+            CHECK(lb.grain / la.grain > 0.5 && lb.grain / la.grain < 1.6);
+            CHECK(la.spread < 0.5 || (lb.spread / la.spread > 0.6 && lb.spread / la.spread < 1.6));
+            CHECK(pb < 0.35 && pb < pa + 0.2);                       // no visible repeat
+            UnloadImage(a); UnloadImage(b);
+        }
+    }
+
+
+    {   // (e) no cell squares and no tiled texture, looked at close (canopyFrom 80 m, cells of 64 m, 400 m of forest seen
+        // from 380 m): across the lines between cells with patches the brightness steps no more than across lines inside a
+        // cell; the texture's strongest repeat stays low.
+        CanopyRig r;
+        r.kinds = kinds;
+        r.at = forest({ -200, -200 }, { 200, 200 }, 7);
+        float minX = 1e9f, minZ = 1e9f, maxX = -1e9f, maxZ = -1e9f;
+        for (const auto& p : r.at) { minX = std::min(minX, p.position.x); minZ = std::min(minZ, p.position.z); maxX = std::max(maxX, p.position.x); maxZ = std::max(maxZ, p.position.z); }
+        const float ix0 = minX + 64, ix1 = minX + std::floor((maxX - minX) / 64) * 64, iz0 = minZ + 64, iz1 = minZ + std::floor((maxZ - minZ) / 64) * 64;
+        for (float elev : { 35.f, 70.f }) {
+            r.from = Vector3Add(r.to, Vector3Scale({ 0, std::sin(elev * DEG2RAD), std::cos(elev * DEG2RAD) }, 380));
+            r.fov = 36;
+            r.spec = trees;
+            Image a = shoot(r, 640, 360);
+            r.spec = nearCanopy;
+            Image b = shoot(r, 640, 360);
+            char n0[64];
+            std::snprintf(n0, sizeof n0, "seams_%02.0f_canopy.png", elev); dump(n0, b);
+            const g3d::Camera cam = canopyScene(r)->camera;
+            Vector2 quad[4] = { project(cam, { ix0, 8, iz0 }, 640, 360), project(cam, { ix1, 8, iz0 }, 640, 360), project(cam, { ix1, 8, iz1 }, 640, 360), project(cam, { ix0, 8, iz1 }, 640, 360) };
+            auto inside = [&](int x, int y) { return insideQuad(quad, x, y); };
+            const double seamA = cellSeamRatio(a, cam, minX, minZ, 64, ix0, ix1, iz0, iz1), seamB = cellSeamRatio(b, cam, minX, minZ, 64, ix0, ix1, iz0, iz1);
+            const double pa = autocorrPeak(a, inside), pb = autocorrPeak(b, inside);
+            std::printf("[scene3d] canopy seams at %2.0f deg: brightness step across cell lines against lines inside cells x%.2f trees, x%.2f canopy; strongest repeat %.2f trees, %.2f canopy\n", elev, seamA, seamB, pa, pb);
+            CHECK(seamB > 0 && seamB < 1.2);
+            CHECK(pb < 0.35 && pb < pa + 0.2);
+            UnloadImage(a); UnloadImage(b);
+        }
+    }
+
+    {   // (a) what a far forest submits: 2 x 3.5 km of trees 800-4000 m from the camera in a 480 x 270 picture (where they are
+        // 2-6 px tall): bodies and triangles of the main pass, with trees only (impostors), with the reduced level all the way
+        // out, and with canopy in cells of 64 m. The forest's rim keeps its trees, so the fall is the share of cells inside.
+        CanopyRig r;
+        r.kinds = kinds;
+        r.at = forest({ -1000, -4000 }, { 1000, -500 }, 9);
+        r.from = { 0, 40, 300 };
+        r.to = { 0, 10, -1500 };
+        r.fov = 45;
+        struct Count { long long bodies, triangles; };
+        auto count = [&](const flora::ForestSpec& spec) {
+            r.spec = spec;
+            Comp c = longComp(canopyScene(r), 480, 270);
+            UnloadImage(render(c, 3));
+            return Count{ g3d::instanceBodiesSubmitted(), g3d::instanceTrianglesSubmitted() };
+        };
+        flora::ForestSpec reduced = trees;
+        reduced.impostorFrom = 1e6f;
+        flora::ForestSpec small = canopy;
+        small.canopyCell = 64;
+        const Count imp = count(trees), red = count(reduced), can = count(small), can128 = count(canopy);
+        std::printf("[scene3d] far forest, %zu trees: bodies / triangles %lld / %lld as impostors, %lld / %lld as reduced trees, %lld / %lld as canopy in 64 m cells (bodies x%.3f, triangles x%.2f of the impostors, x%.4f of the reduced trees); 128 m cells %lld / %lld (bodies x%.3f)\n",
+                    r.at.size(), imp.bodies, imp.triangles, red.bodies, red.triangles, can.bodies, can.triangles,
+                    (double)can.bodies / std::max(imp.bodies, 1LL), (double)can.triangles / std::max(imp.triangles, 1LL), (double)can.triangles / std::max(red.triangles, 1LL),
+                    can128.bodies, can128.triangles, (double)can128.bodies / std::max(imp.bodies, 1LL));
+        CHECK(imp.bodies > 5000);
+        CHECK(can.bodies > 0);
+        CHECK(can.bodies * 5 <= imp.bodies);                         // at least 80% fewer bodies
+        CHECK(can.triangles * 5 <= red.triangles);                   // and 80% fewer triangles than the trees it replaces by meshes
+        CHECK(can.triangles < 12 * imp.triangles);                   // a patch has more triangles than a quad a tree: bounded, not hidden
+    }
+
+    {   // (b) the switch-over. Per frame along a camera dolly (2-4 m a frame): the extra change the canopy's hand-over makes
+        // (a 640 m square of forest in 128 m cells, 320 x 180 px, trees 7 px tall at about 1 km) against the extra change the
+        // impostor switch makes today (a 128 m square, the same camera height: with impostors and without them). Then the
+        // whole step: the picture with trees against the picture with patches, against reduced trees against impostors.
+        // Changes are over 16 px cells.
+        const int w = 320, h = 180;
+        auto grey = [&](const Image& img) {
+            std::vector<float> px((size_t)w * h);
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++) { const Color p = GetImageColor(img, x, y); px[(size_t)y * w + x] = (p.r + p.g + p.b) / 3.f; }
+            return px;
+        };
+        auto series = [&](CanopyRig r, const flora::ForestSpec& spec, int from, int to, int step) {
+            std::vector<std::vector<float>> frames;
+            r.spec = spec;
+            for (int d = from; d >= to; d -= step) {
+                r.from = { 0, 30, (float)d };
+                r.to = { 0, 8, 0 };
+                Comp c = longComp(canopyScene(r), w, h);
+                Image img = render(c, 3);
+                frames.push_back(grey(img));
+                UnloadImage(img);
+            }
+            return frames;
+        };
+        struct Pair { double mean; std::vector<float> cells; };
+        auto cellsOf = [&](const std::vector<float>& a, const std::vector<float>& b) {
+            Pair p{ 0, std::vector<float>((size_t)(w / 16) * (h / 16), 0.f) };
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++) {
+                    const float dlt = std::fabs(a[(size_t)y * w + x] - b[(size_t)y * w + x]);
+                    p.mean += dlt / (w * h);
+                    if (y / 16 < h / 16 && x / 16 < w / 16) p.cells[(size_t)(y / 16) * (w / 16) + x / 16] += dlt / 256.f;
+                }
+            return p;
+        };
+        auto changes = [&](const std::vector<std::vector<float>>& f) {
+            std::vector<Pair> out;
+            for (size_t i = 0; i + 1 < f.size(); i++) out.push_back(cellsOf(f[i], f[i + 1]));
+            return out;
+        };
+        // Excess of x over y per pair: mean of the global means, mean of the cells' positive excess, worst cell.
+        auto excess = [&](const std::vector<Pair>& x, const std::vector<Pair>& y) {
+            double mean = 0, cellMean = 0, cellMax = 0;
+            for (size_t i = 0; i < x.size(); i++) {
+                mean += x[i].mean - y[i].mean;
+                double pos = 0;
+                for (size_t k = 0; k < x[i].cells.size(); k++) { const double e = x[i].cells[k] - y[i].cells[k]; pos += std::max(e, 0.0) / x[i].cells.size(); cellMax = std::max(cellMax, e); }
+                cellMean += pos;
+            }
+            const double n = (double)std::max<size_t>(x.size(), 1);
+            return std::array<double, 3>{ mean / n, cellMean / n, cellMax };
+        };
+        CanopyRig big;
+        big.kinds = kinds;
+        big.at = forest({ -320, -320 }, { 320, 320 }, 4);
+        big.fov = 22; big.shadows = false;
+        CanopyRig small = big;
+        small.at = forest({ -64, -64 }, { 64, 64 }, 4);
+        small.fov = 30;
+        flora::ForestSpec noImpostor = trees;
+        noImpostor.impostorFrom = 1e6f;
+        const auto A = changes(series(big, canopy, 1300, 700, 4)), T = changes(series(big, trees, 1300, 700, 4));
+        const auto Ti = changes(series(small, trees, 190, 30, 2)), E = changes(series(small, noImpostor, 190, 30, 2));
+        const auto canopyBand = excess(A, T), impostorBand = excess(Ti, E);
+        // The whole step, at a camera where the cells are all canopy (700 m) and where all trees are impostors (200 m).
+        big.from = { 0, 30, 1300 }; big.to = { 0, 8, 0 };
+        small.from = { 0, 30, 200 }; small.to = { 0, 8, 0 };
+        big.spec = trees;
+        Image bt = shoot(big, w, h, 3);
+        big.spec = canopy;
+        Image bc = shoot(big, w, h, 3);
+        small.spec = trees;
+        Image st = shoot(small, w, h, 3);
+        small.spec = noImpostor;
+        Image sr = shoot(small, w, h, 3);
+        const Pair stepCanopy = cellsOf(grey(bt), grey(bc)), stepImpostor = cellsOf(grey(st), grey(sr));
+        auto worst = [](const Pair& p) { return (double)*std::max_element(p.cells.begin(), p.cells.end()); };
+        std::printf("[scene3d] switch-over per frame (2-4 m dolly), excess over the same frames without the switch: canopy %.3f global mean, cells %.3f mean of positives, %.2f worst cell (%zu pairs); impostor %.3f, %.3f, %.2f (%zu pairs)\n",
+                    canopyBand[0], canopyBand[1], canopyBand[2], A.size(), impostorBand[0], impostorBand[1], impostorBand[2], Ti.size());
+        std::printf("[scene3d] switch-over, the whole step: canopy against trees: global mean %.2f, worst 16 px cell %.2f; reduced trees against impostors: %.2f, %.2f\n",
+                    stepCanopy.mean, worst(stepCanopy), stepImpostor.mean, worst(stepImpostor));
+        CHECK(A.size() > 50 && Ti.size() > 50);
+        CHECK(std::fabs(canopyBand[0]) < std::fabs(impostorBand[0]) + 0.05);
+        CHECK(canopyBand[1] < impostorBand[1]);
+        CHECK(canopyBand[2] < impostorBand[2]);
+        CHECK(stepCanopy.mean < stepImpostor.mean * 1.5 + 1);
+        CHECK(worst(stepCanopy) < worst(stepImpostor) * 1.5 + 5);
+        UnloadImage(bt); UnloadImage(bc); UnloadImage(st); UnloadImage(sr);
+    }
+
+    {   // (d) purity: a frame alone is the frame after others, with the camera dollying through the cross-fade (the cells are
+        // built in another order), wind on.
+        CanopyRig r;
+        r.kinds = kinds;
+        r.at = forest({ -300, -500 }, { 300, 500 }, 6);
+        r.shadows = true;
+        r.spec = canopy;
+        r.spec.wind = 2; r.spec.gust = 0.5f;
+        r.from = { 0, 40, 1100 };
+        r.to = { 0, 6, 0 };
+        r.fov = 22;
+        auto scene = [&] {
+            auto s = canopyScene(r);
+            s->camera.up = [](int t, g3d::Camera& cam) { cam.position.z = 1100.f - 4.f * (float)t; cam.position.x = 8.f * std::sin(0.05f * (float)t); };
+            return s;
+        };
+        Comp a = longComp(scene(), 320, 180), b = longComp(scene(), 320, 180);
+        Image alone = render(a, 22);                                  // camera at z 1012: the cells round z 0 are in the band
+        UnloadImage(render(b, 3));
+        UnloadImage(render(b, 40));
+        UnloadImage(render(b, 22));
+        Image after = render(b, 22);
+        long long differ = 0;
+        int patch = 0;
+        for (int y = 0; y < alone.height; y++)
+            for (int x = 0; x < alone.width; x++) {
+                const Color p = GetImageColor(alone, x, y), q = GetImageColor(after, x, y);
+                differ += p.r != q.r || p.g != q.g || p.b != q.b;
+                patch += forestPixel(p);
+            }
+        std::printf("[scene3d] canopy purity: %d forest px, %lld differ between a frame alone and after others\n", patch, differ);
+        CHECK(patch > 1000);
+        CHECK(differ == 0);
+        UnloadImage(alone); UnloadImage(after);
+    }
+
+    {   // time per frame for a large forest at a far view: printed, never checked. Bodies and triangles are exact.
+        CanopyRig r;
+        r.kinds = kinds;
+        r.at = forest({ -600, -3000 }, { 600, 0 }, 11);
+        r.from = { 0, 60, 250 };
+        r.to = { 0, 10, -1500 };
+        r.fov = 45;
+        std::printf("[scene3d] canopy bench: %zu trees over 1.2 x 3 km, 1280x720, camera 250 m from the forest's edge (canopy past about 1.9 km); bodies, triangles, ms best/mean of 8, first frame\n", r.at.size());
+        long long bodies[4] = { 0, 0, 0, 0 };
+        for (int on = 0; on < 4; on++) {
+            r.spec = on ? canopy : trees;
+            if (on == 2) r.spec.canopyShadows = true;
+            if (on == 3) r.spec.canopyCell = 64;
+            Comp c = longComp(canopyScene(r), 1280, 720);
+            Canvas canvas;
+            canvas.load(c.w, c.h, 1);
+            const auto t0 = std::chrono::steady_clock::now();
+            presentFrame(c, 1, canvas);
+            Image sync = LoadImageFromTexture(canvas.output().texture);
+            const double first = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            UnloadImage(sync);
+            double best = 1e9, mean = 0;
+            for (int f = 0; f < 8; f++) {
+                const auto t1 = std::chrono::steady_clock::now();
+                presentFrame(c, 2 + f, canvas);
+                Image s2 = LoadImageFromTexture(canvas.output().texture);
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
+                UnloadImage(s2);
+                best = std::min(best, ms);
+                mean += ms / 8;
+            }
+            bodies[on] = g3d::instanceBodiesSubmitted();
+            std::printf("[scene3d]   %-22s bodies %lld, triangles %lld, %.1f / %.1f ms, first frame %.0f ms\n", on == 3 ? "canopy, cells of 64 m" : on == 2 ? "canopy, with shadows" : on ? "canopy (128 m cells)" : "trees only", bodies[on],
+                        g3d::instanceTrianglesSubmitted(), best, mean, first);
+            canvas.unload();
+        }
+        CHECK(bodies[1] < bodies[0]);
+    }
+
+    if (dumpDir && std::getenv("RMTN_L4_IMAGES")) {   // pictures to look at: 2.4 x 3 km of forest, sun 25 degrees, canopy off and on
+        flora::ForestSpec shown = canopy;                 // as a script gets it: the default limit
+        shown.canopyMaxElevation = 20;
+        CanopyRig r;
+        r.kinds = kinds;
+        r.at = forest({ -1200, -3000 }, { 1200, 0 }, 21);
+        r.ground = { 78, 96, 52, 255 };
+        r.sunAzimuth = 140;
+        r.sky = true;
+        r.shadowExtent = 500;
+        std::printf("[scene3d] images: %zu trees over 2.4 km x 3 km\n", r.at.size());
+        auto both = [&](const char* name, Vector3 from, Vector3 to, int w, int h, float fov, float sunEl) {
+            r.sun = sunEl;
+            r.from = from; r.to = to; r.fov = fov;
+            for (int on = 0; on < 2; on++) {
+                r.spec = on ? shown : trees;
+                Image img = shoot(r, w, h);
+                char sn[16];
+                std::snprintf(sn, sizeof sn, "_sun%02.0f", sunEl);
+                dump(std::string(name) + sn + (on ? "_canopy.png" : "_trees.png"), img);
+                UnloadImage(img);
+            }
+        };
+        for (float sunEl : { 25.f, 55.f }) {
+            both("landscape_low", { 0, 160, 260 }, { 0, 20, -1400 }, 1280, 720, 40, sunEl);
+            both("landscape_30deg", Vector3Add({ 0, 10, -1400 }, Vector3Scale({ 0, 0.5f, 0.866f }, 1800)), { 0, 10, -1400 }, 1280, 720, 40, sunEl);
+            r.sun = sunEl;
+            r.spec = shown;
+            r.fov = 40;
+            for (int i = 0; i < 8; i++) {                            // the dolly: the camera moves 50 m a frame
+                r.from = { 0, 160, 460.f - 50.f * (float)i }; r.to = { 0, 20, -1400 };
+                Image img = shoot(r, 640, 360);
+                char n[40];
+                std::snprintf(n, sizeof n, "dolly_sun%02.0f_%d.png", sunEl, i);
+                dump(n, img);
+                UnloadImage(img);
+            }
+        }
+    }
+}
+
 // ---- map forests at a distance (geo3d::forest levels by size on screen)
 struct MapForestRig {
     std::shared_ptr<geo3d::Surface> surface;
@@ -3558,6 +4423,12 @@ int main() try {
         CloseWindow();
         return failures ? 1 : 0;
     }
+    if (std::getenv("RMTN_CANOPY_ONLY")) {
+        canopyTests();
+        shutdownGraphics();
+        CloseWindow();
+        return failures ? 1 : 0;
+    }
     if (std::getenv("RMTN_TREES_ONLY")) {            // while working on trees: just those
         trees();
         shutdownGraphics();
@@ -3593,6 +4464,7 @@ int main() try {
     grassField();
     trees();
     mapForestTests();
+    canopyTests();
     devices();
     shutdownGraphics();
     CloseWindow();

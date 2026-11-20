@@ -1547,6 +1547,22 @@ TreePtr makeTree(const TreeSpec& specIn, const TreeBuild& buildIn) {
     t->reducedTriangles = (long long)(lowWood.idx.size() + lowLeaves.idx.size()) / 3;
     for (const Soup* so : { &heroWood, &heroLeaves })
         for (const Vert& v : so->v) { t->top = std::max(t->top, v.p.y); t->radius = std::max(t->radius, std::hypot(v.p.x, v.p.z)); }
+    {   // The crown's colour from above: leaf vertex colours x the leaf picture's opaque texels.
+        double vc[3] = { 0, 0, 0 }, tx[3] = { 0, 0, 0 };
+        for (const Vert& v : heroLeaves.v) { vc[0] += v.c.r; vc[1] += v.c.g; vc[2] += v.c.b; }
+        double solid = 0;
+        for (size_t px = 0; px + 3 < leafPic->px.size(); px += 4)
+            if (leafPic->px[px + 3] >= 128) { tx[0] += leafPic->px[px]; tx[1] += leafPic->px[px + 1]; tx[2] += leafPic->px[px + 2]; solid++; }
+        if (!heroLeaves.v.empty() && b.style != TreeStyle::PaperCut) {
+            const double n = (double)heroLeaves.v.size();
+            const bool plain = b.style == TreeStyle::LowPoly;      // flat colours: no picture
+            for (int k = 0; k < 3; k++) {
+                const double tex = plain || solid < 1 ? 1.0 : tx[k] / solid / 255.0;
+                (&t->crownColour.r)[k] = (unsigned char)std::clamp(std::lround(vc[k] / n * tex), 0l, 255l);
+            }
+        } else t->crownColour = mixColor(s.leafColor, s.bark, s.deciduous && s.season > 0.9f ? 1.f : 0.f);
+        t->crownColour.a = 255;
+    }
     if (canopy)
         for (size_t i = 0; i < canopy->size(); i++) {
             const float* p = &canopy->position[i * 3];
@@ -1656,6 +1672,20 @@ TreePtr makeTree(const TreeSpec& specIn, const TreeBuild& buildIn) {
 // ---- forests -----------------------------------------------------------------------------
 namespace {
 
+// One square of the forest's ground with trees in it, and its canopy patch (made on first need).
+struct CanopyCell {
+    int ix = 0, iz = 0;
+    std::vector<uint32_t> trees;            // placement indices, ascending
+    Vector3 centre{ 0, 0, 0 };              // the trees' mean (mid-height): distances are taken to it
+    float height = 0;                       // the trees' mean height (for the size they show at)
+    bool interior = false;                  // has a patch: it and its eight neighbours are well wooded
+    Vector3 sphere{ 0, 0, 0 };              // a sphere holding the patch (for culling and shadow reach)
+    float sphereRadius = 0;
+    std::shared_ptr<g3d::Instances> inst;
+    g3d::Object3D* child = nullptr;
+    bool built = false;
+};
+
 struct ForestState {
     float yawSign = 1;
     std::vector<Placement> at;
@@ -1664,7 +1694,293 @@ struct ForestState {
     std::vector<size_t> first;      // each kind's first child
     std::vector<g3d::Object3D*> canopies;   // per placement: its splat crown's tilt (or null)
     float pitchSign = 1;            // Instance::pitch's sign that tips a quad's top towards +z
+    // Far canopy (ForestSpec::canopyFrom > 0): the cells, and the grid they sit on.
+    std::vector<CanopyCell> cells;
+    std::vector<int> cellAt;        // cellsX * cellsZ: index into `cells`, or -1
+    int cellsX = 0, cellsZ = 0;
+    float cellSize = 64, minX = 0, minZ = 0;
+    bool splats = false;            // some tree is a splat crown (its tilt object must be hidden with it)
 };
+
+// ---- far canopy: a height field over each cell's crowns ------------------------------------
+// Each tree is a crown: a dome (broadleaf, palm: the upper half of an ellipsoid from the crown's
+// base to its top, vertical at its edge) or a cone (conifer), its outline pushed in and out by
+// noise. A node's height is the highest crown over it, its crown colour that tree's, darker
+// towards the crown base; between crowns it lies at the crown base. Past 1.15 crown radii the
+// forest thins out: the surface slopes to the ground and its alpha falls through the material's
+// cut-out, so the forest's edge is a noisy line. Everything is a function of the node's world
+// position and the trees near it, so neighbouring cells meet exactly.
+constexpr float CANOPY_REACH = 2.7f;        // crown radii from a tree's stem that can still be under its influence
+constexpr float CANOPY_TILE = 24.f;          // metres a repeat of the patches' grain picture covers
+
+// The grain picture of the patches, a darkening multiplier (mean about 0.75) in clumps of leaves
+// from half a metre up, and an alpha that only ever roughens the cut-out near a forest's edge
+// (it stays above 0.6). Tileable; made when a draw first needs it.
+g3d::DynamicTexturePtr canopyTexture() {
+    auto t = std::make_shared<g3d::DynamicTexture>();
+    t->every = 1 << 30;
+    t->make = [](int) {
+        const int S = 512;
+        auto octave = [S](int x, int y, int period, uint32_t seed) {
+            const float fx = (float)x / S * period, fy = (float)y / S * period;
+            const int i = (int)std::floor(fx), j = (int)std::floor(fy);
+            float u = fx - i, v = fy - j;
+            u = u * u * (3 - 2 * u); v = v * v * (3 - 2 * v);
+            auto at = [&](int a, int b) { return hashUnit((uint32_t)(((a % period) + period) % period) * 7919u + 13u, (uint32_t)(((b % period) + period) % period) + seed * 104729u); };
+            return (at(i, j) * (1 - u) + at(i + 1, j) * u) * (1 - v) + (at(i, j + 1) * (1 - u) + at(i + 1, j + 1) * u) * v;
+        };
+        Image img{};
+        img.width = img.height = S; img.mipmaps = 1;
+        img.format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+        img.data = MemAlloc((unsigned)(S * S * 4));
+        unsigned char* d = (unsigned char*)img.data;
+        for (int y = 0; y < S; y++)
+            for (int x = 0; x < S; x++) {
+                const float n = 0.15f * octave(x, y, 24, 2) + 0.35f * octave(x, y, 48, 3) + 0.35f * octave(x, y, 96, 4) + 0.15f * octave(x, y, 192, 5);
+                const float k = smoothstep(0.44f, 0.56f, n);
+                const unsigned char g = (unsigned char)std::lround(255.f * (0.28f + 0.72f * k));
+                unsigned char* q = d + ((size_t)y * S + x) * 4;
+                q[0] = q[1] = q[2] = g;
+                q[3] = (unsigned char)std::lround(255.f * (0.62f + 0.38f * octave(x, y, 96, 6)));
+            }
+        return img;
+    };
+    return t;
+}
+constexpr float CANOPY_GAIN = 1.8f;        // the patch's colour against the crown colour (the trees' own crowns are lit and shaded)
+// How bright a patch must be (Instance::shade) to match the crowns it stands for. A field of
+// crowns is a field of lit spheres: lighter looking down-sun, darker into it, darker still under a low
+// sun, where crowns shade each other; a flat patch is lit by the sun's height alone. The factor is
+// measured, not modelled: canopyTests with RMTN_L4_CALIBRATE=1 renders trees and patches at two shades over a grid of view
+// heights, sun heights and the angle between the sun and the camera, solves for the shade that matches the mean linear
+// luminance of the trees in the cells that have patches, and prints this table. Blended in log space.
+// Axes: view elevation (7 20 35 50 70), sun elevation (15 25 40 55 70), angle between sun and camera seen from above (0 45 90 135 180).
+constexpr float CANOPY_SHADE[5][5][5] = {
+    {
+        { 2.00f, 1.08f, 1.08f, 0.97f, 1.42f },
+        { 0.97f, 1.10f, 0.91f, 1.02f, 1.07f },
+        { 1.11f, 1.02f, 0.69f, 0.68f, 0.66f },
+        { 0.93f, 0.81f, 0.55f, 0.46f, 0.44f },
+        { 0.69f, 0.62f, 0.46f, 0.37f, 0.35f },
+    },
+    {
+        { 2.00f, 1.78f, 1.12f, 1.07f, 1.61f },
+        { 1.79f, 1.10f, 0.98f, 0.99f, 1.07f },
+        { 1.13f, 1.14f, 0.81f, 0.63f, 0.64f },
+        { 1.10f, 1.01f, 0.70f, 0.41f, 0.41f },
+        { 0.90f, 0.82f, 0.62f, 0.40f, 0.31f },
+    },
+    {
+        { 2.00f, 1.12f, 1.02f, 1.05f, 1.12f },
+        { 1.26f, 1.16f, 0.88f, 0.68f, 0.76f },
+        { 1.16f, 1.12f, 0.77f, 0.36f, 0.37f },
+        { 1.11f, 1.00f, 0.69f, 0.35f, 0.23f },
+        { 0.93f, 0.85f, 0.65f, 0.46f, 0.38f },
+    },
+    {
+        { 1.41f, 1.16f, 1.01f, 0.87f, 1.01f },
+        { 1.15f, 1.17f, 0.91f, 0.50f, 0.56f },
+        { 1.16f, 1.12f, 0.84f, 0.43f, 0.27f },
+        { 1.13f, 1.06f, 0.81f, 0.53f, 0.41f },
+        { 1.03f, 0.97f, 0.80f, 0.63f, 0.56f },
+    },
+    {
+        { 1.15f, 1.10f, 0.90f, 0.60f, 0.61f },
+        { 1.10f, 1.04f, 0.84f, 0.58f, 0.46f },
+        { 1.07f, 1.00f, 0.82f, 0.63f, 0.55f },
+        { 1.05f, 0.99f, 0.84f, 0.69f, 0.63f },
+        { 1.01f, 0.97f, 0.88f, 0.78f, 0.75f },
+    },
+};
+// `toSun` and `toEye` are unit vectors from the patch.
+float canopyShade(Vector3 toSun, Vector3 toEye) {
+    static const float viewAt[5] = { 7, 20, 35, 50, 70 }, sunAt[5] = { 15, 25, 40, 55, 70 }, relAt[5] = { 0, 45, 90, 135, 180 };
+    auto locate = [](const float* axis, float v, int& i, float& t) {
+        v = std::clamp(v, axis[0], axis[4]);
+        i = 0;
+        while (i < 3 && v > axis[i + 1]) i++;
+        t = (v - axis[i]) / (axis[i + 1] - axis[i]);
+    };
+    const float view = std::asin(std::clamp(toEye.y, -1.f, 1.f)) / DEG2RAD, sunEl = std::asin(std::clamp(toSun.y, -1.f, 1.f)) / DEG2RAD;
+    const float hs = std::hypot(toSun.x, toSun.z), he = std::hypot(toEye.x, toEye.z);
+    float rel = 0;
+    if (hs > 1e-4f && he > 1e-4f) rel = std::acos(std::clamp((toSun.x * toEye.x + toSun.z * toEye.z) / (hs * he), -1.f, 1.f)) / DEG2RAD;
+    int vi, si, ri;
+    float vt, st, rt;
+    locate(viewAt, view, vi, vt);
+    locate(sunAt, sunEl, si, st);
+    locate(relAt, rel, ri, rt);
+    float s = 0;
+    for (int a = 0; a < 2; a++)
+        for (int b = 0; b < 2; b++)
+            for (int c = 0; c < 2; c++)
+                s += (a ? vt : 1 - vt) * (b ? st : 1 - st) * (c ? rt : 1 - rt) * std::log(CANOPY_SHADE[vi + a][si + b][ri + c]);
+    return 1.08f * std::exp(s);   // the table is measured over cells of 5 px trees; a 1280x720 30-degree shot of 3 km of forest (canopy test f) wants a little more
+}
+
+
+float canopyReach(const ForestState& st) {
+    float r = 0;
+    for (const Placement& p : st.at) {
+        const Tree& tr = *st.trees[(size_t)std::max(p.variant, 0) % st.trees.size()];
+        r = std::max(r, std::max(tr.spec.crownRadius, 0.8f) * p.scale * CANOPY_REACH);
+    }
+    return r;
+}
+
+void buildPatch(ForestState& st, CanopyCell& cell) {
+    Color meanCrown{ 0, 0, 0, 255 };
+    {
+        float r = 0, g = 0, b = 0;
+        for (const TreePtr& t : st.trees) { r += t->crownColour.r; g += t->crownColour.g; b += t->crownColour.b; }
+        const float n = (float)std::max<size_t>(st.trees.size(), 1);
+        meanCrown = { (unsigned char)(r / n), (unsigned char)(g / n), (unsigned char)(b / n), 255 };
+    }
+    const ForestSpec& f = st.spec;
+    const float C = st.cellSize;
+    const int n = std::clamp((int)std::ceil(C / std::max(f.canopyDetail, 0.25f)), 4, 120);
+    const float step = C / (float)n;
+    const int N = n + 3;                                    // the nodes of the cell, and one more each side for normals
+    const long gx0 = (long)cell.ix * n - 1, gz0 = (long)cell.iz * n - 1;     // global node numbers of node 0
+    auto nodeX = [&](int i) { return st.minX + (float)(gx0 + i) * step; };
+    auto nodeZ = [&](int j) { return st.minZ + (float)(gz0 + j) * step; };
+    const size_t total = (size_t)N * N;
+    std::vector<float> wob(total), bump(total), tint(total);
+    for (int j = 0; j < N; j++)
+        for (int i = 0; i < N; i++) {
+            const float x = nodeX(i), z = nodeZ(j);
+            const size_t k = (size_t)j * N + i;
+            wob[k] = 1 + 0.5f * (noise(x, z, 6.f, 71) * 2 - 1);
+            bump[k] = (noise(x, z, std::max(1.6f * step, 4.f), 72) * 2 - 1);
+            tint[k] = noise(x, z, 24.f, 73);
+        }
+    // The trees that can reach this cell's nodes: its own and the eight round it.
+    std::vector<uint32_t> near;
+    for (int dz = -1; dz <= 1; dz++)
+        for (int dx = -1; dx <= 1; dx++) {
+            const int cx = cell.ix + dx, cz = cell.iz + dz;
+            if (cx < 0 || cz < 0 || cx >= st.cellsX || cz >= st.cellsZ) continue;
+            const int c = st.cellAt[(size_t)cz * st.cellsX + cx];
+            if (c >= 0) near.insert(near.end(), st.cells[(size_t)c].trees.begin(), st.cells[(size_t)c].trees.end());
+        }
+    std::sort(near.begin(), near.end());
+    constexpr float NONE = -1e30f;
+    std::vector<float> h(total, NONE), e(total, 0.f), rel(total, 0.f), gSum(total, 0.f), gWeight(total, 0.f);
+    std::vector<int> owner(total, -1);
+    float groundMin = 1e30f;
+    for (uint32_t id : near) {
+        const Placement& p = st.at[id];
+        const Tree& tr = *st.trees[(size_t)std::max(p.variant, 0) % st.trees.size()];
+        const float s = p.scale, R = std::max(tr.spec.crownRadius, 0.8f) * s;
+        const float top = p.position.y + tr.top * s;
+        const float base = p.position.y + std::clamp(tr.spec.crownBase, 0.f, 0.9f) * tr.top * s;
+        const float span = std::max(top - base, 0.2f), gap = base + 0.62f * span;   // between crowns the canopy closes at 0.62 of the crown
+        const bool cone = tr.spec.form == TreeForm::Conifer;
+        groundMin = std::min(groundMin, p.position.y);
+        const float reach = R * CANOPY_REACH;
+        const int i0 = std::max(0, (int)std::floor((p.position.x - reach - nodeX(0)) / step)), i1 = std::min(N - 1, (int)std::ceil((p.position.x + reach - nodeX(0)) / step));
+        const int j0 = std::max(0, (int)std::floor((p.position.z - reach - nodeZ(0)) / step)), j1 = std::min(N - 1, (int)std::ceil((p.position.z + reach - nodeZ(0)) / step));
+        for (int j = j0; j <= j1; j++)
+            for (int i = i0; i <= i1; i++) {
+                const size_t k = (size_t)j * N + i;
+                const float dx = nodeX(i) - p.position.x, dz = nodeZ(j) - p.position.z;
+                const float u = std::sqrt(dx * dx + dz * dz) / (R * std::max(wob[k], 0.3f));
+                if (u > 0.85f) continue;
+                const float presence = 1 - smoothstep(0.4f, 0.85f, u);
+                float hc;
+                if (u >= 1) hc = gap;
+                else if (cone) hc = gap + (top - gap) * (1 - std::pow(u, 1.4f));
+                else hc = gap + (top - gap) * std::pow(1 - std::pow(u, 2.4f), 0.6f);
+                const float relative = std::clamp((hc - base) / span, 0.f, 1.f);
+                hc += bump[k] * span * (u < 1 ? 0.3f : 0.1f);
+                if (hc > h[k]) { h[k] = hc; rel[k] = relative; owner[k] = (int)id; }
+                e[k] = std::max(e[k], presence);
+                gSum[k] += p.position.y * presence;
+                gWeight[k] += presence;
+            }
+    }
+    if (groundMin > 1e29f) groundMin = 0;
+    // Surface height, alpha and colour per node.
+    std::vector<float> surface(total), alpha(total);
+    for (size_t k = 0; k < total; k++) {
+        if (gWeight[k] <= 0 || h[k] <= NONE) { surface[k] = groundMin; alpha[k] = 0; continue; }
+        const float ground = gSum[k] / gWeight[k];
+        const float lift = smoothstep(0.05f, 0.85f, e[k]);
+        surface[k] = ground + (h[k] - ground) * (0.5f + 0.5f * lift);   // the edge hangs at about the crowns' base, over the trunks
+        alpha[k] = std::clamp((e[k] - 0.04f) / 0.25f, 0.f, 1.f);
+    }
+    // The mesh: the cell's own (n + 1)^2 nodes; quads that can show only.
+    const int V = n + 1;
+    std::vector<float> pos((size_t)V * V * 3), nor((size_t)V * V * 3);
+    std::vector<unsigned char> col((size_t)V * V * 4);
+    Vector3 lo{ 1e30f, 1e30f, 1e30f }, hi{ -1e30f, -1e30f, -1e30f };
+    for (int j = 0; j < V; j++)
+        for (int i = 0; i < V; i++) {
+            const size_t k = (size_t)(j + 1) * N + (size_t)(i + 1);
+            const size_t o = ((size_t)j * V + i);
+            const Vector3 p{ nodeX(i + 1), surface[k], nodeZ(j + 1) };
+            const float dhx = (surface[k + 1] - surface[k - 1]) / (2 * step), dhz = (surface[k + N] - surface[k - N]) / (2 * step);
+            const Vector3 nv = Vector3Normalize({ -dhx * 0.12f, 1, -dhz * 0.12f });   // crowns are rougher than the nodes: lit a little flatter
+            pos[o * 3] = p.x; pos[o * 3 + 1] = p.y; pos[o * 3 + 2] = p.z;
+            nor[o * 3] = nv.x; nor[o * 3 + 1] = nv.y; nor[o * 3 + 2] = nv.z;
+            lo = Vector3Min(lo, p); hi = Vector3Max(hi, p);
+            Color c = { 60, 90, 40, 255 };
+            if (owner[k] >= 0) {
+                const Placement& q = st.at[(size_t)owner[k]];
+                const Tree& tr = *st.trees[(size_t)std::max(q.variant, 0) % st.trees.size()];
+                const float shade = 0.25f + 0.75f * std::pow(rel[k], 1.2f);
+                const float vary = 0.88f + 0.24f * hashUnit(q.id, 5), patch = 0.9f + 0.2f * tint[k];
+                const Color cc = mixColor(tr.crownColour, meanCrown, 0.5f);
+                const float warm = 0.94f + 0.12f * hashUnit(q.id, 6);
+                const float steep = 1 - 0.4f * smoothstep(0.6f, 2.5f, std::hypot(dhx, dhz));
+                const float m = shade * vary * patch * steep * CANOPY_GAIN;
+                c = { (unsigned char)std::clamp(std::lround(cc.r * m * warm), 0l, 255l),
+                      (unsigned char)std::clamp(std::lround(cc.g * m), 0l, 255l),
+                      (unsigned char)std::clamp(std::lround(cc.b * m / warm), 0l, 255l), 255 };
+            }
+            col[o * 4] = c.r; col[o * 4 + 1] = c.g; col[o * 4 + 2] = c.b;
+            col[o * 4 + 3] = (unsigned char)std::lround(alpha[k] * 255.f);
+        }
+    std::vector<unsigned short> idx;
+    for (int j = 0; j < n; j++)
+        for (int i = 0; i < n; i++) {
+            float a = 0;
+            for (int dj = 0; dj < 2; dj++)
+                for (int di = 0; di < 2; di++) a = std::max(a, alpha[(size_t)(j + 1 + dj) * N + (size_t)(i + 1 + di)]);
+            if (a < 0.45f) continue;
+            const unsigned short a0 = (unsigned short)(j * V + i), a1 = (unsigned short)(a0 + 1), b0 = (unsigned short)(a0 + V), b1 = (unsigned short)(b0 + 1);
+            const bool flip = (((unsigned)(i * 73856093) ^ (unsigned)(j * 19349663) ^ (unsigned)(cell.ix * 83492791) ^ (unsigned)(cell.iz * 2654435761u)) >> 7) & 1u;
+            if (flip) { for (unsigned short v : { a0, b0, b1, a0, b1, a1 }) idx.push_back(v); }
+            else for (unsigned short v : { a0, b0, a1, a1, b0, b1 }) idx.push_back(v);   // counter-clockwise from above, the diagonal either way
+        }
+    cell.built = true;
+    if (idx.empty()) return;
+    auto am = std::make_shared<g3d::AnimatedMesh>();
+    am->frames = 1;
+    am->vertices = V * V;
+    am->positions = pos;
+    am->normals = nor;
+    am->centre = Vector3Scale(Vector3Add(lo, hi), 0.5f);
+    am->radius = Vector3Distance(lo, hi) * 0.5f + 0.05f;
+    am->rest = std::make_shared<g3d::Geometry>([pos, nor, col, idx] {
+        Mesh m{};
+        m.vertexCount = (int)(pos.size() / 3);
+        m.triangleCount = (int)idx.size() / 3;
+        m.vertices = (float*)MemAlloc((unsigned)(pos.size() * sizeof(float)));
+        m.normals = (float*)MemAlloc((unsigned)(nor.size() * sizeof(float)));
+        m.texcoords = (float*)MemAlloc((unsigned)(m.vertexCount * 2 * sizeof(float)));
+        m.colors = (unsigned char*)MemAlloc((unsigned)col.size());
+        m.indices = (unsigned short*)MemAlloc((unsigned)(idx.size() * sizeof(unsigned short)));
+        std::copy(pos.begin(), pos.end(), m.vertices);
+        std::copy(nor.begin(), nor.end(), m.normals);
+        for (int k = 0; k < m.vertexCount; k++) { m.texcoords[k * 2] = (pos[(size_t)k * 3] + 0.7f * pos[(size_t)k * 3 + 1]) / CANOPY_TILE; m.texcoords[k * 2 + 1] = (pos[(size_t)k * 3 + 2] - 0.43f * pos[(size_t)k * 3 + 1]) / CANOPY_TILE; }
+        std::copy(col.begin(), col.end(), m.colors);
+        std::copy(idx.begin(), idx.end(), m.indices);
+        UploadMesh(&m, false);
+        return m;
+    });
+    cell.inst->mesh = am;
+}
 
 // Children per tree kind, in this order: the four levels, then one child per impostor picture
 // (VIEWS + row * views + direction), then, with impostorShadows, the same again for the
@@ -1741,7 +2057,7 @@ void place(g3d::Object3D& group, const std::shared_ptr<ForestState>& st, int t) 
     const float blend = std::max(f.blend, 0.01f);
     // The light the impostors' shadows are drawn for: the first that casts one.
     struct { bool on = false, directional = true; Vector3 toward{ 0, 1, 0 }, at{ 0, 0, 0 }, target{ 0, 0, 0 }; float extent = 0; } caster;
-    if (f.impostorShadows)
+    if (f.impostorShadows || (f.canopyShadows && (f.canopyFrom > 0 || f.canopyBelow > 0)))
         if (const g3d::Scene* scene = g3d::drawingScene())
             for (const g3d::Light& l : scene->lights) {
                 if (!l.castShadow) continue;
@@ -1754,19 +2070,23 @@ void place(g3d::Object3D& group, const std::shared_ptr<ForestState>& st, int t) 
                 caster.toward = Vector3Length(away) > 1e-6f ? Vector3Normalize(away) : Vector3{ 0, 1, 0 };
                 break;
             }
-    for (const Placement& p : st->at) {
+    // Coverage of each level: hero, reduced, impostor, and what is left after hiding.
+    auto ramp = [blend](float d, float at) { return std::clamp((d - (at - blend * 0.5f)) / blend, 0.f, 1.f); };
+    // One tree: `cap` is the share of the screen door its cell's canopy leaves it (1 = all).
+    auto one = [&](const Placement& p, float cap) {
         const size_t kind = (size_t)std::max(p.variant, 0) % kinds;
         const Tree& tree = *st->trees[kind];
         const size_t base = st->first[kind];
         const Vector3 mid{ p.position.x, p.position.y + tree.top * p.scale * 0.5f, p.position.z };
         const float d = Vector3Distance(eye, mid);
-        // Coverage of each level: hero, reduced, impostor, and what is left after hiding.
-        auto ramp = [blend](float d, float at) { return std::clamp((d - (at - blend * 0.5f)) / blend, 0.f, 1.f); };
         const bool paper = tree.build.style == TreeStyle::PaperCut;     // one card, no impostors
         const bool near = paper || tree.views.empty();                   // nothing to stand in far away
         const float toLow = paper ? 0.f : ramp(d, f.reducedFrom), toFar = near ? 0.f : ramp(d, f.impostorFrom);
-        const float shown = f.hideFrom > 0 ? 1 - ramp(d, f.hideFrom) : 1;
-        if (shown <= 0) continue;
+        const float shown = std::min(f.hideFrom > 0 ? 1 - ramp(d, f.hideFrom) : 1, cap);
+        if (shown <= 0) {
+            if (tree.canopy) st->canopies[(size_t)(&p - st->at.data())]->visible = false;
+            return;
+        }
         const Sway sway = swayOf(f, wind, p, tree, seconds);
         if (tree.canopy) {                                       // the splat crown leans with the wood
             g3d::Object3D* tilt = st->canopies[(size_t)(&p - st->at.data())];
@@ -1861,7 +2181,7 @@ void place(g3d::Object3D& group, const std::shared_ptr<ForestState>& st, int t) 
             // covers shadowExtent round its target.
             // (Only where the light's map reaches: a directional light's covers shadowExtent round its target.)
             const Vector3 rel = Vector3Subtract(pivot, caster.target);
-            if (caster.on && (!caster.directional || Vector3Length(Vector3Subtract(rel, Vector3Scale(caster.toward, Vector3DotProduct(rel, caster.toward)))) <=
+            if (f.impostorShadows && caster.on && (!caster.directional || Vector3Length(Vector3Subtract(rel, Vector3Scale(caster.toward, Vector3DotProduct(rel, caster.toward)))) <=
                                                        caster.extent * 1.4143f + tree.radius * p.scale + tree.top * p.scale)) {
                 const Vector3 toLight = caster.directional ? caster.toward : Vector3Normalize(Vector3Subtract(caster.at, pivot));
                 const ViewPick s = pickView(tree, toLight, turn);
@@ -1869,6 +2189,153 @@ void place(g3d::Object3D& group, const std::shared_ptr<ForestState>& st, int t) 
                 put(VIEWS + pictures + row * views + v, lo, hi, standIn(row, poseFor(toLight, s.elevation), {}));
             }
         }
+    };
+    if (st->cells.empty()) {
+        for (const Placement& p : st->at) one(p, 1.f);
+        return;
+    }
+    // With canopy: by cell. A cell's trees and its patch share the screen door: the trees keep
+    // [0, 1 - c), the patch the rest, c being how far the cell's trees are into the canopy band.
+    const float aspect = 4.f;                                 // wider than any view: only to skip what cannot show
+    const float cBlend = std::max(f.canopyBlend > 0 ? f.canopyBlend : 0.5f * st->cellSize, 0.01f);   // a whole cell fades together
+    const g3d::Camera& cam = g3d::drawingCamera();
+    // The sun the patches are lit by: the first directional light (toward it, unit).
+    bool haveSun = false;
+    Vector3 toSun{ 0, 1, 0 };
+    if (f.canopyShade <= 0)
+        if (const g3d::Scene* scene = g3d::drawingScene())
+            for (const g3d::Light& l : scene->lights)
+                if (l.type == g3d::Light::Type::Directional) {
+                    const Vector3 away = Vector3Subtract(l.position, l.target);
+                    if (Vector3Length(away) > 1e-6f) { toSun = Vector3Normalize(away); haveSun = true; }
+                    break;
+                }
+    const float rows = g3d::drawingViewportHeight();
+    // Pixels a metre of height covers at a metre's distance (0: unknown, or an orthographic camera).
+    const float perMetre = !cam.orthographic && rows > 0 && cam.fov > 0.1f ? rows / (2.f * std::tan(cam.fov * 0.5f * DEG2RAD)) : 0.f;
+    // Patches are tuned for cameras that look across a forest from low: above `canopyMaxElevation` (the camera's
+    // elevation as seen from the forest's middle) a patch cannot match the trees' brightness (their light depends on
+    // the view and the sky), so every cell keeps its trees.
+    bool canopyAllowed = true;
+    if (f.canopyMaxElevation > 0 && !st->cells.empty()) {
+        const Vector3 mid = Vector3Scale(Vector3Add(st->cells.front().centre, st->cells.back().centre), 0.5f);
+        const Vector3 d = Vector3Subtract(eye, mid);
+        canopyAllowed = std::atan2(d.y, std::hypot(d.x, d.z)) * RAD2DEG <= f.canopyMaxElevation;
+    }
+    for (CanopyCell& cell : st->cells) {
+        const float dCell = Vector3Distance(eye, cell.centre);
+        // Where this cell's patch takes over: `canopyFrom` metres, or the distance at which its trees are
+        // `canopyBelow` px tall, whichever is the more distant.
+        float from = f.canopyFrom;
+        if (f.canopyBelow > 0 && perMetre > 0) from = std::max(from, cell.height * perMetre / f.canopyBelow);
+        from *= 1.f + 0.25f * (2.f * hashUnit((uint32_t)(cell.ix * 7919 + 13), (uint32_t)cell.iz * 104729u + 99u) - 1.f);   // a ragged front, not a line
+        const float c = canopyAllowed && cell.interior && from > 0 ? std::clamp((dCell - (from - cBlend * 0.5f)) / cBlend, 0.f, 1.f) : 0.f;
+        const float hide = f.hideFrom > 0 ? 1 - ramp(dCell, f.hideFrom) : 1.f;
+        if (c < 1)
+            for (uint32_t i : cell.trees) one(st->at[i], 1.f - c);
+        else if (st->splats)
+            for (uint32_t i : cell.trees)
+                if (g3d::Object3D* tilt = st->canopies[i]) tilt->visible = false;
+        if (!cell.child) continue;
+        const float lo = 1.f - c, hi = std::min(1.f, hide);
+        cell.child->visible = false;
+        if (c <= 0 || hi - lo < 1.f / 64) continue;
+        const bool inView = g3d::visibleSphere(cam, aspect, cell.sphere, cell.sphereRadius);
+        const Vector3 rel = Vector3Subtract(cell.sphere, caster.target);
+        const bool inReach = caster.on && f.canopyShadows &&
+            (!caster.directional || Vector3Length(Vector3Subtract(rel, Vector3Scale(caster.toward, Vector3DotProduct(rel, caster.toward)))) <=
+                                        caster.extent * 1.4143f + cell.sphereRadius);
+        if (!inView && !inReach) continue;
+        if (!cell.built) buildPatch(*st, cell);
+        cell.child->visible = true;
+        g3d::Instance in;
+        if (lo <= 1e-4f) in.fade = hi;
+        else if (hi >= 1 - 1e-4f) in.fade = -(1 - lo);
+        else { in.fade = hi; in.fadeFrom = lo; }
+        if (f.canopyShade > 0) in.shade = f.canopyShade;
+        else if (haveSun) {
+            in.shade = canopyShade(toSun, Vector3Normalize(Vector3Subtract(eye, cell.centre)));
+        }
+        cell.child->instances->list.push_back(in);
+    }
+}
+
+// The cells of a forest with canopy, each with its (empty until needed) patch object. Only the
+// placements are looked at: no meshes are made here.
+void setUpCanopy(ForestState& st, g3d::Object3D& group) {
+    const ForestSpec& f = st.spec;
+    if (st.at.empty()) return;
+    st.cellSize = std::max({ f.canopyCell, canopyReach(st) * 1.05f + 1.f, 8.f });
+    const float C = st.cellSize;
+    float maxX = -1e30f, maxZ = -1e30f;
+    st.minX = st.minZ = 1e30f;
+    for (const Placement& p : st.at) {
+        st.minX = std::min(st.minX, p.position.x); maxX = std::max(maxX, p.position.x);
+        st.minZ = std::min(st.minZ, p.position.z); maxZ = std::max(maxZ, p.position.z);
+    }
+    st.cellsX = (int)std::floor((maxX - st.minX) / C) + 1;
+    st.cellsZ = (int)std::floor((maxZ - st.minZ) / C) + 1;
+    if ((double)st.cellsX * st.cellsZ > 4e6) throw std::invalid_argument("flora::addForest: canopyCell is too small for the forest");
+    std::vector<std::vector<uint32_t>> members((size_t)st.cellsX * st.cellsZ);
+    for (size_t i = 0; i < st.at.size(); i++) {
+        const int cx = (int)std::floor((st.at[i].position.x - st.minX) / C), cz = (int)std::floor((st.at[i].position.z - st.minZ) / C);
+        members[(size_t)cz * st.cellsX + cx].push_back((uint32_t)i);
+    }
+    // The patches' material: the first tree's leaves, cut out by the vertex alpha, with no picture.
+    g3d::Material m = st.trees[0]->leaves;
+    m.dynamicMap.reset(); m.map.clear(); m.dynamicNormalMap.reset(); m.normalMap.clear();
+    m.color = WHITE;
+    m.alphaCutoff = 0.5f; m.doubleSided = true;
+    m.roughness = 1.f; m.translucency = 0.15f;
+    m.dynamicMap = canopyTexture();
+    m.castShadow = f.canopyShadows;
+    m.receiveShadow = false;                                 // the relief shades itself in its colours; its own shadow map would speckle it
+    st.cellAt.assign(members.size(), -1);
+    for (int cz = 0; cz < st.cellsZ; cz++)
+        for (int cx = 0; cx < st.cellsX; cx++) {
+            std::vector<uint32_t>& ids = members[(size_t)cz * st.cellsX + cx];
+            if (ids.empty()) continue;
+            CanopyCell cell;
+            cell.ix = cx; cell.iz = cz;
+            cell.trees = std::move(ids);
+            Vector3 sum{ 0, 0, 0 };
+            float lo = 1e30f, hi = -1e30f;
+            for (uint32_t i : cell.trees) {
+                const Placement& p = st.at[i];
+                const Tree& tr = *st.trees[(size_t)std::max(p.variant, 0) % st.trees.size()];
+                sum = Vector3Add(sum, { p.position.x, p.position.y + tr.top * p.scale * 0.5f, p.position.z });
+                lo = std::min(lo, p.position.y); hi = std::max(hi, p.position.y + tr.top * p.scale);
+            }
+            cell.centre = Vector3Scale(sum, 1.f / (float)cell.trees.size());
+            cell.sphere = { st.minX + (cx + 0.5f) * C, 0.5f * (lo + hi), st.minZ + (cz + 0.5f) * C };
+            cell.sphereRadius = std::hypot(C * 0.7072f, 0.5f * (hi - lo) + 1.f);
+            float tall = 0;
+            for (uint32_t i : cell.trees) tall += st.trees[(size_t)std::max(st.at[i].variant, 0) % st.trees.size()]->top * st.at[i].scale / (float)cell.trees.size();
+            cell.height = tall;
+            st.cellAt[(size_t)cz * st.cellsX + cx] = (int)st.cells.size();
+            st.cells.push_back(std::move(cell));
+        }
+    // Only cells well inside the forest get a patch: it and its eight neighbours hold at least half
+    // the median number of trees. The boundary of the forest and of its clearings keep their trees,
+    // so from the side the edge is trees, not the edge of a height field.
+    std::vector<size_t> counts;
+    for (const CanopyCell& c : st.cells) counts.push_back(c.trees.size());
+    std::sort(counts.begin(), counts.end());
+    const size_t enough = (counts[counts.size() / 2] + 3) / 4;
+    auto wooded = [&](int cx, int cz) {
+        if (cx < 0 || cz < 0 || cx >= st.cellsX || cz >= st.cellsZ) return false;
+        const int k = st.cellAt[(size_t)cz * st.cellsX + cx];
+        return k >= 0 && st.cells[(size_t)k].trees.size() >= enough;
+    };
+    for (CanopyCell& cell : st.cells) {
+        bool all = true;
+        for (int dz = -1; dz <= 1; dz++)
+            for (int dx = -1; dx <= 1; dx++) all = all && wooded(cell.ix + dx, cell.iz + dz);
+        if (!all) continue;
+        cell.interior = true;
+        cell.inst = std::make_shared<g3d::Instances>();
+        cell.child = group.add(cell.inst, m);
+        cell.child->visible = false;
     }
 }
 
@@ -1923,7 +2390,9 @@ g3d::Object3D* forestInto(g3d::Object3D* group, const std::vector<Placement>& at
         splats->look.shDegree = 0;
         tilt->add(splats);
         st->canopies.push_back(tilt);
+        st->splats = true;
     }
+    if (spec.canopyFrom > 0 || spec.canopyBelow > 0) setUpCanopy(*st, *group);
     group->up = [st](int t, g3d::Object3D& self) { place(self, st, t); };
     return group;
 }

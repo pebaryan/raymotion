@@ -5,9 +5,13 @@ Status: 0.13. Approved 2026-11-19 with nothing cut; built in the suggested order
 
 1. the leftovers (this plan);
 2. weather and water;
-3. speaking characters (lip-sync facial animation from the voice-over) and character
+3. zooming from space to street (added 2026-11-20). A smooth 3D camera flies from the globe
+   down to a region and a city, through data at several scales and with buildings and terrain.
+   It is also the showcase for weather and water, like a flight from a spaceship into a flight
+   simulator;
+4. speaking characters (lip-sync facial animation from the voice-over) and character
    variation for dialog-based films;
-4. audio and subtitle management.
+5. audio and subtitle management.
 
 This plan gathers what earlier releases left open. Each item has its own test.
 
@@ -114,6 +118,47 @@ beyond that distance stop being drawn.
   - At the switch-over distance, the picture changes by less than the impostor blend does
     today.
   - Frames stay pure.
+
+**Done 2026-11-20, redone after two reviews.** `ForestSpec::canopyBelow` (px; hand-over where a cell's
+trees are under that many pixels tall, about 7; 0 = off), `canopyFrom` (metres, floor), `canopyCell`
+(128 m), `canopyDetail` (3 m), `canopyBlend` (half a cell), `canopyShadows` (false), `canopyShade`
+(0 = by view and sun; > 0 fixed, for calibrating); script keys the same except `canopyShade`. Existing
+films' far pictures don't change. A cell well inside the forest (it and its eight neighbours hold a
+quarter of the median tree count) gets a height-field patch; boundary and clearing cells keep their
+trees. Crowns are domes and cones with noise outlines and relief, nearly flat normals; colour half the
+tree's crown colour and half the forest mean, a non-repeating grain picture; quads triangulated with a
+hashed diagonal. A cell's trees and patch share one screen door by distance; each cell's hand-over is
+jittered +-25% so the front is ragged. Patches are lit by `Instance::shade` from a measured table over
+view elevation x sun elevation x angle between sun and camera (`CANOPY_SHADE`, calibrated by
+`RMTN_L4_CALIBRATE=1`, times 1.08). Patches are built lazily (`raymotion list` unchanged within noise).
+Round 3 (2026-11-20): the 30-degree look did NOT pass, so the canopy is a low-camera feature. Cause found by
+ablation: no per-cell constant (colour, shade, height mean, interior set) explains the blotches; the rest is a smooth
+mismatch between a patch and the trees it replaces that depends on view, sun and the sky's diffuse light (canopy/trees
+luma 0.74-1.0 at sun 25 with a sky, 0.99-1.10 at sun 55; block means off by up to 25-40%), and a fitted smooth
+model of the shade table leaves about 15% rms. `canopyMaxElevation` (default 20 degrees, 0 = no limit): when the
+camera seen from the forest's middle is higher, every cell keeps its trees (checked: 59 px of 921,600 differ).
+Below it, the low shots at sun 25 and 55 pass. The 30-degree study stays in `canopyTests` behind `RMTN_L4_HIGH=1`
+(its checks fail by design). Images: `out/l4/v5`.
+
+What the tests measure (`canopyTests`, `RMTN_CANOPY_ONLY=1`):
+- Trees 5-8 px tall, 7 / 30 / 60 degrees, sun 25: linear luma canopy/trees 1.12 / 1.05 / 1.06;
+  sun 55: 1.10 / 1.13 / 1.09 (bound 0.85-1.15). Grain x0.80-0.92 at sun 25, x0.68-0.81 at sun 55.
+  Strongest repeat 0.13 / 0.03 / 0.04 (sun 25) against 0.08 / 0.04 / 0.10 for trees.
+- Hand-over strip (f), 1280x720, 30 degrees up, sun 25, trees frame against canopy frame on the same
+  pixels: 16-row windows 0.914-1.014, far half 0.954, biggest step between neighbouring windows 0.029
+  (bounds 0.9-1.1, step < 0.06). With the old single gain the same check read 0.82-1.00, far half
+  0.86, step 0.089, and failed.
+- Seams, close: x0.96 / 1.01 against lines inside cells. Purity: 0 of 7,924 px differ.
+- Far forest, 76,954 trees: bodies 145,094 (impostors) -> 16,053 (64 m cells, -89%) or 20,259 (128 m,
+  -86%); triangles x4.35 of the impostors, x0.0031 of reduced trees.
+- Switch-over, 2-4 m dolly: canopy excess -0.012 mean / worst cell 2.8; the impostor switch 34.6.
+- Bench (39,245 trees, 720p, very noisy): trees 29-43 ms, canopy 25-47, shadows 27-42, 64 m 30-62.
+
+Limits: in the 30-degree high shots a few cells still read darker (far left) or greener than the trees
+around them, and the far rows are a touch dark; the table is for one rig and the fudge is empirical;
+clearings smaller than a cell are filled in; no clear frame-time gain at 720p, only fewer bodies and
+triangles. The jitter and the boundary-cell rule were not break-tested. A cell's trees and patch change
+together. Patches may be missing in a reflection that sees cells the main camera does not.
 
 ## L5. Grass that shadows itself
 
