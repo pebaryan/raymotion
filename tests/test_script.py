@@ -34,6 +34,41 @@ void second(int t) {
 '''
 
 
+def png_rows(path):
+    """The rows of an 8-bit RGB or RGBA PNG as bytearrays, and the bytes a pixel takes."""
+    import struct
+    import zlib
+    data = pathlib.Path(path).read_bytes()
+    pos, idat, header = 8, b"", None
+    while pos < len(data):
+        size, tag = struct.unpack(">I4s", data[pos:pos + 8])
+        body = data[pos + 8:pos + 8 + size]
+        if tag == b"IHDR":
+            header = struct.unpack(">IIBBBBB", body)
+        elif tag == b"IDAT":
+            idat += body
+        pos += 12 + size
+    w, h, depth, ctype = header[:4]
+    bpp = {2: 3, 6: 4}[ctype]
+    raw, stride, rows, prev = zlib.decompress(idat), w * bpp, [], bytearray(w * bpp)
+    for y in range(h):
+        kind, line = raw[y * (stride + 1)], bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+        for i in range(stride):
+            a = line[i - bpp] if i >= bpp else 0
+            b = prev[i]
+            c = prev[i - bpp] if i >= bpp else 0
+            if kind == 1: line[i] = (line[i] + a) & 255
+            elif kind == 2: line[i] = (line[i] + b) & 255
+            elif kind == 3: line[i] = (line[i] + ((a + b) >> 1)) & 255
+            elif kind == 4:
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        prev = line
+        rows.append(line)
+    return rows, bpp
+
+
 class Scripts(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="raymotion scripts ", dir=pathlib.Path(EXE).parent)
@@ -178,6 +213,12 @@ void draw(int frame) {
         self.assertIn("strip points", self.run_cli("still", "land", "--script", self.path, "--png", "x.png", ok=False))
         write(hills.replace('"min":[-25,-25],"max":[25,25]', '"min":[-900,-900],"max":[900,900]'), spacing=4)
         self.assertIn("at most", self.run_cli("still", "land", "--script", self.path, "--png", "x.png", ok=False, timeout=90))
+        # Grass shadows: off, and at half density, are accepted (the pixel effect is measured in
+        # scene3d_tests; at this size the shadows hardly show).
+        write(hills, grass_extra=',\\"castShadows\\":false')
+        self.run_cli("still", "land", "--script", self.path, "--at", 3, "--png", "noshadow.png")
+        write(hills, grass_extra=',\\"shadowDensity\\":0.5')
+        self.run_cli("still", "land", "--script", self.path, "--at", 3, "--png", "half.png")
         write(hills, grass_extra=',\\"mask\\":{\\"width\\":2,\\"height\\":2,\\"values\\":[1,1,1,1]}')
         self.assertIn("not both", self.run_cli("still", "land", "--script", self.path, "--png", "x.png", ok=False))
 
@@ -208,6 +249,26 @@ void draw(int frame) { g3d::draw("''' + literal + '''", frame, 0, 0, 160, 90); }
         self.assertNotEqual((self.cwd / "a.png").read_bytes(), (self.cwd / "b.png").read_bytes())
         write({"trees": ["shrub"], "build": build, "at": [[0, 0, 0], [4, 0, -3, 45, 1.5, 0]]})
         self.run_cli("still", "wood", "--script", self.path, "--png", "at.png", timeout=120)
+        # Far canopy: with canopyFrom inside the forest the picture changes, and repeats exactly.
+        far = {"trees": ["shrub", "birch"], "build": build, "wind": 0,
+               "scatter": {"area": {"min": [-60, -60], "max": [60, 60]}, "spacing": 5, "seed": 2}}
+        write(far)
+        self.run_cli("still", "wood", "--script", self.path, "--at", 3, "--png", "far0.png", timeout=120)
+        write(dict(far, canopyFrom=20, canopyCell=16, canopyDetail=2, canopyBlend=4, canopyShadows=False))
+        self.run_cli("still", "wood", "--script", self.path, "--at", 3, "--png", "far1.png", timeout=120)
+        self.run_cli("still", "wood", "--script", self.path, "--at", 3, "--png", "far2.png", timeout=120)
+        self.assertNotEqual((self.cwd / "far0.png").read_bytes(), (self.cwd / "far1.png").read_bytes())
+        self.assertEqual((self.cwd / "far1.png").read_bytes(), (self.cwd / "far2.png").read_bytes())
+        # Far canopy by size on screen (canopyBelow), with no height limit, and with a lone row of
+        # impostor pictures and no impostor shadows: all accepted, and each repeats exactly.
+        write(dict(far, canopyBelow=7, canopyMaxElevation=0))
+        self.run_cli("still", "wood", "--script", self.path, "--at", 3, "--png", "far3.png", timeout=120)
+        self.run_cli("still", "wood", "--script", self.path, "--at", 3, "--png", "far4.png", timeout=120)
+        self.assertEqual((self.cwd / "far3.png").read_bytes(), (self.cwd / "far4.png").read_bytes())
+        write(dict(far, build=dict(build, elevations=1), impostorShadows=False, impostorFrom=30))
+        self.run_cli("still", "wood", "--script", self.path, "--at", 3, "--png", "rows.png", timeout=120)
+        write(dict(far, build=dict(build, elevations=9)))
+        self.assertIn("elevations", self.run_cli("still", "wood", "--script", self.path, "--png", "x.png", ok=False))
         write({"trees": ["baobab"], "build": build, "at": [[0, 0, 0]]})
         self.assertIn("unknown preset", self.run_cli("still", "wood", "--script", self.path, "--png", "x.png", ok=False))
         write({"trees": [], "at": [[0, 0, 0]]})
@@ -320,6 +381,47 @@ void draw(int frame) { flora2d::draw("''' + literal + '''", frame); }
         self.assertIn("needs \"at\"", self.run_cli("still", "flat", "--script", self.path, "--png", "x.png", ok=False))
 
     @unittest.skipUnless(GL, "needs OpenGL")
+    def test_flora_2d_path_meadow(self):
+        # A meadow filling SVG path data stays in its shape (a curved edge and a hole), a
+        # malformed path or rule is refused with a clear message.
+        def write(item):
+            literal = json.dumps({"items": [{"meadow": item}]}).replace("\\", "\\\\").replace('"', '\\"')
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "pm"; c.w = 160; c.h = 90; c.fps = 30; c.duration = 10; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) { flora2d::draw("''' + literal + '''", frame); }
+''')
+
+        def still(name="pm.png"):
+            return self.run_cli("still", "pm", "--script", self.path, "--at", 3, "--png", name, ok=name != "bad.png")
+
+        # a curved-topped shape on the left, with a hole; the right third of the picture is outside
+        d = "M 10 70 C 10 30 90 30 90 70 L 90 88 L 10 88 Z M 40 70 L 40 80 L 60 80 L 60 70 Z"
+        write({"path": d, "rule": "evenodd", "preset": "lawn", "height": 4, "density": 2.5})
+        still()
+        rows, bpp = png_rows(self.cwd / "pm.png")
+
+        def green(x0, y0, x1, y1):
+            n = 0
+            for y in range(y0, y1):
+                for x in range(x0, x1):
+                    r, g, b = rows[y][x * bpp:x * bpp + 3]
+                    n += g > 40 and g > r
+            return n
+        inside, outside, hole = green(14, 60, 36, 86), green(110, 0, 160, 90), green(44, 71, 56, 75)
+        print(f"[flora2d] svg path meadow: {inside} green px inside, {outside} outside, {hole} in the hole")
+        self.assertGreater(inside, 100)
+        self.assertEqual(outside, 0)
+        self.assertLess(hole, 3)
+        write({"path": "M 10 10 L 50 abc Z"})
+        self.assertIn("flora2d meadow path:", still("bad.png"))
+        write({"path": d, "rule": "winding"})
+        self.assertIn("nonzero", still("bad.png"))
+        write({"path": d, "shape": [[0, 0], [1, 1], [0, 1]]})
+        self.assertIn("not both", still("bad.png"))
+
+    @unittest.skipUnless(GL, "needs OpenGL")
     def test_flora_city_and_map(self):
         # A city's vegetation as plants, and forest cover on a map: each changes the picture,
         # and bad descriptors are refused by name.
@@ -366,10 +468,108 @@ void draw(int frame) { g3d::draw("''' + literal + '''", frame, 0, 0, 160, 90); }
         write(globe({"regions": ["FIN", [5, 58, 12, 63]], "spacing": 1, "height": 0.03}))
         self.run_cli("still", "green", "--script", self.path, "--at", 2, "--png", "wooded.png", timeout=120)
         self.assertNotEqual((self.cwd / "bare.png").read_bytes(), (self.cwd / "wooded.png").read_bytes())
+        # Levels by size on screen: the same cover as meshes only (impostorBelow 0, mergeBelow 0) and by
+        # default; far away they differ, and the keys are accepted.
+        far = {"regions": [[5, 55, 25, 65]], "spacing": 0.3, "height": 0.03}
+        write(globe(far))
+        self.run_cli("still", "green", "--script", self.path, "--at", 2, "--png", "levels.png", timeout=120)
+        write(globe(dict(far, impostorBelow=0, mergeBelow=0)))
+        self.run_cli("still", "green", "--script", self.path, "--at", 2, "--png", "meshes.png", timeout=120)
+        self.assertNotEqual((self.cwd / "levels.png").read_bytes(), (self.cwd / "meshes.png").read_bytes())
+        write(globe(dict(far, impostorBelow=20, blend=0.5, mergeBelow=6, dropBelow=1, pictureSpeckle=0)))
+        self.run_cli("still", "green", "--script", self.path, "--at", 2, "--png", "tuned.png", timeout=120)
         write(globe({"regions": ["Atlantis"]}))
         self.assertIn("no country", self.run_cli("still", "green", "--script", self.path, "--png", "x.png", ok=False))
         write(globe({"regions": [[10, 60, 5, 50]]}))
         self.assertIn("[west, south, east, north]", self.run_cli("still", "green", "--script", self.path, "--png", "x.png", ok=False))
+
+    @unittest.skipUnless(GL, "needs OpenGL")
+    def test_environment_faces(self):
+        # A skybox from six cube faces (and from one cross): looking along +x, -z and -x shows
+        # the -x, -z and +x faces; a bad descriptor says what is wrong.
+        import struct
+        import zlib
+
+        def chunk(tag, data):
+            return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
+
+        def write_png(path, w, h, rgb_at):
+            raw = b"".join(b"\0" + b"".join(bytes(rgb_at(x, y)) for x in range(w)) for y in range(h))
+            path.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) +
+                             chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+        def read_pixel(path, px, py):
+            data = path.read_bytes()
+            pos, idat, header = 8, b"", None
+            while pos < len(data):
+                size, tag = struct.unpack(">I4s", data[pos:pos + 8])
+                body = data[pos + 8:pos + 8 + size]
+                if tag == b"IHDR":
+                    header = struct.unpack(">IIBBBBB", body)
+                elif tag == b"IDAT":
+                    idat += body
+                pos += 12 + size
+            w, h, depth, ctype = header[:4]
+            self.assertEqual((depth, header[6]), (8, 0))
+            bpp = {2: 3, 6: 4}[ctype]
+            raw, stride, rows, prev = zlib.decompress(idat), w * bpp, [], bytearray(w * bpp)
+            for y in range(h):
+                kind, line = raw[y * (stride + 1)], bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+                for i in range(stride):
+                    a = line[i - bpp] if i >= bpp else 0
+                    b = prev[i]
+                    c = prev[i - bpp] if i >= bpp else 0
+                    if kind == 1: line[i] = (line[i] + a) & 255
+                    elif kind == 2: line[i] = (line[i] + b) & 255
+                    elif kind == 3: line[i] = (line[i] + ((a + b) >> 1)) & 255
+                    elif kind == 4:
+                        p = a + b - c
+                        pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                        line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+                prev = line
+                rows.append(line)
+            return tuple(rows[py][px * bpp:px * bpp + 3])
+
+        colours = [(220, 40, 40), (40, 200, 200), (40, 200, 40), (200, 40, 200), (40, 40, 220), (220, 220, 40)]
+        names = ["px", "nx", "py", "ny", "pz", "nz"]
+        for name, rgb in zip(names, colours):
+            write_png(self.cwd / f"{name}.png", 16, 16, lambda x, y, rgb=rgb: rgb)
+        # the same six faces as a cross: row 0 +y, row 1 -x +z +x -z, row 2 -y
+        spots = {"py": (1, 0), "nx": (0, 1), "pz": (1, 1), "px": (2, 1), "nz": (3, 1), "ny": (1, 2)}
+        by_name = dict(zip(names, colours))
+        def cross_at(x, y):
+            for name, (cx, cy) in spots.items():
+                if cx == x // 16 and cy == y // 16:
+                    return by_name[name]
+            return (0, 0, 0)
+        write_png(self.cwd / "cross.png", 64, 48, cross_at)
+
+        def draw(environment, target):
+            world = json.dumps({"camera": {"position": [0, 0, 0], "target": target, "fov": 60},
+                                "environment": environment, "showEnvironment": True})
+            literal = world.replace("\\", "\\\\").replace('"', '\\"')
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "cube"; c.w = 64; c.h = 36; c.fps = 30; c.duration = 1; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) { g3d::draw("''' + literal + '''", frame, 0, 0, 64, 36); }
+''')
+            (self.cwd / "sky.png").unlink(missing_ok=True)
+            return self.run_cli("still", "cube", "--script", self.path, "--at", 0, "--ss", 1, "--png", "sky.png", ok=None)
+
+        def near(a, b):
+            return all(abs(x - y) <= 8 for x, y in zip(a, b))
+        files = [f"{n}.png" for n in names]
+        # the faces labelled +x and -x swap sides (packs are left-handed, the engine is not)
+        for target, index in (([1, 0, 0], 1), ([0, 0, -1], 5), ([-1, 0, 0], 0)):
+            draw({"faces": files}, target)
+            self.assertTrue(near(read_pixel(self.cwd / "sky.png", 32, 18), colours[index]), (target, index))
+            draw({"cross": "cross.png"}, target)
+            self.assertTrue(near(read_pixel(self.cwd / "sky.png", 32, 18), colours[index]), ("cross", target))
+        self.assertIn("six files", draw({"faces": files[:5]}, [1, 0, 0]))
+        self.assertIn("exactly one of", draw({"faces": files, "cross": "cross.png"}, [1, 0, 0]))
+        self.assertIn("exactly one of", draw({}, [1, 0, 0]))
+        self.assertIn("file not found", draw({"faces": files[:5] + ["missing.png"]}, [1, 0, 0]))
 
     @unittest.skipUnless(GL, "needs OpenGL")
     def test_flora_prefabs(self):

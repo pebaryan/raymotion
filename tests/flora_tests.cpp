@@ -213,9 +213,41 @@ static void treesCpu() {
         CHECK(t->hero.wood->vertices > 0 && t->hero.wood->vertices < 65536);
         CHECK(t->hero.leaves->vertices > 0 && t->hero.leaves->vertices < 65536);
         CHECK(t->reducedTriangles < t->heroTriangles);
-        CHECK(t->views.size() == 4);
+        CHECK(t->views.size() == 4 * 3 && t->viewElevation.size() == 3);   // 4 directions at 3 elevations
+        CHECK(t->viewElevation[0] == 0 && std::fabs(t->viewElevation[1] - 35) < 1e-3f && std::fabs(t->viewElevation[2] - 70) < 1e-3f);
+        CHECK(t->viewSide.size() == 3 && t->viewSide[2] > 0 && t->viewSide[0] > 0 && t->viewPivot > 0 && t->viewPivot < t->top);
         std::printf("[flora] tree %-8s top %.2f m (spec %.1f), reach %.2f m\n", n, t->top, flora::tree(n).height, t->radius);
         CHECK(t->top > 0.5f * flora::tree(n).height && t->top < 1.2f * flora::tree(n).height + flora::tree(n).leafSize);   // cards stand out
+    }
+    {   // elevations: 1 is the horizon only (pivot at half the quad, as before), 2 is 0 and 50, memory grows with the rows
+        flora::TreeBuild one{ 8, 4, 4, 32 }, two = one, three = one;
+        one.elevations = 1; two.elevations = 2; three.elevations = 3;
+        const flora::TreePtr a1 = flora::makeTree(flora::oak(), one), a2 = flora::makeTree(flora::oak(), two), a3 = flora::makeTree(flora::oak(), three);
+        CHECK(a1->views.size() == 4 && a2->views.size() == 8 && a3->views.size() == 12);
+        CHECK(a1->viewElevation == std::vector<float>{ 0 } && a2->viewElevation.size() == 2 && std::fabs(a2->viewElevation[1] - 50) < 1e-3f);
+        CHECK(std::fabs(a1->viewPivot - 0.5f * a1->viewSide[0]) < 1e-4f);
+        // The old formula: a square of side max(height, 2 * reach) * 1.06, its foot on the ground (the quad
+        // is bottom-anchored), the same for every direction, and every row of a taller stack no smaller.
+        CHECK(std::fabs(a1->viewSide[0] - std::max(a1->top, 2 * a1->radius) * 1.06f) < 1e-3f);
+        for (const auto& q : a1->views) {
+            float lo = 1e9f, hi = -1e9f;
+            for (int v = 0; v < q->vertices; v++) { lo = std::min(lo, q->positions[(size_t)v * 3 + 1]); hi = std::max(hi, q->positions[(size_t)v * 3 + 1]); }
+            CHECK(std::fabs(lo) < 1e-4f && std::fabs(hi - a1->viewSide[0]) < 1e-3f);
+        }
+        CHECK(a3->viewSide[0] != a1->viewSide[0] || a3->viewPivot != a1->viewPivot);   // more rows is not the same picture
+    }
+    {   // what the impostor rows cost to build (printed, not checked: it depends on the machine)
+        for (const char* n : { "oak", "birch", "pine", "spruce" }) {
+            double ms[2];
+            for (int k = 0; k < 2; k++) {
+                flora::TreeBuild b;
+                b.elevations = k == 0 ? 1 : 3;
+                const auto t0 = std::chrono::steady_clock::now();
+                flora::makeTree(flora::tree(n), b);
+                ms[k] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            }
+            std::printf("[flora] makeTree %-7s default build: %.0f ms with 1 row, %.0f ms with 3 (%.2fx)\n", n, ms[0], ms[1], ms[1] / std::max(ms[0], 1e-3));
+        }
     }
     bool threw = false;
     try { flora::tree("baobab"); } catch (const std::invalid_argument&) { threw = true; }
@@ -305,7 +337,7 @@ static void stylesCpu() {
                     l->heroTriangles, p->heroTriangles, r->top, l->top, p->top);
         CHECK(l->heroTriangles > 20 && (std::string(n) == "palm" || l->heroTriangles * 3 < r->heroTriangles));
         CHECK(l->top > 0.75f * r->top && l->top < 1.25f * r->top);
-        CHECK((int)l->views.size() == 4 && l->leaves.alphaCutoff == 0 && !l->leaves.dynamicMap);
+        CHECK((int)l->views.size() == 4 * 3 && l->leaves.alphaCutoff == 0 && !l->leaves.dynamicMap);
         CHECK(p->heroTriangles == 2 && p->views.empty() && p->wood.dynamicMap && p->wood.alphaCutoff > 0);
         CHECK(p->top >= r->top * 0.99f);                                // the card holds the whole tree
         const flora::TreePose full = flora::grownPositions(*l, 1);
@@ -354,6 +386,99 @@ static void flat() {
     const float right = flora2d::bendAt(w, 100, 40);
     w.direction = -1;
     NEAR(flora2d::bendAt(w, 100, 40), -right, 1e-6);
+
+    // Outside motion blur the wind reads t as it is: bendAt equals the formula on integer frames.
+    CHECK(subframe() == 0);
+    flora2d::Wind g;
+    double worst = 0;
+    for (int t : { 0, 1, 17, 90, 301 })
+        for (float x : { 0.f, 150.f, 777.f }) {
+            const float s = t / g.fps, xp = x - g.gustSpeed * s, period = g.gustWidth * 3, phase = 0.3f;
+            const float gust = std::pow(0.5f + 0.5f * std::cos(6.28318531f * xp / period), 8.f) * g.gust;
+            const float want = g.strength * (0.12f + 0.55f * gust + 0.14f * std::sin(6.28318531f * (g.sway * s + phase) + x * 0.004f) +
+                                             0.05f * gust * std::sin(6.28318531f * (3 * s + phase)));
+            worst = std::max(worst, std::fabs((double)want - flora2d::bendAt(g, x, t, phase)));
+        }
+    std::printf("[flora2d] bendAt on integer frames vs the formula: worst difference %.3g\n", worst);
+    CHECK(worst < 1e-6);
+}
+
+// ---- meadows from vector paths
+
+// Distance from p to a ring's edges, and whether p is inside the rings by even-odd.
+static float distToRings(const std::vector<vg::Polyline>& rings, Vector2 p, bool& inside) {
+    float best = 1e30f;
+    inside = false;
+    for (const vg::Polyline& r : rings)
+        for (size_t i = 0; i < r.pts.size(); i++) {
+            const Vector2 a = r.pts[i], b = r.pts[(i + 1) % r.pts.size()];
+            if ((a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
+            const Vector2 ab{ b.x - a.x, b.y - a.y }, ap{ p.x - a.x, p.y - a.y };
+            const float k = std::clamp((ap.x * ab.x + ap.y * ab.y) / std::max(ab.x * ab.x + ab.y * ab.y, 1e-9f), 0.f, 1.f);
+            best = std::min(best, std::hypot(ap.x - k * ab.x, ap.y - k * ab.y));
+        }
+    return best;
+}
+
+static void pathMeadows() {
+    // A shape with a cubic crest and a round hole.
+    const vg::Path outer = vg::Path::parse("M 20 150 C 20 20 280 20 280 150 L 280 190 L 20 190 Z");
+    const vg::Path hole = vg::Path::parse("M 100 130 C 100 100 200 100 200 130 C 200 160 100 160 100 130 Z");
+    vg::Path shape = outer;
+    shape.append(hole);                                                   // same winding: a hole by even-odd
+    vg::Path nz = outer;
+    nz.append(hole.reversed());                                           // opposite winding: a hole by non-zero
+    const flora2d::Grass lawn = [] { flora2d::Grass g = flora2d::lawn(); g.density = 2; return g; }();
+
+    const auto roots = flora2d::meadowRoots(shape, lawn, 5, 0.5f, vg::FillRule::EvenOdd);
+    const auto again = flora2d::meadowRoots(shape, lawn, 5, 0.5f, vg::FillRule::EvenOdd);
+    const auto other = flora2d::meadowRoots(shape, lawn, 6, 0.5f, vg::FillRule::EvenOdd);
+    const auto viaNonZero = flora2d::meadowRoots(nz, lawn, 5, 0.5f, vg::FillRule::NonZero);
+    const auto fine = shape.flatten(0.005f);
+    const auto holeFine = hole.flatten(0.005f);
+    float worstOutside = 0;
+    int inHole = 0, nearCurve = 0;
+    float deepestInHole = 0;
+    for (const Vector2& r : roots) {
+        bool in;
+        const float d = distToRings(fine, r, in);
+        if (!in) worstOutside = std::max(worstOutside, d);
+        bool inH;
+        const float dh = distToRings(holeFine, r, inH);
+        if (inH) deepestInHole = std::max(deepestInHole, dh);
+        inHole += inH && dh > 0.5f;
+        nearCurve += in && d < 1.5f && r.y < 150;                         // roots hugging the curved crest
+    }
+    std::printf("[flora2d] path meadow: %zu roots, worst %.4f px outside the shape (limit 0.5), %d deeper than 0.5 px in the hole (deepest %.4f px), %d within 1.5 px of the crest\n",
+                roots.size(), worstOutside, inHole, deepestInHole, nearCurve);
+    CHECK(roots.size() > 5000 && worstOutside <= 0.5f && inHole == 0 && nearCurve > 20);
+    CHECK(roots.size() == again.size() && std::equal(roots.begin(), roots.end(), again.begin(), [](Vector2 a, Vector2 b) { return a.x == b.x && a.y == b.y; }));
+    CHECK(other.size() != roots.size() || other[0].x != roots[0].x);
+    CHECK(viaNonZero.size() == roots.size() && std::equal(roots.begin(), roots.end(), viaNonZero.begin(), [](Vector2 a, Vector2 b) { return a.x == b.x && a.y == b.y; }));
+    // Without the hole there are roots in that place: the hole is what empties it.
+    const auto whole = flora2d::meadowRoots(outer, lawn, 5, 0.5f);
+    int filled = 0;
+    for (const Vector2& r : whole) { bool in; distToRings(holeFine, r, in); filled += in; }
+    std::printf("[flora2d] the same shape without the hole has %zu roots, %d of them where the hole is\n", whole.size(), filled);
+    CHECK(filled > 500 && whole.size() > roots.size());
+    CHECK(flora2d::meadowRoots(vg::Path{}, lawn).empty() && flora2d::meadowRoots(vg::Path::line({ 0, 0 }, { 10, 10 }), lawn).empty());
+
+    // The polygon overload keeps its roots: golden values recorded from the code before the
+    // path overload existed (the same loop, built on its own).
+    const std::vector<Vector2> quad{ { 60, 90 }, { 260, 90 }, { 300, 190 }, { 20, 190 } };
+    struct Gold { float density, height; uint32_t seed; float persp; size_t n; double sx, sy; float fx, fy, lx, ly; };
+    const Gold golds[] = { { 1.6f, 18, 1, 0.5f, 15345, 2455712.9389, 2192113.2913, 61.4347f, 90.0888f, 298.8576f, 189.2592f },
+                           { 0.9f, 46, 7, 0.3f, 3354, 536489.0985, 476755.2815, 60.3387f, 90.9502f, 297.1361f, 186.0949f } };
+    for (const Gold& k : golds) {
+        flora2d::Grass g; g.density = k.density; g.height = k.height;
+        const auto r = flora2d::meadowRoots(quad, g, k.seed, k.persp);
+        double sx = 0, sy = 0;
+        for (const Vector2& p : r) { sx += p.x; sy += p.y; }
+        std::printf("[flora2d] polygon meadow seed %u: %zu roots (was %zu), sums %.4f %.4f (were %.4f %.4f)\n", k.seed, r.size(), k.n, sx, sy, k.sx, k.sy);
+        CHECK(r.size() == k.n && std::fabs(sx - k.sx) < 0.01 && std::fabs(sy - k.sy) < 0.01);
+        CHECK(r.size() == k.n && std::fabs(r.front().x - k.fx) < 1e-3f && std::fabs(r.front().y - k.fy) < 1e-3f &&
+              std::fabs(r.back().x - k.lx) < 1e-3f && std::fabs(r.back().y - k.ly) < 1e-3f);
+    }
 }
 
 int main() try {
@@ -367,6 +492,7 @@ int main() try {
     growthCpu();
     stylesCpu();
     flat();
+    pathMeadows();
     if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); return 1; }
     std::puts("flora tests passed");
     return 0;

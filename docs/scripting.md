@@ -545,6 +545,17 @@ with a 2:1 image. The callback uses the same `void pixels(int frame, array<uint>
 signature as dynamic maps, receives frame 0, and must fill exactly `width*(width/2)` packed
 pixels. It runs once when the environment is first generated; its width must be even and 16..2048.
 Do not combine the JSON callback with an `environment` path or `studioEnvironment` object.
+A scene descriptor's `environment` is an image path (equirectangular PNG/JPG/HDR), or an object
+that gives a cube skybox: `{"faces": [px, nx, py, ny, pz, nz]}` (six files in the order +x, -x,
++y, -y, +z, -z) or `{"cross": "sky.png"}` (one horizontal cross, a 4x3 grid: `+y` above column 1,
+`-x +z +x -z` along row 1, `-y` below column 1). Packs are labelled for left-handed engines and
+raymotion is right-handed, so the `+x` and `-x` faces swap sides (as in three.js): the face labelled
+`+x` appears toward world -x. Every face stays unmirrored and the sky continuous. Faces must be
+square and equal in size, and are all 8-bit or all HDR (HDR stays linear). They are converted once
+to an equirectangular image, so `environmentIntensity`, `environmentRotation`, `showEnvironment`
+and `fogFromSky` work as for a path. Paths resolve like any other media file. A wrong face count,
+a non-square or mismatched face, a missing file, or both keys at once is an error. `examples/scripts/cube_skybox.as`
+shows it.
 Scene handles also expose `modelAnimationCount(file)`, `modelAnimationIndex(file, name)` and
 `modelAnimationFrames(file, index)` for choosing clips on `Object3D` models; query these in draw
 callbacks, where models are loaded with the graphics context active. `Object3D.lookAt` applies
@@ -712,7 +723,7 @@ and any field value by name to override the preset: `density` (blades a square m
 `height`, `heightVariation`, `width`, `lean`, `segments`, colours `root`, `tip` and `dry`,
 `colorVariation`, `dryness`, wind `windDirection` (`[x, z]`), `sway`, `gust`, `gustSpeed`,
 `gustScale`, `fps`, and detail `tileSize`, `detailDistance`, `fadeStart`, `fadeEnd`,
-`shadowDistance`, `mapResolution`. Optional grids over the area, `mask` (density 0..1),
+`shadowDistance`, `mapResolution`, and `castShadows` (default `true`: the blades go into the shadow maps, so a tall tuft shades the grass behind it; `false` stops it) and `shadowDensity` (default 1, every blade; below 1 is a cheaper random share, with a weave of blade shadows on the soil near the camera as its cost; see docs/flora.md). Optional grids over the area, `mask` (density 0..1),
 `ground` (height) and `tall` (height multiplier), are `{"width": w, "height": h, "values":
 [...]}` row by row from `min` to `max`, read bilinearly. The object's `material` starts from
 the grass material (translucent, matt, no ink lines) and changes only what it names. The field
@@ -740,8 +751,12 @@ A `forest` object grows trees and places them: `trees` (1..8 preset names, or ob
 `autumnColor`, `colorVariation`, `deciduous`, `season`, `sway`, `seed`), then `scatter` (as for
 instances; it picks a tree per spot) or `at` (`[[x, y, z, yaw, scale, tree], ...]`); the
 levels `reducedFrom`, `impostorFrom`, `blend`, `hideFrom`; the wind `windDirection`, `wind`,
-`gust`, `gustSpeed`, `gustScale`; `impostorShadows`; and `build` (`frames`, `loopSeconds`,
-`views`, `viewSize`, `reducedLeaves`). A built tree is kept while its description stays the
+`gust`, `gustSpeed`, `gustScale`; the far canopy (`canopyMaxElevation`, degrees, default 20: a higher camera keeps the trees) `canopyBelow` (pixels, about 7; 0 = off: cells well inside the forest are replaced by one height-field patch where their trees are under that many px tall, and those trees are not drawn) and `canopyFrom` (metres), `canopyCell` (128), `canopyDetail` (3), `canopyBlend` (0 = half a cell) and `canopyShadows` (false); `impostorShadows` (default true: far trees cast the shadow of
+their picture, seen from the first shadow-casting light, within its `shadowExtent`); and `build`
+(`frames`, `loopSeconds`,
+`views`, `viewSize`, `elevations` (1..8, default 3: rows of impostor pictures at 0, 35 and 70
+degrees above the horizon; 4 or more reach 90, straight down; 1 keeps the old horizon-only picture), `reducedLeaves`). A built tree
+is kept while its description stays the
 same; each build takes a few hundred milliseconds, so step `season` rather than animate it
 every frame. See `examples/scripts/flora_forest.as`.
 Growth: grass takes `grow` (0..1, may follow `t`) and `arrival` (`{"from": [x, z], "reach":
@@ -764,11 +779,21 @@ far: shifted by the top-level `"camera"` and faded into `"haze"`) and style keys
 widths, colours, `silhouette`). `"wind"` sets `strength`, `direction`, `sway`, `gust`,
 `gustSpeed` and `gustWidth`. See `examples/scripts/flora_2d.as`.
 
+A meadow takes either `"shape"` (a polygon) or `"path"`: SVG path data such as `"M 40 600
+C 300 300 700 900 1000 600 L 1000 800 Z"`, in the node's px like every other point. Every
+contour is filled (open ones close), curves are flattened to 0.1 px, and `"rule"` is
+`"nonzero"` (the default, as `vg::fill`) or `"evenodd"`; an inner contour is a hole (with
+`nonzero` it must be wound the other way) and holes get no blades. Bad path data is refused
+with `flora2d meadow path: ...` and the offset of the error. The wind reads time as
+`frameTime(t)`, so a `motionBlur(samples, shutter)` on the composition blurs the blades'
+tips in a gust (`examples/scripts/flora_2d_path.as`).
+
 Plants in cities and on maps: a 3D scene's `city` takes `"plants": true` or `{"trees",
 "cover", "treeHeight", "shrubHeight", "shrubSpacing", "grass", "style", "wind", "seed"}`
 (its trees then draw as trees, not solids; see `examples/scripts/city_plants.as`). A
 `geo3d` descriptor takes `"forest": {"regions": ["FIN", [west, south, east, north]],
-"spacing", "height", "heightVariation", "stagger", "seed", "limit"}` with the usual
+"spacing", "height", "heightVariation", "stagger", "seed", "limit", "impostorBelow", "blend",
+"mergeBelow", "dropBelow", "pictureSpeckle"}` (the last five set levels by size on screen: see [flora.md](flora.md)) with the usual
 `start`/`duration` or `progress` reveal, and `geo3d::forest(parent, surface, regionsJson,
 styleJson)` does the same on a handle; see `examples/scripts/geo_forest.as`.
 

@@ -181,12 +181,20 @@ TreeSpec tree(const std::string& name);
 
 // What a tree is built into: two meshes per detail level (wood, leaves) with the wind baked
 // into `frames` frames looping every `loopSeconds`, and impostors (pictures of the tree from
-// `views` directions around it, with normals so they are lit) for the distance.
+// `views` directions around it, with normals so they are lit) for the distance. The pictures
+// are taken at `elevations` heights too, so a tree seen from above is not a side view.
 struct TreeBuild {
     int frames = 24;
     float loopSeconds = 4;
-    int views = 8;                  // impostor directions
-    int viewSize = 192;             // impostor pixels a side
+    int views = 8;                  // impostor directions round the tree
+    int viewSize = 192;             // impostor pixels a side, per view
+    // Impostor heights above the horizon, in equal steps from 0 degrees to 70 (two: 0 and 50; four
+    // or more: up to 90, straight down, where the picture shows the crown and no trunk).
+    // 3 is 0, 35 and 70; 1 is the horizon only (the quad only turns about the vertical, as
+    // before). The atlas holds views x elevations pictures: memory grows with the product.
+    // The pictures are drawn the first time a draw needs them, not by makeTree, so building a tree
+    // (a list, a prepare) stays cheap; the result does not depend on which frame asks first.
+    int elevations = 3;
     float reducedLeaves = 0.3f;     // the reduced level keeps this fraction of cards, enlarged
     TreeStyle style = TreeStyle::Realistic;
     g3d::Shading shading = g3d::Shading::Standard;   // for the wood, leaf and impostor materials
@@ -197,9 +205,18 @@ struct Tree {
     TreeBuild build;
     struct Level { std::shared_ptr<g3d::AnimatedMesh> wood, leaves; };
     Level hero, reduced;
-    std::vector<std::shared_ptr<g3d::AnimatedMesh>> views;   // impostor quads, one per direction
+    // Impostor quads, one per picture: views[row * build.views + k] is direction k (turning from
+    // +z towards +x) at elevation row `row`. Empty for styles with no impostor.
+    std::vector<std::shared_ptr<g3d::AnimatedMesh>> views;
+    std::vector<float> viewElevation;   // degrees above the horizon of each row
+    std::vector<float> viewSide;        // each row's quad side in metres (taller rows are larger,
+                                        // as the tree's outline is taller from above)
+    float viewPivot = 0;                // height of the point every picture is centred on
     g3d::Material wood, leaves, impostor;
     float top = 0, radius = 0;      // highest point; widest reach from the stem
+    // The crown's mean colour from above (leaf vertex colours x the leaf picture's opaque texels;
+    // the bark's for a bare tree): what a forest's far canopy is coloured from.
+    Color crownColour{ 70, 104, 46, 255 };
     long long heroTriangles = 0, reducedTriangles = 0;
     std::shared_ptr<const TreeGrowth> growth;          // what growing needs (flora::addGrowingTree)
     std::shared_ptr<const splat::Cloud> canopy;        // TreeStyle::Splat: the crown, in the tree's space
@@ -211,18 +228,44 @@ TreePtr makeTree(const TreeSpec& spec, const TreeBuild& build = {});
 // How a forest is drawn. Each tree picks its level from its distance to the camera of the view
 // being drawn (g3d::drawingCamera, so a function of t): the full tree, the reduced one, then
 // the impostor, cross-faded over `blend` metres by a screen door (Instance::fade), never
-// popping. Impostors cross-fade between their two nearest directions too. Distances are
-// measured in the forest's own space: leave its object untransformed.
+// popping. Impostors turn to face the camera fully (from above too), and cross-fade between
+// the four nearest pictures (two directions x two elevations) by the same screen door. With
+// `impostorShadows`, each impostor also casts its shadow from a copy of itself that faces the
+// light and uses the picture nearest the light's direction (the first shadow-casting light).
+// Far canopy, for forests seen from so far that a tree is a few pixels tall (set `canopyBelow`
+// to 6-8; `canopyFrom` gives a distance in metres instead, or as a floor). The ground is cut
+// into square cells of `canopyCell` metres. A cell well inside the forest (it and its eight
+// neighbours hold at least a quarter of the median number of trees) gets a patch: a height field just
+// over its crowns (domes and cones with noise-broken outlines and relief), coloured from the
+// trees' crown colours, darker between crowns, and lit like any surface. The forest's boundary
+// and its clearings keep their trees whatever the distance, so the edge a viewer sees from the
+// side is trees. A cell's trees and its patch cross-fade over `canopyBlend` metres (half a cell
+// unless set) by the same screen door, by the distance to the cell's trees; beyond that the
+// cell's trees are not drawn at all, so a far forest costs one body a cell, not one a tree (a
+// larger cell is fewer draws). Patches are made the first frame a cell needs one and can show
+// (in view, or in reach of a shadow), so building a forest costs nothing. With `canopyShadows`
+// a patch casts its shadow, within the light's shadowExtent.
+// Patches match the trees only from low views: a camera higher than `canopyMaxElevation`
+// (20 degrees) above the forest keeps every tree, since from above the patches show as blotches.
+// Distances are measured in the forest's own space: leave its object untransformed.
 struct ForestSpec {
     float reducedFrom = 30, impostorFrom = 80;
     float blend = 6;
     float hideFrom = 0;             // > 0: trees fade out from here over `blend`
+    float canopyFrom = 0;           // > 0: canopy patches replace the trees from this distance (metres)
+    float canopyBelow = 0;          // > 0: ...or where a cell's trees are under this many px tall (try 6-8); with canopyFrom, the farther of the two. Both 0 = off
+    float canopyCell = 128;         // metres a side of a patch's cell (a patch is one draw: smaller cells cost more draws)
+    float canopyDetail = 3;         // metres between a patch's height samples
+    float canopyBlend = 0;          // metres the cross-fade takes (a whole cell fades together; 0 = half a cell)
+    bool canopyShadows = false;     // patches cast shadows (inside the light's shadowExtent; far cells rarely are)
+    float canopyShade = 0;          // 0: patches are as bright as the crowns they stand for, by view and sun; > 0: a fixed brightness factor (1 = plain lit; for calibrating)
+    float canopyMaxElevation = 20;  // degrees: the camera, seen from the forest middle, higher than this keeps every tree (the patches are for low views; 0 = no limit)
     Vector2 windDirection{ 1, 0 };
     float wind = 1;                 // lean and sway together; 0 holds the trees still, at rest
     float gust = 0.6f;              // gust fronts lean the trees further as they pass
     float gustSpeed = 7, gustScale = 50;
     float fps = 30;                 // frames a second, for the wind's clock
-    bool impostorShadows = false;   // impostors face the camera, so their shadows are poor
+    bool impostorShadows = true;    // far trees cast the shadow of their picture, seen from the light
 };
 // Trees at the placements (Placement::variant picks from `trees`, wrapping round). Returns
 // the forest's group; its children are the instanced levels.

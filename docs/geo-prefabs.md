@@ -16,7 +16,7 @@ frames, local to the instance. `ocean`, `land`, `coast`, `border` and `graticule
 base map's colours. `projection` is any name `geo::Projection::named` knows
 (`equalEarth`, `orthographic`, `mercator`, `conicEqualArea`, ...).
 
-`examples/scripts/map_prefabs.as` uses both.
+`examples/scripts/map_prefabs.as` uses both; `examples/showcase/maps_2d.cpp` (`raymotion render maps-2d`) uses them from C++.
 
 ## geo-route
 
