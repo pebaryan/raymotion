@@ -353,7 +353,10 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
 * Vegetation prefabs `flora-meadow`, `flora-tree-grow` and `flora-2d-hill`, and an engine
   showcase (`raymotion render flora`: a meadow, a 5,000-tree fly-over, a growing tree, a 2D
   hillside). The whole vegetation API, measured budgets and what is verified are in
-  [docs/flora.md](docs/flora.md).
+  [docs/flora.md](docs/flora.md). A second showcase, `raymotion render far-and-near`
+  (`examples/showcase/far_and_near.cpp`), descends from a globe of 100,000 trees to a blade of
+  grass and wipes the same frame between the old and the new way at each distance, with the
+  engine's own body, triangle and shadow-blade counts under each side.
 * Lights: up to 8 directional/point/spot lights with range falloff. Any of them can cast
   PCF shadows; they share one shadow atlas (`shadowMapSize` per tile, a tile per
   directional/spot light and six per point light, 16 tiles), with `shadowBias` in world
