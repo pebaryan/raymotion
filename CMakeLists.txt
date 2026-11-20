@@ -204,6 +204,7 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/promo.cpp
     examples/showcase/npr.cpp
     examples/showcase/flora.cpp
+    examples/showcase/maps_2d.cpp
     examples/showcase/diagrams.cpp
     examples/showcase/particles.cpp
     examples/showcase/particles3d.cpp

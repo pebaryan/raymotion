@@ -1181,6 +1181,9 @@ node->fn = [=](const Ctx& cx, int t) {
   speed on screen. `geo::focus(base, box, geometry, padding)` makes the views: a globe
   turns to face the region, a world map keeps north up and only zooms.
 * Prefabs: `geo-route` and `geo-flyto` ([props](docs/geo-prefabs.md)).
+* An engine showcase of all of the above in C++, `raymotion render maps-2d` (a GDP-per-person
+  choropleth from the bundled data, a series over years, a route with its computed length,
+  a globe flying to Kenya, the two prefabs): `examples/showcase/maps_2d.cpp`.
 
 From scripts the same calls take JSON for values and styles; see
 `examples/scripts/map_choropleth.as`, `map_route.as`, `map_timeline.as` and

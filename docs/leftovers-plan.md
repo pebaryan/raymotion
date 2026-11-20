@@ -138,6 +138,18 @@ Tests:
 
 Data comes from the bundled Natural Earth set, and anything else is labelled illustrative.
 
+**Done 2026-11-20.** `maps-2d` (`examples/showcase/maps_2d.cpp`), 32 s, five chapters:
+1. GDP per person from Natural Earth's `gdp_md / pop`, with a colour bar marked "60,000
+   and over".
+2. A `geo::Series` over eight Southeast Asian countries, labelled illustrative and
+   clipped to a panel with `isolate().mask`.
+3. Jakarta–Dubai–Vienna–New York along great circles, with the distance from
+   `geo::length` (17,611 km).
+4. A globe flying to Kenya, which is then highlighted and named.
+5. The `geo-route` and `geo-flyto` prefabs.
+
+There is no audio. The map helpers don't clip to a box, so side-by-side maps need a mask.
+
 ## L9. Bindings, examples, docs and release
 
 - Script keys for L1–L7, landing with each item.
