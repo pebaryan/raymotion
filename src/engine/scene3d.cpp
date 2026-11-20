@@ -1173,10 +1173,12 @@ struct Gpu {
     int frame = 0;                                      // the frame being drawn (for dynamic maps)
     Vector3 viewCam{ 0, 0, 0 };                         // the frame's camera position (fields)
     long long fieldBlades = 0;                          // blades submitted by the main pass this frame
+    long long instanceBodies = 0, instanceTriangles = 0;   // instanced bodies (and their triangles) the main pass drew
 };
 Gpu gpu;
 thread_local const Camera* viewing = nullptr;      // drawingCamera()
 thread_local const Scene* viewingScene = nullptr;  // drawingScene()
+thread_local float viewingHeight = 0;                   // drawingViewportHeight()
 
 Texture2D whiteTexture() { return { rlGetTextureIdDefault(), 1, 1, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 }; }
 
@@ -1796,10 +1798,26 @@ void gatherInstances(const Object3D& o, const Matrix& world, const Cull& k, std:
     if (am.frames <= 0) return;
     out.reserve(in.list.size());
     for (const Instance& i : in.list) {
-        const Matrix tilt = MatrixRotateXYZ(Vector3Scale({ i.pitch, 0, i.bank }, DEG2RAD));
-        const Matrix turn = MatrixMultiply(MatrixRotateXYZ(Vector3Scale({ 0, i.yaw, 0 }, DEG2RAD)),
-                                           MatrixTranslate(i.position.x, i.position.y, i.position.z));
-        Matrix m = MatrixMultiply(MatrixMultiply(MatrixMultiply(MatrixScale(i.scale, i.scale, i.scale), tilt), turn), world);
+        Matrix m;
+        if (Vector3LengthSqr(i.aim) > 1e-12f) {
+            // Directions to a basis: z along aim, y as near aimUp as it can be, x = y cross z.
+            const Vector3 z = Vector3Normalize(i.aim);
+            Vector3 y = Vector3Subtract(i.aimUp, Vector3Scale(z, Vector3DotProduct(i.aimUp, z)));
+            if (Vector3LengthSqr(y) < 1e-8f) y = Vector3Subtract({ 0, 1, 0 }, Vector3Scale(z, z.y));
+            if (Vector3LengthSqr(y) < 1e-8f) y = { 0, 0, 1 };
+            y = Vector3Normalize(y);
+            const Vector3 x = Vector3CrossProduct(y, z);
+            const Matrix basis = { x.x, y.x, z.x, i.position.x,
+                                   x.y, y.y, z.y, i.position.y,
+                                   x.z, y.z, z.z, i.position.z,
+                                   0, 0, 0, 1 };
+            m = MatrixMultiply(MatrixMultiply(MatrixScale(i.scale, i.scale, i.scale), basis), world);
+        } else {
+            const Matrix tilt = MatrixRotateXYZ(Vector3Scale({ i.pitch, 0, i.bank }, DEG2RAD));
+            const Matrix turn = MatrixMultiply(MatrixRotateXYZ(Vector3Scale({ 0, i.yaw, 0 }, DEG2RAD)),
+                                               MatrixTranslate(i.position.x, i.position.y, i.position.z));
+            m = MatrixMultiply(MatrixMultiply(MatrixMultiply(MatrixScale(i.scale, i.scale, i.scale), tilt), turn), world);
+        }
         if (k.on) {
             const float sc = std::max({ std::sqrt(m.m0 * m.m0 + m.m1 * m.m1 + m.m2 * m.m2),
                                         std::sqrt(m.m4 * m.m4 + m.m5 * m.m5 + m.m6 * m.m6),
@@ -2144,6 +2162,10 @@ void drawInstances(const Item& it, Pass pass) {
     SetShaderValue(base, gpu.il[p].verts, &am.vertices, SHADER_UNIFORM_INT);
     SetShaderValue(base, gpu.il[p].rows, &vat.rows, SHADER_UNIFORM_INT);
     bindUnit(VAT_SLOT, vat.tex);
+    if (pass == Pass::Lit) {
+        gpu.instanceBodies += (long long)it.inst->size();
+        gpu.instanceTriangles += (long long)it.inst->size() * am.rest->mesh().triangleCount;
+    }
     DrawMeshInstanced(am.rest->mesh(), mat, it.inst->data(), (int)it.inst->size());
     bindUnit(VAT_SLOT, 0);
 }
@@ -3392,6 +3414,7 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     std::deque<std::vector<FieldTile>> fieldStore;            // and the fields' tiles
     gpu.viewCam = cam.position;                              // fields thin out by distance from it, in every pass
     gpu.fieldBlades = 0;
+    gpu.instanceBodies = gpu.instanceTriangles = 0;
     pruneFields();
     collect(s.objects, MatrixIdentity(), items, emitters, ft, cull, instanceStore, fieldStore);
     const Texture2D envTex = s.sky.enabled ? renderSky(s, ft, target.id, target.texture.width, target.texture.height)
@@ -4116,12 +4139,15 @@ Vector2 Field::bladeRoot(int tx, int tz, uint32_t k) const {
     return { min.x + (tx + (float)(x >> 8) / 16777216.f) * ts, min.y + (tz + (float)(z >> 8) / 16777216.f) * ts };
 }
 long long fieldBladesSubmitted() { return gpu.fieldBlades; }
+long long instanceBodiesSubmitted() { return gpu.instanceBodies; }
+long long instanceTrianglesSubmitted() { return gpu.instanceTriangles; }
 
 const Camera& drawingCamera() {
     static const Camera none{};
     return viewing ? *viewing : none;
 }
 const Scene* drawingScene() { return viewingScene; }
+float drawingViewportHeight() { return viewingHeight; }
 
 Object3D* Scene::add(std::shared_ptr<Splats> s) {
     Object3D* o = add();
@@ -4333,9 +4359,10 @@ void render(Scene& s, int t, const Ctx& c, Rectangle viewport, Camera* camera) {
     struct Viewing {                                      // drawingCamera() while the scene's `up`s run
         const Camera* before;
         const Scene* sceneBefore;
-        Viewing(const Camera* c, const Scene* s) : before(viewing), sceneBefore(viewingScene) { viewing = c; viewingScene = s; }
-        ~Viewing() { viewing = before; viewingScene = sceneBefore; }
-    } viewingNow(&cam, &s);
+        float heightBefore;
+        Viewing(const Camera* c, const Scene* s, float h) : before(viewing), sceneBefore(viewingScene), heightBefore(viewingHeight) { viewing = c; viewingScene = s; viewingHeight = h; }
+        ~Viewing() { viewing = before; viewingScene = sceneBefore; viewingHeight = heightBefore; }
+    } viewingNow(&cam, &s, cull.compH);
     animate(s.objects, t, MatrixIdentity(), cull);
     if (canvasSize().x > 0) {
         sizeSurfaces(s.objects, MatrixIdentity(), cam, cull.screenH * cull.aspect, cull.screenH);

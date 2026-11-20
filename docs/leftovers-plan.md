@@ -134,6 +134,32 @@ L2–L3. Then the default 100,000 trees hold their frame rate when zoomed out.
   - The upright check (every tree along the surface's up at morph 0, 0.5 and 1) still
     passes.
 
+**Done 2026-11-20.** `ForestCover::impostorBelow` (10 px), `blend`, `mergeBelow` (12 px),
+`pictureSpeckle` (0.35) and `dropBelow` (0); script keys the same. A tree under `impostorBelow`
+px is one flora impostor picture, a quad aimed with the new `Instance::aim`/`aimUp` so it
+stands along the surface's up (the elevation and direction are read in the tree's tilted
+frame): it faces the camera, and from 55 to 75 degrees up lies flat along the surface, so
+from straight above trees overlap by their heights alone. The default trees bake four rows
+(0, 30, 60, 90 degrees; `elevations` of 4 or more reach 90) and no trunk above 45 degrees.
+Trees under `mergeBelow` px are thinned by rank and enlarged to keep their area, the quad
+centred at the unenlarged crown's middle (an enlargement that raised the quad made a radial
+swirl) and the fade band a share of the kept trees (a fixed band left the 7-radii patch faint
+and dotted). One picture a tree: the four-way blend left dark spokes in dense forests seen
+from above. Impostors cast no shadow here. Surface points are cached per morph. Counters
+`g3d::instanceBodiesSubmitted/TrianglesSubmitted` and `drawingViewportHeight()` are new.
+100,000 trees at 1280x720: about 62-70 ms every tree a mesh, 7-8 ms at 7 radii and 21-24 ms
+at 3.5 (CPU-bound, on a loaded machine; triangles fall 230 times, bodies 19 times at 7 radii).
+From 1.2 radii and closer (18 px and more) the default forest is meshes. Seen from above and
+from 60 degrees, 3.5 to 1.5 radii, the tests measure orange and brown pixels (0 against 0),
+luminance rings round the point below the camera, the darkest box, the radial structure of the
+strokes (0.005-0.030 against 0.005-0.037 for meshes), blotchiness and grain.
+Limits: a picture is smoother than the faceted mesh (3x3 contrast 0.58-0.7 of the mesh's at
+3.5-2.0 radii, 0.89 at 7) and its crowns read as blotches (8 px cell spread 1.4-1.7 of the
+mesh's); `pictureSpeckle` trades one for the other. The 7-radii patch's silhouette is a few
+pixels larger and lumpier than the meshes' (the merged quads are 4 times as big).
+For a film where that texture change shows in a zoom, set `impostorBelow` and `mergeBelow` to
+0: every tree is then a mesh, as before.
+
 ## L7. 2D vegetation
 
 - `flora2d::meadow` takes a `vg::Path` shape as well as a polygon.

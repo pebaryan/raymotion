@@ -3397,7 +3397,8 @@ geo3d::ForestCover geoForestStyle(const Json& j){
     if(!j.isObject())throw std::runtime_error("geo3d forest style must be an object");
     geo3d::ForestCover st; st.spacing=(float)j.num("spacing",st.spacing); st.height=(float)j.num("height",st.height); st.heightVariation=(float)j.num("heightVariation",st.heightVariation);
     st.stagger=(float)j.num("stagger",st.stagger); st.seed=(uint32_t)j.integer("seed",1); st.limit=std::clamp(j.integer("limit",st.limit),1,200000); st.grow=scriptGeo3DReveal(j);
-    if(!std::isfinite(st.spacing)||st.spacing<0.02f||!std::isfinite(st.height)||st.height<=0||!std::isfinite(st.heightVariation)||!std::isfinite(st.stagger))
+    st.pictureSpeckle=(float)j.num("pictureSpeckle",st.pictureSpeckle); st.impostorBelow=(float)j.num("impostorBelow",st.impostorBelow); st.blend=(float)j.num("blend",st.blend); st.mergeBelow=(float)j.num("mergeBelow",st.mergeBelow); st.dropBelow=(float)j.num("dropBelow",st.dropBelow);
+    if(!std::isfinite(st.spacing)||st.spacing<0.02f||!std::isfinite(st.height)||st.height<=0||!std::isfinite(st.heightVariation)||!std::isfinite(st.stagger)||!std::isfinite(st.impostorBelow)||!std::isfinite(st.blend)||!std::isfinite(st.mergeBelow)||!std::isfinite(st.dropBelow))
         throw std::runtime_error("geo3d forest needs spacing of at least 0.02 degrees and a positive height");
     return st;
 }

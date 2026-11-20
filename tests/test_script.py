@@ -442,6 +442,16 @@ void draw(int frame) { g3d::draw("''' + literal + '''", frame, 0, 0, 160, 90); }
         write(globe({"regions": ["FIN", [5, 58, 12, 63]], "spacing": 1, "height": 0.03}))
         self.run_cli("still", "green", "--script", self.path, "--at", 2, "--png", "wooded.png", timeout=120)
         self.assertNotEqual((self.cwd / "bare.png").read_bytes(), (self.cwd / "wooded.png").read_bytes())
+        # Levels by size on screen: the same cover as meshes only (impostorBelow 0, mergeBelow 0) and by
+        # default; far away they differ, and the keys are accepted.
+        far = {"regions": [[5, 55, 25, 65]], "spacing": 0.3, "height": 0.03}
+        write(globe(far))
+        self.run_cli("still", "green", "--script", self.path, "--at", 2, "--png", "levels.png", timeout=120)
+        write(globe(dict(far, impostorBelow=0, mergeBelow=0)))
+        self.run_cli("still", "green", "--script", self.path, "--at", 2, "--png", "meshes.png", timeout=120)
+        self.assertNotEqual((self.cwd / "levels.png").read_bytes(), (self.cwd / "meshes.png").read_bytes())
+        write(globe(dict(far, impostorBelow=20, blend=0.5, mergeBelow=6, dropBelow=1)))
+        self.run_cli("still", "green", "--script", self.path, "--at", 2, "--png", "tuned.png", timeout=120)
         write(globe({"regions": ["Atlantis"]}))
         self.assertIn("no country", self.run_cli("still", "green", "--script", self.path, "--png", "x.png", ok=False))
         write(globe({"regions": [[10, 60, 5, 50]]}))

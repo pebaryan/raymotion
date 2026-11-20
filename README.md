@@ -340,7 +340,9 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   SolitaryVegetationObjects into trees (as tall as their `height`; conifers by species)
   and its PlantCover into grass or shrubs (`isPlant` to filter the solids out);
   `geo3d::forest` scatters low-poly trees over countries or boxes, standing along the
-  surface's up on a globe, a map or between, and growing in west to east.
+  surface's up on a globe, a map or between, and growing in west to east. Far trees become
+  pictures of themselves by their size on screen (and the farthest merge), so 100,000 of them
+  stay cheap zoomed out.
 * Vegetation prefabs `flora-meadow`, `flora-tree-grow` and `flora-2d-hill`, and an engine
   showcase (`raymotion render flora`: a meadow, a 5,000-tree fly-over, a growing tree, a 2D
   hillside). The whole vegetation API, measured budgets and what is verified are in

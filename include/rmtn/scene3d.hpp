@@ -240,6 +240,12 @@ struct Instance {
     // keeps the band [fadeFrom, fade) of the screen door. Several stand-ins can then share a
     // pixel between them, each in its own band.
     float fadeFrom = 0;
+    // An orientation given as directions, for bodies that stand on a curved surface or face a
+    // viewer: when `aim` is not zero it replaces pitch, bank and yaw. The body's +z turns to
+    // `aim`, and its +y is as near `aimUp` as that allows (so a quad faces the camera and its
+    // top leans along the surface's up). `aimUp` parallel to `aim` falls back to world +y.
+    Vector3 aim{ 0, 0, 0 };
+    Vector3 aimUp{ 0, 1, 0 };
 };
 
 // An object's instances: `up` refills `list` each frame from t (pure, like any `up`). They
@@ -316,6 +322,10 @@ struct Field {
 // Blades the last rendered frame submitted in its main pass, over every field (before the
 // shader thins them by mask and distance; shadow passes not counted): for measuring budgets.
 long long fieldBladesSubmitted();
+// Instanced bodies (trees, say) the last rendered frame drew in its main pass, culled ones not
+// counted, and the triangles they came to: a deterministic measure of what a forest costs.
+long long instanceBodiesSubmitted();
+long long instanceTrianglesSubmitted();
 
 // ------------------------------------------------------------------ gaussian splats
 // A cloud of Gaussian splats (see splat.hpp) drawn in the object's space: one instanced quad
@@ -700,6 +710,10 @@ const Camera& drawingCamera();
 // Inside an `up` callback: the scene being drawn (its lights are final for this frame), or null
 // outside a draw.
 const Scene* drawingScene();
+// Inside an `up` callback: the height in composition px of the view being drawn (the viewport's,
+// or the whole composition's), or 0 outside a draw. With the camera's fov it gives how many
+// pixels something of a known size and distance covers.
+float drawingViewportHeight();
 
 // The camera as render() sees it at frame t: `camera` with its `up` applied (to a copy).
 Camera cameraAt(const Camera& camera, int t);

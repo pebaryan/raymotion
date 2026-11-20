@@ -69,9 +69,9 @@ flora::addForest(*scene, flora::scatter(land, sc, 7), kinds);
   - painted leaf cards (cut out and translucent);
   - wind baked into a loop;
   - three levels: the full tree, a reduced tree, and an impostor (pictures of the tree
-    from 8 directions at each of 3 elevations, 0, 35 and 70 degrees above the horizon, with
+    from 8 directions at each of 3 elevations, 0, 35 and 70 degrees above the horizon (4 or more: up to 90), with
     normals so they are lit). `TreeBuild::elevations` sets the rows: 1 is the horizon only,
-    2 is 0 and 50. The atlas grows with the rows: the default oak's is 2.25 MiB with one row
+    2 is 0 and 50, 4 is 0, 30, 60 and 90. The atlas grows with the rows: the default oak's is 2.25 MiB with one row
     and 6.75 MiB with three (colour and normals, before mipmaps).
 
 **`addForest`:**
@@ -161,6 +161,55 @@ from `frameTime`.
 - The trees stand along the surface's up on a globe, on the map and in between.
 - They grow in from west to east.
 - Script: the `"forest"` key on a geo3d descriptor, or `geo3d::forest`.
+- **Levels by size on screen.** Each tree's height in pixels (composition px, from the camera
+  being drawn: perspective or orthographic) picks its level:
+  - at or above `impostorBelow` (default 10) it is the low-poly mesh;
+  - below it, it is a picture of itself: a quad of the flora impostor atlas (8 directions
+    at 4 heights, 0, 30, 60 and 90 degrees, baked lazily at the first draw) that faces the camera and stands along
+    the surface's up, not the world's, so it is right on the globe, on the map and
+    between. The picture's height and direction are read against the surface's
+    up and the tree's own tilt. One picture a tree (the nearest): the four-way blend of
+    `flora::addForest` leaves cut-out holes that show the quads below as dark spokes in a
+    dense forest seen from above, so the picture changes in steps as the view turns;
+  - the two cross-fade by screen door over `blend` (0.3: a band of 30% of `impostorBelow`,
+    centred on it), so nothing pops;
+  - `impostorBelow: 0` keeps every tree a mesh, as before. Trees whose build brings no pictures
+    (paper cut-outs, splats) stay meshes.
+- **Merging.** Under `mergeBelow` px (default 12) only a fraction `(px / mergeBelow)^2` of the
+  trees stay, chosen by a stable rank, each drawn larger by the inverse root so the area they
+  cover is the same (and the ground's tint under the forest). At 3 px, 6% of the trees are
+  drawn at 12 px. A tree fades by screen door as its rank passes, over a band of 30% of the
+  kept share (a fixed band would leave every tree of the 6% half transparent: a faint, dotted
+  patch at 7 radii). The enlarged quad stays centred where the unenlarged crown's middle is, so
+  from above trees overlap by their own heights, not by how far from the camera they are.
+  `mergeBelow: 0` turns it off. `dropBelow` (default 0) drops trees under a height outright;
+  that lightens the forest's colour, which merging does not.
+- **Shadows.** Impostors cast none (maps seldom use shadow maps, and a shadow only a few
+  pixels long is not worth a second set of bodies). Where a light does cast shadows, a tree's
+  shadow fades out as it becomes a picture. Pictures do receive shadows.
+- The level is a function of the camera's position and the frame, never of the frames before.
+  The forest's `up` must not sit under a moved parent: it reads the camera in the forest's own
+  space (as `flora::addForest` does).
+- A map forest's pictures are matched to the mesh forest's look (`LowPoly` trees only): dimmed a
+  little from above (a faceted crown's picture is brighter than the crown seen from 60 to 90
+  degrees), tinted a little yellower, and each picture's brightness spread by a stable per-tree
+  factor, `pictureSpeckle` (0.35 = 1 +- 35%). The default trees bake four rows (0, 30, 60 and
+  90 degrees, the top row taken from 89.5), and bake no trunk above 45 degrees: from above
+  only a crown shows. Seen from straight above:
+  - from 50 to 75 degrees up, the direction the picture is taken from and its top turn to the
+    camera's own (the screen's up), the same for every tree; from 55 to 75 the quad lies flat
+    along the surface instead of facing the camera (a quad that faces it is tilted by how far
+    the tree is from the point below the camera, so each tree's outer edge covers its outward
+    neighbour: strokes along the radius, a swirl round a dark spot);
+  - what is measured (`mapForestTests`, top-down and from 60 degrees, 3.5 to 1.5 radii): orange
+    (red above green) and brown pixels, luminance in five rings round the middle, the darkest
+    9 px box, the radial structure of the strokes, blotchiness and grain.
+  The known difference: a picture is smoother at the pixel scale than the facets of a mesh a
+  few pixels high (local 3x3 contrast 0.58 to 0.7 of the mesh's at 3.5 to 2.0 radii, top-down) and its
+  crowns read as rounded blotches (8 px cell spread 1.4 to 1.7 of the mesh's). More spread gets
+  grain at the price of blotches (0.5: grain 0.7, blotches 2.2), so 0.35 is the compromise;
+  `impostorBelow` is 10 px so the pictures stand only where a tree is under a dozen pixels and
+  the difference is the least visible. At 2 radii and closer the forest is meshes.
 
 ## Prefabs
 
@@ -244,6 +293,29 @@ milestone's tests print them, so they can be measured again.
 - **Impostor shadows:** from a sun at 25 and 55 degrees the shadowed ground under an oak
   at impostor distance is 1.00 and 0.99 of the full tree's, its centroid within 0.1 m;
   birch 0.92 and 0.84, pine 1.13 and 0.95.
+- **Map forest, 100,000 trees at 1280x720 (flat map, readback included):** bodies drawn and
+  triangles, then best-of-18 frame times in a quiet run (a loaded machine reads 1.5 times
+  higher; the test prints the mean too). The frame is CPU-bound here (about 0.15 to 0.3 µs a
+  body to gather and draw), so triangles fall 230 times but ms only follow the body count.
+
+  | camera (globe radii up; tree height) | every tree a mesh | meshes and pictures | and merged (default) |
+  | --- | --- | --- | --- |
+  | 7 (3 px) | 166,679 bodies, 45.9 M tris, 48-53 ms | 100,000, 0.2 M, 61-69 ms | 8,763, 0.018 M, 6.8-8.4 ms |
+  | 3.5 (6 px) | 166,679, 45.9 M, 63-70 ms | 100,000, 0.2 M, 57-64 ms | 35,384, 0.07 M, 21-24 ms |
+  | 1.2 (18 px) | 166,679, 45.9 M, 62-73 ms | 100,000, 0.2 M, 53-60 ms | 166,679 meshes, 45.9 M, 61-73 ms |
+  | 0.35 (62 px) | 120,809, 33.6 M, 61-63 ms | about the same | unchanged (all meshes) |
+
+  Best-of-18 times over three runs on a loaded machine (a quiet run read 5.6 ms at 7 radii and 14
+  at 3.5; this one is noisy: the mean columns ran 30% higher). The "meshes and pictures"
+  column is every tree a picture below 36 px with no merging, to show what merging alone
+  buys: pictures cut triangles 230 times and bodies 1.7 times, not the time; merging cuts the
+  bodies (19 times at 7 radii, 4.7 at 3.5) and with them the frame. At 1.2 radii and closer
+  the default forest is meshes (the picture threshold is 10 px), so nothing is saved there, by
+  choice. The tests check the counts, never a time.
+- **Map forest, one tree against its picture** (the three default trees, morph 0, 0.5 and 1,
+  six directions, 0 to 90 degrees up): silhouette overlap 0.72 to 0.87, luminance 0.88 to
+  1.18 of the mesh's, the same at every morph. The mean colour of a pictures-only forest over
+  a mesh forest, at 13 to 60 px: rgb 65 to 70, 93 to 98, 42 to 46 against 72 to 73, 101, 46.
 - **Scatter:** about 33,000 placements over 1 km² in 0.12 s, measured on the CPU.
 - **Tree build:** 0.1–1 s per preset. A full tree is 9,000–29,000 triangles; the low-poly
   oak is 860 and the paper oak is 2.

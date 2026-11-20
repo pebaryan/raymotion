@@ -188,7 +188,8 @@ struct TreeBuild {
     float loopSeconds = 4;
     int views = 8;                  // impostor directions round the tree
     int viewSize = 192;             // impostor pixels a side, per view
-    // Impostor heights above the horizon, in equal steps from 0 degrees to 70 (two: 0 and 50).
+    // Impostor heights above the horizon, in equal steps from 0 degrees to 70 (two: 0 and 50; four
+    // or more: up to 90, straight down, where the picture shows the crown and no trunk).
     // 3 is 0, 35 and 70; 1 is the horizon only (the quad only turns about the vertical, as
     // before). The atlas holds views x elevations pictures: memory grows with the product.
     // The pictures are drawn the first time a draw needs them, not by makeTree, so building a tree

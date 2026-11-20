@@ -755,7 +755,7 @@ levels `reducedFrom`, `impostorFrom`, `blend`, `hideFrom`; the wind `windDirecti
 their picture, seen from the first shadow-casting light, within its `shadowExtent`); and `build`
 (`frames`, `loopSeconds`,
 `views`, `viewSize`, `elevations` (1..8, default 3: rows of impostor pictures at 0, 35 and 70
-degrees above the horizon; 1 keeps the old horizon-only picture), `reducedLeaves`). A built tree
+degrees above the horizon; 4 or more reach 90, straight down; 1 keeps the old horizon-only picture), `reducedLeaves`). A built tree
 is kept while its description stays the
 same; each build takes a few hundred milliseconds, so step `season` rather than animate it
 every frame. See `examples/scripts/flora_forest.as`.
@@ -792,7 +792,8 @@ Plants in cities and on maps: a 3D scene's `city` takes `"plants": true` or `{"t
 "cover", "treeHeight", "shrubHeight", "shrubSpacing", "grass", "style", "wind", "seed"}`
 (its trees then draw as trees, not solids; see `examples/scripts/city_plants.as`). A
 `geo3d` descriptor takes `"forest": {"regions": ["FIN", [west, south, east, north]],
-"spacing", "height", "heightVariation", "stagger", "seed", "limit"}` with the usual
+"spacing", "height", "heightVariation", "stagger", "seed", "limit", "impostorBelow", "blend",
+"mergeBelow", "dropBelow", "pictureSpeckle"}` (the last five set levels by size on screen: see [flora.md](flora.md)) with the usual
 `start`/`duration` or `progress` reveal, and `geo3d::forest(parent, surface, regionsJson,
 styleJson)` does the same on a handle; see `examples/scripts/geo_forest.as`.
 
