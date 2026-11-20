@@ -109,6 +109,23 @@ L2–L3. Then the default 100,000 trees hold their frame rate when zoomed out.
   - A path meadow's roots stay inside its shape, including its curves.
   - With motion blur, a gusting frame differs from the plain frame only among the tips.
 
+**Done 2026-11-20.** `flora2d::meadow` takes a `vg::Path` with a `vg::FillRule`, and so
+does the script meadow item (`"path"` with SVG data, `"rule"`). Paths are flattened to
+0.1 px, and edges are bucketed by y. `flora2d::meadowRoots` returns the roots without
+drawing them. `bendAt` reads `frameTime(t)`, so `motionBlur` blurs the swaying tips. On
+whole frames the output is unchanged. Example: `flora_2d_path.as`.
+
+Tests:
+- `flora_tests`:
+  - Path meadow: 21,339 roots, worst 0.046 px outside the curved edge, none in the hole.
+  - The polygon meadow gives the same roots and sums as before.
+  - `bendAt` on whole frames matches the formula exactly.
+- `flora2d_render_tests`:
+  - With blur, 4,892 px change in the tip band, 0 at the roots and 0 in the ground.
+  - A still wind renders the same with blur on and off.
+- `test_script.py`, `test_flora_2d_path_meadow`: 572 px inside, 0 outside, 0 in the hole;
+  a bad path, rule or key is refused.
+
 ## L8. C++ showcase for the 2D map helpers
 
 `maps-2d`: an engine showcase, not a film, like `flora`. It shows:

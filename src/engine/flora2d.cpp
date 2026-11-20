@@ -122,11 +122,95 @@ bool inside(const std::vector<Vector2>& poly, Vector2 p) {
     return in;
 }
 
+// A path's contours as closed rings, curves flattened to within 0.1 px (open contours close
+// themselves, as a fill does), with the edges bucketed by y so that a point test looks at
+// the few edges near its row. Even-odd and non-zero winding, as vg::fill uses.
+class Rings {
+public:
+    Rings(const vg::Path& path, vg::FillRule rule) : rule_(rule) {
+        for (const vg::Polyline& pl : path.flatten(0.1f)) {
+            const size_t n = pl.pts.size();
+            if (n < 3) continue;
+            for (size_t i = 0; i < n; i++) {
+                const Vector2 a = pl.pts[i], b = pl.pts[(i + 1) % n];
+                if (a.y == b.y) continue;                              // horizontal edges never cross a row
+                edges_.push_back({ a, b });
+                x0 = std::min({ x0, a.x, b.x }); x1 = std::max({ x1, a.x, b.x });
+                y0 = std::min({ y0, a.y, b.y }); y1 = std::max({ y1, a.y, b.y });
+            }
+        }
+        if (edges_.empty()) return;
+        bins_ = std::clamp((int)std::ceil((y1 - y0) / 4.f), 1, 4096);
+        binH_ = std::max((y1 - y0) / bins_, 1e-3f);
+        buckets_.resize((size_t)bins_);
+        for (size_t i = 0; i < edges_.size(); i++) {
+            const int lo = bin(std::min(edges_[i].a.y, edges_[i].b.y)), hi = bin(std::max(edges_[i].a.y, edges_[i].b.y));
+            for (int k = lo; k <= hi; k++) buckets_[(size_t)k].push_back((int)i);
+        }
+    }
+    bool empty() const { return edges_.empty(); }
+    bool contains(Vector2 p) const {
+        if (edges_.empty() || p.y < y0 || p.y > y1) return false;
+        int winding = 0, crossings = 0;
+        for (int i : buckets_[(size_t)bin(p.y)]) {
+            const Edge& e = edges_[(size_t)i];
+            if ((e.a.y > p.y) == (e.b.y > p.y)) continue;
+            if (p.x < (e.b.x - e.a.x) * (p.y - e.a.y) / (e.b.y - e.a.y) + e.a.x) { winding += e.b.y > e.a.y ? 1 : -1; crossings++; }
+        }
+        return rule_ == vg::FillRule::EvenOdd ? (crossings & 1) != 0 : winding != 0;
+    }
+    float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f;
+private:
+    struct Edge { Vector2 a, b; };
+    int bin(float y) const { return std::clamp((int)((y - y0) / binH_), 0, bins_ - 1); }
+    vg::FillRule rule_;
+    std::vector<Edge> edges_;
+    std::vector<std::vector<int>> buckets_;
+    int bins_ = 1;
+    float binH_ = 1;
+};
+
+// Blades of a meadow: rows back (top) to front, each about a seventh of a blade high apart
+// (scaled with distance), kept where `in` says the root is inside. Positions depend on the
+// shape's box, the grass, the seed and `perspective`, and on nothing else.
+template <class In>
+std::vector<BladeAt> meadowBlades(float x0, float x1, float y0, float y1, const In& in, const Grass& g, uint32_t seed,
+                                  float perspective, const Arrival& arrival) {
+    perspective = std::clamp(perspective, 0.f, 0.95f);
+    std::vector<BladeAt> bs;
+    uint64_t i = 0;
+    for (float y = y0; y <= y1 && bs.size() < 200000;) {
+        const float depth = y1 > y0 ? (y - y0) / (y1 - y0) : 1;           // 0 back .. 1 front
+        const float size = 1 - perspective * (1 - depth);
+        const float gap = 1 / (g.density * size);
+        for (float x = x0 + unit(seed, i, 10) * gap; x <= x1; x += gap) {
+            const Vector2 p{ x + (unit(seed, i, 11) - 0.5f) * gap, y + (unit(seed, i, 12) - 0.5f) * g.height * size * 0.12f };
+            if (in(p)) bs.push_back(bladeOf(g, seed, i, p, arrival ? arrival(p) : (x1 > x0 ? (p.x - x0) / (x1 - x0) : 0), size));
+            i++;
+        }
+        y += std::max(g.height * size * 0.14f, 1.f);
+    }
+    return bs;
+}
+std::vector<BladeAt> polygonBlades(const std::vector<Vector2>& shape, const Grass& g, uint32_t seed, float perspective, const Arrival& arrival) {
+    if (shape.size() < 3 || g.density <= 0) return {};
+    float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f;
+    for (const Vector2& p : shape) { x0 = std::min(x0, p.x); x1 = std::max(x1, p.x); y0 = std::min(y0, p.y); y1 = std::max(y1, p.y); }
+    return meadowBlades(x0, x1, y0, y1, [&](Vector2 p) { return inside(shape, p); }, g, seed, perspective, arrival);
+}
+std::vector<BladeAt> pathBlades(const vg::Path& shape, vg::FillRule rule, const Grass& g, uint32_t seed, float perspective, const Arrival& arrival) {
+    if (g.density <= 0) return {};
+    const Rings rings(shape, rule);
+    if (rings.empty()) return {};
+    return meadowBlades(rings.x0, rings.x1, rings.y0, rings.y1, [&](Vector2 p) { return rings.contains(p); }, g, seed, perspective, arrival);
+}
+
 }  // namespace
 
 float bendAt(const Wind& w, float x, int t, float phase) {
     if (w.strength == 0) return 0;
-    const float s = t / std::max(w.fps, 1e-3f), dir = w.direction < 0 ? -1.f : 1.f;
+    // frameTime(t) is t itself except while motion blur samples a moment within the frame.
+    const float s = (float)frameTime(t) / std::max(w.fps, 1e-3f), dir = w.direction < 0 ? -1.f : 1.f;
     const float lean = 0.12f;
     const float sway = w.sway > 0 ? 0.14f * std::sin(TAU2 * (w.sway * s + phase) + x * 0.004f) : 0.f;   // 0: no sway
     const float xp = x - dir * w.gustSpeed * s, period = std::max(w.gustWidth, 1.f) * 3;
@@ -194,25 +278,26 @@ void tuft(const Ctx& c, Vector2 at, const Grass& g, int count, int t, float u, u
 
 void meadow(const Ctx& c, const std::vector<Vector2>& shape, const Grass& g, int t, float u, uint32_t seed, const Wind& w,
             float perspective, const Arrival& arrival) {
-    if (shape.size() < 3 || u <= 0 || g.density <= 0) return;
-    float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f;
-    for (const Vector2& p : shape) { x0 = std::min(x0, p.x); x1 = std::max(x1, p.x); y0 = std::min(y0, p.y); y1 = std::max(y1, p.y); }
-    perspective = std::clamp(perspective, 0.f, 0.95f);
-    std::vector<BladeAt> bs;
-    uint64_t i = 0;
-    // Rows back to front, each about a fifth of a blade high apart (scaled with distance).
-    for (float y = y0; y <= y1 && bs.size() < 200000;) {
-        const float depth = y1 > y0 ? (y - y0) / (y1 - y0) : 1;           // 0 back .. 1 front
-        const float size = 1 - perspective * (1 - depth);
-        const float gap = 1 / (g.density * size);
-        for (float x = x0 + unit(seed, i, 10) * gap; x <= x1; x += gap) {
-            const Vector2 p{ x + (unit(seed, i, 11) - 0.5f) * gap, y + (unit(seed, i, 12) - 0.5f) * g.height * size * 0.12f };
-            if (inside(shape, p)) bs.push_back(bladeOf(g, seed, i, p, arrival ? arrival(p) : (x1 > x0 ? (p.x - x0) / (x1 - x0) : 0), size));
-            i++;
-        }
-        y += std::max(g.height * size * 0.14f, 1.f);
-    }
-    drawBlades(c, bs, g, t, u, seed, w);
+    if (u <= 0) return;
+    drawBlades(c, polygonBlades(shape, g, seed, perspective, arrival), g, t, u, seed, w);
+}
+
+void meadow(const Ctx& c, const vg::Path& shape, const Grass& g, int t, float u, uint32_t seed, const Wind& w, float perspective,
+            const Arrival& arrival, vg::FillRule rule) {
+    if (u <= 0) return;
+    drawBlades(c, pathBlades(shape, rule, g, seed, perspective, arrival), g, t, u, seed, w);
+}
+
+std::vector<Vector2> meadowRoots(const std::vector<Vector2>& shape, const Grass& g, uint32_t seed, float perspective) {
+    std::vector<Vector2> out;
+    for (const BladeAt& b : polygonBlades(shape, g, seed, perspective, {})) out.push_back(b.root);
+    return out;
+}
+
+std::vector<Vector2> meadowRoots(const vg::Path& shape, const Grass& g, uint32_t seed, float perspective, vg::FillRule rule) {
+    std::vector<Vector2> out;
+    for (const BladeAt& b : pathBlades(shape, rule, g, seed, perspective, {})) out.push_back(b.root);
+    return out;
 }
 
 void shrub(const Ctx& c, Vector2 base, const Shrub& s, int t, float u, uint32_t seed, const Wind& w) {

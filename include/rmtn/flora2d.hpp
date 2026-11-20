@@ -12,6 +12,8 @@
 //
 // Coordinates are the node's (composition px, y down); things grow up, toward -y. Every
 // frame is a function of `t` (wind) and `u` (growth) alone: nothing is kept between frames.
+// The wind reads time as frameTime(t), so under motion blur (Comp or Layer::motionBlur) blades
+// are drawn at each sampled moment and their tips blur; without it the wind reads t itself.
 // Growth follows the 3D convention: u = 0 draws nothing, u = 1 the whole plant; grass
 // rises behind a front, a tree's wood runs out from the root over u 0..0.7, its branches
 // thickening behind the front, and the leaves come last.
@@ -70,6 +72,17 @@ void tuft(const Ctx& c, Vector2 at, const Grass& g, int count, int t, float u = 
 // the back by `perspective` (0 = all the same size, 0.6 = the top row 40% of the front's).
 void meadow(const Ctx& c, const std::vector<Vector2>& shape, const Grass& g, int t, float u = 1, uint32_t seed = 1,
             const Wind& w = {}, float perspective = 0.5f, const Arrival& arrival = {});
+// The same filling a vector path: every closed contour (open ones close themselves) is
+// flattened to within 0.1 px, so a root is never more than that outside a curved edge. `rule`
+// is vg::fill's: with NonZero (the default) a hole is a contour wound the other way; with
+// EvenOdd any inner contour is a hole. Holes get no blades.
+void meadow(const Ctx& c, const vg::Path& shape, const Grass& g, int t, float u = 1, uint32_t seed = 1, const Wind& w = {},
+            float perspective = 0.5f, const Arrival& arrival = {}, vg::FillRule rule = vg::FillRule::NonZero);
+// Where a meadow's blades root (node space, back to front), for the same arguments as
+// `meadow` (growth, wind and arrival don't move roots). The same shape and seed give the same roots.
+std::vector<Vector2> meadowRoots(const std::vector<Vector2>& shape, const Grass& g, uint32_t seed = 1, float perspective = 0.5f);
+std::vector<Vector2> meadowRoots(const vg::Path& shape, const Grass& g, uint32_t seed = 1, float perspective = 0.5f,
+                                 vg::FillRule rule = vg::FillRule::NonZero);
 
 struct Shrub {
     float size = 70;            // px across

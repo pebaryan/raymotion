@@ -4758,9 +4758,23 @@ void flora2dDraw(const std::string& source, int frame) {
             lastLine = lineOf(it);
             flora2d::grass(c, lastLine, grassOf(), frame, u, seed, wind);
         } else if (kind == "meadow") {
-            const auto shape = points(it["shape"], "meadow shape");
-            if (shape.size() < 3) throw std::runtime_error("flora2d meadow shape needs 3 or more points");
-            flora2d::meadow(c, shape, grassOf(), frame, u, seed, wind, std::clamp((float)it.num("perspective", 0.5), 0.f, 0.95f));
+            const float perspective = std::clamp((float)it.num("perspective", 0.5), 0.f, 0.95f);
+            if (it.has("path")) {                    // SVG path data; "rule" is vg::fill's
+                if (it.has("shape")) throw std::runtime_error("flora2d meadow takes \"shape\" or \"path\", not both");
+                const std::string d = it.str("path", ""), rule = it.str("rule", "nonzero");
+                if (d.empty() || d.size() > 65536) throw std::runtime_error("flora2d meadow path must be SVG path data up to 64 KiB");
+                if (rule != "nonzero" && rule != "evenodd") throw std::runtime_error("flora2d meadow rule must be \"nonzero\" or \"evenodd\"");
+                vg::Path shape;
+                try { shape = vg::Path::parse(d); }
+                catch (const std::exception& e) { throw std::runtime_error(std::string("flora2d meadow path: ") + e.what()); }
+                if (shape.empty()) throw std::runtime_error("flora2d meadow path has no segments");
+                flora2d::meadow(c, shape, grassOf(), frame, u, seed, wind, perspective, {},
+                                rule == "evenodd" ? vg::FillRule::EvenOdd : vg::FillRule::NonZero);
+            } else {
+                const auto shape = points(it["shape"], "meadow shape");
+                if (shape.size() < 3) throw std::runtime_error("flora2d meadow shape needs 3 or more points");
+                flora2d::meadow(c, shape, grassOf(), frame, u, seed, wind, perspective);
+            }
         } else if (kind == "tuft") {
             flora2d::tuft(c, jsonV2(it["at"]), grassOf(), std::clamp(it.integer("count", 14), 1, 400), frame, u, seed, wind);
         } else if (kind == "shrub" || kind == "tree") {

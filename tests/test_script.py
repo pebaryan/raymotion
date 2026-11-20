@@ -34,6 +34,41 @@ void second(int t) {
 '''
 
 
+def png_rows(path):
+    """The rows of an 8-bit RGB or RGBA PNG as bytearrays, and the bytes a pixel takes."""
+    import struct
+    import zlib
+    data = pathlib.Path(path).read_bytes()
+    pos, idat, header = 8, b"", None
+    while pos < len(data):
+        size, tag = struct.unpack(">I4s", data[pos:pos + 8])
+        body = data[pos + 8:pos + 8 + size]
+        if tag == b"IHDR":
+            header = struct.unpack(">IIBBBBB", body)
+        elif tag == b"IDAT":
+            idat += body
+        pos += 12 + size
+    w, h, depth, ctype = header[:4]
+    bpp = {2: 3, 6: 4}[ctype]
+    raw, stride, rows, prev = zlib.decompress(idat), w * bpp, [], bytearray(w * bpp)
+    for y in range(h):
+        kind, line = raw[y * (stride + 1)], bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+        for i in range(stride):
+            a = line[i - bpp] if i >= bpp else 0
+            b = prev[i]
+            c = prev[i - bpp] if i >= bpp else 0
+            if kind == 1: line[i] = (line[i] + a) & 255
+            elif kind == 2: line[i] = (line[i] + b) & 255
+            elif kind == 3: line[i] = (line[i] + ((a + b) >> 1)) & 255
+            elif kind == 4:
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        prev = line
+        rows.append(line)
+    return rows, bpp
+
+
 class Scripts(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="raymotion scripts ", dir=pathlib.Path(EXE).parent)
@@ -318,6 +353,47 @@ void draw(int frame) { flora2d::draw("''' + literal + '''", frame); }
         self.assertIn("oak, birch, pine", self.run_cli("still", "flat", "--script", self.path, "--png", "x.png", ok=False))
         write(1, [{"tree": {"x": 10}}])
         self.assertIn("needs \"at\"", self.run_cli("still", "flat", "--script", self.path, "--png", "x.png", ok=False))
+
+    @unittest.skipUnless(GL, "needs OpenGL")
+    def test_flora_2d_path_meadow(self):
+        # A meadow filling SVG path data stays in its shape (a curved edge and a hole), a
+        # malformed path or rule is refused with a clear message.
+        def write(item):
+            literal = json.dumps({"items": [{"meadow": item}]}).replace("\\", "\\\\").replace('"', '\\"')
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "pm"; c.w = 160; c.h = 90; c.fps = 30; c.duration = 10; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) { flora2d::draw("''' + literal + '''", frame); }
+''')
+
+        def still(name="pm.png"):
+            return self.run_cli("still", "pm", "--script", self.path, "--at", 3, "--png", name, ok=name != "bad.png")
+
+        # a curved-topped shape on the left, with a hole; the right third of the picture is outside
+        d = "M 10 70 C 10 30 90 30 90 70 L 90 88 L 10 88 Z M 40 70 L 40 80 L 60 80 L 60 70 Z"
+        write({"path": d, "rule": "evenodd", "preset": "lawn", "height": 4, "density": 2.5})
+        still()
+        rows, bpp = png_rows(self.cwd / "pm.png")
+
+        def green(x0, y0, x1, y1):
+            n = 0
+            for y in range(y0, y1):
+                for x in range(x0, x1):
+                    r, g, b = rows[y][x * bpp:x * bpp + 3]
+                    n += g > 40 and g > r
+            return n
+        inside, outside, hole = green(14, 60, 36, 86), green(110, 0, 160, 90), green(44, 71, 56, 75)
+        print(f"[flora2d] svg path meadow: {inside} green px inside, {outside} outside, {hole} in the hole")
+        self.assertGreater(inside, 100)
+        self.assertEqual(outside, 0)
+        self.assertLess(hole, 3)
+        write({"path": "M 10 10 L 50 abc Z"})
+        self.assertIn("flora2d meadow path:", still("bad.png"))
+        write({"path": d, "rule": "winding"})
+        self.assertIn("nonzero", still("bad.png"))
+        write({"path": d, "shape": [[0, 0], [1, 1], [0, 1]]})
+        self.assertIn("not both", still("bad.png"))
 
     @unittest.skipUnless(GL, "needs OpenGL")
     def test_flora_city_and_map(self):

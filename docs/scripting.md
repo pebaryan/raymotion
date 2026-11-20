@@ -775,6 +775,15 @@ far: shifted by the top-level `"camera"` and faded into `"haze"`) and style keys
 widths, colours, `silhouette`). `"wind"` sets `strength`, `direction`, `sway`, `gust`,
 `gustSpeed` and `gustWidth`. See `examples/scripts/flora_2d.as`.
 
+A meadow takes either `"shape"` (a polygon) or `"path"`: SVG path data such as `"M 40 600
+C 300 300 700 900 1000 600 L 1000 800 Z"`, in the node's px like every other point. Every
+contour is filled (open ones close), curves are flattened to 0.1 px, and `"rule"` is
+`"nonzero"` (the default, as `vg::fill`) or `"evenodd"`; an inner contour is a hole (with
+`nonzero` it must be wound the other way) and holes get no blades. Bad path data is refused
+with `flora2d meadow path: ...` and the offset of the error. The wind reads time as
+`frameTime(t)`, so a `motionBlur(samples, shutter)` on the composition blurs the blades'
+tips in a gust (`examples/scripts/flora_2d_path.as`).
+
 Plants in cities and on maps: a 3D scene's `city` takes `"plants": true` or `{"trees",
 "cover", "treeHeight", "shrubHeight", "shrubSpacing", "grass", "style", "wind", "seed"}`
 (its trees then draw as trees, not solids; see `examples/scripts/city_plants.as`). A

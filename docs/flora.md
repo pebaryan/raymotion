@@ -119,6 +119,19 @@ work on a flat composition and on a `g3d::Surface`. They take:
 
 Layer helpers: `groundLine`, `heightAt`, `ground`, `parallax`, `hazed` and `softness`.
 
+**Meadows from a path.** `meadow` takes a `vg::Path` as well as a polygon, with an optional
+`vg::FillRule` (default `NonZero`, as `vg::fill`; with `EvenOdd` any inner contour is a
+hole, with `NonZero` a hole is wound the other way). Curves are flattened to 0.1 px, so a
+root is never more than that outside a curved edge. `meadowRoots` returns where the blades
+root, for tests or for placing things among them. In scripts a meadow item takes `"path"`
+(SVG path data) and `"rule"` instead of `"shape"`. See `examples/scripts/flora_2d_path.as`.
+
+**Motion blur.** The wind reads time as `frameTime(t)`, so with `Comp::motionBlur` (or a
+layer's) the blades are drawn at each sampled moment and their tips blur; roots stay
+sharp, as they barely move. Without motion blur `subframe()` is 0 and the wind reads `t`
+as before. Growth is set by the caller's `u`, so it blurs only if `u` is itself computed
+from `frameTime`.
+
 ## Cities and maps
 
 **`city::addPlants(scene, model, plants)`:**
@@ -242,6 +255,11 @@ Tests: `flora_tests`, `scene3d_tests`, `flora2d_render_tests` and `test_script.p
   - Grass rises in steps under a third of the total.
 - **Styles:** each look draws differently; the sky survives a forest drawn earlier.
 - **2D:** growth, wind, gust travel, parallax, haze and softness.
+- **2D paths and blur:**
+  - Path meadow roots stay within 0.05 px of the shape (limit 0.5), with none in a hole.
+  - The polygon meadow's roots match values recorded before the path overload.
+  - With motion blur the tips differ and the roots and ground don't.
+  - A still wind is unchanged by blur.
 - **Cities and maps:**
   - A species-named pine is taller than its street trees.
   - Lawns become grass and shrub beds become shrubs.
@@ -261,5 +279,4 @@ Tests: `flora_tests`, `scene3d_tests`, `flora2d_render_tests` and `test_script.p
   you ask for them.
 - Map forests have no impostors or splats. Low-poly instances are cheap enough up to the
   default limit.
-- 2D meadows take a polygon, not a `vg::Path`, and 2D blades get no per-blade motion blur.
 - The `flora` showcase is an engine demo, not a film: it has no brief, script or QC review.
