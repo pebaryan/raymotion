@@ -489,10 +489,14 @@ void main() {
 // "Anti-aliased Alpha Test", 2017).
 const char* CUTOUT_FS = R"(
 uniform float alphaCutoff;
+// The uv's screen derivatives, taken first thing in main: after a discard (a cut-out's
+// edge, a screen-door fade) derivatives and implicit-lod texture reads are undefined, and
+// drivers differ there (Mesa's llvmpipe shaded impostor pictures darker than NVIDIA did).
+vec2 uvDx, uvDy;
 bool cutAway(float a, vec2 uv) {
     if (alphaCutoff <= 0.0) return false;
-    vec2 texels = uv * vec2(textureSize(texture0, 0));
-    vec2 d = max(abs(dFdx(texels)), abs(dFdy(texels)));
+    vec2 size = vec2(textureSize(texture0, 0));
+    vec2 d = max(abs(uvDx * size), abs(uvDy * size));
     float mip = max(log2(max(max(d.x, d.y), 1e-6)), 0.0);
     return a * (1.0 + 0.25 * mip) < alphaCutoff;
 }
@@ -519,8 +523,9 @@ uniform sampler2D texture0; uniform vec4 colDiffuse;
 out vec4 finalColor;
 //@CUTOUT_FS@
 void main() {
+    uvDx = dFdx(fragTexCoord); uvDy = dFdy(fragTexCoord);
     if (fadedAway(fragFade)) discard;
-    if (cutAway(texture(texture0, fragTexCoord).a * colDiffuse.a * fragAlpha, fragTexCoord)) discard;
+    if (cutAway(textureGrad(texture0, fragTexCoord, uvDx, uvDy).a * colDiffuse.a * fragAlpha, fragTexCoord)) discard;
     finalColor = vec4(1.0);
 }
 )";
@@ -561,22 +566,28 @@ out vec4 finalColor;
 
 // A tangent-space normal map without stored tangents: the frame is rebuilt from the screen
 // derivatives of position and uv (Schüler, "Normal Mapping Without Precomputed Tangents", 2013).
-vec3 mapNormal(vec3 n, vec3 p, vec2 uv) {
-    vec3 dp1 = dFdx(p), dp2 = dFdy(p);
-    vec2 duv1 = dFdx(uv), duv2 = dFdy(uv);
+vec3 posDx, posDy;                                                 // fragPos's, taken with uvDx and uvDy
+vec3 mapNormal(vec3 n, vec3 p, vec2 uv) {                          // p, uv: fragPos, fragTexCoord
+    vec3 dp1 = posDx, dp2 = posDy;
+    vec2 duv1 = uvDx, duv2 = uvDy;
     vec3 dp2perp = cross(dp2, n), dp1perp = cross(n, dp1);
     vec3 t = dp2perp * duv1.x + dp1perp * duv2.x;
     vec3 b = dp2perp * duv1.y + dp1perp * duv2.y;
     float m = max(dot(t, t), dot(b, b));
     if (m < 1e-20) return n;                                       // no uv change: nothing to map
     float inv = inversesqrt(m);
-    vec3 s = texture(texture2, uv).xyz * 2.0 - 1.0;
+    vec3 s = textureGrad(texture2, uv, uvDx, uvDy).xyz * 2.0 - 1.0;
     s.xy *= normalScale;
     return normalize(mat3(t * inv, b * inv, n) * s);
 }
 
 const float PI = 3.14159265;
-const float SPREAD_POW = 1.5;
+// An impostor texel stands for many leaves: its normal map holds their mean normal, whose
+// length is how alike they face (1: one way; 0.5: spread evenly over the half facing the
+// viewer). Lit, such a spread averages its clamped cosines: for the even half-sphere about
+// the mean that is (1 + cos) / 4, never the mean's own cosine, so it does not go dark
+// where the mean turns from the light. spreadW blends towards it (0 off).
+float spreadW = 0.0;
 
 // ---- shadows: atlas tiles; params = (near, far, perspective, texel size per unit depth)
 float linearDepth(float d, vec4 prm) {
@@ -667,6 +678,7 @@ float lightAt(int i, vec3 n, out vec3 l, out float ndl) {
         if (lightType[i] == 2) atten *= smoothstep(lightCosOuter[i], lightCosInner[i], dot(-l, lightDir[i]));
     }
     ndl = dot(n, l);
+    if (spreadW > 0.0) ndl = mix(max(ndl, 0.0), 0.25 + 0.25 * ndl, spreadW);
     if (ndl <= 0.0 || atten <= 0.0) return 0.0;
     if (lightShadow[i] >= 0 && receiveShadow == 1) {
         int tile = lightShadow[i] + (lightType[i] == 1 ? cubeFace(fragPos - lightPos[i]) : 0);
@@ -745,6 +757,8 @@ vec3 hatch(vec3 albedo, vec3 n) {
 }
 
 void main() {
+    uvDx = dFdx(fragTexCoord); uvDy = dFdy(fragTexCoord);           // before any discard (see uvDx)
+    posDx = dFdx(fragPos); posDy = dFdy(fragPos);
     if (skybox == 1) {
         if (waterOn == 1 && viewPos.y < waterEye) { finalColor = encode(waterScatter, 1.0); return; }
         finalColor = encode(env(normalize(fragPos - viewPos), 0.0) * backdropScale, 1.0);
@@ -754,7 +768,7 @@ void main() {
     float cutDist = clipPlane.w - dot(fragPos, clipPlane.xyz);     // < 0: beyond the cut
     if (cutDist < 0.0) discard;
     if (fadedAway(fragFade)) discard;
-    vec4 base = texture(texture0, fragTexCoord) * colDiffuse * fragColor;
+    vec4 base = textureGrad(texture0, fragTexCoord, uvDx, uvDy) * colDiffuse * fragColor;
     if (alphaCutoff > 0.0) {
         if (cutAway(base.a, fragTexCoord)) discard;
         base.a = 1.0;                                              // what a cut-out keeps is solid
@@ -773,7 +787,7 @@ void main() {
     else {
         float rough = roughness, metal = metalness;
         if (hasRoughnessMap == 1) {
-            vec3 mr = texture(texture1, fragTexCoord).rgb;
+            vec3 mr = textureGrad(texture1, fragTexCoord, uvDx, uvDy).rgb;
             rough *= mr.g; metal *= mr.b;
         }
         rough = clamp(rough, 0.0, 1.0);
@@ -789,7 +803,7 @@ void main() {
         } else color = mix(groundColor, skyColor, n.y * 0.5 + 0.5) * albedo;
 
         float sunVis = 1.0;                                         // baked self-shadow, and the spread of the normals a texel stands for
-        if (hasNormalMap == 2) { vec4 bk = texture(texture2, fragTexCoord); sunVis = bk.a * pow(clamp(length(bk.xyz * 2.0 - 1.0), 0.0, 1.0), SPREAD_POW); }
+        if (hasNormalMap == 2) { vec4 bk = textureGrad(texture2, fragTexCoord, uvDx, uvDy); sunVis = bk.a; spreadW = clamp(2.0 * (1.0 - length(bk.xyz * 2.0 - 1.0)), 0.0, 1.0); }
         float shininess = exp2(10.0 * (1.0 - rough) + 1.0);
         for (int i = 0; i < 8; i++) {
             if (i >= lightCount) break;
@@ -925,8 +939,9 @@ vec2 octEncode(vec3 n) {
     return e * 0.5 + 0.5;
 }
 void main() {
+    uvDx = dFdx(fragTexCoord); uvDy = dFdy(fragTexCoord);
     if (fadedAway(fragFade)) discard;
-    if (cutAway(texture(texture0, fragTexCoord).a * colDiffuse.a * fragColor.a, fragTexCoord)) discard;
+    if (cutAway(textureGrad(texture0, fragTexCoord, uvDx, uvDy).a * colDiffuse.a * fragColor.a, fragTexCoord)) discard;
     vec3 n = normalize(mat3(matView) * normalize(fragNormal));
     if (!gl_FrontFacing) n = -n;
     finalColor = vec4(octEncode(n), lineStyle / 255.0, objectId / 255.0);
