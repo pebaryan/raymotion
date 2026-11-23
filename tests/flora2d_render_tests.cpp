@@ -134,6 +134,37 @@ static void wind() {
     UnloadImage(a); UnloadImage(b); UnloadImage(b2); UnloadImage(s0); UnloadImage(s1);
 }
 
+static void motionBlurred() {
+    // Under motion blur the wind reads frameTime(t): the tips blur between frames, the roots
+    // and the ground don't, and a still wind (or no blur) draws exactly what it did.
+    flora2d::Wind w;
+    w.gust = 1; w.gustSpeed = 600; w.gustWidth = 120;
+    auto scene = [](flora2d::Wind wind) {
+        return [wind](const Ctx& c, int t) {
+            dr::rect(c, 0, 181, 320, 19, { 60, 90, 50, 255 });
+            flora2d::grass(c, line, flora2d::tallGrass(), t, 1, 5, wind);
+        };
+    };
+    auto render = [&](flora2d::Wind wind, int samples) {
+        Comp c = comp(scene(wind));
+        c.motionBlur = { samples, 0.9f };
+        return ::render(c, 12);
+    };
+    Image sharp = render(w, 1), sharp2 = render(w, 1), blurred = render(w, 12);
+    const int tipSharp = cover(sharp, 0, 100, 320, 150);
+    const int tips = differ(sharp, blurred, 100, 150), roots = differ(sharp, blurred, 177, 181), ground = differ(sharp, blurred, 183, 200);
+    std::printf("[flora2d] motion blur: %d px changed in the tip band, %d in the root band, %d in the ground (grass covers %d px of the tip band)\n",
+                tips, roots, ground, tipSharp);
+    dump("flora2d-blur-off.png", sharp);
+    dump("flora2d-blur-on.png", blurred);
+    CHECK(differ(sharp, sharp2) == 0);
+    CHECK(tips > 400 && roots < tips / 10 && ground == 0);
+    Image calmSharp = render(flora2d::Wind{ 0 }, 1), calmBlurred = render(flora2d::Wind{ 0 }, 12);
+    std::printf("[flora2d] still wind: %d px differ with blur on\n", differ(calmSharp, calmBlurred));
+    CHECK(differ(calmSharp, calmBlurred) == 0);
+    UnloadImage(sharp); UnloadImage(sharp2); UnloadImage(blurred); UnloadImage(calmSharp); UnloadImage(calmBlurred);
+}
+
 static void meadowAndLayers() {
     // A meadow keeps its blades' roots in its shape (tips may rise above its top edge).
     const std::vector<Vector2> shape{ { 60, 90 }, { 260, 90 }, { 300, 190 }, { 20, 190 } };
@@ -205,6 +236,7 @@ int main() {
     if (!IsWindowReady()) return 77;
     reveal();
     wind();
+    motionBlurred();
     meadowAndLayers();
     onSurface();
     shutdownGraphics();

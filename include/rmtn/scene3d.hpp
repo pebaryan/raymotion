@@ -142,7 +142,11 @@ struct Material {
     bool unlit = false;             // flat base colour (no lights, shadows or fog)
     bool doubleSided = false;
     bool castShadow = true, receiveShadow = true;
-    std::string map;                // optional base-colour texture file
+    bool normalAlphaShade = false;  // the normal map's alpha is the share of direct light that reaches each
+                                    // texel (a baked self-shadow; impostors use it): scales every light but the ambient
+    bool shadowOnly = false;        // drawn into the shadow maps only: a stand-in that casts what
+                                    // the lit object would, from another pose (impostor shadows)
+    std::string map;               // optional base-colour texture file
     DynamicTexturePtr dynamicMap;   // or a texture made per frame (wins over `map`); its alpha
                                     // multiplies opacity: give a see-through overlay opacity
                                     // just under 1 so it draws with the transparent objects
@@ -232,6 +236,16 @@ struct Instance {
     // pixels, f < 0 the other 1 + f, so a body at u and its stand-in at -u fill each pixel
     // once (dithered cross-fades between tiers, no popping). Shadows fade the same way.
     float fade = 1;
+    // With fade > 0: also drop the pixels below this level (0..1, steps of 1/32), so the body
+    // keeps the band [fadeFrom, fade) of the screen door. Several stand-ins can then share a
+    // pixel between them, each in its own band.
+    float fadeFrom = 0;
+    // An orientation given as directions, for bodies that stand on a curved surface or face a
+    // viewer: when `aim` is not zero it replaces pitch, bank and yaw. The body's +z turns to
+    // `aim`, and its +y is as near `aimUp` as that allows (so a quad faces the camera and its
+    // top leans along the surface's up). `aimUp` parallel to `aim` falls back to world +y.
+    Vector3 aim{ 0, 0, 0 };
+    Vector3 aimUp{ 0, 1, 0 };
 };
 
 // An object's instances: `up` refills `list` each frame from t (pure, like any `up`). They
@@ -296,7 +310,17 @@ struct Field {
     float tileSize = 4;                         // metres
     float detailDistance = 14;                  // nearer tiles get full blades, further one segment
     float fadeStart = 35, fadeEnd = 70;         // blades thin out over this band (metres from the camera)
-    float shadowDistance = 18;                  // tiles nearer than this cast shadows (all receive)
+    float shadowDistance = 18;                  // with castShadows: only tiles nearer than this to the camera cast (all receive)
+    // Blades into the shadow maps, so a tall tuft shades the grass behind it and the ground. On
+    // by default, every blade the main pass draws. Each tile within `shadowDistance` of the camera
+    // and inside a directional light's shadowExtent is drawn into the maps with the same wind at
+    // the same t. A `shadowDensity` below 1 is a saving: a random share of the blades, each widened
+    // by 1 / shadowDensity (at most 3 times) so the shadow keeps its weight. The cost is a
+    // blocky weave of blade shadows on the soil in the nearest metres under a low sun (shadow-map
+    // texels, worse as the share falls). Blades both cast and receive: the lit shader's normal
+    // offset and slope bias keep them from speckling themselves. Off: the grass casts nothing.
+    bool castShadows = true;
+    float shadowDensity = 1;                    // 0.02..1, the share of blades drawn into the shadow maps
 
     // What the shader draws, mirrored on the CPU for tests and placement: blade k of tile
     // (tx, tz) has its root at x, z in the object's space (before masks and fading).
@@ -308,6 +332,14 @@ struct Field {
 // Blades the last rendered frame submitted in its main pass, over every field (before the
 // shader thins them by mask and distance; shadow passes not counted): for measuring budgets.
 long long fieldBladesSubmitted();
+// Blades the last rendered frame submitted to its shadow passes, over every field (a tile
+// counted once for each shadow map it is drawn into): a deterministic measure of what
+// Field::castShadows costs.
+long long fieldShadowBladesSubmitted();
+// Instanced bodies (trees, say) the last rendered frame drew in its main pass, culled ones not
+// counted, and the triangles they came to: a deterministic measure of what a forest costs.
+long long instanceBodiesSubmitted();
+long long instanceTrianglesSubmitted();
 
 // ------------------------------------------------------------------ gaussian splats
 // A cloud of Gaussian splats (see splat.hpp) drawn in the object's space: one instanced quad
@@ -607,9 +639,28 @@ struct Scene {
     float ambient = 0.35f;          // hemisphere light from sky (above) and ground (below)
     // Image-based lighting from an equirectangular image (PNG/JPG, or HDR for linear
     // radiance). It replaces the hemisphere: diffuse from its blurred mips, reflections
-    // sharp to blurry with roughness.
+    // sharp to blurry with roughness. It repeats round the azimuth and is clamped over the
+    // poles, so straight up shows the top row only (the same file used as a material map
+    // keeps repeating).
     std::string environment;
-    std::function<Image()> environmentGenerator;    // used when `environment` is empty; called once
+    // A skybox given as cube faces instead of one equirectangular image. Either six files in
+    // the order +x, -x, +y, -y, +z, -z, or ONE file holding a horizontal cross (a 4x3 grid of
+    // square faces: row 0 has +y in column 1; row 1 is -x, +z, +x, -z; row 2 has -y in column 1).
+    // Skybox packs are labelled for left-handed engines (OpenGL cube maps); raymotion is
+    // right-handed. So the +x and -x faces swap sides, as in three.js: the face labelled +x
+    // appears in the world -x direction and the face labelled -x at world +x, while +y, -y,
+    // +z and -z stay where they are. This keeps every face unmirrored on screen (a camera with
+    // +y up sees its image left on the screen's left and top at the top for the four side
+    // faces) and the sky continuous across the seams. +y's image bottom edge meets +z, and
+    // -y's image top edge meets +z. Faces must be square and equal in size and kind
+    // (8-bit PNG/JPG, or all HDR for linear radiance). They are converted once on the CPU to
+    // an equirectangular image (4 x face width, at most 4096) with bilinear sampling inside
+    // each face, which image-based lighting, showEnvironment, environmentRotation and
+    // fogFromSky then use unchanged. Any other count, a non-square or mismatched face, or a
+    // missing file throws std::runtime_error. Precedence: `environment` (a file) wins over
+    // `environmentFaces`, which wins over `environmentGenerator`.
+    std::vector<std::string> environmentFaces;
+    std::function<Image()> environmentGenerator;    // used when no file or faces are set; called once
     float environmentIntensity = 1;
     float environmentRotation = 0;  // degrees about +y
     bool showEnvironment = false;   // also draw it as the backdrop
@@ -672,6 +723,13 @@ void render(Scene& scene, int t, const Ctx& c, Rectangle viewport = {}, Camera* 
 // Inside an `up` callback: the camera of the view being drawn, after its own `up` (so tiers
 // by distance, billboards and the like can follow it). A default camera outside a draw.
 const Camera& drawingCamera();
+// Inside an `up` callback: the scene being drawn (its lights are final for this frame), or null
+// outside a draw.
+const Scene* drawingScene();
+// Inside an `up` callback: the height in composition px of the view being drawn (the viewport's,
+// or the whole composition's), or 0 outside a draw. With the camera's fov it gives how many
+// pixels something of a known size and distance covers.
+float drawingViewportHeight();
 
 // The camera as render() sees it at frame t: `camera` with its `up` applied (to a copy).
 Camera cameraAt(const Camera& camera, int t);

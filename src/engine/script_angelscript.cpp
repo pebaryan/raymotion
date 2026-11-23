@@ -1356,7 +1356,7 @@ if(!obj)throw std::runtime_error("unknown 3D prefab kind");auto* out=new ScriptO
 ; ScriptObject3D* scriptCurrentUpObject(){if(!scriptUpObjectValue)throw std::runtime_error("g3d::upObject is only available inside an Object3D up callback");auto owner=scriptUpOwner.lock();if(!owner)throw std::runtime_error("Object3D up callback scene has expired");auto* out=new ScriptObject3D();out->owner=std::move(owner);out->value=scriptUpObjectValue;return out;} void scriptSceneEnvironmentFunction(g3d::Scene& scene,const std::string& callback,int width){
     if(callback.empty()||callback.size()>128||width<16||width>2048||width%2)throw std::runtime_error("environment function needs a callback name and an even width from 16 to 2048");
     auto& call=invocation();if(!call.drawing||!call.pixelFunction)throw std::runtime_error("environment function is available during composition drawing");const auto dispatch=call.pixelFunction;
-    scene.environment.clear();scene.environmentGenerator=[callback,width,dispatch](){return dispatch(callback,0,width,width/2);};
+    scene.environment.clear();scene.environmentFaces.clear();scene.environmentGenerator=[callback,width,dispatch](){return dispatch(callback,0,width,width/2);};
 }
 struct ScriptRigSkin;
 g3d::Camera scriptCameraState(CScriptArray* fields,const g3d::Camera& base){
@@ -1444,7 +1444,7 @@ value->skyColor=mkColor(sky); value->groundColor=mkColor(ground); }
     void environment(const std::string& file,float intensity=1,float rotation=0,bool show=false){
 value->environment=file; value->environmentIntensity=intensity; value->environmentRotation=rotation; value->showEnvironment=show; }
     void studioEnvironment(unsigned top,unsigned horizon,unsigned bottom,int panels=3){
-value->environment.clear(); value->environmentGenerator=g3d::studioEnvironment(mkColor(top),mkColor(horizon),mkColor(bottom),panels); }
+value->environment.clear(); value->environmentFaces.clear(); value->environmentGenerator=g3d::studioEnvironment(mkColor(top),mkColor(horizon),mkColor(bottom),panels); }
     void environmentFunction(const std::string& callback,int width=512){scriptSceneEnvironmentFunction(*value,callback,width);}
     void fog(float nearDistance,float farDistance,unsigned color){
 value->fogNear=nearDistance; value->fogFar=farDistance; value->fogColor=mkColor(color); value->fogMode=g3d::FogMode::Linear; }
@@ -3397,7 +3397,8 @@ geo3d::ForestCover geoForestStyle(const Json& j){
     if(!j.isObject())throw std::runtime_error("geo3d forest style must be an object");
     geo3d::ForestCover st; st.spacing=(float)j.num("spacing",st.spacing); st.height=(float)j.num("height",st.height); st.heightVariation=(float)j.num("heightVariation",st.heightVariation);
     st.stagger=(float)j.num("stagger",st.stagger); st.seed=(uint32_t)j.integer("seed",1); st.limit=std::clamp(j.integer("limit",st.limit),1,200000); st.grow=scriptGeo3DReveal(j);
-    if(!std::isfinite(st.spacing)||st.spacing<0.02f||!std::isfinite(st.height)||st.height<=0||!std::isfinite(st.heightVariation)||!std::isfinite(st.stagger))
+    st.pictureSpeckle=(float)j.num("pictureSpeckle",st.pictureSpeckle); st.impostorBelow=(float)j.num("impostorBelow",st.impostorBelow); st.blend=(float)j.num("blend",st.blend); st.mergeBelow=(float)j.num("mergeBelow",st.mergeBelow); st.dropBelow=(float)j.num("dropBelow",st.dropBelow);
+    if(!std::isfinite(st.spacing)||st.spacing<0.02f||!std::isfinite(st.height)||st.height<=0||!std::isfinite(st.heightVariation)||!std::isfinite(st.stagger)||!std::isfinite(st.impostorBelow)||!std::isfinite(st.blend)||!std::isfinite(st.mergeBelow)||!std::isfinite(st.dropBelow))
         throw std::runtime_error("geo3d forest needs spacing of at least 0.02 degrees and a positive height");
     return st;
 }
@@ -4758,9 +4759,23 @@ void flora2dDraw(const std::string& source, int frame) {
             lastLine = lineOf(it);
             flora2d::grass(c, lastLine, grassOf(), frame, u, seed, wind);
         } else if (kind == "meadow") {
-            const auto shape = points(it["shape"], "meadow shape");
-            if (shape.size() < 3) throw std::runtime_error("flora2d meadow shape needs 3 or more points");
-            flora2d::meadow(c, shape, grassOf(), frame, u, seed, wind, std::clamp((float)it.num("perspective", 0.5), 0.f, 0.95f));
+            const float perspective = std::clamp((float)it.num("perspective", 0.5), 0.f, 0.95f);
+            if (it.has("path")) {                    // SVG path data; "rule" is vg::fill's
+                if (it.has("shape")) throw std::runtime_error("flora2d meadow takes \"shape\" or \"path\", not both");
+                const std::string d = it.str("path", ""), rule = it.str("rule", "nonzero");
+                if (d.empty() || d.size() > 65536) throw std::runtime_error("flora2d meadow path must be SVG path data up to 64 KiB");
+                if (rule != "nonzero" && rule != "evenodd") throw std::runtime_error("flora2d meadow rule must be \"nonzero\" or \"evenodd\"");
+                vg::Path shape;
+                try { shape = vg::Path::parse(d); }
+                catch (const std::exception& e) { throw std::runtime_error(std::string("flora2d meadow path: ") + e.what()); }
+                if (shape.empty()) throw std::runtime_error("flora2d meadow path has no segments");
+                flora2d::meadow(c, shape, grassOf(), frame, u, seed, wind, perspective, {},
+                                rule == "evenodd" ? vg::FillRule::EvenOdd : vg::FillRule::NonZero);
+            } else {
+                const auto shape = points(it["shape"], "meadow shape");
+                if (shape.size() < 3) throw std::runtime_error("flora2d meadow shape needs 3 or more points");
+                flora2d::meadow(c, shape, grassOf(), frame, u, seed, wind, perspective);
+            }
         } else if (kind == "tuft") {
             flora2d::tuft(c, jsonV2(it["at"]), grassOf(), std::clamp(it.integer("count", 14), 1, 400), frame, u, seed, wind);
         } else if (kind == "shrub" || kind == "tree") {
@@ -4857,7 +4872,8 @@ std::shared_ptr<g3d::Field> jsonGrass(const Json& d, int fps) {
     num("dryness", next.dryness); num("sway", next.sway); num("gust", next.gust); num("gustSpeed", next.gustSpeed);
     num("gustScale", next.gustScale); num("tileSize", next.tileSize); num("detailDistance", next.detailDistance);
     num("fadeStart", next.fadeStart); num("fadeEnd", next.fadeEnd); num("shadowDistance", next.shadowDistance);
-    num("grow", next.grow);
+    num("grow", next.grow); num("shadowDensity", next.shadowDensity);
+    next.castShadows = d.flag("castShadows", next.castShadows);
     next.fps = (float)d.num("fps", fps);
     next.segments = d.integer("segments", next.segments);
     next.mapResolution = d.integer("mapResolution", next.mapResolution);
@@ -4866,7 +4882,7 @@ std::shared_ptr<g3d::Field> jsonGrass(const Json& d, int fps) {
     next.windDirection = jsonV2(d["windDirection"], next.windDirection);
     for (float v : { next.density, next.height, next.heightVariation, next.width, next.lean, next.colorVariation, next.dryness,
                      next.sway, next.gust, next.gustSpeed, next.gustScale, next.tileSize, next.detailDistance, next.fadeStart,
-                     next.fadeEnd, next.shadowDistance, next.fps, next.windDirection.x, next.windDirection.y })
+                     next.fadeEnd, next.shadowDistance, next.shadowDensity, next.fps, next.windDirection.x, next.windDirection.y })
         if (!std::isfinite(v)) throw std::runtime_error("grass values must be finite");
     if (next.density < 0 || next.density > 20000 || next.tileSize < 0.25f || next.tileSize > 64 || next.height < 0 || next.width < 0)
         throw std::runtime_error("grass density must be 0..20000 a square metre, tileSize 0.25..64, height and width >= 0");
@@ -5098,6 +5114,7 @@ flora::TreePtr jsonTree(const Json& d, const Json& build) {
     b.frames = build.integer("frames", b.frames);
     b.views = build.integer("views", b.views);
     b.viewSize = build.integer("viewSize", b.viewSize);
+    b.elevations = build.integer("elevations", b.elevations);
     b.reducedLeaves = (float)build.num("reducedLeaves", b.reducedLeaves);
     b.loopSeconds = (float)build.num("loopSeconds", b.loopSeconds);
     {
@@ -5113,9 +5130,9 @@ flora::TreePtr jsonTree(const Json& d, const Json& build) {
         else if (shading == "hatch") b.shading = g3d::Shading::Hatch;
         else if (shading != "standard") throw std::runtime_error("forest build shading must be standard, toon, gooch or hatch");
     }
-    if (b.frames < 1 || b.frames > 64 || b.views < 1 || b.views > 32 || b.viewSize < 16 || b.viewSize > 512 || !std::isfinite(b.reducedLeaves) ||
+    if (b.frames < 1 || b.frames > 64 || b.views < 1 || b.views > 32 || b.viewSize < 16 || b.viewSize > 512 || b.elevations < 1 || b.elevations > 8 || !std::isfinite(b.reducedLeaves) ||
         !std::isfinite(b.loopSeconds) || b.loopSeconds <= 0)
-        throw std::runtime_error("forest build needs frames 1..64, views 1..32, viewSize 16..512 and a positive loopSeconds");
+        throw std::runtime_error("forest build needs frames 1..64, views 1..32, viewSize 16..512, elevations 1..8 and a positive loopSeconds");
     flora::TreePtr made;
     try { made = flora::makeTree(t, b); }
     catch (const std::invalid_argument& e) { throw std::runtime_error(e.what()); }
@@ -5152,11 +5169,13 @@ g3d::Object3D* jsonForest(g3d::Scene& scene, g3d::Object3D* parent, const Json& 
     flora::ForestSpec f;
     auto num = [&d](const char* key, float& out) { out = (float)d.num(key, out); };
     num("reducedFrom", f.reducedFrom); num("impostorFrom", f.impostorFrom); num("blend", f.blend); num("hideFrom", f.hideFrom);
+    num("canopyFrom", f.canopyFrom); num("canopyBelow", f.canopyBelow); num("canopyCell", f.canopyCell); num("canopyDetail", f.canopyDetail); num("canopyMaxElevation", f.canopyMaxElevation); num("canopyBlend", f.canopyBlend);
     num("wind", f.wind); num("gust", f.gust); num("gustSpeed", f.gustSpeed); num("gustScale", f.gustScale);
     f.fps = (float)d.num("fps", fps);
     f.windDirection = jsonV2(d["windDirection"], f.windDirection);
     f.impostorShadows = d.flag("impostorShadows", f.impostorShadows);
-    for (float v : { f.reducedFrom, f.impostorFrom, f.blend, f.hideFrom, f.wind, f.gust, f.gustSpeed, f.gustScale, f.fps, f.windDirection.x, f.windDirection.y })
+    f.canopyShadows = d.flag("canopyShadows", f.canopyShadows);
+    for (float v : { f.reducedFrom, f.impostorFrom, f.blend, f.hideFrom, f.canopyFrom, f.canopyBelow, f.canopyCell, f.canopyDetail, f.canopyBlend, f.wind, f.gust, f.gustSpeed, f.gustScale, f.fps, f.windDirection.x, f.windDirection.y })
         if (!std::isfinite(v)) throw std::runtime_error("forest values must be finite");
     if (d.has("grow")) {
         // Growing trees: each its own mesh, so a patch. With growFrom, nearer trees start first.
@@ -5317,8 +5336,20 @@ return std::string(lab3d::name(k)); }
  else if(!object) object=parent?parent->add():scene.add(); object->name=source.str("name",""); object->position=jsonV3(source["position"]); object->rotation=jsonV3(source["rotation"]); object->scale=jsonV3(source["scale"],{
 1,1,1}
 ); object->visible=source.flag("visible",true); object->modelMaterials=source.flag("modelMaterials",true); object->animation=source.integer("animation",-1); object->animationFrame=(float)source.num("animationFrame",0); object->cullRadius=(float)source.num("cullRadius",object->cullRadius); object->cullCentre=jsonV3(source["cullCentre"],object->cullCentre); if(!std::isfinite(object->cullRadius)||!std::isfinite(object->cullCentre.x)||!std::isfinite(object->cullCentre.y)||!std::isfinite(object->cullCentre.z))        throw std::runtime_error("3D object culling sphere must be finite"); if(!instancesDesc.isNull())object->instances=jsonInstances(object->geometry,instancesDesc); const auto& children=source["children"]; if(children.isArray()) for(const auto& child:children.asArray()) addJsonObject(scene,object,child,depth+1,count,fps); }
+// "environment": an image path, {"faces":[+x,-x,+y,-y,+z,-z files]} or {"cross":"cross.png"}.
+void jsonSceneEnvironment(g3d::Scene& scene,const Json& e) {
+    if(e.isNull()){scene.environment.clear();return;}
+    if(e.isString()){scene.environment=e.asString();return;}
+    if(!e.isObject())throw std::runtime_error("3D environment must be an image path or an object with faces or cross");
+    const bool faces=e.has("faces"),cross=e.has("cross");
+    if(faces==cross)throw std::runtime_error("3D environment object needs exactly one of faces (six files) or cross (one file)");
+    scene.environment.clear();scene.environmentFaces.clear();
+    if(cross){const auto& c=e["cross"];if(!c.isString()||c.asString().empty())throw std::runtime_error("3D environment cross must be one image file name");scene.environmentFaces.push_back(c.asString());return;}
+    const auto& list=e["faces"];if(!list.isArray()||list.size()!=6)throw std::runtime_error("3D environment faces must list six files in the order +x, -x, +y, -y, +z, -z");
+    for(const auto& f:list.asArray()){if(!f.isString()||f.asString().empty())throw std::runtime_error("3D environment faces must be non-empty file names");scene.environmentFaces.push_back(f.asString());}
+}
 std::shared_ptr<g3d::Scene> buildJsonScene(const Json& j) {
-    auto scene=std::make_shared<g3d::Scene>(); auto& cam=scene->camera; const auto& camera=j["camera"]; cam.position=jsonV3(camera["position"],cam.position); cam.target=jsonV3(camera["target"],cam.target); cam.upVector=jsonV3(camera["up"],cam.upVector); cam.fov=(float)camera.num("fov",cam.fov); cam.orthographic=camera.flag("orthographic",cam.orthographic); cam.orthoHeight=(float)camera.num("orthoHeight",cam.orthoHeight); cam.nearPlane=(float)camera.num("near",cam.nearPlane); cam.farPlane=(float)camera.num("far",cam.farPlane); cam.dof.focusDistance=(float)camera.num("focusDistance",cam.dof.focusDistance); cam.dof.aperture=(float)camera.num("aperture",cam.dof.aperture); cam.dof.maxBlur=(float)camera.num("maxBlur",cam.dof.maxBlur); cam.dof.tilt=(float)camera.num("focusTilt",cam.dof.tilt); scene->background=j.color("background",scene->background); scene->skyColor=j.color("skyColor",scene->skyColor); scene->groundColor=j.color("groundColor",scene->groundColor); scene->ambient=(float)j.num("ambient",scene->ambient); scene->environment=j.str("environment",""); scene->environmentIntensity=(float)j.num("environmentIntensity",scene->environmentIntensity); scene->environmentRotation=(float)j.num("environmentRotation",scene->environmentRotation); scene->showEnvironment=j.flag("showEnvironment",scene->showEnvironment); scene->shadowMapSize=std::clamp(j.integer("shadowMapSize",scene->shadowMapSize),128,4096); scene->cullFloor=(float)j.num("cullFloor",scene->cullFloor); scene->fogColor=j.color("fogColor",scene->fogColor); scene->fogNear=(float)j.num("fogNear",0); scene->fogFar=(float)j.num("fogFar",0); scene->fogDensity=(float)j.num("fogDensity",0); scene->fogHeight=(float)j.num("fogHeight",0); scene->fogFalloff=(float)j.num("fogFalloff",0); scene->fogFromSky=j.flag("fogFromSky",false); const auto fog=j.str("fogMode","linear"); if(fog=="exponential") scene->fogMode=g3d::FogMode::Exponential; else if(fog=="exponential2") scene->fogMode=g3d::FogMode::Exponential2; else if(fog!="linear") throw std::runtime_error("unknown 3D fog mode: "+fog); if(j["sky"].isObject()) {
+    auto scene=std::make_shared<g3d::Scene>(); auto& cam=scene->camera; const auto& camera=j["camera"]; cam.position=jsonV3(camera["position"],cam.position); cam.target=jsonV3(camera["target"],cam.target); cam.upVector=jsonV3(camera["up"],cam.upVector); cam.fov=(float)camera.num("fov",cam.fov); cam.orthographic=camera.flag("orthographic",cam.orthographic); cam.orthoHeight=(float)camera.num("orthoHeight",cam.orthoHeight); cam.nearPlane=(float)camera.num("near",cam.nearPlane); cam.farPlane=(float)camera.num("far",cam.farPlane); cam.dof.focusDistance=(float)camera.num("focusDistance",cam.dof.focusDistance); cam.dof.aperture=(float)camera.num("aperture",cam.dof.aperture); cam.dof.maxBlur=(float)camera.num("maxBlur",cam.dof.maxBlur); cam.dof.tilt=(float)camera.num("focusTilt",cam.dof.tilt); scene->background=j.color("background",scene->background); scene->skyColor=j.color("skyColor",scene->skyColor); scene->groundColor=j.color("groundColor",scene->groundColor); scene->ambient=(float)j.num("ambient",scene->ambient); jsonSceneEnvironment(*scene,j["environment"]); scene->environmentIntensity=(float)j.num("environmentIntensity",scene->environmentIntensity); scene->environmentRotation=(float)j.num("environmentRotation",scene->environmentRotation); scene->showEnvironment=j.flag("showEnvironment",scene->showEnvironment); scene->shadowMapSize=std::clamp(j.integer("shadowMapSize",scene->shadowMapSize),128,4096); scene->cullFloor=(float)j.num("cullFloor",scene->cullFloor); scene->fogColor=j.color("fogColor",scene->fogColor); scene->fogNear=(float)j.num("fogNear",0); scene->fogFar=(float)j.num("fogFar",0); scene->fogDensity=(float)j.num("fogDensity",0); scene->fogHeight=(float)j.num("fogHeight",0); scene->fogFalloff=(float)j.num("fogFalloff",0); scene->fogFromSky=j.flag("fogFromSky",false); const auto fog=j.str("fogMode","linear"); if(fog=="exponential") scene->fogMode=g3d::FogMode::Exponential; else if(fog=="exponential2") scene->fogMode=g3d::FogMode::Exponential2; else if(fog!="linear") throw std::runtime_error("unknown 3D fog mode: "+fog); if(j["sky"].isObject()) {
         const auto& sky=j["sky"]; scene->sky.enabled=sky.flag("enabled",true); scene->sky.zenith=sky.color("zenith",scene->sky.zenith); scene->sky.horizon=sky.color("horizon",scene->sky.horizon); scene->sky.ground=sky.color("ground",scene->sky.ground); scene->sky.curve=(float)sky.num("curve",scene->sky.curve); scene->sky.sunDirection=jsonV3(sky["sunDirection"],scene->sky.sunDirection); scene->sky.sunLight=sky.integer("sunLight",scene->sky.sunLight); scene->sky.sunColor=sky.color("sunColor",scene->sky.sunColor); scene->sky.sunSize=(float)sky.num("sunSize",scene->sky.sunSize); scene->sky.sunGlow=(float)sky.num("sunGlow",scene->sky.sunGlow); scene->sky.haze=sky.color("haze",scene->sky.haze); scene->sky.hazeAmount=(float)sky.num("hazeAmount",scene->sky.hazeAmount); scene->sky.stars=(float)sky.num("stars",0); scene->sky.clouds=(float)sky.num("clouds",0); scene->sky.cloudColor=sky.color("cloudColor",scene->sky.cloudColor); scene->sky.cloudShade=sky.color("cloudShade",scene->sky.cloudShade); scene->sky.cloudScale=(float)sky.num("cloudScale",scene->sky.cloudScale); scene->sky.cloudDrift=jsonV2(sky["cloudDrift"],scene->sky.cloudDrift); scene->sky.seed=scriptUnsigned32(sky["seed"],1,"sky seed"); scene->sky.lighting=(float)sky.num("lighting",1); scene->sky.resolution=std::clamp(sky.integer("resolution",scene->sky.resolution),128,4096); scene->sky.show=sky.flag("show",true); }
     const auto& water=j["water"]; if(water.isObject()) {
         const auto kind=water.str("preset","calm"); if(kind=="storm") scene->water=g3d::Water::storm(); else if(kind=="choppy") scene->water=g3d::Water::choppy(); else if(kind=="calm") scene->water=g3d::Water::calm(); else throw std::runtime_error("water preset must be calm, choppy or storm"); scene->water.enabled=water.flag("enabled",true); scene->water.level=(float)water.num("level",0); scene->water.speed=(float)water.num("speed",scene->water.speed); scene->water.fps=(float)water.num("fps",j.num("fps",30)); scene->water.deep=water.color("deep",scene->water.deep); scene->water.absorb=jsonV3(water["absorb"],scene->water.absorb); scene->water.openDepth=(float)water.num("openDepth",scene->water.openDepth); scene->water.caustics=(float)water.num("caustics",scene->water.caustics); scene->water.foam=(float)water.num("foam",scene->water.foam); scene->water.sunGlint=(float)water.num("sunGlint",scene->water.sunGlint); const auto& waves=water["waves"]; if(waves.isArray()) {
@@ -5334,7 +5365,7 @@ std::shared_ptr<g3d::Scene> buildJsonScene(const Json& j) {
 116,132,150,255}
 ),studio.color("bottom",Color{
 24,26,33,255}
-),std::clamp(studio.integer("panels",3),0,16)); const auto environmentFunction=j.str("environmentFunction","");if(!environmentFunction.empty()){if(!scene->environment.empty()||studio.isObject())throw std::runtime_error("environmentFunction cannot be combined with an environment path or studioEnvironment");scriptSceneEnvironmentFunction(*scene,environmentFunction,j.integer("environmentWidth",512));} const auto& lights=j["lights"]; if(lights.isArray()) for(const auto& light:lights.asArray()) {
+),std::clamp(studio.integer("panels",3),0,16)); const auto environmentFunction=j.str("environmentFunction","");if(!environmentFunction.empty()){if(!scene->environment.empty()||!scene->environmentFaces.empty()||studio.isObject())throw std::runtime_error("environmentFunction cannot be combined with an environment path or studioEnvironment");scriptSceneEnvironmentFunction(*scene,environmentFunction,j.integer("environmentWidth",512));} const auto& lights=j["lights"]; if(lights.isArray()) for(const auto& light:lights.asArray()) {
         if(scene->lights.size()>=8) throw std::runtime_error("3D scenes support at most eight lights"); const auto type=light.str("type","directional"); const auto color=light.color("color",WHITE); auto position=jsonV3(light["position"],{
 3,5,2}
 ), target=jsonV3(light["target"]); const auto intensity=(float)light.num("intensity",1); g3d::Light l; if(type=="point") l=g3d::Light::point(position,color,intensity,(float)light.num("range",0)); else if(type=="spot") l=g3d::Light::spot(position,target,color,intensity,(float)light.num("outerAngle",30),light.flag("castShadow",false)); else if(type=="directional") l=g3d::Light::directional(position,color,intensity,light.flag("castShadow",false)); else throw std::runtime_error("unknown 3D light type: "+type); l.innerAngle=(float)light.num("innerAngle",l.innerAngle); l.range=(float)light.num("range",l.range); l.shadowExtent=(float)light.num("shadowExtent",l.shadowExtent); l.shadowBias=(float)light.num("shadowBias",l.shadowBias); scene->lights.push_back(std::move(l)); }

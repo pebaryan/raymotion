@@ -102,6 +102,29 @@ struct ForestCover {
     float stagger = 0.4f;               // with grow: the eastmost tree starts this much of u later
     uint32_t seed = 1;
     int limit = 100000;                 // most trees; the scatter is thinned evenly beyond it
+    // Levels by size on screen. A tree whose height is under `impostorBelow` px (in the
+    // composition, measured from the camera drawing it) is drawn as a picture of itself: a
+    // quad that faces the camera (lying flat along the surface when seen from straight above) and
+    // stands along the surface's up, whether globe, map or
+    // between (the flora impostors, baked lazily at the first draw). The hero tree and the
+    // picture cross-fade by screen door over `blend` (a fraction of impostorBelow, centred on
+    // it) so nothing pops. 0 keeps every tree a full mesh. Trees that bring no pictures
+    // (paper cut-outs, splats) stay meshes. Impostors cast no shadow: where a light casts one,
+    // a tree's shadow fades out as it turns into a picture (maps seldom use shadow maps).
+    float impostorBelow = 10;
+    float blend = 0.3f;
+    // Merging: trees under this height in px (0: never) are thinned by a stable rank, so a
+    // fraction (px / mergeBelow)^2 stays, each drawn larger by the inverse root of it, and the
+    // area they cover (the ground's tint under them) is kept. 100,000 trees a pixel high are then
+    // fewer, a few pixels high. Each tree fades in or out by screen door, so none pops.
+    float mergeBelow = 12;
+    // A picture is smoother than the mesh it stands for, so each picture's brightness is spread
+    // by a stable per-tree factor of 1 +- pictureSpeckle (and its colour made a little yellower),
+    // which gives a far forest back the speckle of the mesh forest. 0: none.
+    float pictureSpeckle = 0.30f;
+    // Trees shorter than this many px are not drawn at all (0: all are). Off by default: dropping
+    // them lightens the forest's colour, merging does not.
+    float dropBelow = 0;
 };
 g3d::Object3D* forest(g3d::Object3D& parent, SurfacePtr s, const std::vector<geo::Geometry>& regions,
                       const ForestCover& st = {});

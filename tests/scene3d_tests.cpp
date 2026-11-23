@@ -3,12 +3,14 @@
 #include "rmtn/raymotion.hpp"
 #include <raymath.h>
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -375,6 +377,390 @@ static void environment(const fs::path& dir) {
     Color mt = px(img, project(r->camera, { 0, 0.9f, 0.4f }));
     CHECK(mt.r > mt.b + 40);
     UnloadImage(img);
+}
+
+// ---- the poles of an equirectangular environment (L9)
+// Environments must not wrap in v (the top row would blend with the bottom one at the poles);
+// material maps must still repeat. Both share the texture cache, so both are checked.
+static void environmentPoles(const fs::path& dir) {
+    const Color top = { 220, 40, 40, 255 }, bottom = { 40, 40, 220, 255 };
+    Image eq = GenImageColor(256, 128, top);
+    ImageDrawRectangle(&eq, 0, 64, 256, 64, bottom);
+    const std::string path = (dir / "poles-eq.png").string();
+    ExportImage(eq, path.c_str());
+    UnloadImage(eq);
+
+    // Largest per-channel distance from `want` over the whole image.
+    auto worst = [](const Image& img, Color want) {
+        int m = 0;
+        for (int y = 0; y < img.height; y++)
+            for (int x = 0; x < img.width; x++) {
+                Color p = GetImageColor(img, x, y);
+                m = std::max({ m, std::abs(p.r - want.r), std::abs(p.g - want.g), std::abs(p.b - want.b) });
+            }
+        return m;
+    };
+    for (int generated = 0; generated < 2; generated++)
+        for (int up = 1; up >= 0; up--) {
+            auto s = std::make_shared<g3d::Scene>();
+            s->camera.position = { 0, 0, 0 };
+            s->camera.target = { 0, up ? 1.f : -1.f, 0 };
+            s->camera.upVector = { 0, 0, 1 };
+            s->camera.fov = 60;
+            s->showEnvironment = true;
+            if (generated)
+                s->environmentGenerator = [path] { return LoadImage(path.c_str()); };
+            else
+                s->environment = path;
+            Comp c = sceneComp(s);
+            Image img = render(c, 0);
+            const int dev = worst(img, up ? top : bottom);
+            std::printf("[scene3d] %s equirect looking %s: worst distance from the %s colour %d levels\n",
+                        generated ? "generated" : "file", up ? "up" : "down", up ? "top" : "bottom", dev);
+            CHECK(dev <= 2);
+            UnloadImage(img);
+        }
+
+    // A material texture on a quad still repeats: u runs 0..2, so u = 1.3 reads like 0.3.
+    Image half = GenImageColor(64, 64, RED);
+    ImageDrawRectangle(&half, 32, 0, 32, 64, BLUE);
+    const std::string tex = (dir / "poles-half.png").string();
+    ExportImage(half, tex.c_str());
+    UnloadImage(half);
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = { 0, 6, 0 };
+    s->camera.target = { 0, 0, 0 };
+    s->camera.upVector = { 0, 0, -1 };
+    s->camera.fov = 40;
+    g3d::Material m = unlit(WHITE);
+    m.map = tex;
+    auto plane = g3d::Geometry::plane(4, 4);
+    plane->update([](Mesh& mesh) { for (int i = 0; i < mesh.vertexCount; i++) mesh.texcoords[2 * i] *= 2; }, g3d::Geometry::TexcoordBuffer);
+    s->add(plane, m);
+    Comp c = sceneComp(s);
+    Image img = render(c, 0);
+    auto at = [&](float f) { return px(img, project(s->camera, { -2 + 4 * f, 0, 0 })); };
+    const Color a = at(0.15f), b = at(0.65f), cc = at(0.35f), d = at(0.85f);
+    std::printf("[scene3d] material repeat: u 0.3/1.3 -> %d,%d,%d / %d,%d,%d; u 0.7/1.7 -> %d,%d,%d / %d,%d,%d\n",
+                a.r, a.g, a.b, b.r, b.g, b.b, cc.r, cc.g, cc.b, d.r, d.g, d.b);
+    CHECK(close(a, b, 6) && close(cc, d, 6) && !close(a, cc, 60));
+    UnloadImage(img);
+}
+
+// ---- cube-face skybox (L1)
+namespace cube {
+using DirFn = std::function<Color(Vector3)>;
+// The direction through face `f` at (s, t) in 0..1 by the OpenGL cube-map table.
+static Vector3 faceDirGl(int f, float s, float t) {
+    const float sc = 2 * s - 1, tc = 2 * t - 1;
+    Vector3 d;
+    switch (f) {
+    case 0: d = { 1, -tc, -sc }; break;
+    case 1: d = { -1, -tc, sc }; break;
+    case 2: d = { sc, 1, tc }; break;
+    case 3: d = { sc, -1, -tc }; break;
+    case 4: d = { sc, -tc, 1 }; break;
+    default: d = { -sc, -tc, -1 }; break;
+    }
+    return Vector3Normalize(d);
+}
+// The WORLD direction: x negated, because raymotion is right-handed (the +x face lies toward -x).
+static Vector3 faceDir(int f, float s, float t) {
+    Vector3 d = faceDirGl(f, s, t);
+    d.x = -d.x;
+    return d;
+}
+static Image faceImage(int f, int n, const DirFn& fn) {
+    Image img = GenImageColor(n, n, BLACK);
+    for (int y = 0; y < n; y++)
+        for (int x = 0; x < n; x++) ImageDrawPixel(&img, x, y, fn(faceDir(f, (x + 0.5f) / n, (y + 0.5f) / n)));
+    return img;
+}
+static std::vector<std::string> writeFaces(const fs::path& dir, const std::string& name, int n, const DirFn& fn) {
+    static const char* tags[6] = { "px", "nx", "py", "ny", "pz", "nz" };
+    std::vector<std::string> files;
+    for (int f = 0; f < 6; f++) {
+        Image img = faceImage(f, n, fn);
+        files.push_back((dir / (name + "-" + tags[f] + ".png")).string());
+        ExportImage(img, files.back().c_str());
+        UnloadImage(img);
+    }
+    return files;
+}
+static std::string writeCross(const fs::path& dir, const std::string& name, int n, const DirFn& fn) {
+    const int col[6] = { 2, 0, 1, 1, 1, 3 }, row[6] = { 1, 1, 0, 2, 1, 1 };
+    Image cross = GenImageColor(4 * n, 3 * n, BLACK);
+    for (int f = 0; f < 6; f++) {
+        Image img = faceImage(f, n, fn);
+        for (int y = 0; y < n; y++)
+            for (int x = 0; x < n; x++) ImageDrawPixel(&cross, col[f] * n + x, row[f] * n + y, GetImageColor(img, x, y));
+        UnloadImage(img);
+    }
+    const std::string path = (dir / (name + "-cross.png")).string();
+    ExportImage(cross, path.c_str());
+    UnloadImage(cross);
+    return path;
+}
+// The same function as an equirectangular image, in the shader's mapping.
+static std::string writeEquirect(const fs::path& dir, const std::string& name, int w, const DirFn& fn) {
+    Image img = GenImageColor(w, w / 2, BLACK);
+    for (int y = 0; y < w / 2; y++)
+        for (int x = 0; x < w; x++) {
+            const float phi = ((x + 0.5f) / w - 0.5f) * 2 * PI, theta = (y + 0.5f) / (w / 2) * PI;
+            ImageDrawPixel(&img, x, y, fn({ std::cos(phi) * std::sin(theta), std::cos(theta), std::sin(phi) * std::sin(theta) }));
+        }
+    const std::string path = (dir / (name + "-eq.png")).string();
+    ExportImage(img, path.c_str());
+    UnloadImage(img);
+    return path;
+}
+static Color gradient(Vector3 d) {
+    auto q = [](float v) { return (unsigned char)std::clamp((int)(128 + 120 * v + 0.5f), 0, 255); };
+    return { q(d.x), q(d.y), q(d.z), 255 };
+}
+// A camera at the origin looking along `dir`.
+static std::shared_ptr<g3d::Scene> skyScene(Vector3 dir) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = { 0, 0, 0 };
+    s->camera.target = Vector3Normalize(dir);
+    s->camera.upVector = std::fabs(dir.y) > 0.9f * Vector3Length(dir) ? Vector3{ 0, 0, 1 } : Vector3{ 0, 1, 0 };
+    s->camera.fov = 60;
+    s->showEnvironment = true;
+    return s;
+}
+struct Diff { double mean = 0; int max = 0, bandMax = 0; };
+// Mean and maximum absolute difference of two images; bandMax over the centre 5 columns and rows.
+static Diff diff(const Image& a, const Image& b) {
+    Diff d;
+    long long sum = 0;
+    for (int y = 0; y < a.height; y++)
+        for (int x = 0; x < a.width; x++) {
+            Color p = GetImageColor(a, x, y), q = GetImageColor(b, x, y);
+            const int m = std::max({ std::abs(p.r - q.r), std::abs(p.g - q.g), std::abs(p.b - q.b) });
+            sum += std::abs(p.r - q.r) + std::abs(p.g - q.g) + std::abs(p.b - q.b);
+            d.max = std::max(d.max, m);
+            if (std::abs(x - a.width / 2) <= 2 || std::abs(y - a.height / 2) <= 2) d.bandMax = std::max(d.bandMax, m);
+        }
+    d.mean = sum / (3.0 * a.width * a.height);
+    return d;
+}
+static Image look(std::shared_ptr<g3d::Scene> s) { Comp c = sceneComp(s); return render(c, 0); }
+
+static std::string errorOf(std::shared_ptr<g3d::Scene> s) {
+    try { Image i = look(s); UnloadImage(i); } catch (const std::runtime_error& e) { return e.what(); }
+    return "";
+}
+} // namespace cube
+
+static void cubeSkybox(const fs::path& dir) {
+    using namespace cube;
+    // 1. Six solid colours: each axis shows its face's colour at the centre.
+    const Color solid[6] = { { 220, 40, 40, 255 }, { 40, 200, 200, 255 }, { 40, 200, 40, 255 },
+                             { 200, 40, 200, 255 }, { 40, 40, 220, 255 }, { 220, 220, 40, 255 } };
+    const Vector3 axes[6] = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
+    const char* names[6] = { "+x", "-x", "+y", "-y", "+z", "-z" };
+    std::vector<std::string> solidFiles;
+    for (int f = 0; f < 6; f++) {
+        Image img = GenImageColor(64, 64, solid[f]);
+        solidFiles.push_back((dir / (std::string("cube-solid") + std::to_string(f) + ".png")).string());
+        ExportImage(img, solidFiles.back().c_str());
+        UnloadImage(img);
+    }
+    for (int f = 0; f < 6; f++) {
+        auto s = skyScene(axes[f]);
+        s->environmentFaces = solidFiles;
+        Image img = look(s);
+        Color c = GetImageColor(img, W / 2, H / 2);
+        const int face = f < 2 ? 1 - f : f;         // the faces labelled +x and -x swap sides
+        std::printf("[scene3d] cube world %s shows face %s: centre rgb %d %d %d (face colour %d %d %d)\n", names[f], names[face],
+                    c.r, c.g, c.b, solid[face].r, solid[face].g, solid[face].b);
+        CHECK(close(c, solid[face], 6));
+        UnloadImage(img);
+    }
+
+    // 1b. Orientation: the four side faces carry a left-third red / right-third blue marker and
+    // must show red on the screen's left, blue on its right (unmirrored). +y has a red band along
+    // its image bottom (the edge that meets +z), -y along its image top (also meets +z).
+    {
+        auto marked = [&](int f, int n) {
+            Image img = GenImageColor(n, n, Color{ 128, 128, 128, 255 });
+            for (int y = 0; y < n; y++)
+                for (int x = 0; x < n; x++) {
+                    Color c = { 128, 128, 128, 255 };
+                    if (f < 2 || f > 3) { if (x < n / 3) c = RED; else if (x >= n - n / 3) c = BLUE; }
+                    else if (f == 2 && y >= n - n / 6) c = RED;
+                    else if (f == 3 && y < n / 6) c = RED;
+                    ImageDrawPixel(&img, x, y, c);
+                }
+            return img;
+        };
+        static const char* tags[6] = { "px", "nx", "py", "ny", "pz", "nz" };
+        std::vector<std::string> files;
+        for (int f = 0; f < 6; f++) {
+            Image img = marked(f, 96);
+            files.push_back((dir / (std::string("cube-mark-") + tags[f] + ".png")).string());
+            ExportImage(img, files.back().c_str());
+            UnloadImage(img);
+        }
+        auto centroid = [](const Image& img, bool wantRed, float& cx, float& cy) {
+            double sx = 0, sy = 0; int n = 0;
+            for (int y = 0; y < img.height; y++)
+                for (int x = 0; x < img.width; x++) {
+                    Color c = GetImageColor(img, x, y);
+                    const bool hit = wantRed ? (c.r > 200 && c.g < 60 && c.b < 60) : (c.b > 200 && c.r < 60 && c.g < 150);
+                    if (hit) { sx += x; sy += y; n++; }
+                }
+            cx = n ? (float)(sx / n) : -1; cy = n ? (float)(sy / n) : -1;
+            return n;
+        };
+        const int sides[4] = { 0, 1, 4, 5 };
+        for (int f : sides) {
+            auto s = skyScene(f == 0 ? Vector3{ -1, 0, 0 } : f == 1 ? Vector3{ 1, 0, 0 } : axes[f]);   // where each face lies
+            s->environmentFaces = files;
+            Image img = look(s);
+            float rx, ry, bx, by;
+            const int nr = centroid(img, true, rx, ry), nb = centroid(img, false, bx, by);
+            std::printf("[scene3d] cube face %s: red x %.1f (%d px), blue x %.1f (%d px), screen centre %d\n", names[f], rx, nr, bx, nb, W / 2);
+            CHECK(nr > 100 && nb > 100 && rx < W / 2 - 10 && bx > W / 2 + 10);
+            UnloadImage(img);
+        }
+        for (int f : { 2, 3 }) {
+            auto s = skyScene({ 0, f == 2 ? 1.f : -1.f, 0.6f });
+            s->environmentFaces = files;
+            Image img = look(s);
+            float rx, ry;
+            const int nr = centroid(img, true, rx, ry);
+            std::printf("[scene3d] cube face %s tilted toward +z: red band y %.1f (%d px), screen centre %d; expected %s\n", names[f], ry, nr, H / 2,
+                        f == 2 ? "below centre (+z is down the screen when looking up)" : "above centre (+z is up the screen when looking down)");
+            CHECK(nr > 100);
+            CHECK(f == 2 ? ry > H / 2 + 10 : ry < H / 2 - 10);
+            UnloadImage(img);
+        }
+    }
+
+    // 1c. HDR faces stay linear: a Radiance .hdr face of 4.0 (rgbe 128,128,128,131) at
+    // intensity 0.15 shows 0.6 linear (about 203 in sRGB); clamped to 1 first it would be ~107.
+    {
+        std::vector<std::string> hdr;
+        for (int f = 0; f < 6; f++) {
+            const std::string path = (dir / (std::string("cube-hdr") + std::to_string(f) + ".hdr")).string();
+            std::ofstream out(path, std::ios::binary);
+            out << "#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 4 +X 4\n";
+            for (int i = 0; i < 16; i++) { const unsigned char px4[4] = { 128, 128, 128, 131 }; out.write((const char*)px4, 4); }
+            hdr.push_back(path);
+        }
+        auto s = skyScene({ 0, 0, 1 });
+        s->environmentFaces = hdr;
+        s->environmentIntensity = 0.15f;
+        Image img = look(s);
+        Color c = GetImageColor(img, W / 2, H / 2);
+        std::printf("[scene3d] cube HDR face 4.0 at intensity 0.15: centre rgb %d %d %d\n", c.r, c.g, c.b);
+        CHECK(c.r > 170 && c.r < 235 && std::abs(c.r - c.g) <= 3);
+        UnloadImage(img);
+    }
+
+    // 2. A smooth sky as faces vs as an equirectangular image of the same detail: no seams.
+    const int n = 256;
+    auto faces = writeFaces(dir, "cube-grad", n, gradient);
+    const std::string eq = writeEquirect(dir, "cube-grad", 4 * n, gradient);
+    const Vector3 views[] = { { 1, 0, 0 }, { 0, 0, -1 }, { 0, 1, 0 }, { 0, -1, 0 }, { 1, 0, 1 }, { -1, 0, 1 }, { 1, 0, -1 }, { -1, 0, -1 },
+                              { 1, 1, 0 }, { 0, 1, 1 }, { -1, -1, 0 }, { 0, -1, -1 }, { 1, 1, 1 }, { -1, 1, 1 }, { 1, -1, -1 }, { -1, -1, 1 },
+                              { 0.9f, 0.2f, 0.3f }, { -0.3f, 0.5f, -0.8f } };
+    double meanSum = 0;
+    int worstMax = 0, worstBand = 0, count = 0;
+    for (const Vector3& v : views) {
+        auto a = skyScene(v), b = skyScene(v);
+        a->environmentFaces = faces;
+        b->environment = eq;
+        Image ia = look(a), ib = look(b);
+        Diff d = diff(ia, ib);
+        meanSum += d.mean; worstMax = std::max(worstMax, d.max); worstBand = std::max(worstBand, d.bandMax); count++;
+        UnloadImage(ia); UnloadImage(ib);
+    }
+    std::printf("[scene3d] cube seams: %d views, mean abs diff %.3f levels, worst max %d, worst centre-band max %d\n",
+                count, meanSum / count, worstMax, worstBand);
+    CHECK(meanSum / count < 1.5);
+    CHECK(worstBand <= 8);          // no seam spike where the view crosses an edge or corner
+    CHECK(worstMax <= 10);
+
+    // 3. A matte sphere lit by the sky: faces vs equirectangular.
+    double litDiff = 0;
+    for (float yaw : { 0.f, 70.f, 200.f }) {
+        Diff d;
+        Image imgs[2];
+        for (int k = 0; k < 2; k++) {
+            auto s = std::make_shared<g3d::Scene>();
+            s->camera.position = { 0, 0.5f, 4 };
+            if (k == 0) s->environmentFaces = faces; else s->environment = eq;
+            s->environmentRotation = yaw;
+            g3d::Material m;
+            m.color = Color{ 200, 200, 200, 255 };
+            m.roughness = 1;
+            s->add(g3d::Geometry::sphere(1, 48, 64), m);
+            imgs[k] = look(s);
+        }
+        d = diff(imgs[0], imgs[1]);
+        litDiff = std::max(litDiff, d.mean);
+        std::printf("[scene3d] cube lighting yaw %.0f: mean abs diff %.3f max %d (sphere luma %d)\n", yaw, d.mean, d.max,
+                    luma(GetImageColor(imgs[0], W / 2, H / 2)));
+        CHECK(luma(GetImageColor(imgs[0], W / 2, H / 2)) > 20);          // it is lit, not black
+        UnloadImage(imgs[0]); UnloadImage(imgs[1]);
+    }
+    CHECK(litDiff < 2.0);
+
+    // 4. The horizontal cross gives the same picture as the six files.
+    const std::string cross = writeCross(dir, "cube-grad", n, gradient);
+    int crossMax = 0;
+    double crossMean = 0;
+    for (const Vector3& v : views) {
+        auto a = skyScene(v), b = skyScene(v);
+        a->environmentFaces = faces;
+        b->environmentFaces = { cross };
+        Image ia = look(a), ib = look(b);
+        Diff d = diff(ia, ib);
+        crossMax = std::max(crossMax, d.max); crossMean += d.mean / (double)(sizeof(views) / sizeof(views[0]));
+        UnloadImage(ia); UnloadImage(ib);
+    }
+    std::printf("[scene3d] cube cross vs six files: mean abs diff %.4f, max %d\n", crossMean, crossMax);
+    CHECK(crossMax <= 1);
+
+    // 5. Precedence: a file beats faces, and faces beat the generator.
+    {
+        auto s = skyScene({ 1, 0, 0 });
+        s->environmentFaces = solidFiles;
+        s->environment = eq;
+        Image i = look(s);
+        Color c = GetImageColor(i, W / 2, H / 2);
+        CHECK(!close(c, solid[1], 20));
+        UnloadImage(i);
+        auto g = skyScene({ 1, 0, 0 });
+        g->environmentFaces = solidFiles;
+        g->environmentGenerator = g3d::studioEnvironment(GREEN, GREEN, GREEN, 0);
+        i = look(g);
+        CHECK(close(GetImageColor(i, W / 2, H / 2), solid[1], 6));
+        UnloadImage(i);
+    }
+
+    // 6. Errors name the problem.
+    auto five = skyScene({ 1, 0, 0 });
+    five->environmentFaces = std::vector<std::string>(solidFiles.begin(), solidFiles.begin() + 5);
+    const std::string e5 = errorOf(five);
+    Image rect = GenImageColor(32, 16, WHITE);
+    const std::string rectPath = (dir / "cube-rect.png").string();
+    ExportImage(rect, rectPath.c_str());
+    UnloadImage(rect);
+    auto nonSquare = skyScene({ 1, 0, 0 });
+    nonSquare->environmentFaces = solidFiles;
+    nonSquare->environmentFaces[3] = rectPath;
+    const std::string eRect = errorOf(nonSquare);
+    auto missing = skyScene({ 1, 0, 0 });
+    missing->environmentFaces = solidFiles;
+    missing->environmentFaces[2] = (dir / "no-such-face.png").string();
+    const std::string eMissing = errorOf(missing);
+    std::printf("[scene3d] cube errors:\n  five: %s\n  non-square: %s\n  missing: %s\n", e5.c_str(), eRect.c_str(), eMissing.c_str());
+    CHECK(e5.find("six") != std::string::npos);
+    CHECK(eRect.find("square") != std::string::npos && eRect.find("cube-rect") != std::string::npos);
+    CHECK(eMissing.find("no-such-face") != std::string::npos);
 }
 
 // A box that glows white (emissive, so it shows without lights) and takes fog.
@@ -1834,6 +2220,57 @@ static g3d::ScenePtr meadow(std::function<void(g3d::Field&)> edit = {}, bool wit
     s->lights.push_back(sun);
     return s;
 }
+// A tall tuft (a dense disc of 1.5 m blades) in short grass, seen from straight above, lit by a sun
+// `elevation` degrees up in compass direction `azimuth` (its shadow runs the other way).
+static Vector3 sunSide(float azimuth) { return { std::cos(azimuth * DEG2RAD), 0, std::sin(azimuth * DEG2RAD) }; }
+static g3d::ScenePtr tuftScene(float azimuth, bool cast, float elevation = 25, float shadowDensity = 0.35f) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = { 0, 24, 4 };      // not straight down: the engine and raylib pick different up vectors there
+    s->camera.target = { 0, 0, 0 };
+    s->camera.fov = 20;
+    s->ambient = 0.3f;
+    s->shadowMapSize = 2048;
+    g3d::Material ground;
+    ground.color = { 190, 190, 190, 255 };
+    ground.roughness = 1;
+    s->add(g3d::Geometry::plane(80, 80), ground);
+    g3d::Material grass;
+    grass.roughness = 0.8f;
+    grass.translucency = 0.8f;
+    grass.translucencyColor = { 255, 236, 160, 255 };
+    grass.lineWidth = 0;
+    auto lawn = std::make_shared<g3d::Field>();
+    lawn->min = { -6, -6 }; lawn->max = { 6, 6 };
+    lawn->density = 300; lawn->height = 0.25f; lawn->tileSize = 2;
+    lawn->castShadows = cast; lawn->shadowDensity = shadowDensity; lawn->shadowDistance = 80;   // the camera is 24 m up
+    s->add(lawn, grass);
+    auto tuft = std::make_shared<g3d::Field>();
+    tuft->min = { -0.5f, -0.5f }; tuft->max = { 0.5f, 0.5f };
+    tuft->mask = [](float x, float z) { return x * x + z * z < 0.25f ? 1.f : 0.f; };
+    tuft->density = 2500; tuft->height = 1.5f; tuft->heightVariation = 0.2f; tuft->width = 0.02f; tuft->tileSize = 1;
+    tuft->castShadows = cast; tuft->shadowDensity = shadowDensity; tuft->shadowDistance = 80;
+    s->add(tuft, grass);
+    const Vector3 up = sunSide(azimuth);
+    const float e = elevation * DEG2RAD;
+    g3d::Light sun = g3d::Light::directional({ up.x * std::cos(e) * 20, std::sin(e) * 20, up.z * std::cos(e) * 20 },
+                                             { 255, 240, 220, 255 }, 2.2f, true);
+    sun.target = { 0, 0, 0 };
+    sun.shadowExtent = 6;
+    s->lights.push_back(sun);
+    return s;
+}
+// Mean luma of the square of half-size `half` metres centred on the ground point `c`.
+static double boxLuma(const Image& img, const g3d::Camera& cam, Vector3 c, float half) {
+    const Vector2 a = project(cam, { c.x - half, 0, c.z - half }, img.width, img.height);
+    const Vector2 b = project(cam, { c.x + half, 0, c.z + half }, img.width, img.height);
+    const int x0 = (int)std::min(a.x, b.x), x1 = (int)std::max(a.x, b.x), y0 = (int)std::min(a.y, b.y), y1 = (int)std::max(a.y, b.y);
+    double sum = 0;
+    int n = 0;
+    for (int y = std::max(y0, 0); y < std::min(y1, img.height); y++)
+        for (int x = std::max(x0, 0); x < std::min(x1, img.width); x++) { sum += luma(GetImageColor(img, x, y)); n++; }
+    return n ? sum / n : 0;
+}
+
 static void grassField() {
     {   // placement: a tile holds density * size^2 blades; any first n of them spread evenly
         g3d::Field f;
@@ -2038,6 +2475,159 @@ static void grassField() {
         CHECK(lowest >= plateau - 2 && lowest < below);
         UnloadImage(img);
     }
+    {   // castShadows: a tall tuft shades the grass and ground behind it, on the side away from the sun,
+        // and does not when the switch is off. Two sun azimuths, so the direction is checked.
+        const int w = 480, h = 270;
+        for (float az : { 40.f, 150.f }) {
+            double on[3], off[3];
+            for (int cast = 0; cast < 2; cast++) {
+                auto s = tuftScene(az, cast != 0);
+                Comp c = longComp(s, w, h);
+                Image img = render(c, 20);
+                if (az == 40.f) dumpField(cast ? "tuft_on.png" : "tuft_off.png", img);
+                const Vector3 d = sunSide(az), across = { -d.z, 0, d.x };
+                double* out = cast ? on : off;
+                out[0] = boxLuma(img, s->camera, Vector3Scale(d, -2.2f), 0.3f);        // behind the tuft, away from the sun
+                out[1] = boxLuma(img, s->camera, Vector3Scale(d, 2.2f), 0.3f);         // the same distance on the sun side
+                out[2] = boxLuma(img, s->camera, Vector3Scale(across, 2.2f), 0.3f);    // the same distance across the sun
+                UnloadImage(img);
+            }
+            std::printf("[scene3d] grass shadow, sun azimuth %.0f: luma behind / sun side / across: on %.1f / %.1f / %.1f (%.2f), "
+                        "off %.1f / %.1f / %.1f (%.2f)\n", az, on[0], on[1], on[2], on[0] / on[1], off[0], off[1], off[2], off[0] / off[1]);
+            CHECK(on[0] < 0.8 * on[1]);                                        // clearly darker away from the sun
+            CHECK(on[2] > 0.9 * on[1] && on[2] < 1.1 * on[1]);                 // and not across it: the direction is right
+            CHECK(off[0] > 0.93 * off[1] && off[0] < 1.07 * off[1]);           // off: no difference beyond the grain
+        }
+    }
+    {   // castShadows: how much to thin the blades in the shadow map (printed, not checked): the shadow's
+        // darkness against its cost, for the tuft of the test above.
+        const int w = 480, h = 270;
+        for (float frac : { 1.f, 0.5f, 0.35f, 0.2f, 0.1f }) {
+            auto s = tuftScene(40, true, 25, frac);
+            Comp c = longComp(s, w, h);
+            Image img = render(c, 20);
+            const Vector3 d = sunSide(40);
+            const double behind = boxLuma(img, s->camera, Vector3Scale(d, -2.2f), 0.3f), lit = boxLuma(img, s->camera, Vector3Scale(d, 2.2f), 0.3f);
+            const long long blades = g3d::fieldShadowBladesSubmitted();
+            UnloadImage(img);
+            std::printf("[scene3d] grass shadow density %.2f: %lld blades in the shadow map, behind / sun side %.2f\n", frac, blades, behind / lit);
+        }
+    }
+    {   // castShadows: the shadow pass draws blades in step with the main pass, and the count is exact
+        const bool bench = std::getenv("RMTN_FIELD_BENCH") != nullptr;
+        auto build = [bench](bool cast, float share) {
+            auto s = meadow([&](g3d::Field& f) {
+                f.min = { -200, -200 }; f.max = { 200, 200 }; f.density = bench ? 600.f : 120.f;
+                if (share >= 0) { f.castShadows = cast; f.shadowDensity = share; }   // share < 0: the defaults
+            });
+            s->camera.position = { 0, 1.7f, 6 };
+            s->camera.target = { 0, 1.2f, -10 };
+            s->objects[0]->material.color = { 70, 92, 40, 255 };
+            return s;
+        };
+        const int w = bench ? 1920 : 480, h = bench ? 1080 : 270, frames = bench ? 12 : 4;
+        long long main[4] = {}, shadow[4] = {};
+        const struct { bool cast; float share; const char* name; } modes[4] = { { false, 0.35f, "off" }, { true, 1.f, "on, all blades" }, { true, 0.35f, "on, 0.35" }, { true, -1.f, "defaults" } };
+        for (int m = 0; m < 4; m++) {
+            Comp c = longComp(build(modes[m].cast, modes[m].share), w, h);
+            UnloadImage(render(c, 30));                                       // warm up (shaders, maps)
+            main[m] = g3d::fieldBladesSubmitted();
+            shadow[m] = g3d::fieldShadowBladesSubmitted();
+            double best = 1e9, mean = 0;
+            for (int f = 31; f < 31 + frames; f++) {
+                const auto t0 = std::chrono::steady_clock::now();
+                UnloadImage(render(c, f));
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                best = std::min(best, ms);
+                mean += ms / frames;
+            }
+            std::printf("[scene3d] grass shadows %s, %dx%d: %lld blades in the main pass, %lld in the shadow pass; "
+                        "%.1f ms best of %d, %.1f mean (with readback)\n", modes[m].name, w, h, main[m], shadow[m], best, frames, mean);
+        }
+        CHECK(main[0] > 0 && main[0] == main[1] && main[1] == main[2] && main[2] == main[3]);   // the switch changes only the shadow pass
+        CHECK(shadow[0] == 0);
+        CHECK(shadow[1] > 0);
+        CHECK(shadow[2] >= 0.35 * shadow[1] && shadow[2] <= 0.35 * shadow[1] + 400);   // the share, rounded up a tile at a time
+        const g3d::Field defaults;                                             // as before 0.13: on, every blade, no pick
+        CHECK(defaults.castShadows && defaults.shadowDensity == 1.f);
+        CHECK(shadow[3] == shadow[1] && shadow[3] > 0);
+    }
+    {   // castShadows: frames stay pure
+        Comp again = longComp(tuftScene(40, true), 480, 270);
+        Image before = render(again, 39), after = render(again, 40);
+        Comp fresh = longComp(tuftScene(40, true), 480, 270);
+        Image alone = render(fresh, 40);
+        CHECK(same(after, alone));
+        CHECK(!same(before, after));
+        UnloadImage(before); UnloadImage(after); UnloadImage(alone);
+    }
+    {   // castShadows: the shadow follows the blades in the wind. A dense tuft of red blades, 1 m tall, a sun
+        // from +x, a gust along +z: at frame 21 no gust bends the blades, at 63 it bends them 0.9 of their
+        // height. The shadow's mean z (across the shadow's own direction) must move as the blades' does.
+        const int w = 640, h = 360;
+        auto make = [](bool cast) {
+            auto s = std::make_shared<g3d::Scene>();
+            s->camera.position = { 0, 30, 4 };
+            s->camera.target = { 0, 0, 0 };
+            s->camera.fov = 14;
+            s->ambient = 0.25f;
+            s->shadowMapSize = 2048;
+            g3d::Material ground;
+            ground.color = { 220, 220, 220, 255 };
+            ground.roughness = 1;
+            s->add(g3d::Geometry::plane(80, 80), ground);
+            auto f = std::make_shared<g3d::Field>();
+            f->min = { -0.5f, -0.5f }; f->max = { 0.5f, 0.5f };
+            f->mask = [](float x, float z) { return x * x + z * z < 0.0625f ? 1.f : 0.f; };
+            f->density = 6000; f->height = 1; f->heightVariation = 0; f->lean = 0; f->width = 0.03f; f->tileSize = 1;
+            f->sway = 0; f->gust = 0.9f; f->gustSpeed = 5; f->gustScale = 14; f->windDirection = { 0, 1 };
+            f->root = { 150, 0, 0, 255 }; f->tip = { 255, 30, 30, 255 };
+            f->colorVariation = 0; f->dryness = 0;
+            f->castShadows = cast; f->shadowDistance = 80;
+            g3d::Material grass;
+            grass.roughness = 0.8f;
+            grass.lineWidth = 0;
+            s->add(f, grass);
+            g3d::Light sun = g3d::Light::directional({ 20 * std::cos(30 * DEG2RAD), 10, 0 }, WHITE, 2.4f, true);
+            sun.target = { 0, 0, 0 };
+            sun.shadowExtent = 5;
+            s->lights.push_back(sun);
+            return s;
+        };
+        auto scene = make(true);
+        Comp c = longComp(scene, w, h);
+        auto zOf = [&](const Image& img, double& shadowZ, double& bladeZ, int& shadowPx, int& bladePx) {
+            const Vector2 o = project(scene->camera, { 0, 0, 0 }, w, h), one = project(scene->camera, { 0, 0, 1 }, w, h);
+            const double perM = one.y - o.y;
+            double lit = 0;
+            for (int y = 0; y < 20; y++) for (int x = 0; x < 20; x++) lit += luma(GetImageColor(img, x, y)) / 400.0;
+            double sz = 0, bz = 0;
+            shadowPx = bladePx = 0;
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++) {
+                    const Color p = GetImageColor(img, x, y);
+                    if (p.r > p.g + 40) { bz += (y - o.y) / perM; bladePx++; }
+                    else if (luma(p) < 0.7 * lit) { sz += (y - o.y) / perM; shadowPx++; }
+                }
+            shadowZ = shadowPx ? sz / shadowPx : 0;
+            bladeZ = bladePx ? bz / bladePx : 0;
+        };
+        double sz[2], bz[2];
+        int sp[2], bp[2];
+        const int frames[2] = { 21, 63 };
+        for (int i = 0; i < 2; i++) {
+            Image img = render(c, frames[i]);
+            zOf(img, sz[i], bz[i], sp[i], bp[i]);
+            dumpField(i ? "gust_lean.png" : "gust_upright.png", img);
+            UnloadImage(img);
+        }
+        const double shiftShadow = sz[1] - sz[0], shiftBlade = bz[1] - bz[0];
+        std::printf("[scene3d] grass shadow in a gust: blades' mean z %.2f -> %.2f (%d, %d px), shadow's %.2f -> %.2f (%d, %d px); shift %.2f m against %.2f m\n",
+                    bz[0], bz[1], bp[0], bp[1], sz[0], sz[1], sp[0], sp[1], shiftShadow, shiftBlade);
+        CHECK(bp[0] > 100 && bp[1] > 100 && sp[0] > 500 && sp[1] > 500);
+        CHECK(std::fabs(shiftBlade) > 0.15);                                                // the gust really bends the blades
+        CHECK(shiftShadow / shiftBlade > 0.6 && shiftShadow / shiftBlade < 1.6);   // and the shadow goes with them
+    }
     {   // landscape: a 400 m square; time printed, not checked. Full size (600 blades a square
         // metre at 1080p) with RMTN_FIELD_BENCH set; smaller by default, for software GL on CI.
         const bool bench = std::getenv("RMTN_FIELD_BENCH") != nullptr;
@@ -2179,6 +2769,199 @@ static void trees() {
             CHECK(iou > 0.6f);
             UnloadImage(a); UnloadImage(b);
         }
+    }
+    // Silhouette overlap (intersection over union of tree pixels) of a tree forced to its
+    // impostor against the same tree at full detail, from `elev` degrees above the horizon.
+    auto overlapFrom = [&](const flora::TreePtr& tree, float yaw, float elev) {
+        auto shot = [&](bool far) {
+            auto s = noShadows(treeStage());
+            const float e = elev * DEG2RAD;
+            s->camera.position = { 0, 6 + 30 * std::sin(e), 30 * std::cos(e) };
+            s->camera.target = { 0, 6, 0 };
+            flora::ForestSpec fs;
+            fs.wind = 0; fs.gust = 0;
+            if (far) { fs.reducedFrom = 1; fs.impostorFrom = 2; fs.blend = 0.1f; }
+            else { fs.reducedFrom = 200; fs.impostorFrom = 300; }
+            flora::addTree(*s, tree, { 0, 0, 0 }, yaw, 1, fs);
+            Comp c = longComp(s, 240, 240);
+            return render(c, 0);
+        };
+        Image a = shot(false), b = shot(true);
+        int both = 0, either = 0;
+        for (int y = 0; y < a.height; y++)
+            for (int x = 0; x < a.width; x++) {
+                const Color ca = GetImageColor(a, x, y), cb = GetImageColor(b, x, y);
+                const bool p = isTree(ca), q = isTree(cb);
+                both += p && q; either += p || q;
+            }
+        UnloadImage(a); UnloadImage(b);
+        return either ? (float)both / either : 0.f;
+    };
+    {   // from above: the impostor still stands for the tree (mean over three turns of the tree)
+        const float elevs[] = { 0, 30, 45, 60, 80 };
+        for (int k : { 0, 1, 2 }) {                    // oak, birch, pine
+            std::printf("[scene3d] %-5s impostor overlap by elevation:", names[k]);
+            float worst60 = 1;
+            for (float elev : elevs) {
+                float sum = 0, low = 1;
+                for (float yaw : { 0.f, 70.f, 200.f }) {
+                    const float iou = overlapFrom(built[(size_t)k], yaw, elev);
+                    sum += iou; low = std::min(low, iou);
+                }
+                std::printf("  %.0f deg: mean %.2f (min %.2f)", elev, sum / 3, low);
+                if (elev == 0) CHECK(sum / 3 > (k == 0 ? 0.84f : k == 1 ? 0.86f : 0.61f));   // the side view: at least what it was
+                if (elev == 60) worst60 = low;
+            }
+            std::printf("\n");
+            CHECK(worst60 >= 0.75f);
+            // The same tree with one row of pictures (what impostors were before): 60 degrees, and the side.
+            flora::TreeBuild one;
+            one.elevations = 1;
+            const flora::TreePtr flat = flora::makeTree(flora::tree(names[k]), one);
+            float flat0 = 0, flat60 = 0;
+            for (float yaw : { 0.f, 70.f, 200.f }) { flat0 += overlapFrom(flat, yaw, 0) / 3; flat60 += overlapFrom(flat, yaw, 60) / 3; }
+            std::printf("[scene3d] %-5s with elevations = 1: overlap %.2f from the side, %.2f from 60 deg\n", names[k], flat0, flat60);
+            CHECK(flat60 + 0.02f < worst60);   // birch, upright and narrow, gains least from rows: 0.72 to 0.76
+            // Atlas memory: colour and normal pictures, 4 bytes a texel, views x elevations cells of viewSize^2.
+            const auto atlasBytes = [](const flora::Tree& t) {
+                return (long long)t.build.views * t.build.elevations * t.build.viewSize * t.build.viewSize * 4 * 2;
+            };
+            std::printf("[scene3d] %-5s impostor atlas: %lld KiB with one row, %lld KiB with %d\n", names[k], atlasBytes(*flat) / 1024,
+                        atlasBytes(*built[(size_t)k]) / 1024, built[(size_t)k]->build.elevations);
+        }
+    }
+    {   // brightness: under the default sun (shadows on) the crown pixels both a full tree and its
+        // impostor cover have about the same mean linear luminance, and about the same colour.
+        auto linear = [](unsigned char c) { return std::pow(c / 255.0, 2.2); };
+        for (int k : { 0, 1, 2 }) {
+            std::printf("[scene3d] %-5s impostor / full crown luminance:", names[k]);
+            for (float elev : { 0.f, 30.f, 60.f, 80.f }) {
+                double ratio = 0;
+                double rgbA[3] = { 0, 0, 0 }, rgbB[3] = { 0, 0, 0 };
+                int n = 0;
+                for (float yaw : { 0.f, 70.f, 200.f }) {
+                    auto shot = [&](bool far) {
+                        auto s = treeStage();                                // the default sun, with shadows
+                        const float e = elev * DEG2RAD;
+                        s->camera.position = { 0, 6 + 30 * std::sin(e), 30 * std::cos(e) };
+                        s->camera.target = { 0, 6, 0 };
+                        flora::ForestSpec fs;
+                        fs.wind = 0; fs.gust = 0;
+                        if (far) { fs.reducedFrom = 1; fs.impostorFrom = 2; fs.blend = 0.1f; }
+                        else { fs.reducedFrom = 200; fs.impostorFrom = 300; }
+                        flora::addTree(*s, built[(size_t)k], { 0, 0, 0 }, yaw, 1, fs);
+                        Comp c = longComp(s, 240, 240);
+                        return render(c, 0);
+                    };
+                    Image a = shot(false), b = shot(true);
+                    if (const char* dir = std::getenv("RMTN_CROWN_DUMP"); dir && yaw == 0.f) {   // pictures to look at, not checks
+                        char fn[512];
+                        std::snprintf(fn, sizeof fn, "%s/crown_%s_%02.0f_full.png", dir, names[k], elev); ExportImage(a, fn);
+                        std::snprintf(fn, sizeof fn, "%s/crown_%s_%02.0f_impostor.png", dir, names[k], elev); ExportImage(b, fn);
+                    }
+                    double ya = 0, yb = 0;
+                    for (int y = 0; y < a.height; y++)
+                        for (int x = 0; x < a.width; x++) {
+                            const Color ca = GetImageColor(a, x, y), cb = GetImageColor(b, x, y);
+                            if (!isTree(ca) || !isTree(cb)) continue;
+                            ya += 0.2126 * linear(ca.r) + 0.7152 * linear(ca.g) + 0.0722 * linear(ca.b);
+                            yb += 0.2126 * linear(cb.r) + 0.7152 * linear(cb.g) + 0.0722 * linear(cb.b);
+                            rgbA[0] += ca.r; rgbA[1] += ca.g; rgbA[2] += ca.b; rgbB[0] += cb.r; rgbB[1] += cb.g; rgbB[2] += cb.b;
+                            n++;
+                        }
+                    ratio += (ya > 0 ? yb / ya : 0) / 3;
+                    UnloadImage(a); UnloadImage(b);
+                }
+                std::printf("  %.0f deg %.2f (rgb full %.0f %.0f %.0f, impostor %.0f %.0f %.0f)", elev, ratio, rgbA[0] / std::max(n, 1), rgbA[1] / std::max(n, 1),
+                            rgbA[2] / std::max(n, 1), rgbB[0] / std::max(n, 1), rgbB[1] / std::max(n, 1), rgbB[2] / std::max(n, 1));
+                CHECK(ratio > 0.75 && ratio < 1.3);
+            }
+            std::printf("\n");
+        }
+    }
+    {   // impostor shadows: a tree at impostor distance casts about the shadow of the full tree,
+        // in the same place, from a low and a higher sun. Seen from straight above (orthographic),
+        // the shadowed ground is what is darker than the same ground with no tree, outside both
+        // trees' own pixels.
+        struct Shadow { long long px = 0; double cx = 0, cz = 0; int x0 = 1 << 30, x1 = -1, y0 = 1 << 30, y1 = -1; };
+        const int N = 600;
+        const float span = 60;                                       // metres across the picture
+        auto ground = [&](const flora::TreePtr& tree, float sunElevation, bool far, bool withTree) {
+            auto s = treeStage();
+            const float az = 35 * DEG2RAD, el = sunElevation * DEG2RAD;
+            s->lights[0].position = { 60 * std::cos(az) * std::cos(el), 60 * std::sin(el), 60 * std::sin(az) * std::cos(el) };
+            s->lights[0].shadowExtent = 40;
+            s->camera.position = { -9, 60, -5.99f };
+            s->camera.target = { -9, 0, -6 };
+            s->camera.orthographic = true;
+            s->camera.orthoHeight = span;
+            flora::ForestSpec fs;
+            fs.wind = 0; fs.gust = 0;
+            if (far) { fs.reducedFrom = 1; fs.impostorFrom = 2; fs.blend = 0.1f; }
+            else { fs.reducedFrom = 500; fs.impostorFrom = 600; }
+            if (withTree) flora::addTree(*s, tree, { 0, 0, 0 }, 20, 1, fs);
+            Comp c = longComp(s, N, N);
+            return render(c, 0);
+        };
+        auto lum = [](Color c) { return c.r + c.g + c.b; };
+        auto shadowOf = [&](const Image& bare, const Image& a, const Image& b, bool useB) {
+            Shadow out;
+            for (int y = 0; y < N; y++)
+                for (int x = 0; x < N; x++) {
+                    const Color base = GetImageColor(bare, x, y), ca = GetImageColor(a, x, y), cb = GetImageColor(b, x, y);
+                    if (isTree(ca) || isTree(cb)) continue;                       // under either tree's own pixels
+                    if (lum(useB ? cb : ca) < 0.6f * lum(base)) {
+                        out.px++; out.cx += x; out.cz += y;
+                        out.x0 = std::min(out.x0, x); out.x1 = std::max(out.x1, x); out.y0 = std::min(out.y0, y); out.y1 = std::max(out.y1, y);
+                    }
+                }
+            if (out.px) { out.cx /= out.px; out.cz /= out.px; }
+            return out;
+        };
+        const float px2 = (span / N) * (span / N);                     // m^2 a pixel
+        for (int k : { 0, 1, 2 }) {                                     // oak, birch, pine
+            for (float sun : { 25.f, 55.f }) {
+                Image bare = ground(built[(size_t)k], sun, false, false);
+                Image full = ground(built[(size_t)k], sun, false, true), imp = ground(built[(size_t)k], sun, true, true);
+                const Shadow f = shadowOf(bare, full, imp, false), i = shadowOf(bare, full, imp, true);
+                const double diag = std::hypot(f.x1 - f.x0, f.y1 - f.y0);
+                const double off = std::hypot(f.cx - i.cx, f.cz - i.cz);
+                std::printf("[scene3d] %-5s shadow, sun %2.0f deg: full %.1f m2, impostor %.1f m2 (ratio %.2f); centroid %.2f m apart (%.1f%% of the shadow's %.1f m)\n",
+                            names[k], sun, f.px * px2, i.px * px2, f.px ? (double)i.px / f.px : 0., off * span / N, diag ? 100 * off / diag : 0., diag * span / N);
+                if (k == 0) {
+                    CHECK(f.px * px2 > 20);
+                    CHECK(std::fabs((double)i.px / std::max(1LL, f.px) - 1) < 0.15);
+                    CHECK(off < 0.06 * diag);
+                } else CHECK(std::fabs((double)i.px / std::max(1LL, f.px) - 1) < 0.30);
+                UnloadImage(bare); UnloadImage(full); UnloadImage(imp);
+            }
+        }
+    }
+    {   // impostor forest frames are pure (shadows included): a frame drawn alone is the frame after another
+        auto s = noShadows(treeStage());
+        s->lights[0].castShadow = true;
+        s->camera.position = { 0, 25, 60 };
+        s->camera.target = { 0, 4, 0 };
+        flora::ForestSpec fs;
+        fs.reducedFrom = 1; fs.impostorFrom = 2; fs.blend = 0.1f; fs.wind = 3; fs.gust = 0.5f;
+        std::vector<flora::Placement> at;
+        for (int i = 0; i < 12; i++) at.push_back({ { -18.f + 7 * (i % 6), 0, -6.f + 12 * (i / 6) }, 30.f * i, 1, i % 3, (uint32_t)i + 1 });
+        flora::addForest(*s, at, { built[0], built[1], built[2] }, fs);
+        Comp a = longComp(s, 320, 240), b = longComp(s, 320, 240);
+        Image alone = render(a, 12);
+        UnloadImage(render(b, 11));
+        Image after = render(b, 12);
+        int differ = 0, tree = 0;
+        for (int y = 0; y < alone.height; y++)
+            for (int x = 0; x < alone.width; x++) {
+                const Color p = GetImageColor(alone, x, y), q = GetImageColor(after, x, y);
+                differ += p.r != q.r || p.g != q.g || p.b != q.b;
+                tree += isTree(p);
+            }
+        std::printf("[scene3d] impostor forest: %d tree px, %d differ between a frame alone and after another\n", tree, differ);
+        CHECK(tree > 500);
+        CHECK(differ == 0);
+        UnloadImage(alone); UnloadImage(after);
     }
     {   // wind: the crown leans downwind, frames are pure, and the wind moves it
         auto windy = [&](Vector2 dir) {
@@ -2476,21 +3259,40 @@ static void trees() {
     {   // a forest: time printed, not checked. 1 km square, ~10^4 trees, with RMTN_FIELD_BENCH.
         const bool bench = std::getenv("RMTN_FIELD_BENCH") != nullptr;
         const float half = bench ? 500.f : 120.f;
-        auto s = treeStage({ 70, 92, 40, 255 });
-        s->camera.position = { 0, 30, half + 20 };
-        s->camera.target = { 0, 6, half - 60 };
-        s->camera.fov = 55;
         const auto placed = flora::scatter(flora::rect({ -half, -half }, { half, half }), { 7.f, 0.3f, 60, 0.8f, 1.2f, 4 }, 3);
-        flora::addForest(*s, placed, { built[0], built[1], built[2], built[3] });
-        Comp c = longComp(s, bench ? 1920 : 480, bench ? 1080 : 270);
-        Image first = render(c, 30);
-        dumpField("forest.png", first);
-        UnloadImage(first);
-        const int frames = bench ? 5 : 2;
-        const auto t0 = std::chrono::steady_clock::now();
-        for (int f = 31; f < 31 + frames; f++) UnloadImage(render(c, f));
-        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / frames;
-        std::printf("[scene3d] forest %dx%d: %zu trees, %.1f ms a frame (with readback)\n", c.w, c.h, placed.size(), ms);
+        // Impostors as they were (one row of pictures, no shadows) against the new ones without and with shadows.
+        flora::TreeBuild oneRow;
+        oneRow.elevations = 1;
+        std::vector<flora::TreePtr> legacy;
+        for (int k = 0; k < 4; k++) legacy.push_back(flora::makeTree(flora::tree(names[k]), oneRow));
+        struct Variant { const char* name; bool old; bool shadows; };
+        for (const Variant v : { Variant{ "one row, no shadows (as before)", true, false }, Variant{ "three rows, impostor shadows off", false, false },
+                                 Variant{ "three rows, impostor shadows on", false, true } }) {
+            const bool shadows = v.shadows;
+            auto s = treeStage({ 70, 92, 40, 255 });
+            s->camera.position = { 0, 30, half + 20 };
+            s->camera.target = { 0, 6, half - 60 };
+            s->camera.fov = 55;
+            flora::ForestSpec fs;
+            fs.impostorShadows = shadows;
+            const std::vector<flora::TreePtr>& kinds = v.old ? legacy : std::vector<flora::TreePtr>{ built[0], built[1], built[2], built[3] };
+            flora::addForest(*s, placed, kinds, fs);
+            Comp c = longComp(s, bench ? 1920 : 480, bench ? 1080 : 270);
+            Image first = render(c, 30);
+            if (shadows) dumpField("forest.png", first);
+            UnloadImage(first);
+            const int frames = bench ? 12 : 2;
+            double total = 0, best = 1e30;
+            for (int f = 31; f < 31 + frames; f++) {
+                const auto t0 = std::chrono::steady_clock::now();
+                UnloadImage(render(c, f));
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                total += ms;
+                best = std::min(best, ms);
+            }
+            std::printf("[scene3d] forest %dx%d: %zu trees, %.1f ms a frame (best %.1f, with readback), %s\n", c.w, c.h,
+                        placed.size(), total / frames, best, v.name);
+        }
     }
     if (std::getenv("RMTN_FIELD_DUMP")) {     // the presets in a row, near enough for the full trees
         auto s = treeStage({ 92, 104, 60, 255 });
@@ -2536,6 +3338,1362 @@ static void trees() {
     }
 }
 
+// ---- far canopy (ForestSpec::canopyFrom): patches over a cell's crowns, in place of its trees
+struct CanopyRig {
+    std::vector<flora::TreePtr> kinds;
+    std::vector<flora::Placement> at;
+    flora::ForestSpec spec;
+    Color ground{ 200, 40, 200, 255 };
+    float sun = 35, sunAzimuth = 40;
+    bool shadows = true;
+    Vector3 from{ 0, 40, 350 }, to{ 0, 6, 0 };
+    float fov = 22;
+    bool sky = true;                // a day sky: its diffuse light reaches trees and patches differently from the plain ambient (calibrate with it)
+    float shadowExtent = 160;
+};
+static g3d::ScenePtr canopyScene(const CanopyRig& r) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->ambient = 0.4f;
+    g3d::Material g;
+    g.color = r.ground;
+    g.roughness = 1;
+    s->add(g3d::Geometry::plane(8000, 8000), g);
+    const float az = r.sunAzimuth * DEG2RAD, el = r.sun * DEG2RAD;
+    g3d::Light sun = g3d::Light::directional({ r.to.x + 600 * std::cos(az) * std::cos(el), 600 * std::sin(el), r.to.z + 600 * std::sin(az) * std::cos(el) },
+                                             { 255, 240, 220, 255 }, 2.2f, r.shadows);
+    sun.target = r.to;
+    sun.shadowExtent = r.shadowExtent;
+    s->lights.push_back(sun);
+    s->camera.position = r.from;
+    s->camera.target = r.to;
+    s->camera.fov = r.fov;
+    s->camera.farPlane = 6000;
+    if (r.sky) s->sky = g3d::Sky::day();
+    flora::addForest(*s, r.at, r.kinds, r.spec);
+    return s;
+}
+static bool forestPixel(Color c) { return !(c.r > 1.3f * c.g && c.b > 1.3f * c.g) && c.r + c.g + c.b > 12; }
+
+// What an image of forest looks like: mean colour, grain, silhouette and seams along cell lines.
+struct CanopyLook {
+    double rgb[3] = { 0, 0, 0 }, lin = 0, grain = 0, spread = 0, topVar = 0, topStep = 0;
+    int px = 0;
+};
+static double linLuma(Color c) { return 0.2126 * std::pow(c.r / 255.0, 2.2) + 0.7152 * std::pow(c.g / 255.0, 2.2) + 0.0722 * std::pow(c.b / 255.0, 2.2); }
+// `x0..x1` is the image's columns the forest's far edge is measured over.
+static CanopyLook canopyLook(const Image& img, int x0, int x1, const std::function<bool(int, int)>& inside = nullptr) {
+    CanopyLook L;
+    const int w = img.width, h = img.height;
+    std::vector<unsigned char> m((size_t)w * h), mAll((size_t)w * h);
+    std::vector<float> lum((size_t)w * h);
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            const Color c = GetImageColor(img, x, y);
+            mAll[(size_t)y * w + x] = forestPixel(c);
+            m[(size_t)y * w + x] = forestPixel(c) && (!inside || inside(x, y));
+            lum[(size_t)y * w + x] = (float)luma(c);
+            if (m[(size_t)y * w + x]) { L.rgb[0] += c.r; L.rgb[1] += c.g; L.rgb[2] += c.b; L.lin += linLuma(c); L.px++; }
+        }
+    for (double& v : L.rgb) v /= std::max(L.px, 1);
+    L.lin /= std::max(L.px, 1);
+    // Grain: |pixel - its 5x5 mean|, where all 25 are forest.
+    double g = 0;
+    long gn = 0;
+    for (int y = 2; y < h - 2; y++)
+        for (int x = 2; x < w - 2; x++) {
+            double s = 0;
+            bool all = true;
+            for (int j = -2; j <= 2 && all; j++)
+                for (int i = -2; i <= 2; i++) {
+                    if (!m[(size_t)(y + j) * w + x + i]) { all = false; break; }
+                    s += lum[(size_t)(y + j) * w + x + i];
+                }
+            if (!all) continue;
+            g += std::fabs(lum[(size_t)y * w + x] - s / 25);
+            gn++;
+        }
+    L.grain = gn ? g / gn : 0;
+    // Spread of 8 x 8 px cell means (fully forest cells): the blotchiness at crown scale.
+    std::vector<double> cm;
+    for (int y = 0; y + 8 <= h; y += 8)
+        for (int x = 0; x + 8 <= w; x += 8) {
+            double s = 0;
+            bool all = true;
+            for (int j = 0; j < 8 && all; j++)
+                for (int i = 0; i < 8; i++) {
+                    if (!m[(size_t)(y + j) * w + x + i]) { all = false; break; }
+                    s += lum[(size_t)(y + j) * w + x + i];
+                }
+            if (all) cm.push_back(s / 64);
+        }
+    if (cm.size() > 4) {
+        double mean = 0, var = 0;
+        for (double v : cm) mean += v / cm.size();
+        for (double v : cm) var += (v - mean) * (v - mean) / cm.size();
+        L.spread = std::sqrt(var);
+    }
+    // The far edge: each column's first run of three forest pixels from the top, minus its straight-line trend.
+    std::vector<double> top;
+    std::vector<int> cols;
+    for (int x = x0; x < x1; x++) {
+        for (int y = 0; y < h - 3; y++)
+            if (mAll[(size_t)y * w + x] && mAll[(size_t)(y + 1) * w + x] && mAll[(size_t)(y + 2) * w + x]) { top.push_back(y); cols.push_back(x); break; }
+    }
+    if (top.size() > 20) {
+        double sx = 0, sy = 0, sxx = 0, sxy = 0;
+        const double n = (double)top.size();
+        for (size_t i = 0; i < top.size(); i++) { sx += cols[i]; sy += top[i]; sxx += (double)cols[i] * cols[i]; sxy += cols[i] * top[i]; }
+        const double slope = (n * sxy - sx * sy) / std::max(n * sxx - sx * sx, 1e-9), icpt = (sy - slope * sx) / n;
+        double var = 0, step = 0;
+        for (size_t i = 0; i < top.size(); i++) {
+            const double r = top[i] - (slope * cols[i] + icpt);
+            var += r * r / n;
+            if (i && cols[i] == cols[i - 1] + 1) step += std::fabs(top[i] - top[i - 1]) / n;
+        }
+        L.topVar = std::sqrt(var);
+        L.topStep = step;
+    }
+    return L;
+}
+
+// The strongest repeat in the picture: the normalised autocorrelation of luma over the pixels `inside` (and forest),
+// at offsets of 10-30 px (a visibly tiled texture shows as a peak at its period). Random foliage stays low.
+static double autocorrPeak(const Image& img, const std::function<bool(int, int)>& inside) {
+    const int w = img.width, h = img.height;
+    std::vector<float> lum((size_t)w * h);
+    std::vector<unsigned char> in((size_t)w * h);
+    double mean = 0;
+    long n = 0;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            const Color c = GetImageColor(img, x, y);
+            lum[(size_t)y * w + x] = (float)luma(c);
+            in[(size_t)y * w + x] = forestPixel(c) && (!inside || inside(x, y));
+            if (in[(size_t)y * w + x]) { mean += lum[(size_t)y * w + x]; n++; }
+        }
+    {   // high-pass: take out the slow light and dark (a 33 px box mean), so only the texture's own repeat is left
+        std::vector<double> sum((size_t)(w + 1) * (h + 1), 0.0);
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) sum[(size_t)(y + 1) * (w + 1) + x + 1] = lum[(size_t)y * w + x] + sum[(size_t)y * (w + 1) + x + 1] + sum[(size_t)(y + 1) * (w + 1) + x] - sum[(size_t)y * (w + 1) + x];
+        std::vector<float> hp(lum.size());
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                const int x0 = std::max(0, x - 16), x1 = std::min(w, x + 17), y0 = std::max(0, y - 16), y1 = std::min(h, y + 17);
+                const double s = sum[(size_t)y1 * (w + 1) + x1] - sum[(size_t)y0 * (w + 1) + x1] - sum[(size_t)y1 * (w + 1) + x0] + sum[(size_t)y0 * (w + 1) + x0];
+                hp[(size_t)y * w + x] = lum[(size_t)y * w + x] - (float)(s / ((x1 - x0) * (y1 - y0)));
+            }
+        lum = hp;
+    }
+    mean = 0;
+    for (size_t i = 0; i < lum.size(); i++) if (in[i]) mean += lum[i];
+    if (n < 2000) return -1;
+    mean /= n;
+    double var = 0;
+    for (size_t i = 0; i < lum.size(); i++) if (in[i]) var += (lum[i] - mean) * (lum[i] - mean);
+    double best = 0;
+    for (int dy = 0; dy <= 30; dy++)
+        for (int dx = -30; dx <= 30; dx++) {
+            if (dy == 0 && dx <= 0) continue;
+            if (std::hypot(dx, dy) < 10 || std::hypot(dx, dy) > 30) continue;
+            double s = 0, vs = 0;
+            for (int y = 0; y + dy < h; y++)
+                for (int x = std::max(0, -dx); x + dx < w && x < w; x++) {
+                    const size_t a = (size_t)y * w + x, b = (size_t)(y + dy) * w + x + dx;
+                    if (in[a] && in[b]) { s += (lum[a] - mean) * (lum[b] - mean); vs += 1; }
+                }
+            if (vs > 1000) best = std::max(best, s / vs / (var / n));
+        }
+    return best;
+}
+
+// Brightness steps along the cells' boundary lines against lines 1/4, 1/2 and 3/4 of a cell off: along a line, in pieces
+// of 8 points (16 m, 5 m up), the mean luma of the forest pixels 3-9 px to one side against the other side, |difference|
+// averaged over the pieces. Averaging over a piece takes the grain out, so a cell that is lighter than its neighbour
+// shows; ~1 where no seam shows.
+static double cellSeamRatio(const Image& img, const g3d::Camera& cam, float minX, float minZ, float C, float x0, float x1, float z0, float z1) {
+    auto across = [&](float offset) {
+        double sum = 0;
+        long pieces = 0;
+        for (int k = 1; k < 8; k++) {
+            for (int axis = 0; axis < 2; axis++) {
+                const float fixed = (axis == 0 ? minX : minZ) + (k + offset) * C;
+                const float lo = axis == 0 ? z0 : x0, hi = axis == 0 ? z1 : x1;
+                if (fixed < (axis == 0 ? x0 : z0) + 4 || fixed > (axis == 0 ? x1 : z1) - 4) continue;
+                double sa = 0, sb = 0;
+                long na = 0, nb = 0;
+                int inPiece = 0;
+                auto flush = [&] {
+                    if (na >= 12 && nb >= 12) { sum += std::fabs(sa / na - sb / nb); pieces++; }
+                    sa = sb = 0; na = nb = 0; inPiece = 0;
+                };
+                for (float u = lo + 4; u < hi - 4; u += 2) {
+                    const Vector3 a = axis == 0 ? Vector3{ fixed, 5, u } : Vector3{ u, 5, fixed };
+                    const Vector3 b = axis == 0 ? Vector3{ fixed, 5, u + 2 } : Vector3{ u + 2, 5, fixed };
+                    const Vector2 pa = project(cam, a, img.width, img.height), pb = project(cam, b, img.width, img.height);
+                    Vector2 t = Vector2Subtract(pb, pa);
+                    const float len = Vector2Length(t);
+                    if (len >= 0.2f) {                                         // else edge-on: no tangent to cross
+                        t = Vector2Scale(t, 1 / len);
+                        const Vector2 nrm{ -t.y, t.x };
+                        for (float d : { 3.f, 5.f, 7.f, 9.f })
+                            for (int side = 0; side < 2; side++) {
+                                const Vector2 p = side ? Vector2Subtract(pa, Vector2Scale(nrm, d)) : Vector2Add(pa, Vector2Scale(nrm, d));
+                                if (p.x < 1 || p.y < 1 || p.x > img.width - 2 || p.y > img.height - 2) continue;
+                                const Color c = px(img, p);
+                                if (!forestPixel(c)) continue;
+                                (side ? sb : sa) += luma(c);
+                                (side ? nb : na)++;
+                            }
+                    }
+                    if (++inPiece == 8) flush();
+                }
+            }
+        }
+        return pieces > 8 ? sum / pieces : -1.0;
+    };
+    const double on = across(0), off = (across(0.5f) + across(0.25f) + across(0.75f)) / 3;
+    return on > 0 && off > 0 ? on / off : -1;
+}
+// Is (x, y) inside the convex quad `q` (corners in order)?
+static bool insideQuad(const Vector2 q[4], int x, int y) {
+    bool pos = false, neg = false;
+    for (int i = 0; i < 4; i++) {
+        const Vector2 a = q[i], b = q[(i + 1) % 4];
+        const float cr = (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x);
+        pos = pos || cr > 0;
+        neg = neg || cr < 0;
+    }
+    return !(pos && neg);
+}
+
+static void canopyTests() {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    const char* dumpDir = std::getenv("RMTN_L4_DUMP");
+    auto dump = [&](const std::string& name, const Image& img) {
+        if (!dumpDir) return;
+        fs::create_directories(dumpDir);
+        ExportImage(img, (fs::path(dumpDir) / name).string().c_str());
+    };
+    std::vector<flora::TreePtr> kinds;
+    for (const char* n : { "oak", "birch", "pine" }) kinds.push_back(flora::makeTree(flora::tree(n)));
+    auto forest = [&](Vector2 lo, Vector2 hi, uint32_t seed) {
+        flora::ScatterSpec sc;
+        sc.spacing = 7; sc.clumping = 0.3f; sc.clumpScale = 60; sc.scaleMin = 0.8f; sc.scaleMax = 1.2f; sc.variants = 3;
+        return flora::scatter(flora::rect(lo, hi), sc, seed);
+    };
+    auto shoot = [&](CanopyRig r, int w, int h, int frame = 12) {
+        Comp c = longComp(canopyScene(r), w, h);
+        return render(c, frame);
+    };
+    flora::ForestSpec trees;                       // as every forest is today
+    trees.wind = 0; trees.gust = 0;
+    flora::ForestSpec canopy = trees;
+    canopy.canopyBelow = 7;                        // the hand-over: trees under 7 px tall
+    canopy.canopyMaxElevation = 0;                 // the tests below exercise the patches at any view; the limit has its own check in (f)
+    flora::ForestSpec nearCanopy = trees;          // by distance instead, for close looks at the patches
+    nearCanopy.canopyFrom = 80; nearCanopy.canopyCell = 64;
+
+    for (float sunEl : { 25.f, 55.f }) {   // (f) the hand-over seen from 30 degrees up (the case a high camera shows): rows of the picture
+        // trees-only frame against canopy frame, same pixels. The brightness must not step across it, and there is no row-wise step.
+        CanopyRig r;
+        r.kinds = kinds;
+        r.at = forest({ -1200, -3000 }, { 1200, 0 }, 21);
+        r.sun = sunEl; r.sunAzimuth = 140; r.shadowExtent = 500;
+        if (std::getenv("RMTN_L4_NOSH")) r.shadows = false;
+        if (std::getenv("RMTN_L4_SKY")) r.sky = true;
+        r.from = Vector3Add({ 0, 10, -1400 }, Vector3Scale({ 0, 0.5f, 0.866f }, 1800));
+        r.to = { 0, 10, -1400 };
+        r.fov = 40;
+        r.spec = trees;
+        Image a = shoot(r, 1280, 720);
+        {   // the default limit (20 degrees): from 30 degrees up every tree stays, the picture is the trees' own (a few edge pixels aside)
+            flora::ForestSpec gated = canopy;
+            gated.canopyMaxElevation = 20;
+            r.spec = gated;
+            Image g = shoot(r, 1280, 720);
+            long diff = 0;
+            for (int y = 0; y < 720; y++)
+                for (int x = 0; x < 1280; x++) {
+                    const Color p = GetImageColor(a, x, y), q = GetImageColor(g, x, y);
+                    diff += p.r != q.r || p.g != q.g || p.b != q.b;
+                }
+            std::printf("[scene3d] canopy at 30 deg, sun %.0f, canopyMaxElevation 20: %ld px differ from the trees-only frame\n", sunEl, diff);
+            CHECK(diff < 200);                       // a few edge pixels: the canopy forest draws its trees cell by cell (another draw order)
+            UnloadImage(g);
+            // The study below (the hand-over seen from 30 degrees with the limit off) is opt-in: it records how far the patches are from the
+            // trees there (block means off by up to 25-40% with a sky lighting the trees), which is why the limit exists. Its checks fail by design.
+            if (!std::getenv("RMTN_L4_HIGH")) { UnloadImage(a); continue; }
+        }
+        r.spec = canopy;
+        Image b = shoot(r, 1280, 720);
+        char sn[24]; std::snprintf(sn, sizeof sn, "strip_sun%02.0f_", sunEl); dump(std::string(sn) + "trees.png", a); dump(std::string(sn) + "canopy.png", b);
+        const int x0 = 240, x1 = 1040;
+        std::vector<double> ratio;                                  // per row: canopy / trees mean linear luma over pixels that are forest in both
+        std::vector<int> rowsDiffer;
+        for (int y = 0; y < 720; y++) {
+            double sa = 0, sb = 0;
+            int n = 0, differs = 0;
+            for (int x = x0; x < x1; x++) {
+                const Color p = GetImageColor(a, x, y), q = GetImageColor(b, x, y);
+                if (!forestPixel(p) || !forestPixel(q)) continue;
+                sa += linLuma(p); sb += linLuma(q); n++;
+                differs += std::abs(p.r - q.r) + std::abs(p.g - q.g) + std::abs(p.b - q.b) > 12;
+            }
+            ratio.push_back(n > (x1 - x0) / 2 ? sb / std::max(sa, 1e-9) : -1.0);
+            rowsDiffer.push_back(n > 0 && differs * 20 > n ? 1 : 0);
+        }
+        // 16-row windows
+        std::vector<double> win;
+        for (int y = 0; y + 16 <= 720; y += 8) {
+            double s = 0;
+            int n = 0;
+            for (int k = 0; k < 16; k++) if (ratio[(size_t)y + k] > 0) { s += ratio[(size_t)y + k]; n++; }
+            win.push_back(n >= 12 ? s / n : -1.0);
+        }
+        double stepMax = 0, lo = 9, hi = 0;
+        int changed = 0, first = -1, last = -1;
+        for (int y = 0; y < 720; y++) if (rowsDiffer[(size_t)y]) { changed++; if (first < 0) first = y; last = y; }
+        for (size_t i = 0; i + 1 < win.size(); i++) {
+            if (win[i] < 0 || win[i + 1] < 0) continue;
+            stepMax = std::max(stepMax, std::fabs(win[i + 1] - win[i]));
+        }
+        double farMean = 0;
+        int farN = 0;
+        for (size_t i = 0; i < win.size(); i++) if (win[i] > 0) { lo = std::min(lo, win[i]); hi = std::max(hi, win[i]); if ((int)i * 8 + 16 <= (first + last) / 2) { farMean += win[i]; farN++; } }
+        {   // canopy / trees luma against the screen height of the trees there (diagnostic print): row -> distance by projecting the ground
+            const g3d::Camera cam = canopyScene(r)->camera;
+            std::vector<std::pair<float, float>> rowDist;       // (row, distance)
+            for (float z = 150; z > -3100; z -= 10) rowDist.push_back({ project(cam, { 0, 10, z }, 1280, 720).y, Vector3Distance(r.from, { 0, 10, z }) });
+            const float perMetre = 720.f / (2.f * std::tan(r.fov * 0.5f * DEG2RAD));
+            for (size_t i = 0; i < win.size(); i += 3) {
+                const float yc = (float)i * 8 + 8;
+                float best = 1e9f, dist = 0;
+                for (auto& rd : rowDist) if (std::fabs(rd.first - yc) < best) { best = std::fabs(rd.first - yc); dist = rd.second; }
+                std::printf("[scene3d]   sun %.0f row %3.0f: distance %4.0f m, trees %.1f px tall, canopy/trees %.3f\n", sunEl, yc, dist, 15.f * perMetre / std::max(dist, 1.f), win[i]);
+            }
+        }
+        {   // diagnostic: forest coverage (share of pixels that are not ground) per 24-row band, trees against canopy, and the forest-pixel luma ratio
+            for (int y0 = 120; y0 < 720; y0 += 48) {
+                long na = 0, nb = 0, n = 0;
+                double la = 0, lb = 0;
+                for (int y = y0; y < y0 + 24; y++)
+                    for (int x = x0; x < x1; x++) {
+                        const Color p = GetImageColor(a, x, y), q = GetImageColor(b, x, y);
+                        n++;
+                        if (forestPixel(p)) { na++; la += linLuma(p); }
+                        if (forestPixel(q)) { nb++; lb += linLuma(q); }
+                    }
+                std::printf("[scene3d]   sun %.0f rows %3d: coverage %.3f trees, %.3f canopy; forest-pixel luma %.4f trees, %.4f canopy (x%.3f)\n", sunEl, y0, (double)na / n, (double)nb / n, la / std::max(na, 1L), lb / std::max(nb, 1L), (lb / std::max(nb, 1L)) / (la / std::max(na, 1L) + 1e-12));
+            }
+        }
+        std::printf("[scene3d] hand-over at 30 deg, sun %.0f: rows %d-%d differ (%d rows); canopy / trees luma per 16-row window %.3f-%.3f, the far half %.3f; biggest step between neighbouring windows %.3f\n",
+                    sunEl, first, last, changed, lo, hi, farN ? farMean / farN : 0.0, stepMax);
+        CHECK(changed > 100);                                         // the canopy is really in the picture
+        CHECK(lo > 0.9 && hi < 1.1);
+        CHECK(stepMax < 0.06);
+        {   // cell-scale structure. The picture as a viewer sees it (green ground, sky, every pixel inside the forest's outline): block means
+            // (48 x 32 px, about a 128 m cell here) of linear luma, canopy frame against trees frame. Two forests of the same kind with different
+            // seeds differ by block too (crowns fall differently), so the reference is trees against trees of another seed; the canopy may be
+            // off by little more than that, and its blocks must show no pattern (a band, a frame, rectangles) the other seed does not.
+            CanopyRig vr = r;
+            vr.ground = { 78, 96, 52, 255 };
+            vr.sky = true;
+            vr.spec = trees;
+            Image va = shoot(vr, 1280, 720);
+            vr.spec = canopy;
+            Image vb = shoot(vr, 1280, 720);
+            vr.at = forest({ -1200, -3000 }, { 1200, 0 }, 22);
+            vr.spec = trees;
+            Image vc = shoot(vr, 1280, 720);
+            if (dumpDir) {
+                char vn[40];
+                std::snprintf(vn, sizeof vn, "view_sun%02.0f_", sunEl);
+                dump(std::string(vn) + "trees.png", va);
+                dump(std::string(vn) + "canopy.png", vb);
+                dump(std::string(vn) + "trees_seed22.png", vc);
+            }
+            const g3d::Camera vcam = canopyScene(vr)->camera;
+            const Vector2 vquad[4] = { project(vcam, { -1100, 12, -2900 }, 1280, 720), project(vcam, { 1100, 12, -2900 }, 1280, 720), project(vcam, { 1100, 12, -100 }, 1280, 720), project(vcam, { -1100, 12, -100 }, 1280, 720) };
+            const int bw = 48, bh = 32, nx = 1280 / bw, ny = 720 / bh;
+            struct Blocks { std::vector<double> m; };
+            auto blocks = [&](const Image& img) {
+                Blocks B;
+                B.m.assign((size_t)nx * ny, -1);
+                for (int by = 0; by < ny; by++)
+                    for (int bx = 0; bx < nx; bx++) {
+                        const int cx[4] = { bx * bw, (bx + 1) * bw - 1, bx * bw, (bx + 1) * bw - 1 }, cy[4] = { by * bh, by * bh, (by + 1) * bh - 1, (by + 1) * bh - 1 };
+                        bool inside = true;
+                        for (int k = 0; k < 4; k++) inside = inside && insideQuad(vquad, cx[k], cy[k]);
+                        if (!inside) continue;
+                        double s = 0;
+                        for (int y = by * bh; y < (by + 1) * bh; y++)
+                            for (int x = bx * bw; x < (bx + 1) * bw; x++) s += linLuma(GetImageColor(img, x, y));
+                        B.m[(size_t)by * nx + bx] = s / (bw * bh);
+                    }
+                return B;
+            };
+            const Blocks ba = blocks(va), bb = blocks(vb), bc = blocks(vc);
+            struct Cmp { double mean, sd, off, worst; int n; double rowBand; };
+            auto compare = [&](const Blocks& p, const Blocks& q, const char* heatName) {
+                Cmp c{ 0, 0, 0, 0, 0, 0 };
+                std::vector<double> rr;
+                for (size_t k = 0; k < p.m.size(); k++) if (p.m[k] > 0 && q.m[k] > 0 && (int)(k / nx) >= 3) rr.push_back(q.m[k] / p.m[k]);
+                c.n = (int)rr.size();
+                for (double v : rr) { c.mean += v / std::max(c.n, 1); c.off += std::fabs(v - 1) > 0.12; c.worst = std::max(c.worst, std::fabs(v - 1)); }
+                for (double v : rr) c.sd += (v - c.mean) * (v - c.mean) / std::max(c.n, 1);
+                c.sd = std::sqrt(c.sd);
+                c.off /= std::max(c.n, 1);
+                if (dumpDir && heatName) {
+                    Image heat = GenImageColor(nx, ny, BLACK);
+                    for (int by = 0; by < ny; by++)
+                        for (int bx = 0; bx < nx; bx++) {
+                            const size_t k = (size_t)by * nx + bx;
+                            if (p.m[k] <= 0 || q.m[k] <= 0) continue;
+                            const float t = std::clamp((float)(q.m[k] / p.m[k] - 1) / 0.35f, -1.f, 1.f);
+                            ImageDrawPixel(&heat, bx, by, { (unsigned char)(128 + 127 * std::max(t, 0.f)), (unsigned char)(128 - 60 * std::fabs(t)), (unsigned char)(128 + 127 * std::max(-t, 0.f)), 255 });
+                        }
+                    ImageResizeNN(&heat, nx * 24, ny * 24);
+                    char hn[48];
+                    std::snprintf(hn, sizeof hn, "%s_sun%02.0f.png", heatName, sunEl);
+                    dump(hn, heat);
+                    UnloadImage(heat);
+                }
+                return c;
+            };
+            const Cmp canopyCmp = compare(ba, bb, "blockratio_canopy"), seedCmp = compare(ba, bc, "blockratio_seed");
+            std::printf("[scene3d] cell-scale blocks at 30 deg, sun %.0f (%d blocks), against the trees: canopy mean %.3f spread %.3f, %.1f%% off by more than 12%%, worst %.2f; another seed of trees mean %.3f spread %.3f, %.1f%% off, worst %.2f\n",
+                        sunEl, canopyCmp.n, canopyCmp.mean, canopyCmp.sd, 100 * canopyCmp.off, 1 + canopyCmp.worst, seedCmp.mean, seedCmp.sd, 100 * seedCmp.off, 1 + seedCmp.worst);
+            CHECK(canopyCmp.n > 150);
+            CHECK(canopyCmp.sd < 1.25 * seedCmp.sd + 0.01);
+            CHECK(canopyCmp.off < 1.5 * seedCmp.off + 0.02);
+            CHECK(canopyCmp.worst < seedCmp.worst + 0.1);
+            CHECK(std::fabs(canopyCmp.mean - 1) < 0.05);
+            UnloadImage(va); UnloadImage(vb); UnloadImage(vc);
+        }
+        UnloadImage(a); UnloadImage(b);
+    }
+    if (std::getenv("RMTN_L4_FONLY")) return;
+
+    if (std::getenv("RMTN_L4_CALIBRATE")) {   // offline: the shade that makes patches as bright as trees, over view and sun; prints CANOPY_SHADE
+        CanopyRig r;
+        r.kinds = kinds;
+        r.at = forest({ -500, -450 }, { 500, 450 }, 5);
+        float minX = 1e9f, minZ = 1e9f, maxX = -1e9f, maxZ = -1e9f;
+        for (const auto& p : r.at) { minX = std::min(minX, p.position.x); minZ = std::min(minZ, p.position.z); maxX = std::max(maxX, p.position.x); maxZ = std::max(maxZ, p.position.z); }
+        const float ix0 = minX + 128, ix1 = minX + std::floor((maxX - minX) / 128) * 128, iz0 = minZ + 128, iz1 = minZ + std::floor((maxZ - minZ) / 128) * 128;
+        r.to = { 0, 6, 0 };
+        r.fov = 22;
+        const float views[5] = { 7, 20, 35, 50, 70 }, suns[5] = { 15, 25, 40, 55, 70 }, rels[5] = { 0, 45, 90, 135, 180 };
+        static float table[5][5][5];
+        auto lookAt = [&](float elev, float sunEl, float rel, const flora::ForestSpec& spec) {
+            r.sun = sunEl; r.sunAzimuth = 90 - rel;
+            r.from = Vector3Add(r.to, Vector3Scale({ 0, std::sin(elev * DEG2RAD), std::cos(elev * DEG2RAD) }, 2900));
+            r.spec = spec;
+            Image img = shoot(r, 640, 360);
+            const g3d::Camera cam = canopyScene(r)->camera;
+            Vector2 quad[4] = { project(cam, { ix0, 8, iz0 }, 640, 360), project(cam, { ix1, 8, iz0 }, 640, 360), project(cam, { ix1, 8, iz1 }, 640, 360), project(cam, { ix0, 8, iz1 }, 640, 360) };
+            const CanopyLook l = canopyLook(img, 0, 640, [&](int x, int y) { return insideQuad(quad, x, y); });
+            UnloadImage(img);
+            return l;
+        };
+        for (int v = 0; v < 5; v++)
+            for (int s = 0; s < 5; s++)
+                for (int a = 0; a < 5; a++) {
+                    flora::ForestSpec one = canopy, two = canopy;
+                    one.canopyShade = 1; two.canopyShade = 0.6f;
+                    const CanopyLook lt = lookAt(views[v], suns[s], rels[a], trees), l1 = lookAt(views[v], suns[s], rels[a], one), l2 = lookAt(views[v], suns[s], rels[a], two);
+                    float sh = 1;
+                    if (lt.px >= 1500 && l1.px >= 1500) {
+                        const double resp = std::max(std::log(l2.lin / std::max(l1.lin, 1e-9)) / std::log(0.6), 0.5);   // light goes as shade^resp
+                        sh = (float)std::pow(lt.lin / std::max(l1.lin, 1e-9), 1.0 / resp);
+                        flora::ForestSpec fix = canopy;
+                        fix.canopyShade = sh;
+                        const CanopyLook lf = lookAt(views[v], suns[s], rels[a], fix);       // one refinement from what that shade really gives
+                        sh *= (float)std::pow(lt.lin / std::max(lf.lin, 1e-9), 1.0 / resp);
+                    }
+                    table[v][s][a] = sh;
+                    std::printf("[calib] view %2.0f sun %2.0f rel %3.0f: trees %.1f plain %.1f -> shade %.2f\n", views[v], suns[s], rels[a], lt.lin * 1000, l1.lin * 1000, sh);
+                }
+        std::printf("// shade by view elevation (7 20 35 50 70), sun elevation (15 25 40 55 70), angle between sun and camera, seen from above (0 45 90 135 180)\nconstexpr float CANOPY_SHADE[5][5][5] = {\n");
+        for (int v = 0; v < 5; v++) {
+            std::printf("    {\n");
+            for (int s = 0; s < 5; s++) {
+                std::printf("        {");
+                for (int a = 0; a < 5; a++) std::printf(" %.2ff%s", table[v][s][a], a < 4 ? "," : "");
+                std::printf(" },\n");
+            }
+            std::printf("    },\n");
+        }
+        std::printf("};\n");
+    }
+
+    if (const char* fitFile = std::getenv("RMTN_L4_FIT")) {   // offline: fit a smooth model to the calibration table's lines ([calib] view v sun s rel r ... shade x)
+        std::ifstream in(fitFile);
+        std::string line;
+        std::vector<std::array<double, 9>> rows;            // features..., log shade
+        while (std::getline(in, line)) {
+            float v, s, r, sh;
+            if (std::sscanf(line.c_str(), "[calib] view %f sun %f rel %f: trees %*f plain %*f -> shade %f", &v, &s, &r, &sh) != 4) continue;
+            if (sh >= 1.99f || sh <= 0.01f) continue;       // clamped or failed
+            const double az = (90 - r) * DEG2RAD, se = s * DEG2RAD, ve = v * DEG2RAD;
+            const Vector3 toSun = { (float)(std::cos(az) * std::cos(se)), (float)std::sin(se), (float)(std::sin(az) * std::cos(se)) }, toEye = { 0, (float)std::sin(ve), (float)std::cos(ve) };
+            const double cg = Vector3DotProduct(toSun, toEye), g = std::acos(std::clamp(cg, -1.0, 1.0)), phase = (std::sin(g) + (PI - g) * cg) / PI;
+            rows.push_back({ 1.0, toSun.y, phase, toEye.y, phase * toSun.y, toSun.y * toSun.y, toEye.y * toSun.y, phase * toEye.y, std::log(sh) });
+        }
+        const int NF = 8;
+        for (int use : { 5, 6, 8 }) {                       // the first `use` features
+            double A[NF][NF + 1] = {};
+            for (const auto& row : rows)
+                for (int i = 0; i < use; i++) { for (int j = 0; j < use; j++) A[i][j] += row[i] * row[j]; A[i][use] += row[i] * row[NF]; }
+            for (int i = 0; i < use; i++) {
+                int p = i;
+                for (int k = i + 1; k < use; k++) if (std::fabs(A[k][i]) > std::fabs(A[p][i])) p = k;
+                for (int j = 0; j <= use; j++) std::swap(A[i][j], A[p][j]);
+                for (int k = 0; k < use; k++) {
+                    if (k == i) continue;
+                    const double m = A[k][i] / A[i][i];
+                    for (int j = i; j <= use; j++) A[k][j] -= m * A[i][j];
+                }
+            }
+            double c[NF] = {}, rss = 0, worst = 0;
+            for (int i = 0; i < use; i++) c[i] = A[i][use] / A[i][i];
+            for (const auto& row : rows) {
+                double s = 0;
+                for (int i = 0; i < use; i++) s += c[i] * row[i];
+                rss += (s - row[NF]) * (s - row[NF]);
+                worst = std::max(worst, std::fabs(std::exp(s - row[NF]) - 1));
+            }
+            std::printf("[fit] %d features, %zu samples: rms log residual %.3f, worst %.0f%%; coefficients", use, rows.size(), std::sqrt(rss / rows.size()), 100 * worst);
+            for (int i = 0; i < use; i++) std::printf(" %.4f", c[i]);
+            std::printf("\n");
+        }
+        return;
+    }
+
+    {   // the repeat measure itself: a diagonal hatch (period 12 px, under noise) must read high, noise alone low
+        Image hatch = GenImageColor(256, 256, { 60, 90, 40, 255 }), noise = GenImageColor(256, 256, { 60, 90, 40, 255 });
+        for (int y = 0; y < 256; y++)
+            for (int x = 0; x < 256; x++) {
+                const float nz = 30.f * (rnd01(3u, (unsigned long long)(y * 256 + x)) - 0.5f);
+                const float st = 22.f * std::sin((x + y) * TAU / 12.f);
+                ImageDrawPixel(&hatch, x, y, { (unsigned char)std::clamp(70 + st + nz, 0.f, 255.f), (unsigned char)std::clamp(100 + st + nz, 0.f, 255.f), (unsigned char)std::clamp(50 + st + nz, 0.f, 255.f), 255 });
+                ImageDrawPixel(&noise, x, y, { (unsigned char)std::clamp(70 + nz, 0.f, 255.f), (unsigned char)std::clamp(100 + nz, 0.f, 255.f), (unsigned char)std::clamp(50 + nz, 0.f, 255.f), 255 });
+            }
+        const double ph = autocorrPeak(hatch, nullptr), pn = autocorrPeak(noise, nullptr);
+        std::printf("[scene3d] repeat measure: hatch %.2f, noise %.2f\n", ph, pn);
+        CHECK(ph > 0.5 && pn < 0.2);
+        UnloadImage(hatch); UnloadImage(noise);
+    }
+
+    {   // (c) the canopy against the trees it replaces where trees are 5-8 px tall (the forest 2.1-3.2 km away, a 640 x 360
+        // picture at 22 degrees), from a camera 7, 30 and 60 degrees over it. Colour, grain and blotchiness are measured
+        // inside the cells that have patches (the forest's rim keeps its trees, the same on both sides).
+        CanopyRig r;
+        r.kinds = kinds;
+        r.at = forest({ -700, -600 }, { 700, 600 }, 5);
+        float minX = 1e9f, minZ = 1e9f, maxX = -1e9f, maxZ = -1e9f;
+        for (const auto& p : r.at) { minX = std::min(minX, p.position.x); minZ = std::min(minZ, p.position.z); maxX = std::max(maxX, p.position.x); maxZ = std::max(maxZ, p.position.z); }
+        const float C = 128;
+        const float ix0 = minX + C, ix1 = minX + std::floor((maxX - minX) / C) * C, iz0 = minZ + C, iz1 = minZ + std::floor((maxZ - minZ) / C) * C;
+        r.to = { 0, 6, 0 };
+        r.fov = 22;
+        for (float sunEl : { 25.f, 55.f })
+        for (float elev : { 7.f, 30.f, 60.f }) {
+            r.sun = sunEl;
+            r.from = Vector3Add(r.to, Vector3Scale({ 0, std::sin(elev * DEG2RAD), std::cos(elev * DEG2RAD) }, 2900));
+            r.spec = trees;
+            Image a = shoot(r, 640, 360);
+            r.spec = canopy;
+            Image b = shoot(r, 640, 360);
+            const g3d::Camera cam = canopyScene(r)->camera;
+            Vector2 quad[4] = { project(cam, { ix0, 8, iz0 }, 640, 360), project(cam, { ix1, 8, iz0 }, 640, 360), project(cam, { ix1, 8, iz1 }, 640, 360), project(cam, { ix0, 8, iz1 }, 640, 360) };
+            auto inside = [&](int x, int y) { return insideQuad(quad, x, y); };
+            const CanopyLook la = canopyLook(a, 0, 640, inside), lb = canopyLook(b, 0, 640, inside);
+            const double pa = autocorrPeak(a, inside), pb = autocorrPeak(b, inside);
+            long long differ = 0;
+            for (int y = 0; y < 360; y++)
+                for (int x = 0; x < 640; x++) { const Color p = GetImageColor(a, x, y), q = GetImageColor(b, x, y); differ += std::abs(p.r - q.r) + std::abs(p.g - q.g) + std::abs(p.b - q.b) > 12; }
+            char n0[64];
+            std::snprintf(n0, sizeof n0, "look_%02.0f_sun%02.0f_trees.png", elev, sunEl); dump(n0, a);
+            std::snprintf(n0, sizeof n0, "look_%02.0f_sun%02.0f_canopy.png", elev, sunEl); dump(n0, b);
+            std::printf("[scene3d] canopy at %2.0f deg sun %2.0f: %d / %d px in the patches' cells (trees / canopy); mean rgb %.0f %.0f %.0f / %.0f %.0f %.0f; linear luma ratio %.2f\n",
+                        elev, sunEl, la.px, lb.px, la.rgb[0], la.rgb[1], la.rgb[2], lb.rgb[0], lb.rgb[1], lb.rgb[2], lb.lin / std::max(la.lin, 1e-9));
+            std::printf("[scene3d] canopy at %2.0f deg sun %2.0f: grain %.2f / %.2f (x%.2f); 8px-cell spread %.2f / %.2f (x%.2f); far edge variation %.2f / %.2f px, step %.2f / %.2f px; strongest repeat %.2f / %.2f; %lld px differ by > 12\n",
+                        elev, sunEl, la.grain, lb.grain, lb.grain / std::max(la.grain, 1e-3), la.spread, lb.spread, lb.spread / std::max(la.spread, 1e-3),
+                        la.topVar, lb.topVar, la.topStep, lb.topStep, pa, pb, differ);
+            CHECK(la.px > 5000 && lb.px > 5000);
+            // From 60 degrees patches cover 0.80 of the trees' pixels (0.798 on Mesa, 0.803 on NVIDIA): ragged, one more
+            // reason they are off above canopyMaxElevation by default. Where they are drawn by default, the bound holds.
+            CHECK((double)lb.px / la.px > (elev < 20 ? 0.8 : 0.75) && (double)lb.px / la.px < 1.4);
+            CHECK(lb.lin / la.lin > 0.85 && lb.lin / la.lin < 1.15);
+            CHECK(std::fabs(lb.rgb[1] / lb.rgb[0] - la.rgb[1] / la.rgb[0]) < 0.18 && std::fabs(lb.rgb[2] / lb.rgb[1] - la.rgb[2] / la.rgb[1]) < 0.18);
+            CHECK(lb.grain / la.grain > 0.5 && lb.grain / la.grain < 1.6);
+            // Blotchiness only where patches are drawn by default (ForestSpec::canopyMaxElevation, 20): from 30
+            // degrees up they are ragged at 8 px cells, the reason for that limit.
+            if (elev < 20) CHECK(la.spread < 0.5 || (lb.spread / la.spread > 0.6 && lb.spread / la.spread < 1.6));
+            CHECK(pb < 0.35 && pb < pa + 0.2);                       // no visible repeat
+            UnloadImage(a); UnloadImage(b);
+        }
+    }
+
+
+    {   // (e) no cell squares and no tiled texture, looked at close (canopyFrom 80 m, cells of 64 m, 400 m of forest seen
+        // from 380 m): across the lines between cells with patches the brightness steps no more than across lines inside a
+        // cell; the texture's strongest repeat stays low.
+        CanopyRig r;
+        r.kinds = kinds;
+        r.at = forest({ -200, -200 }, { 200, 200 }, 7);
+        float minX = 1e9f, minZ = 1e9f, maxX = -1e9f, maxZ = -1e9f;
+        for (const auto& p : r.at) { minX = std::min(minX, p.position.x); minZ = std::min(minZ, p.position.z); maxX = std::max(maxX, p.position.x); maxZ = std::max(maxZ, p.position.z); }
+        const float ix0 = minX + 64, ix1 = minX + std::floor((maxX - minX) / 64) * 64, iz0 = minZ + 64, iz1 = minZ + std::floor((maxZ - minZ) / 64) * 64;
+        for (float elev : { 35.f, 70.f }) {
+            r.from = Vector3Add(r.to, Vector3Scale({ 0, std::sin(elev * DEG2RAD), std::cos(elev * DEG2RAD) }, 380));
+            r.fov = 36;
+            r.spec = trees;
+            Image a = shoot(r, 640, 360);
+            r.spec = nearCanopy;
+            Image b = shoot(r, 640, 360);
+            char n0[64];
+            std::snprintf(n0, sizeof n0, "seams_%02.0f_canopy.png", elev); dump(n0, b);
+            const g3d::Camera cam = canopyScene(r)->camera;
+            Vector2 quad[4] = { project(cam, { ix0, 8, iz0 }, 640, 360), project(cam, { ix1, 8, iz0 }, 640, 360), project(cam, { ix1, 8, iz1 }, 640, 360), project(cam, { ix0, 8, iz1 }, 640, 360) };
+            auto inside = [&](int x, int y) { return insideQuad(quad, x, y); };
+            const double seamA = cellSeamRatio(a, cam, minX, minZ, 64, ix0, ix1, iz0, iz1), seamB = cellSeamRatio(b, cam, minX, minZ, 64, ix0, ix1, iz0, iz1);
+            const double pa = autocorrPeak(a, inside), pb = autocorrPeak(b, inside);
+            std::printf("[scene3d] canopy seams at %2.0f deg: brightness step across cell lines against lines inside cells x%.2f trees, x%.2f canopy; strongest repeat %.2f trees, %.2f canopy\n", elev, seamA, seamB, pa, pb);
+            CHECK(seamB > 0 && seamB < 1.2);
+            CHECK(pb < 0.35 && pb < pa + 0.2);
+            UnloadImage(a); UnloadImage(b);
+        }
+    }
+
+    {   // (a) what a far forest submits: 2 x 3.5 km of trees 800-4000 m from the camera in a 480 x 270 picture (where they are
+        // 2-6 px tall): bodies and triangles of the main pass, with trees only (impostors), with the reduced level all the way
+        // out, and with canopy in cells of 64 m. The forest's rim keeps its trees, so the fall is the share of cells inside.
+        CanopyRig r;
+        r.kinds = kinds;
+        r.at = forest({ -1000, -4000 }, { 1000, -500 }, 9);
+        r.from = { 0, 40, 300 };
+        r.to = { 0, 10, -1500 };
+        r.fov = 45;
+        struct Count { long long bodies, triangles; };
+        auto count = [&](const flora::ForestSpec& spec) {
+            r.spec = spec;
+            Comp c = longComp(canopyScene(r), 480, 270);
+            UnloadImage(render(c, 3));
+            return Count{ g3d::instanceBodiesSubmitted(), g3d::instanceTrianglesSubmitted() };
+        };
+        flora::ForestSpec reduced = trees;
+        reduced.impostorFrom = 1e6f;
+        flora::ForestSpec small = canopy;
+        small.canopyCell = 64;
+        const Count imp = count(trees), red = count(reduced), can = count(small), can128 = count(canopy);
+        std::printf("[scene3d] far forest, %zu trees: bodies / triangles %lld / %lld as impostors, %lld / %lld as reduced trees, %lld / %lld as canopy in 64 m cells (bodies x%.3f, triangles x%.2f of the impostors, x%.4f of the reduced trees); 128 m cells %lld / %lld (bodies x%.3f)\n",
+                    r.at.size(), imp.bodies, imp.triangles, red.bodies, red.triangles, can.bodies, can.triangles,
+                    (double)can.bodies / std::max(imp.bodies, 1LL), (double)can.triangles / std::max(imp.triangles, 1LL), (double)can.triangles / std::max(red.triangles, 1LL),
+                    can128.bodies, can128.triangles, (double)can128.bodies / std::max(imp.bodies, 1LL));
+        CHECK(imp.bodies > 5000);
+        CHECK(can.bodies > 0);
+        CHECK(can.bodies * 5 <= imp.bodies);                         // at least 80% fewer bodies
+        CHECK(can.triangles * 5 <= red.triangles);                   // and 80% fewer triangles than the trees it replaces by meshes
+        CHECK(can.triangles < 12 * imp.triangles);                   // a patch has more triangles than a quad a tree: bounded, not hidden
+    }
+
+    {   // (b) the switch-over. Per frame along a camera dolly (2-4 m a frame): the extra change the canopy's hand-over makes
+        // (a 640 m square of forest in 128 m cells, 320 x 180 px, trees 7 px tall at about 1 km) against the extra change the
+        // impostor switch makes today (a 128 m square, the same camera height: with impostors and without them). Then the
+        // whole step: the picture with trees against the picture with patches, against reduced trees against impostors.
+        // Changes are over 16 px cells.
+        const int w = 320, h = 180;
+        auto grey = [&](const Image& img) {
+            std::vector<float> px((size_t)w * h);
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++) { const Color p = GetImageColor(img, x, y); px[(size_t)y * w + x] = (p.r + p.g + p.b) / 3.f; }
+            return px;
+        };
+        auto series = [&](CanopyRig r, const flora::ForestSpec& spec, int from, int to, int step) {
+            std::vector<std::vector<float>> frames;
+            r.spec = spec;
+            for (int d = from; d >= to; d -= step) {
+                r.from = { 0, 30, (float)d };
+                r.to = { 0, 8, 0 };
+                Comp c = longComp(canopyScene(r), w, h);
+                Image img = render(c, 3);
+                frames.push_back(grey(img));
+                UnloadImage(img);
+            }
+            return frames;
+        };
+        struct Pair { double mean; std::vector<float> cells; };
+        auto cellsOf = [&](const std::vector<float>& a, const std::vector<float>& b) {
+            Pair p{ 0, std::vector<float>((size_t)(w / 16) * (h / 16), 0.f) };
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++) {
+                    const float dlt = std::fabs(a[(size_t)y * w + x] - b[(size_t)y * w + x]);
+                    p.mean += dlt / (w * h);
+                    if (y / 16 < h / 16 && x / 16 < w / 16) p.cells[(size_t)(y / 16) * (w / 16) + x / 16] += dlt / 256.f;
+                }
+            return p;
+        };
+        auto changes = [&](const std::vector<std::vector<float>>& f) {
+            std::vector<Pair> out;
+            for (size_t i = 0; i + 1 < f.size(); i++) out.push_back(cellsOf(f[i], f[i + 1]));
+            return out;
+        };
+        // Excess of x over y per pair: mean of the global means, mean of the cells' positive excess, worst cell.
+        auto excess = [&](const std::vector<Pair>& x, const std::vector<Pair>& y) {
+            double mean = 0, cellMean = 0, cellMax = 0;
+            for (size_t i = 0; i < x.size(); i++) {
+                mean += x[i].mean - y[i].mean;
+                double pos = 0;
+                for (size_t k = 0; k < x[i].cells.size(); k++) { const double e = x[i].cells[k] - y[i].cells[k]; pos += std::max(e, 0.0) / x[i].cells.size(); cellMax = std::max(cellMax, e); }
+                cellMean += pos;
+            }
+            const double n = (double)std::max<size_t>(x.size(), 1);
+            return std::array<double, 3>{ mean / n, cellMean / n, cellMax };
+        };
+        CanopyRig big;
+        big.kinds = kinds;
+        big.at = forest({ -320, -320 }, { 320, 320 }, 4);
+        big.fov = 22; big.shadows = false;
+        CanopyRig small = big;
+        small.at = forest({ -64, -64 }, { 64, 64 }, 4);
+        small.fov = 30;
+        flora::ForestSpec noImpostor = trees;
+        noImpostor.impostorFrom = 1e6f;
+        const auto A = changes(series(big, canopy, 1300, 700, 4)), T = changes(series(big, trees, 1300, 700, 4));
+        const auto Ti = changes(series(small, trees, 190, 30, 2)), E = changes(series(small, noImpostor, 190, 30, 2));
+        const auto canopyBand = excess(A, T), impostorBand = excess(Ti, E);
+        // The whole step, at a camera where the cells are all canopy (700 m) and where all trees are impostors (200 m).
+        big.from = { 0, 30, 1300 }; big.to = { 0, 8, 0 };
+        small.from = { 0, 30, 200 }; small.to = { 0, 8, 0 };
+        big.spec = trees;
+        Image bt = shoot(big, w, h, 3);
+        big.spec = canopy;
+        Image bc = shoot(big, w, h, 3);
+        small.spec = trees;
+        Image st = shoot(small, w, h, 3);
+        small.spec = noImpostor;
+        Image sr = shoot(small, w, h, 3);
+        const Pair stepCanopy = cellsOf(grey(bt), grey(bc)), stepImpostor = cellsOf(grey(st), grey(sr));
+        auto worst = [](const Pair& p) { return (double)*std::max_element(p.cells.begin(), p.cells.end()); };
+        std::printf("[scene3d] switch-over per frame (2-4 m dolly), excess over the same frames without the switch: canopy %.3f global mean, cells %.3f mean of positives, %.2f worst cell (%zu pairs); impostor %.3f, %.3f, %.2f (%zu pairs)\n",
+                    canopyBand[0], canopyBand[1], canopyBand[2], A.size(), impostorBand[0], impostorBand[1], impostorBand[2], Ti.size());
+        std::printf("[scene3d] switch-over, the whole step: canopy against trees: global mean %.2f, worst 16 px cell %.2f; reduced trees against impostors: %.2f, %.2f\n",
+                    stepCanopy.mean, worst(stepCanopy), stepImpostor.mean, worst(stepImpostor));
+        CHECK(A.size() > 50 && Ti.size() > 50);
+        CHECK(std::fabs(canopyBand[0]) < std::fabs(impostorBand[0]) + 0.05);
+        CHECK(canopyBand[1] < impostorBand[1]);
+        CHECK(canopyBand[2] < impostorBand[2]);
+        CHECK(stepCanopy.mean < stepImpostor.mean * 1.5 + 1);
+        CHECK(worst(stepCanopy) < worst(stepImpostor) * 1.5 + 5);
+        UnloadImage(bt); UnloadImage(bc); UnloadImage(st); UnloadImage(sr);
+    }
+
+    {   // (d) purity: a frame alone is the frame after others, with the camera dollying through the cross-fade (the cells are
+        // built in another order), wind on.
+        CanopyRig r;
+        r.kinds = kinds;
+        r.at = forest({ -300, -500 }, { 300, 500 }, 6);
+        r.shadows = true;
+        r.spec = canopy;
+        r.spec.wind = 2; r.spec.gust = 0.5f;
+        r.from = { 0, 40, 1100 };
+        r.to = { 0, 6, 0 };
+        r.fov = 22;
+        auto scene = [&] {
+            auto s = canopyScene(r);
+            s->camera.up = [](int t, g3d::Camera& cam) { cam.position.z = 1100.f - 4.f * (float)t; cam.position.x = 8.f * std::sin(0.05f * (float)t); };
+            return s;
+        };
+        Comp a = longComp(scene(), 320, 180), b = longComp(scene(), 320, 180);
+        Image alone = render(a, 22);                                  // camera at z 1012: the cells round z 0 are in the band
+        UnloadImage(render(b, 3));
+        UnloadImage(render(b, 40));
+        UnloadImage(render(b, 22));
+        Image after = render(b, 22);
+        long long differ = 0;
+        int patch = 0;
+        for (int y = 0; y < alone.height; y++)
+            for (int x = 0; x < alone.width; x++) {
+                const Color p = GetImageColor(alone, x, y), q = GetImageColor(after, x, y);
+                differ += p.r != q.r || p.g != q.g || p.b != q.b;
+                patch += forestPixel(p);
+            }
+        std::printf("[scene3d] canopy purity: %d forest px, %lld differ between a frame alone and after others\n", patch, differ);
+        CHECK(patch > 1000);
+        CHECK(differ == 0);
+        UnloadImage(alone); UnloadImage(after);
+    }
+
+    {   // time per frame for a large forest at a far view: printed, never checked. Bodies and triangles are exact.
+        CanopyRig r;
+        r.kinds = kinds;
+        r.at = forest({ -600, -3000 }, { 600, 0 }, 11);
+        r.from = { 0, 60, 250 };
+        r.to = { 0, 10, -1500 };
+        r.fov = 45;
+        std::printf("[scene3d] canopy bench: %zu trees over 1.2 x 3 km, 1280x720, camera 250 m from the forest's edge (canopy past about 1.9 km); bodies, triangles, ms best/mean of 8, first frame\n", r.at.size());
+        long long bodies[4] = { 0, 0, 0, 0 };
+        for (int on = 0; on < 4; on++) {
+            r.spec = on ? canopy : trees;
+            if (on == 2) r.spec.canopyShadows = true;
+            if (on == 3) r.spec.canopyCell = 64;
+            Comp c = longComp(canopyScene(r), 1280, 720);
+            Canvas canvas;
+            canvas.load(c.w, c.h, 1);
+            const auto t0 = std::chrono::steady_clock::now();
+            presentFrame(c, 1, canvas);
+            Image sync = LoadImageFromTexture(canvas.output().texture);
+            const double first = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            UnloadImage(sync);
+            double best = 1e9, mean = 0;
+            for (int f = 0; f < 8; f++) {
+                const auto t1 = std::chrono::steady_clock::now();
+                presentFrame(c, 2 + f, canvas);
+                Image s2 = LoadImageFromTexture(canvas.output().texture);
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
+                UnloadImage(s2);
+                best = std::min(best, ms);
+                mean += ms / 8;
+            }
+            bodies[on] = g3d::instanceBodiesSubmitted();
+            std::printf("[scene3d]   %-22s bodies %lld, triangles %lld, %.1f / %.1f ms, first frame %.0f ms\n", on == 3 ? "canopy, cells of 64 m" : on == 2 ? "canopy, with shadows" : on ? "canopy (128 m cells)" : "trees only", bodies[on],
+                        g3d::instanceTrianglesSubmitted(), best, mean, first);
+            canvas.unload();
+        }
+        CHECK(bodies[1] < bodies[0]);
+    }
+
+    if (dumpDir && std::getenv("RMTN_L4_IMAGES")) {   // pictures to look at: 2.4 x 3 km of forest, sun 25 degrees, canopy off and on
+        flora::ForestSpec shown = canopy;                 // as a script gets it: the default limit
+        shown.canopyMaxElevation = 20;
+        CanopyRig r;
+        r.kinds = kinds;
+        r.at = forest({ -1200, -3000 }, { 1200, 0 }, 21);
+        r.ground = { 78, 96, 52, 255 };
+        r.sunAzimuth = 140;
+        r.sky = true;
+        r.shadowExtent = 500;
+        std::printf("[scene3d] images: %zu trees over 2.4 km x 3 km\n", r.at.size());
+        auto both = [&](const char* name, Vector3 from, Vector3 to, int w, int h, float fov, float sunEl) {
+            r.sun = sunEl;
+            r.from = from; r.to = to; r.fov = fov;
+            for (int on = 0; on < 2; on++) {
+                r.spec = on ? shown : trees;
+                Image img = shoot(r, w, h);
+                char sn[16];
+                std::snprintf(sn, sizeof sn, "_sun%02.0f", sunEl);
+                dump(std::string(name) + sn + (on ? "_canopy.png" : "_trees.png"), img);
+                UnloadImage(img);
+            }
+        };
+        for (float sunEl : { 25.f, 55.f }) {
+            both("landscape_low", { 0, 160, 260 }, { 0, 20, -1400 }, 1280, 720, 40, sunEl);
+            both("landscape_30deg", Vector3Add({ 0, 10, -1400 }, Vector3Scale({ 0, 0.5f, 0.866f }, 1800)), { 0, 10, -1400 }, 1280, 720, 40, sunEl);
+            r.sun = sunEl;
+            r.spec = shown;
+            r.fov = 40;
+            for (int i = 0; i < 8; i++) {                            // the dolly: the camera moves 50 m a frame
+                r.from = { 0, 160, 460.f - 50.f * (float)i }; r.to = { 0, 20, -1400 };
+                Image img = shoot(r, 640, 360);
+                char n[40];
+                std::snprintf(n, sizeof n, "dolly_sun%02.0f_%d.png", sunEl, i);
+                dump(n, img);
+                UnloadImage(img);
+            }
+        }
+    }
+}
+
+// ---- map forests at a distance (geo3d::forest levels by size on screen)
+struct MapForestRig {
+    std::shared_ptr<geo3d::Surface> surface;
+    g3d::ScenePtr scene;
+    g3d::Object3D* trees = nullptr;
+};
+// ~100,000 trees over a 40 x 25 degree patch, the globe seen from `distance` (in globe radii).
+static MapForestRig mapForestRig(float spacing, float morph, float impostorBelow = 10, float mergeBelow = 12, float speckle = 0.30f, bool shadows = false) {
+    MapForestRig r;
+    r.surface = std::make_shared<geo3d::Surface>(geo::Projection::equirectangular(), geo::LonLat{ 20, 55 }, 1);
+    r.surface->morph = morph;
+    geo::Geometry patch;
+    patch.polygons.push_back({ { { 0, 42 }, { 40, 42 }, { 40, 67 }, { 0, 67 }, { 0, 42 } } });
+    r.scene = std::make_shared<g3d::Scene>();
+    r.scene->ambient = 0.35f;
+    r.scene->lights.push_back(g3d::Light::directional({ 1, 2, 3 }, { 255, 244, 224, 255 }, 1.6f, shadows));
+    g3d::Object3D* world = r.scene->add();
+    g3d::Material ground;
+    ground.color = { 70, 96, 60, 255 };
+    ground.roughness = 1;
+    geo3d::base(*world, r.surface, ground, 96);
+    geo3d::ForestCover cover;
+    cover.spacing = spacing;
+    cover.impostorBelow = impostorBelow;
+    cover.mergeBelow = mergeBelow;
+    cover.pictureSpeckle = speckle;
+    r.trees = geo3d::forest(*world, r.surface, { patch }, cover);
+    return r;
+}
+static void aimAtPatch(MapForestRig& r, float distance) {
+    const Vector3 centre = r.surface->point({ 20, 55 }, 0);
+    const Vector3 up = r.surface->up({ 20, 55 });
+    r.scene->camera.position = Vector3Add(centre, Vector3Scale(up, distance));
+    r.scene->camera.target = centre;
+    r.scene->camera.upVector = { 0, 0, -1 };
+    if (std::fabs(Vector3DotProduct(up, { 0, 0, -1 })) > 0.9f) r.scene->camera.upVector = { 0, 1, 0 };
+}
+static void mapForestTests() {
+    const bool onlyTop = std::getenv("RMTN_TOPDOWN_ONLY") != nullptr;
+    const char* dumpDir = std::getenv("RMTN_L6_DUMP");
+    auto dump = [&](const char* name, const Image& img) {
+        if (!dumpDir) return;
+        fs::create_directories(dumpDir);
+        ExportImage(img, (fs::path(dumpDir) / name).string().c_str());
+    };
+    if (!onlyTop) {   // 100,000 trees zoomed out: every tree a mesh (impostorBelow 0, what it always did) against
+        // levels by screen size. Time is printed (best of several, and the mean), never checked: a
+        // GPU's is noisy. What is checked is what is submitted, which is exact.
+        struct Run { double best = 1e9, mean = 0; long long bodies = 0, triangles = 0; };
+        auto run = [](MapForestRig& r, float dist) {
+            aimAtPatch(r, dist);
+            Comp c = longComp(r.scene, 1280, 720);
+            Canvas canvas;
+            canvas.load(c.w, c.h, 1);
+            Run out;
+            const int runs = 6, per = 3;
+            presentFrame(c, 1, canvas);                           // warm: bakes pictures, uploads
+            for (int i = 0; i < runs; i++) {
+                const auto t0 = std::chrono::steady_clock::now();
+                for (int f = 0; f < per; f++) presentFrame(c, 2 + i * per + f, canvas);
+                Image sync = LoadImageFromTexture(canvas.output().texture);   // waits for the GPU
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / per;
+                UnloadImage(sync);
+                out.best = std::min(out.best, ms);
+                out.mean += ms / runs;
+            }
+            out.bodies = g3d::instanceBodiesSubmitted();
+            out.triangles = g3d::instanceTrianglesSubmitted();
+            canvas.unload();
+            return out;
+        };
+        MapForestRig meshes = mapForestRig(0.0545f, 1, 0, 0), pictures = mapForestRig(0.0545f, 1, 36, 0), merged = mapForestRig(0.0545f, 1);
+        std::printf("[scene3d] map forest bench: 100,000 trees, 1280x720, a flat map; bodies, triangles, ms best/mean\n");
+        std::printf("[scene3d]   %-8s | %-38s | %-38s | %-38s\n", "radii up", "every tree a mesh (before)", "meshes and pictures", "and far trees merged (default)");
+        for (float dist : { 7.f, 3.5f, 1.2f, 0.35f }) {
+            const Run a = run(meshes, dist), b = run(pictures, dist), c = run(merged, dist);
+            auto cell = [](const Run& r) {
+                char s[96];
+                std::snprintf(s, sizeof s, "%7lld %10lld %5.1f/%5.1f", r.bodies, r.triangles, r.best, r.mean);
+                return std::string(s);
+            };
+            std::printf("[scene3d]   %-8.2f | %-38s | %-38s | %-38s\n", dist, cell(a).c_str(), cell(b).c_str(), cell(c).c_str());
+            if (dist > 3) {                                                             // zoomed out: far fewer bodies and triangles
+                CHECK(b.triangles * 20 < a.triangles && c.triangles * 20 < a.triangles && c.triangles > 0);
+                CHECK(c.bodies * 4 < a.bodies && c.bodies < b.bodies);
+            }
+            if (dist < 0.5f) CHECK(c.triangles * 2 > a.triangles);                      // close: hardly any change
+        }
+    }
+    if (!onlyTop) {   // the picture does not change when trees become pictures and the far ones merge: same mean
+        // brightness, and the same shapes at 8 px cells (where trees can no longer be told apart)
+        auto grab = [&](MapForestRig& r, float dist, const char* name) {
+            aimAtPatch(r, dist);
+            Comp c = longComp(r.scene, 960, 540);
+            Image img = render(c, 3);
+            dump(name, img);
+            return img;
+        };
+        auto cells = [](const Image& img) {                        // 8 x 8 px cell luminances
+            std::vector<float> out;
+            for (int y = 0; y + 8 <= img.height; y += 8)
+                for (int x = 0; x + 8 <= img.width; x += 8) {
+                    float sum = 0;
+                    for (int j = 0; j < 8; j++)
+                        for (int i = 0; i < 8; i++) sum += luma(GetImageColor(img, x + i, y + j));
+                    out.push_back(sum / 64.f);
+                }
+            return out;
+        };
+        MapForestRig meshes = mapForestRig(0.0545f, 1, 0, 0), merged = mapForestRig(0.0545f, 1), allPictures = mapForestRig(0.0545f, 1, 1e6f, 0);
+        for (float dist : { 7.f, 3.5f, 2.6f, 2.0f, 1.5f, 1.2f, 0.6f, 0.3f }) {
+            char n0[48], n1[48];
+            std::snprintf(n0, sizeof n0, "look_%.2f_meshes.png", dist);
+            std::snprintf(n1, sizeof n1, "look_%.2f_levels.png", dist);
+            Image a = grab(meshes, dist, n0), b = grab(merged, dist, n1);
+            const std::vector<float> ca = cells(a), cb = cells(b);
+            double ma = 0, mb = 0, diff = 0;
+            for (size_t i = 0; i < ca.size(); i++) { ma += ca[i]; mb += cb[i]; diff += std::fabs(ca[i] - cb[i]); }
+            ma /= ca.size(); mb /= ca.size(); diff /= ca.size();
+            std::printf("[scene3d] map forest look at %.2f radii: mean luma %.1f meshes, %.1f levels (ratio %.3f); mean 8px-cell difference %.2f\n",
+                        dist, ma, mb, mb / ma, diff);
+            {   // grain and colour over the middle of the patch: the mean 3x3-box local contrast of luma, and
+                // mean rgb with its saturation (max - min), meshes against the default
+                auto grain = [](const Image& img) {
+                    double s = 0;
+                    int n = 0;
+                    for (int y = 245; y < 295; y++)
+                        for (int x = 450; x < 510; x++) {
+                            double m = 0;
+                            for (int j = -2; j <= 2; j++)
+                                for (int i = -2; i <= 2; i++) m += luma(GetImageColor(img, x + i, y + j));
+                            s += std::fabs(luma(GetImageColor(img, x, y)) - m / 25);
+                            n++;
+                        }
+                    return s / n;
+                };
+                auto rgbOf = [](const Image& img, double out[4]) {
+                    out[0] = out[1] = out[2] = out[3] = 0;
+                    for (int y = 245; y < 295; y++)
+                        for (int x = 450; x < 510; x++) {
+                            const Color c = GetImageColor(img, x, y);
+                            out[0] += c.r / 3000.0; out[1] += c.g / 3000.0; out[2] += c.b / 3000.0;
+                            out[3] += (std::max({ c.r, c.g, c.b }) - std::min({ c.r, c.g, c.b })) / 3000.0;
+                        }
+                };
+                double ra[4], rb[4];
+                rgbOf(a, ra); rgbOf(b, rb);
+                const double ga = grain(a), gb = grain(b);
+                std::printf("[scene3d] map forest grain at %.2f radii: local contrast %.2f meshes, %.2f levels (x%.2f); rgb %.0f %.0f %.0f sat %.0f meshes, %.0f %.0f %.0f sat %.0f levels\n",
+                            dist, ga, gb, gb / std::max(ga, 1e-3), ra[0], ra[1], ra[2], ra[3], rb[0], rb[1], rb[2], rb[3]);
+                CHECK(gb / std::max(ga, 1e-3) > 0.6 && gb / std::max(ga, 1e-3) < 1.5);
+                CHECK(std::fabs(ra[3] - rb[3]) < 10);
+                if (dist >= 0.5f && dist <= 1.3f) CHECK(diff < 2.0);
+            }
+            {   // all pictures, whatever the size: its contrast (luma spread over 8 px cells) against the meshes'
+                char n2[48];
+                std::snprintf(n2, sizeof n2, "look_%.2f_pictures.png", dist);
+                Image p = grab(allPictures, dist, n2);
+                auto spread = [](const std::vector<float>& v) {
+                    double m = 0, s = 0;
+                    for (float x : v) m += x;
+                    m /= v.size();
+                    for (float x : v) s += (x - m) * (x - m);
+                    return std::sqrt(s / v.size());
+                };
+                const std::vector<float> cp = cells(p);
+                double mp = 0;
+                for (float x : cp) mp += x / cp.size();
+                std::printf("[scene3d] map forest all pictures at %.2f radii: mean luma %.1f (meshes %.1f), 8px-cell spread %.2f (meshes %.2f)\n", dist, mp, ma, spread(cp), spread(ca));
+                if (dist <= 1.5f) {        // the patch's middle: the pictures' mean colour is the crowns' (within 16 of 255)
+                    double rgbP[3] = { 0, 0, 0 }, rgbM[3] = { 0, 0, 0 };
+                    for (int y = 200; y < 340; y++)
+                        for (int x = 400; x < 560; x++) {
+                            const Color cp0 = GetImageColor(p, x, y), cm0 = GetImageColor(a, x, y);
+                            rgbP[0] += cp0.r; rgbP[1] += cp0.g; rgbP[2] += cp0.b;
+                            rgbM[0] += cm0.r; rgbM[1] += cm0.g; rgbM[2] += cm0.b;
+                        }
+                    const double n = 160.0 * 140.0;
+                    std::printf("[scene3d] map forest all pictures at %.2f radii: mean rgb %.0f %.0f %.0f (meshes %.0f %.0f %.0f)\n", dist,
+                                rgbP[0] / n, rgbP[1] / n, rgbP[2] / n, rgbM[0] / n, rgbM[1] / n, rgbM[2] / n);
+                    for (int ch = 0; ch < 3; ch++) CHECK(std::fabs(rgbP[ch] - rgbM[ch]) / n < 16);
+                }
+                UnloadImage(p);
+            }
+            CHECK(mb / ma > 0.9 && mb / ma < 1.1);
+            CHECK(diff < 0.08 * ma);
+            UnloadImage(a);
+            UnloadImage(b);
+        }
+    }
+    {   // seen from straight above and from 60 degrees: the default forest has no brown (trunk) speckle the
+        // meshes lack, no dark spot or ring round the point below the camera, and no radial pattern in
+        // the strokes (a swirl). Counts and means over the patch (pixels that are not the flat ground).
+        MapForestRig meshes = mapForestRig(0.0545f, 1, 0, 0), merged = mapForestRig(0.0545f, 1);
+        struct Stats { double patch = 0, brown = 0, orange = 0, ring[5] = { 0, 0, 0, 0, 0 }, mean = 0, centre = 0, darkest = 1e9, swirl = 0, spread = 0, grain = 0; };
+        auto measure = [&](const Image& img, bool slanted) {
+            Stats st;
+            const Color bg = GetImageColor(img, img.width / 2, img.height - 3);
+            auto inPatch = [&](Color c) { return std::abs(c.r - bg.r) + std::abs(c.g - bg.g) + std::abs(c.b - bg.b) > 24; };
+            std::vector<char> mask((size_t)img.width * img.height, 0);
+            {   // close the gaps between trees: a pixel within 3 px of a tree pixel in every direction is the patch
+                const int W2 = img.width, H2 = img.height;
+                std::vector<char> raw((size_t)W2 * H2), grown((size_t)W2 * H2, 0);
+                for (int y = 0; y < H2; y++) for (int x = 0; x < W2; x++) raw[(size_t)y * W2 + x] = (!slanted || y > H2 / 4) && inPatch(GetImageColor(img, x, y));
+                for (int y = 3; y < H2 - 3; y++) for (int x = 3; x < W2 - 3; x++) {
+                    bool any = false;
+                    for (int j = -3; j <= 3 && !any; j++) for (int i = -3; i <= 3; i++) if (raw[(size_t)(y + j) * W2 + x + i]) { any = true; break; }
+                    grown[(size_t)y * W2 + x] = any;
+                }
+                for (int y = 3; y < H2 - 3; y++) for (int x = 3; x < W2 - 3; x++) {
+                    bool all = true;
+                    for (int j = -3; j <= 3 && all; j++) for (int i = -3; i <= 3; i++) if (!grown[(size_t)(y + j) * W2 + x + i]) { all = false; break; }
+                    mask[(size_t)y * W2 + x] = all;
+                }
+            }
+            int x0 = img.width, x1 = 0, y0 = img.height, y1 = 0;
+            for (int y = 0; y < img.height; y++)
+                for (int x = 0; x < img.width; x++)
+                    if (mask[(size_t)y * img.width + x]) { x0 = std::min(x0, x); x1 = std::max(x1, x); y0 = std::min(y0, y); y1 = std::max(y1, y); }
+            const double cx = 0.5 * (x0 + x1), cy = 0.5 * (y0 + y1), rmax = 0.42 * std::min(x1 - x0, y1 - y0);
+            double cnt[5] = { 0, 0, 0, 0, 0 }, cc = 0;
+            std::vector<float> l((size_t)img.width * img.height, -1.f);
+            for (int y = 0; y < img.height; y++)
+                for (int x = 0; x < img.width; x++) {
+                    const Color c = GetImageColor(img, x, y);
+                    if (!mask[(size_t)y * img.width + x]) continue;
+                    const double r = std::hypot(x - cx, y - cy) / rmax;
+                    st.patch++;
+                    st.mean += luma(c);
+                    if (c.r > c.g + 4) st.orange++;                 // red above green: trunk and orange, never leaves
+                    if (c.r >= c.g || (c.r > 0.85 * c.g && c.r > c.b + 25)) st.brown++;   // and the wider net: red not below green, or a yellow-brown hue
+                    if (r < 1) { const int k = std::min(4, (int)(r * 5)); st.ring[k] += luma(c); cnt[k]++; }
+                    if (r < 0.1) { st.centre += luma(c); cc++; }
+                    l[(size_t)y * img.width + x] = (float)luma(c);
+                }
+            st.mean /= std::max(st.patch, 1.0);
+            st.centre /= std::max(cc, 1.0);
+            for (int k = 0; k < 5; k++) st.ring[k] /= std::max(cnt[k], 1.0);
+            // the darkest 9x9 box mean inside the middle 60% of the patch
+            for (int y = (int)(cy - 0.3 * (y1 - y0)); y < (int)(cy + 0.3 * (y1 - y0)); y += 2)
+                for (int x = (int)(cx - 0.3 * (x1 - x0)); x < (int)(cx + 0.3 * (x1 - x0)); x += 2) {
+                    double s = 0; int n = 0;
+                    for (int j = -4; j <= 4; j++) for (int i = -4; i <= 4; i++) { const float v = l[(size_t)(y + j) * img.width + x + i]; if (v >= 0) { s += v; n++; } }
+                    if (n == 81) st.darkest = std::min(st.darkest, s / n);
+                }
+            // radial structure: gradient direction against the direction from the centre (doubled angle),
+            // weighted by gradient strength; 0 for texture without a pattern
+            double sc = 0, ss = 0, sw = 0;
+            for (int y = y0 + 3; y < y1 - 3; y++)
+                for (int x = x0 + 3; x < x1 - 3; x++) {
+                    const float a = l[(size_t)y * img.width + x + 1], b = l[(size_t)y * img.width + x - 1], c = l[(size_t)(y + 1) * img.width + x], d = l[(size_t)(y - 1) * img.width + x];
+                    if (a < 0 || b < 0 || c < 0 || d < 0 || std::hypot(x - cx, y - cy) < 0.15 * rmax || std::hypot(x - cx, y - cy) > 1.1 * rmax) continue;
+                    const double gx = a - b, gy = c - d, w = gx * gx + gy * gy;
+                    const double th = std::atan2(gy, gx) - std::atan2(y - cy, x - cx);
+                    sc += w * std::cos(2 * th); ss += w * std::sin(2 * th); sw += w;
+                }
+            st.swirl = std::hypot(sc, ss) / std::max(sw, 1e-9);
+            {   // blotchiness: the spread of 8 px cell means over the patch's cells, and the mean 3x3 local contrast
+                std::vector<double> cell;
+                for (int y = y0; y + 8 <= y1; y += 8)
+                    for (int x = x0; x + 8 <= x1; x += 8) {
+                        double sum = 0; bool ok = true;
+                        for (int j = 0; j < 8 && ok; j++) for (int i = 0; i < 8; i++) { const float v = l[(size_t)(y + j) * img.width + x + i]; if (v < 0) { ok = false; break; } sum += v; }
+                        if (ok) cell.push_back(sum / 64);
+                    }
+                double m = 0, v2 = 0;
+                for (double c : cell) m += c / std::max<size_t>(cell.size(), 1);
+                for (double c : cell) v2 += (c - m) * (c - m) / std::max<size_t>(cell.size(), 1);
+                st.spread = std::sqrt(v2);
+                double g = 0; int n = 0;
+                for (int y = y0 + 2; y < y1 - 2; y++)
+                    for (int x = x0 + 2; x < x1 - 2; x++) {
+                        double s = 0; bool ok = true;
+                        for (int j = -1; j <= 1 && ok; j++) for (int i = -1; i <= 1; i++) { const float v = l[(size_t)(y + j) * img.width + x + i]; if (v < 0) { ok = false; break; } s += v; }
+                        if (ok) { g += std::fabs(l[(size_t)y * img.width + x] - s / 9); n++; }
+                    }
+                st.grain = g / std::max(n, 1);
+            }
+            return st;
+        };
+        if (dumpDir && std::getenv("RMTN_L6_DIAG")) {   // which part makes what: pictures alone, merging alone, both
+            struct V { const char* name; float below, merge; };
+            for (const V& v : { V{ "diag_pictures", 1e6f, 0.f }, V{ "diag_merge", 0.f, 12.f }, V{ "diag_both", 1e6f, 12.f } }) {
+                MapForestRig r = mapForestRig(0.0545f, 1, v.below, v.merge);
+                aimAtPatch(r, 2.0f);
+                Comp c = longComp(r.scene, 960, 540);
+                Image im = render(c, 3);
+                const Stats s = measure(im, false);
+                std::printf("[scene3d] diag %s: brown %.0f, rings %.0f %.0f %.0f %.0f %.0f, radial structure %.3f\n", v.name, s.brown, s.ring[0], s.ring[1], s.ring[2], s.ring[3], s.ring[4], s.swirl);
+                dump((std::string(v.name) + ".png").c_str(), im);
+                UnloadImage(im);
+            }
+        }
+        for (int slant = 0; slant < 2; slant++)
+            for (float dist : { 3.5f, 2.6f, 2.0f, 1.5f }) {
+                Image img[2];
+                for (int k = 0; k < 2; k++) {
+                    MapForestRig& r = k ? merged : meshes;
+                    aimAtPatch(r, dist);
+                    if (slant) {
+                        const geo::LonLat at{ 20, 55 };
+                        const Vector3 centre = r.surface->point(at, 0), up = r.surface->up(at), north = r.surface->north(at);
+                        r.scene->camera.position = Vector3Add(centre, Vector3Add(Vector3Scale(up, dist * 0.866f), Vector3Scale(north, -dist * 0.5f)));
+                        r.scene->camera.upVector = north;
+                    }
+                    Comp c = longComp(r.scene, 960, 540);
+                    img[k] = render(c, 3);
+                    char name[64];
+                    std::snprintf(name, sizeof name, "top_%s_%.2f_%s.png", slant ? "60deg" : "down", dist, k ? "levels" : "meshes");
+                    dump(name, img[k]);
+                }
+                const Stats a = measure(img[0], slant != 0), b = measure(img[1], slant != 0);
+                std::printf("[scene3d] map forest %s at %.2f radii: brown (r>=g or yellow-brown) %.0f meshes, %.0f default, orange (r>g+4) %.0f/%.0f, of %.0f px; rings (luma) meshes %.0f %.0f %.0f %.0f %.0f, default %.0f %.0f %.0f %.0f %.0f; centre %.0f/%.0f (mean %.0f/%.0f); darkest box %.0f/%.0f; radial structure %.3f meshes, %.3f default\n",
+                            slant ? "60 degrees" : "straight down", dist, a.brown, b.brown, a.orange, b.orange, a.patch,
+                            a.ring[0], a.ring[1], a.ring[2], a.ring[3], a.ring[4], b.ring[0], b.ring[1], b.ring[2], b.ring[3], b.ring[4],
+                            a.centre, b.centre, a.mean, b.mean, a.darkest, b.darkest, a.swirl, b.swirl);
+                std::printf("[scene3d]   blotches (8 px cell spread) %.2f meshes, %.2f default; grain (3x3) %.2f meshes, %.2f default (x%.2f)\n", a.spread, b.spread, a.grain, b.grain, b.grain / std::max(a.grain, 1e-3));
+                CHECK(b.spread < 1.6 * a.spread + 0.5 && b.spread > 0.5 * a.spread);   // not much blotchier than the facets
+                // A picture is smoother than facets, but not by half. Known limit (0.13): seen from 60 degrees a forest of
+                // pictures is smoother still (0.45-0.46 at 3.5 and 2.6 radii); the baked 60-degree picture lacks the facets'
+                // contrast and filtering is not the cause (normal mips that keep one child's normal measured the same).
+                CHECK(b.grain > (slant ? 0.42 : 0.5) * a.grain && b.grain < 1.5 * a.grain);
+                CHECK(b.brown <= 1.5 * a.brown + 0.002 * a.patch);
+                CHECK(b.orange <= 1.5 * a.orange + 0.002 * a.patch);
+                for (int k = 0; k < 5; k++) CHECK(std::fabs(b.ring[k] / std::max(a.ring[k], 1.0) - 1) < 0.10);
+                CHECK(std::fabs(b.centre / std::max(b.mean, 1.0) - 1) < 0.10);
+                CHECK(b.darkest > 0.80 * a.darkest);
+                CHECK(b.swirl < a.swirl + 0.04);
+                UnloadImage(img[0]); UnloadImage(img[1]);
+            }
+    }
+    if (!onlyTop) {   // one tree, close and as its picture, on the globe, half way and the map, from several heights:
+        // the silhouettes overlap and the colour agrees. (The same pictures the flora tests judge, here
+        // standing along the surface's up instead of the world's.)
+        auto isTree = [](Color c) { return !(c.r > 1.3f * c.g && c.b > 1.3f * c.g) && c.r + c.g + c.b > 12; };
+        auto linear = [](unsigned char c) { return std::pow(c / 255.0, 2.2); };
+        auto shot = [&](const flora::TreePtr& kind, float morph, float elev, float azimuth, bool picture) {
+            auto surface = std::make_shared<geo3d::Surface>(geo::Projection::equirectangular(), geo::LonLat{ 20, 55 }, 1);
+            surface->morph = morph;
+            geo::Geometry patch;
+            patch.polygons.push_back({ { { 19, 54 }, { 21, 54 }, { 21, 56 }, { 19, 56 }, { 19, 54 } } });
+            auto s = std::make_shared<g3d::Scene>();
+            s->ambient = 0.4f;
+            s->lights.push_back(g3d::Light::directional({ 1, 2, 3 }, { 255, 240, 220, 255 }, 2.0f, false));
+            g3d::Object3D* world = s->add();
+            g3d::Material ground;
+            ground.color = { 200, 40, 200, 255 };
+            ground.roughness = 1;
+            geo3d::base(*world, surface, ground, 96);
+            geo3d::ForestCover cover;
+            cover.spacing = 50;                                   // one tree
+            cover.limit = 1;
+            cover.height = 0.1f;
+            cover.heightVariation = 0;
+            cover.impostorBelow = picture ? 1e6f : 0;
+            cover.mergeBelow = 0;
+            cover.pictureSpeckle = 0;                             // one tree: no per-tree spread
+            cover.blend = 0.01f;
+            cover.trees = { kind };
+            geo3d::forest(*world, surface, { patch }, cover);
+            // The camera on a sphere of 0.22 round the tree's middle, at `elev` above the surface there.
+            const geo::LonLat at{ 20, 55 };
+            const Vector3 up = surface->up(at), north = surface->north(at);
+            const Vector3 east = Vector3CrossProduct(north, up);
+            const Vector3 side = Vector3Add(Vector3Scale(north, std::cos(azimuth * DEG2RAD)), Vector3Scale(east, std::sin(azimuth * DEG2RAD)));
+            const Vector3 mid = Vector3Add(surface->point(at, 0), Vector3Scale(up, 0.05f));
+            const float e = elev * DEG2RAD;
+            s->camera.position = Vector3Add(mid, Vector3Add(Vector3Scale(side, 0.22f * std::cos(e)), Vector3Scale(up, 0.22f * std::sin(e))));
+            s->camera.target = mid;
+            s->camera.upVector = elev > 80 ? north : up;
+            s->camera.nearPlane = 0.02f;
+            Comp c = longComp(s, 240, 240);
+            return render(c, 0);
+        };
+        flora::TreeBuild tb;                                      // the forest's default trees, one at a time
+        tb.style = flora::TreeStyle::LowPoly; tb.frames = 1; tb.views = 8; tb.viewSize = 40; tb.elevations = 4;   // as geo3d::forest builds them
+        const char* kindNames[] = { "oak", "birch", "pine" };
+        for (const char* kindName : kindNames) {
+        const flora::TreePtr kind = flora::makeTree(flora::tree(kindName), tb);
+        for (float morph : { 0.f, 0.5f, 1.f }) {
+            std::printf("[scene3d] map forest %s vs its picture, morph %.1f:", kindName, morph);
+            for (float elev : { 0.f, 30.f, 60.f, 85.f, 90.f }) {
+                double overlap = 0, ratio = 0;
+                const std::vector<float> azimuths = std::getenv("RMTN_L6_AZ") ? std::vector<float>{ 0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330 } : std::vector<float>{ 10, 70, 130, 190, 250, 310 };
+                for (float az : azimuths) {
+                    Image a = shot(kind, morph, elev, az, false), b = shot(kind, morph, elev, az, true);
+                    int both = 0, either = 0;
+                    double ya = 0, yb = 0;
+                    for (int y = 0; y < a.height; y++)
+                        for (int x = 0; x < a.width; x++) {
+                            const Color ca = GetImageColor(a, x, y), cb = GetImageColor(b, x, y);
+                            const bool p = isTree(ca), q = isTree(cb);
+                            both += p && q; either += p || q;
+                            if (p) ya += 0.2126 * linear(ca.r) + 0.7152 * linear(ca.g) + 0.0722 * linear(ca.b);
+                            if (q) yb += 0.2126 * linear(cb.r) + 0.7152 * linear(cb.g) + 0.0722 * linear(cb.b);
+                        }
+                    overlap += (either ? (double)both / either : 0) / (double)azimuths.size();
+                    ratio += (ya > 0 ? yb / ya : 0) / (double)azimuths.size();
+                    if (std::getenv("RMTN_L6_AZ") && morph == 0) std::printf("\n     %s e%.0f az%.0f: x%.2f", kindName, elev, az, ya > 0 ? yb / ya : 0.0);
+                    if (az == 70.f) {
+                        char n0[64], n1[64];
+                        std::snprintf(n0, sizeof n0, "tree_%s_m%.0f_e%.0f_full.png", kindName, morph * 10, elev);
+                        std::snprintf(n1, sizeof n1, "tree_%s_m%.0f_e%.0f_picture.png", kindName, morph * 10, elev);
+                        dump(n0, a);
+                        dump(n1, b);
+                    }
+                    UnloadImage(a);
+                    UnloadImage(b);
+                }
+                std::printf("  %.0f deg: overlap %.2f, luminance x%.2f;", elev, overlap, ratio);
+                CHECK(overlap > 0.65);
+                // Known limit (0.13): from 60 degrees a lone tree's picture is darker (0.71-0.81) while a forest of them
+                // is 5% brighter than its meshes; one shade (geo3d::forest's kShade) serves the forest.
+                CHECK(ratio > (elev == 60 ? 0.68 : 0.75) && ratio < 1.3);
+            }
+            std::printf("\n");
+        }
+        }
+    }
+    if (!onlyTop) {   // pictures stand along the surface's up: on the globe, half way and the map, each picture's quad
+        // up, projected on screen, points where the surface's up does at its tree (and its quad faces
+        // the camera). Seen from a slant, so that neither is degenerate.
+        for (float morph : { 0.f, 0.5f, 1.f }) {
+            MapForestRig r = mapForestRig(0.35f, morph, 1e6f, 0);       // every tree a picture
+            const Vector3 centre = r.surface->point({ 20, 55 }, 0), up = r.surface->up({ 20, 55 });
+            const Vector3 north = r.surface->north({ 20, 55 });
+            r.scene->camera.position = Vector3Add(centre, Vector3Add(Vector3Scale(up, 1.2f), Vector3Scale(north, -2.1f)));   // 30 deg up, to the south
+            r.scene->camera.target = centre;
+            r.scene->camera.upVector = up;
+            r.scene->camera.farPlane = 50;
+            Comp c = longComp(r.scene, 640, 360);
+            { Image shotImg = render(c, 0); char nm[48]; std::snprintf(nm, sizeof nm, "upright_m%.0f.png", morph * 10); dump(nm, shotImg); UnloadImage(shotImg); }
+            size_t pictures = 0, hero = 0;
+            double worstUp = 1, worstFace = 1, worstRadial = 1;
+            for (const auto& ch : r.trees->children) {
+                if (!ch->instances) continue;
+                for (const g3d::Instance& in : ch->instances->list) {
+                    if (Vector3LengthSqr(in.aim) < 1e-9f) { hero++; continue; }
+                    pictures++;
+                    // The quad's own axes, as the engine builds them.
+                    const Vector3 z = Vector3Normalize(in.aim);
+                    Vector3 y = Vector3Subtract(in.aimUp, Vector3Scale(z, Vector3DotProduct(in.aimUp, z)));
+                    y = Vector3Normalize(y);
+                    const Vector3 lift = Vector3Normalize(in.aimUp);
+                    if (morph == 0) worstRadial = std::min(worstRadial, (double)Vector3DotProduct(lift, Vector3Normalize(in.position)));   // on the globe up is outward
+                    // The picture's foot: its middle less half its side along y; screen directions at its middle.
+                    const Vector2 p0 = project(r.scene->camera, in.position, 640, 360), p1 = project(r.scene->camera, Vector3Add(in.position, Vector3Scale(y, 0.01f)), 640, 360);
+                    const Vector2 q1 = project(r.scene->camera, Vector3Add(in.position, Vector3Scale(lift, 0.01f)), 640, 360);
+                    const Vector2 a{ p1.x - p0.x, p1.y - p0.y }, b{ q1.x - p0.x, q1.y - p0.y };
+                    const float la = Vector2Length(a), lb = Vector2Length(b);
+                    if (la > 1e-4f && lb > 1e-4f) worstUp = std::min(worstUp, (double)Vector2DotProduct(a, b) / (la * lb));
+                    const Vector3 toCam = Vector3Normalize(Vector3Subtract(r.scene->camera.position, in.position));
+                    worstFace = std::min(worstFace, (double)Vector3DotProduct(z, toCam));
+                }
+            }
+            std::printf("[scene3d] map forest pictures at morph %.1f: %zu pictures (%zu meshes); quad up vs surface up on screen, worst cosine %.4f; quad faces the camera, worst cosine %.4f; lift against the globe's radius (morph 0) %.5f\n",
+                        morph, pictures, hero, worstUp, worstFace, worstRadial);
+            CHECK(pictures > 1000 && hero == 0);
+            CHECK(worstUp > 0.99 && worstFace > 0.99 && worstRadial > 0.999);
+        }
+    }
+    if (!onlyTop) {   // purity: a frame is the same drawn alone as drawn after another (the levels and the cross-fades
+        // are functions of the camera and t, never of what was drawn before)
+        auto frame = [&](int first, int then) {
+            MapForestRig r = mapForestRig(0.12f, 0.5f);
+            const Vector3 centre = r.surface->point({ 20, 55 }, 0), up = r.surface->up({ 20, 55 });
+            const Vector3 north = r.surface->north({ 20, 55 });
+            r.scene->camera.position = Vector3Add(centre, Vector3Add(Vector3Scale(up, 0.25f), Vector3Scale(north, -0.55f)));   // low and long: every level shows
+            r.scene->camera.target = centre;
+            r.scene->camera.upVector = up;
+            Comp c = longComp(r.scene, 480, 270);
+            if (first >= 0) UnloadImage(render(c, first));
+            return render(c, then);
+        };
+        Image a = frame(-1, 7), b = frame(12, 7), d = frame(7, 7);
+        long long diff = 0;
+        for (int y = 0; y < a.height; y++)
+            for (int x = 0; x < a.width; x++) {
+                const Color ca = GetImageColor(a, x, y), cb = GetImageColor(b, x, y), cd = GetImageColor(d, x, y);
+                diff += std::abs(ca.r - cb.r) + std::abs(ca.g - cb.g) + std::abs(ca.b - cb.b) + std::abs(ca.r - cd.r) + std::abs(ca.g - cd.g) + std::abs(ca.b - cd.b);
+            }
+        std::printf("[scene3d] map forest purity: frame 7 alone against frame 7 after frame 12 and after itself, summed difference %lld\n", diff);
+        CHECK(diff == 0);
+        dump("purity.png", a);
+        UnloadImage(a); UnloadImage(b); UnloadImage(d);
+    }
+}
+
 int main() try {
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
@@ -2545,6 +4703,30 @@ int main() try {
     // folder, which a sandboxed shell may not let it write to.
     const fs::path dir = fs::current_path() / "raymotion-scene3d-test";
     fs::create_directories(dir);
+    if (std::getenv("RMTN_POLES_ONLY")) {
+        environmentPoles(dir);
+        shutdownGraphics();
+        CloseWindow();
+        return failures ? 1 : 0;
+    }
+    if (std::getenv("RMTN_MAPFOREST_ONLY")) {
+        mapForestTests();
+        shutdownGraphics();
+        CloseWindow();
+        return failures ? 1 : 0;
+    }
+    if (std::getenv("RMTN_CANOPY_ONLY")) {
+        canopyTests();
+        shutdownGraphics();
+        CloseWindow();
+        return failures ? 1 : 0;
+    }
+    if (std::getenv("RMTN_TREES_ONLY")) {            // while working on trees: just those
+        trees();
+        shutdownGraphics();
+        CloseWindow();
+        return failures ? 1 : 0;
+    }
     geometryExtents();
     placementAndDepth();
     supersampledPlacement();
@@ -2559,6 +4741,8 @@ int main() try {
     vegetationMaterials(dir);
     waterTest();
     environment(dir);
+    environmentPoles(dir);
+    cubeSkybox(dir);
     skyAndFog();
     depthOfField();
     determinism();
@@ -2572,6 +4756,8 @@ int main() try {
     lines3d();
     grassField();
     trees();
+    mapForestTests();
+    canopyTests();
     devices();
     shutdownGraphics();
     CloseWindow();

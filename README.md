@@ -299,6 +299,9 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   gusts downwind as a function of time. About 1.5 million blades a frame at 1080p took
   12 ms with shadows on the development GPU (`RMTN_FIELD_BENCH=1` runs that measurement in
   `scene3d_tests`). Grass shadows want a fine shadow map (`shadowMapSize` 4096) under a low sun.
+  `Field::castShadows` (on, script key `castShadows`) draws the blades into the shadow maps, so a
+  tall tuft shades the grass behind it; `shadowDensity` below 1 (default 1) draws a random share of
+  them for less time, at the cost of a blocky weave of blade shadows on the soil near the camera.
 * Where plants grow (`flora::Area`): a rectangle or polygons with holes, less buildings,
   clearings and roads (strips), over a ground (hills from `flora::noise`, a mesh's upward
   faces, a geo region through a projection), thinned by density, slope and altitude, with a
@@ -313,9 +316,14 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   branches lag and leaves flutter, and gusts lean the trees as they pass. `season` turns
   and drops deciduous leaves. `flora::addForest` draws each tree at the detail its distance
   from the camera needs: the full tree, a reduced one, then an impostor (a lit picture of
-  itself from 8 directions). It cross-fades between levels with a screen door
-  (`Instance::fade`), so nothing pops. About 11,000 trees at 1080p take 26 ms a frame.
-  Impostors turn only about the vertical, so for aerial shots push `impostorFrom` out.
+  itself from 8 directions at 3 elevations, `TreeBuild::elevations`, so it still reads as a
+  tree seen from above). It cross-fades between levels with a screen door
+  (`Instance::fade`), so nothing pops, and impostors cast the shadow of their picture as
+  seen from the light (`ForestSpec::impostorShadows`, within the light's `shadowExtent`).
+  About 11,000 trees at 1080p take 26 ms a frame. With `ForestSpec::canopyBelow` set (px; about 7), far cells of trees
+  are replaced by one canopy patch each (a height field over the crowns; the forest's edge keeps its trees), so a far forest is
+  far fewer bodies (-89% in the far-forest test), not yet fewer milliseconds. It is for low
+  cameras: above `canopyMaxElevation` (20 degrees) every tree is kept, since from higher up the patches show as blotches.
 * Growth, by a reveal `u` = 0..1 as in `plot::` and `geo::`: grass comes up where
   `g3d::Field::grow` passes each spot's `arrival` (`flora::arrivalFrom` a point,
   `arrivalAlong` a line, `arrivalInto` an area from its edges), blades rising rather than
@@ -331,18 +339,24 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
 * 2D vegetation (`flora2d::`, drawn with the node's context, so flat compositions and
   `g3d::Surface` alike): grass along a ground line, tufts, a meadow filling a shape (smaller
   toward its back), shrubs, and branching trees (oak, birch, pine; a silhouette option for
-  far layers). Wind leans, sways and sends gusts along x; every plant grows by `u` as in
-  3D. Parallax layers: `parallax` (a context shifted by the camera), `hazed` colours,
+  far layers); a meadow fills a polygon or a `vg::Path`. Wind leans, sways and sends gusts
+  along x, and with motion blur the blade tips blur; every plant grows by `u` as in 3D. Parallax layers: `parallax` (a context shifted by the camera), `hazed` colours,
   `groundLine`/`ground` for rolling hills and `softness` (a blur filter for a layer).
 * Plants in cities and on maps: `city::addPlants` turns a CityJSON model's
   SolitaryVegetationObjects into trees (as tall as their `height`; conifers by species)
   and its PlantCover into grass or shrubs (`isPlant` to filter the solids out);
   `geo3d::forest` scatters low-poly trees over countries or boxes, standing along the
-  surface's up on a globe, a map or between, and growing in west to east.
+  surface's up on a globe, a map or between, and growing in west to east. Far trees become
+  pictures of themselves by their size on screen (and the farthest merge): 100,000 trees at
+  720p take 7-8 ms a frame at 7 globe radii and 21-24 ms at 3.5, against 60-70 ms as meshes
+  (`impostorBelow` and `mergeBelow` of 0 give meshes only).
 * Vegetation prefabs `flora-meadow`, `flora-tree-grow` and `flora-2d-hill`, and an engine
   showcase (`raymotion render flora`: a meadow, a 5,000-tree fly-over, a growing tree, a 2D
   hillside). The whole vegetation API, measured budgets and what is verified are in
-  [docs/flora.md](docs/flora.md).
+  [docs/flora.md](docs/flora.md). A second showcase, `raymotion render far-and-near`
+  (`examples/showcase/far_and_near.cpp`), descends from a globe of 100,000 trees to a blade of
+  grass and wipes the same frame between the old and the new way at each distance, with the
+  engine's own body, triangle and shadow-blade counts under each side.
 * Lights: up to 8 directional/point/spot lights with range falloff. Any of them can cast
   PCF shadows; they share one shadow atlas (`shadowMapSize` per tile, a tile per
   directional/spot light and six per point light, 16 tiles), with `shadowBias` in world
@@ -352,6 +366,11 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   equirectangular PNG/JPG/HDR) or `environmentGenerator` (e.g. `g3d::studioEnvironment`,
   a gradient with soft light boxes) lights diffuse surfaces from its blurred mips and
   gives reflections that blur with roughness; `showEnvironment` draws it as a skybox.
+* A cube skybox: `scene->environmentFaces` takes six face files (+x, -x, +y, -y, +z, -z) or
+  one horizontal-cross image, as skybox packs ship them (the +x and -x faces swap sides
+  for the right-handed world, as in three.js, so the sky is not mirrored). The faces are resampled
+  once to an equirectangular image, so lighting, `showEnvironment`, `environmentRotation` and
+  `fogFromSky` work unchanged. In scripts: `"environment": {"faces": [...]}` or `{"cross": "sky.png"}`.
 * A procedural sky (`scene->sky`): a gradient from zenith to horizon to ground, a sun
   disc and glow (`sunLight` points it along a light), stars that twinkle, and fbm clouds
   that drift. It is remade each frame, so all of it can be animated, and it is also the
@@ -1176,6 +1195,9 @@ node->fn = [=](const Ctx& cx, int t) {
   speed on screen. `geo::focus(base, box, geometry, padding)` makes the views: a globe
   turns to face the region, a world map keeps north up and only zooms.
 * Prefabs: `geo-route` and `geo-flyto` ([props](docs/geo-prefabs.md)).
+* An engine showcase of all of the above in C++, `raymotion render maps-2d` (a GDP-per-person
+  choropleth from the bundled data, a series over years, a route with its computed length,
+  a globe flying to Kenya, the two prefabs): `examples/showcase/maps_2d.cpp`.
 
 From scripts the same calls take JSON for values and styles; see
 `examples/scripts/map_choropleth.as`, `map_route.as`, `map_timeline.as` and

@@ -96,7 +96,10 @@ mat4 instM; vec4 instAnim; float instFade = 1.0;
 void setupInstance() {
     instM = instanceTransform;
     instAnim = vec4(instM[0].w, instM[1].w, fract(instM[2].w), instM[3].w);
-    instFade = floor(instM[2].w) / 32.0 - 1.0;
+    // Whole part: fade + 1 in 1/32 steps (0..64), plus 65 per 1/32 of Instance::fadeFrom, which
+    // fadedAway() reads back from the fade as 4 per step (fade itself lies in -1..1).
+    float code = floor(instM[2].w), from = floor(code / 65.0);
+    instFade = (code - 65.0 * from) / 32.0 - 1.0 + 4.0 * from;
     instM[0].w = 0.0; instM[1].w = 0.0; instM[2].w = 0.0; instM[3].w = 1.0;
 }
 vec3 vatFetch(float frame, int row0) {
@@ -132,6 +135,8 @@ uniform vec4 fieldFade;                  // fade start, fade end, dryness, grow
 uniform vec3 fieldCam;                   // the viewing camera (world), in the shadow passes too
 uniform vec3 fieldRoot; uniform vec3 fieldTip; uniform vec3 fieldDry;     // sRGB 0..1
 uniform float fieldBands;                // Field::colorBands (0 = smooth)
+uniform float fieldWiden;                // blade width multiplier: 1, more in the shadow pass (thinned blades)
+uniform int fieldPick;                   // > 0 in a shadow pass: instance i draws blade hash(i) mod fieldPick, a random share of them (the first n would show the sequence's lattice)
 uint fieldHash(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
 float fieldRand(uint x) { return float(fieldHash(x) >> 8) / 16777216.0; }
 // Point k of the R2 sequence (Roberts 2018) in the unit square, shifted per tile: any first n
@@ -141,7 +146,7 @@ vec2 fieldSpot(uint k, uint th) {
     return vec2(float(x >> 8), float(z >> 8)) / 16777216.0;
 }
 bool fieldVertex(vec3 corner, out vec3 pos, out vec3 nrm, out vec4 col) {
-    uint k = uint(gl_InstanceID);
+    uint k = fieldPick > 0 ? fieldHash(uint(gl_InstanceID) * 2654435769u + 40503u) % uint(fieldPick) : uint(gl_InstanceID);
     uint th = fieldHash(uint(fieldKey.x) * 73856093u ^ uint(fieldKey.y) * 19349663u ^ uint(fieldSeed) * 83492791u);
     vec2 p = fieldTile.xy + fieldSpot(k, th) * fieldTile.z;
     vec2 a = (p - fieldArea.xy) / (fieldArea.zw - fieldArea.xy);
@@ -160,7 +165,7 @@ bool fieldVertex(vec3 corner, out vec3 pos, out vec3 nrm, out vec4 col) {
     float grown = clamp((fieldFade.w * 1.15 - maps.a) / 0.15, 0.0, 1.0);     // Field::grow past the arrival
     float H = fieldBlade.x * (1.0 + fieldBlade.y * (2.0 * r1 - 1.0)) * maps.b * s * grown * grown * (3.0 - 2.0 * grown);
     if (H <= 1e-4) return false;
-    float W = fieldBlade.z * (0.7 + 0.6 * r2) / max(far, 0.33);        // fewer blades far off, each wider
+    float W = fieldBlade.z * (0.7 + 0.6 * r2) / max(far, 0.33) * fieldWiden;        // fewer blades far off, each wider
     float yaw = r3 * 6.2831853;
     vec3 side = vec3(cos(yaw), 0.0, sin(yaw));
     vec2 face = vec2(-side.z, side.x), wd = fieldWind.xy;
@@ -484,20 +489,30 @@ void main() {
 // "Anti-aliased Alpha Test", 2017).
 const char* CUTOUT_FS = R"(
 uniform float alphaCutoff;
+// The uv's screen derivatives, taken first thing in main: after a discard (a cut-out's
+// edge, a screen-door fade) derivatives and implicit-lod texture reads are undefined, and
+// drivers differ there (Mesa's llvmpipe shaded impostor pictures darker than NVIDIA did).
+vec2 uvDx, uvDy;
 bool cutAway(float a, vec2 uv) {
     if (alphaCutoff <= 0.0) return false;
-    vec2 texels = uv * vec2(textureSize(texture0, 0));
-    vec2 d = max(abs(dFdx(texels)), abs(dFdy(texels)));
+    vec2 size = vec2(textureSize(texture0, 0));
+    vec2 d = max(abs(uvDx * size), abs(uvDy * size));
     float mip = max(log2(max(max(d.x, d.y), 1e-6)), 0.0);
     return a * (1.0 + 0.25 * mip) < alphaCutoff;
 }
 // Instance::fade as a screen door: fade f > 0 keeps the pixels whose 4x4 Bayer level is
 // below f, f < 0 those at or above 1 + f, so a body at u and its stand-in at -u tile exactly.
+// A fade above 1 carries a lower bound too: fade + 4 * k keeps the pixels from k / 32 up.
 bool fadedAway(float f) {
-    if (f >= 1.0) return false;
+    if (f == 1.0) return false;
     ivec2 q = ivec2(gl_FragCoord.xy) & 3;
     const float bayer[16] = float[16](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
     float d = (bayer[q.y * 4 + q.x] + 0.5) / 16.0;
+    float k = floor((f + 2.0) / 4.0);
+    if (k > 0.0) {
+        f -= 4.0 * k;
+        if (d < k / 32.0) return true;
+    }
     return f >= 0.0 ? d >= f : d < 1.0 + f;
 }
 )";
@@ -508,8 +523,9 @@ uniform sampler2D texture0; uniform vec4 colDiffuse;
 out vec4 finalColor;
 //@CUTOUT_FS@
 void main() {
+    uvDx = dFdx(fragTexCoord); uvDy = dFdy(fragTexCoord);
     if (fadedAway(fragFade)) discard;
-    if (cutAway(texture(texture0, fragTexCoord).a * colDiffuse.a * fragAlpha, fragTexCoord)) discard;
+    if (cutAway(textureGrad(texture0, fragTexCoord, uvDx, uvDy).a * colDiffuse.a * fragAlpha, fragTexCoord)) discard;
     finalColor = vec4(1.0);
 }
 )";
@@ -550,21 +566,38 @@ out vec4 finalColor;
 
 // A tangent-space normal map without stored tangents: the frame is rebuilt from the screen
 // derivatives of position and uv (Schüler, "Normal Mapping Without Precomputed Tangents", 2013).
-vec3 mapNormal(vec3 n, vec3 p, vec2 uv) {
-    vec3 dp1 = dFdx(p), dp2 = dFdy(p);
-    vec2 duv1 = dFdx(uv), duv2 = dFdy(uv);
+vec2 texDx, texDy;                                                 // uvDx, uvDy for material reads (impostors: finer)
+const float PICTURE_SHARPEN = 0.35;                                  // 2^-mips
+vec3 posDx, posDy;                                                 // fragPos's, taken with uvDx and uvDy
+vec3 mapNormal(vec3 n, vec3 p, vec2 uv) {                          // p, uv: fragPos, fragTexCoord
+    vec3 dp1 = posDx, dp2 = posDy;
+    vec2 duv1 = uvDx, duv2 = uvDy;
     vec3 dp2perp = cross(dp2, n), dp1perp = cross(n, dp1);
     vec3 t = dp2perp * duv1.x + dp1perp * duv2.x;
     vec3 b = dp2perp * duv1.y + dp1perp * duv2.y;
     float m = max(dot(t, t), dot(b, b));
     if (m < 1e-20) return n;                                       // no uv change: nothing to map
     float inv = inversesqrt(m);
-    vec3 s = texture(texture2, uv).xyz * 2.0 - 1.0;
+    vec3 s = textureGrad(texture2, uv, texDx, texDy).xyz * 2.0 - 1.0;
     s.xy *= normalScale;
     return normalize(mat3(t * inv, b * inv, n) * s);
 }
 
+)" R"(
 const float PI = 3.14159265;
+// An impostor texel's normal is the mean of the leaves it stands for, its length how alike they face.
+// Lit, they are a cone about the mean (half-angle acos of the length), not one normal.
+float spreadCos = 1.0;
+// The cone's mean of max(n.l, 0), c = cos of the mean with l: n.l = A + B cos(phi).
+float coneNdl(float c, float cosPsi) {
+    float sinPsi = sqrt(max(1.0 - cosPsi * cosPsi, 0.0));
+    float A = cosPsi * c, B = sinPsi * sqrt(max(1.0 - c * c, 0.0));
+    if (B < 1e-4) return max(A, 0.0);
+    if (A >= B) return A;
+    if (A <= -B) return 0.0;
+    float phi0 = acos(-A / B);
+    return (A * phi0 + sqrt(B * B - A * A)) / 3.14159265;
+}
 
 // ---- shadows: atlas tiles; params = (near, far, perspective, texel size per unit depth)
 float linearDepth(float d, vec4 prm) {
@@ -655,6 +688,7 @@ float lightAt(int i, vec3 n, out vec3 l, out float ndl) {
         if (lightType[i] == 2) atten *= smoothstep(lightCosOuter[i], lightCosInner[i], dot(-l, lightDir[i]));
     }
     ndl = dot(n, l);
+    if (spreadCos < 0.999) ndl = coneNdl(clamp(ndl, -1.0, 1.0), spreadCos);
     if (ndl <= 0.0 || atten <= 0.0) return 0.0;
     if (lightShadow[i] >= 0 && receiveShadow == 1) {
         int tile = lightShadow[i] + (lightType[i] == 1 ? cubeFace(fragPos - lightPos[i]) : 0);
@@ -733,6 +767,10 @@ vec3 hatch(vec3 albedo, vec3 n) {
 }
 
 void main() {
+    uvDx = dFdx(fragTexCoord); uvDy = dFdy(fragTexCoord);           // before any discard (see uvDx)
+    posDx = dFdx(fragPos); posDy = dFdy(fragPos);
+    texDx = uvDx; texDy = uvDy;
+    if (hasNormalMap == 2) { texDx *= PICTURE_SHARPEN; texDy *= PICTURE_SHARPEN; }
     if (skybox == 1) {
         if (waterOn == 1 && viewPos.y < waterEye) { finalColor = encode(waterScatter, 1.0); return; }
         finalColor = encode(env(normalize(fragPos - viewPos), 0.0) * backdropScale, 1.0);
@@ -742,9 +780,10 @@ void main() {
     float cutDist = clipPlane.w - dot(fragPos, clipPlane.xyz);     // < 0: beyond the cut
     if (cutDist < 0.0) discard;
     if (fadedAway(fragFade)) discard;
-    vec4 base = texture(texture0, fragTexCoord) * colDiffuse * fragColor;
+    vec4 base = textureGrad(texture0, fragTexCoord, texDx, texDy) * colDiffuse * fragColor;
     if (alphaCutoff > 0.0) {
-        if (cutAway(base.a, fragTexCoord)) discard;
+        float cutA = hasNormalMap == 2 ? textureGrad(texture0, fragTexCoord, uvDx, uvDy).a * colDiffuse.a * fragColor.a : base.a;
+        if (cutAway(cutA, fragTexCoord)) discard;
         base.a = 1.0;                                              // what a cut-out keeps is solid
     }
     if (unlit == 1) { finalColor = vec4(base.rgb, base.a * opacity); return; }
@@ -752,7 +791,7 @@ void main() {
     vec3 n = normalize(fragNormal);
     if (!gl_FrontFacing && fieldOn == 0) n = -n;                    // a field's blades face the camera already
     vec3 v = normalize(viewPos - fragPos);
-    if (hasNormalMap == 1 && shading == 0) n = mapNormal(n, fragPos, fragTexCoord);
+    if (hasNormalMap >= 1 && shading == 0) n = mapNormal(n, fragPos, fragTexCoord);
 
     vec3 color;
     if (shading == 1) color = toon(albedo, n, v);
@@ -761,12 +800,14 @@ void main() {
     else {
         float rough = roughness, metal = metalness;
         if (hasRoughnessMap == 1) {
-            vec3 mr = texture(texture1, fragTexCoord).rgb;
+            vec3 mr = textureGrad(texture1, fragTexCoord, uvDx, uvDy).rgb;
             rough *= mr.g; metal *= mr.b;
         }
         rough = clamp(rough, 0.0, 1.0);
         vec3 specColor = mix(vec3(0.04), albedo, metal);
         vec3 diffColor = albedo * (1.0 - metal);
+        float sunVis = 1.0;                                         // baked self-shadow, and the spread of the normals a texel stands for
+        if (hasNormalMap == 2) { vec4 bk = textureGrad(texture2, fragTexCoord, texDx, texDy); sunVis = bk.a * (255.0 / 127.0); spreadCos = clamp(length(bk.xyz * 2.0 - 1.0), 0.0, 1.0); }
         if (hasEnv == 1) {
             float ndv = max(dot(n, v), 1e-4);
             vec3 r = reflect(-v, n);
@@ -774,13 +815,14 @@ void main() {
             // average the whole sky and ground together.
             float blurLod = max(envMaxLod - 4.0, 0.0);
             color = diffColor * env(n, blurLod) + env(r, rough * blurLod) * envBRDF(specColor, rough, ndv) * reflection;
-        } else color = mix(groundColor, skyColor, n.y * 0.5 + 0.5) * albedo;
+        } else color = mix(groundColor, skyColor, n.y * spreadCos * 0.5 + 0.5) * albedo;
 
         float shininess = exp2(10.0 * (1.0 - rough) + 1.0);
+        shininess *= spreadCos / (spreadCos + shininess * (1.0 - spreadCos));      // Toksvig: the normals a texel stands for widen its lobe
         for (int i = 0; i < 8; i++) {
             if (i >= lightCount) break;
             vec3 l; float ndl;
-            float atten = lightAt(i, n, l, ndl);
+            float atten = lightAt(i, n, l, ndl) * (lightShadow[i] >= 0 ? sunVis : 1.0);   // the baked shadow stands in for the shadow map the full tree would have
             if (atten <= 0.0) {
                 // Translucency: the light falls on the far side; it comes through diffused,
                 // and more of it when looking towards the light (forward scattering).
@@ -790,7 +832,7 @@ void main() {
                 if (back <= 0.0) continue;
                 float forward = pow(clamp(dot(v, -lb), 0.0, 1.0), 6.0);
                 color += diffColor * translucencyColor * lightColor[i] * waterLight(i) * back
-                       * translucency * (0.6 * ndlb + 1.4 * forward);
+                       * translucency * (lightShadow[i] >= 0 ? sunVis : 1.0) * (0.6 * ndlb + 1.4 * forward);
                 continue;
             }
             vec3 h = normalize(l + v);
@@ -911,8 +953,9 @@ vec2 octEncode(vec3 n) {
     return e * 0.5 + 0.5;
 }
 void main() {
+    uvDx = dFdx(fragTexCoord); uvDy = dFdy(fragTexCoord);
     if (fadedAway(fragFade)) discard;
-    if (cutAway(texture(texture0, fragTexCoord).a * colDiffuse.a * fragColor.a, fragTexCoord)) discard;
+    if (cutAway(textureGrad(texture0, fragTexCoord, uvDx, uvDy).a * colDiffuse.a * fragColor.a, fragTexCoord)) discard;
     vec3 n = normalize(mat3(matView) * normalize(fragNormal));
     if (!gl_FrontFacing) n = -n;
     finalColor = vec4(octEncode(n), lineStyle / 255.0, objectId / 255.0);
@@ -1096,7 +1139,7 @@ struct InstLocs { int instanced = -1, vat = -1, width = -1, verts = -1, rows = -
 constexpr int VAT_SLOT = 12;             // the baked-animation texture (material maps use 0..11)
 // A field's uniforms in one program (see FIELD_VS); its maps share the VAT_SLOT unit.
 struct FieldLocs { int on = -1, world = -1, tile = -1, key = -1, seed = -1, area = -1, mapFit = -1, maps = -1,
-                   blade = -1, wind = -1, gusts = -1, fade = -1, cam = -1, root = -1, tip = -1, dry = -1, bands = -1; };
+                   blade = -1, wind = -1, gusts = -1, fade = -1, cam = -1, root = -1, tip = -1, dry = -1, bands = -1, widen = -1, pick = -1; };
 constexpr int FIELD_MAX_SEGMENTS = 8;
 struct LineLocs { int depthTex, texel, zNear, zFar, ortho, pixelWorld, pxScale, styles, maxRadius, creaseCos,
                   depthThreshold, wobble, wobbleScale, seed; };
@@ -1160,9 +1203,13 @@ struct Gpu {
     int frame = 0;                                      // the frame being drawn (for dynamic maps)
     Vector3 viewCam{ 0, 0, 0 };                         // the frame's camera position (fields)
     long long fieldBlades = 0;                          // blades submitted by the main pass this frame
+    long long fieldShadowBlades = 0;                    // and by the shadow passes
+    long long instanceBodies = 0, instanceTriangles = 0;   // instanced bodies (and their triangles) the main pass drew
 };
 Gpu gpu;
 thread_local const Camera* viewing = nullptr;      // drawingCamera()
+thread_local const Scene* viewingScene = nullptr;  // drawingScene()
+thread_local float viewingHeight = 0;                   // drawingViewportHeight()
 
 Texture2D whiteTexture() { return { rlGetTextureIdDefault(), 1, 1, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 }; }
 
@@ -1279,7 +1326,7 @@ void ensureGpu() {
             auto f = [&b](const char* name) { return GetShaderLocation(b, name); };
             gpu.F[i] = { f("fieldOn"), f("fieldWorld"), f("fieldTile"), f("fieldKey"), f("fieldSeed"), f("fieldArea"),
                          f("fieldMapFit"), f("fieldMaps"), f("fieldBlade"), f("fieldWind"), f("fieldGusts"),
-                         f("fieldFade"), f("fieldCam"), f("fieldRoot"), f("fieldTip"), f("fieldDry"), f("fieldBands") };
+                         f("fieldFade"), f("fieldCam"), f("fieldRoot"), f("fieldTip"), f("fieldDry"), f("fieldBands"), f("fieldWiden"), f("fieldPick") };
         }
     }
     auto nloc = [](const char* name) { return GetShaderLocation(gpu.line, name); };
@@ -1354,22 +1401,33 @@ DepthTarget& lineTarget(int w, int h) {
     return t;
 }
 
-// Mipmapped, trilinear and repeating: right for material maps and environments alike.
+// Mipmapped, trilinear and repeating: right for material maps (environments clamp in v).
 void prepareTexture(Texture2D& tex) {
     GenTextureMipmaps(&tex);
     SetTextureFilter(tex, TEXTURE_FILTER_TRILINEAR);
     SetTextureWrap(tex, TEXTURE_WRAP_REPEAT);
 }
 
-Texture2D texture(const std::string& path) {
-    auto it = gpu.textures.find(path);
+// An equirectangular environment: repeating in u (the azimuth wraps) but clamped in v, or the
+// top row would blend with the bottom one at the poles.
+void prepareEnvironmentTexture(Texture2D& tex) {
+    prepareTexture(tex);
+    rlTextureParameters(tex.id, RL_TEXTURE_WRAP_T, RL_TEXTURE_WRAP_CLAMP);
+}
+
+// `environment` selects the environment's sampler state. It has its own cache key, since a
+// file may serve as a material map too and that must keep repeating.
+Texture2D texture(const std::string& path, bool environment = false) {
+    const std::string key = environment ? "env:" + path : path;
+    auto it = gpu.textures.find(key);
     if (it != gpu.textures.end()) return it->second;
     Image img = media::loadImage(path);      // resolved like other media; JPG and HDR included
     Texture2D tex = LoadTextureFromImage(img);
     UnloadImage(img);
     if (!IsTextureValid(tex)) throw std::runtime_error("g3d: cannot load texture: " + path);
-    prepareTexture(tex);
-    gpu.textures[path] = tex;
+    if (environment) prepareEnvironmentTexture(tex);
+    else prepareTexture(tex);
+    gpu.textures[key] = tex;
     return tex;
 }
 
@@ -1516,11 +1574,147 @@ Texture2D renderSky(const Scene& s, double frame, unsigned int callerFbo, int fb
     gpu.skyTarget.texture.mipmaps = tex.mipmaps;
     SetTextureFilter(gpu.skyTarget.texture, TEXTURE_FILTER_TRILINEAR);
     SetTextureWrap(gpu.skyTarget.texture, TEXTURE_WRAP_REPEAT);
+    rlTextureParameters(gpu.skyTarget.texture.id, RL_TEXTURE_WRAP_T, RL_TEXTURE_WRAP_CLAMP);   // not over the poles
     return gpu.skyTarget.texture;
 }
 
+// ---- cube-face environments: six faces (or a horizontal cross) resampled to equirectangular.
+// The OpenGL cube-map table: for a direction r, the major axis picks the face and
+// (sc, tc, ma) give s = (sc / |ma| + 1) / 2, t = (tc / |ma| + 1) / 2 with t counted down the
+// image. Face order +x, -x, +y, -y, +z, -z. The engine is right-handed, so cubeToEquirect
+// looks a world direction up with x negated, as three.js does (flipEnvMap).
+bool isFloatFormat(int format);
+
+struct CubeFace {
+    int n = 0;
+    bool isFloat = false;
+    std::vector<float> px;      // n * n * 4, RGBA; 8-bit faces stay in 0..255
+};
+
+CubeFace cubeFaceFromImage(Image img, const std::string& what) {
+    if (!img.data) throw std::runtime_error("g3d: cannot load environment face " + what);
+    if (img.width != img.height)
+        throw std::runtime_error("g3d: environment faces must be square: " + what + " is " +
+                                 std::to_string(img.width) + "x" + std::to_string(img.height));
+    CubeFace f;
+    f.n = img.width;
+    f.isFloat = isFloatFormat(img.format);
+    ImageFormat(&img, f.isFloat ? PIXELFORMAT_UNCOMPRESSED_R32G32B32A32 : PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+    const size_t count = (size_t)f.n * f.n * 4;
+    f.px.resize(count);
+    if (f.isFloat) std::memcpy(f.px.data(), img.data, count * sizeof(float));
+    else for (size_t i = 0; i < count; ++i) f.px[i] = ((const unsigned char*)img.data)[i];
+    return f;
+}
+
+// The face and its (s, t) in 0..1 for a direction, by the OpenGL table.
+int cubeFaceLookup(float rx, float ry, float rz, float& s, float& t) {
+    const float ax = std::fabs(rx), ay = std::fabs(ry), az = std::fabs(rz);
+    int face;
+    float sc, tc, ma;
+    if (ax >= ay && ax >= az) {
+        face = rx > 0 ? 0 : 1; ma = ax; sc = rx > 0 ? -rz : rz; tc = -ry;
+    } else if (ay >= az) {
+        face = ry > 0 ? 2 : 3; ma = ay; sc = rx; tc = ry > 0 ? rz : -rz;
+    } else {
+        face = rz > 0 ? 4 : 5; ma = az; sc = rz > 0 ? rx : -rx; tc = -ry;
+    }
+    s = (sc / ma + 1.f) * 0.5f;
+    t = (tc / ma + 1.f) * 0.5f;
+    return face;
+}
+
+// Bilinear inside a face (clamped at its border).
+void cubeFaceSample(const CubeFace& f, float s, float t, float out[4]) {
+    const float fx = std::clamp(s * f.n - 0.5f, 0.f, (float)(f.n - 1));
+    const float fy = std::clamp(t * f.n - 0.5f, 0.f, (float)(f.n - 1));
+    const int x0 = (int)fx, y0 = (int)fy, x1 = std::min(x0 + 1, f.n - 1), y1 = std::min(y0 + 1, f.n - 1);
+    const float ax = fx - x0, ay = fy - y0;
+    for (int c = 0; c < 4; ++c) {
+        auto at = [&](int x, int y) { return f.px[((size_t)y * f.n + x) * 4 + c]; };
+        out[c] = (at(x0, y0) * (1 - ax) + at(x1, y0) * ax) * (1 - ay) + (at(x0, y1) * (1 - ax) + at(x1, y1) * ax) * ay;
+    }
+}
+
+Image cubeToEquirect(const std::vector<CubeFace>& faces) {
+    const int n = faces[0].n;
+    const bool isFloat = faces[0].isFloat;
+    int w = std::min(4 * n, 4096);
+    w -= w % 2;
+    const int h = w / 2;
+    Image img{};
+    img.width = w; img.height = h; img.mipmaps = 1;
+    img.format = isFloat ? PIXELFORMAT_UNCOMPRESSED_R32G32B32A32 : PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+    img.data = RL_CALLOC((size_t)w * h, isFloat ? 16 : 4);
+    for (int y = 0; y < h; ++y) {
+        const float theta = (y + 0.5f) / h * PI, sy = std::sin(theta), ry = std::cos(theta);
+        for (int x = 0; x < w; ++x) {
+            const float phi = ((x + 0.5f) / w - 0.5f) * 2 * PI;     // the shader's u = atan(z, x) / 2pi + 0.5
+            float s, t, rgba[4];
+            // x is negated: packs are labelled for left-handed engines (see Scene::environmentFaces)
+            const int face = cubeFaceLookup(-std::cos(phi) * sy, ry, std::sin(phi) * sy, s, t);
+            cubeFaceSample(faces[face], s, t, rgba);
+            const size_t i = ((size_t)y * w + x) * 4;
+            for (int c = 0; c < 4; ++c) {
+                if (isFloat) ((float*)img.data)[i + c] = rgba[c];
+                else ((unsigned char*)img.data)[i + c] = (unsigned char)std::clamp((int)(rgba[c] + 0.5f), 0, 255);
+            }
+        }
+    }
+    return img;
+}
+
+// Loads the six faces, or the one cross, and returns the equirectangular image. Throws
+// std::runtime_error naming the problem.
+Image loadEnvironmentFaces(const std::vector<std::string>& files) {
+    std::vector<CubeFace> faces;
+    if (files.size() == 6) {
+        for (const auto& f : files) {
+            if (f.empty()) throw std::runtime_error("g3d: environment face path is empty");
+            faces.push_back(cubeFaceFromImage(media::loadImage(f), f));
+        }
+    } else if (files.size() == 1) {
+        Image img = media::loadImage(files[0]);
+        if (!img.data) throw std::runtime_error("g3d: cannot load environment cross " + files[0]);
+        const int n = img.width / 4;
+        if (n < 1 || img.width != 4 * n || img.height != 3 * n) {
+            const std::string size = std::to_string(img.width) + "x" + std::to_string(img.height);
+            UnloadImage(img);
+            throw std::runtime_error("g3d: environment cross must be a 4x3 grid of square faces: " + files[0] + " is " + size);
+        }
+        // columns/rows of +x, -x, +y, -y, +z, -z in the horizontal cross
+        const int col[6] = { 2, 0, 1, 1, 1, 3 }, row[6] = { 1, 1, 0, 2, 1, 1 };
+        for (int i = 0; i < 6; ++i) {
+            Image tile = ImageFromImage(img, Rectangle{ (float)(col[i] * n), (float)(row[i] * n), (float)n, (float)n });
+            faces.push_back(cubeFaceFromImage(tile, files[0]));
+            UnloadImage(tile);
+        }
+        UnloadImage(img);
+    } else {
+        throw std::runtime_error("g3d: environmentFaces needs six face files (+x -x +y -y +z -z) or one cross image, got " +
+                                 std::to_string(files.size()));
+    }
+    for (const auto& f : faces)
+        if (f.n != faces[0].n || f.isFloat != faces[0].isFloat)
+            throw std::runtime_error("g3d: environment faces must all have the same size and kind (8-bit or HDR)");
+    return cubeToEquirect(faces);
+}
+
 Texture2D environmentTexture(const Scene& s) {
-    if (!s.environment.empty()) return texture(s.environment);
+    if (!s.environment.empty()) return texture(s.environment, true);
+    if (!s.environmentFaces.empty()) {
+        std::string key = "cube:";
+        for (const auto& f : s.environmentFaces) key += f + "|";
+        auto it = gpu.textures.find(key);
+        if (it != gpu.textures.end()) return it->second;
+        Image img = loadEnvironmentFaces(s.environmentFaces);
+        Texture2D tex = LoadTextureFromImage(img);
+        UnloadImage(img);
+        if (!IsTextureValid(tex)) throw std::runtime_error("g3d: cannot make the environment from its faces");
+        prepareEnvironmentTexture(tex);
+        gpu.textures[key] = tex;
+        return tex;
+    }
     if (!s.environmentGenerator) return Texture2D{};
     auto it = gpu.generated.find(&s);
     if (it != gpu.generated.end()) return it->second;
@@ -1528,7 +1722,7 @@ Texture2D environmentTexture(const Scene& s) {
     Texture2D tex = LoadTextureFromImage(img);
     UnloadImage(img);
     if (!IsTextureValid(tex)) throw std::runtime_error("g3d: environment generator produced no image");
-    prepareTexture(tex);
+    prepareEnvironmentTexture(tex);
     gpu.generated[&s] = tex;
     return tex;
 }
@@ -1548,7 +1742,9 @@ Vector3 linear(Color c, float k = 1) {
 // ---- scene traversal -----------------------------------------------------------------
 // A mesh particle is an item of its emitter object with its own transform, fade and tint.
 // One tile of a field this frame: which, how many of its blades, at what detail.
-struct FieldTile { int tx, tz; int count; int segments; bool shadow; };
+// `shadowCount` is how many of its blades go into the shadow maps (0 = none); `seen` is false
+// for a tile kept only for the shadow it casts into view.
+struct FieldTile { int tx, tz; int count; int segments; int shadowCount; bool seen; };
 struct Item {
     Object3D* obj; Matrix world; float viewDepth;
     float alpha = 1;
@@ -1573,6 +1769,8 @@ struct Cull {
     const Camera* cam = nullptr;
     float aspect = 1, floorY = 0;
     std::vector<Vector3> shadowDirs;     // unit: the way the shadows of each shadowing light run
+    struct Footprint { Vector3 target, dir; float extent; };
+    std::vector<Footprint> footprints;   // what each shadowing light's map covers: the shadowExtent round its target
     float screenH = 1080;                // canvas px the view covers, top to bottom (surfaces)
     float compH = 1080;                  // composition px the view covers, top to bottom (line widths)
 };
@@ -1615,6 +1813,16 @@ void animate(std::vector<std::unique_ptr<Object3D>>& list, int t, const Matrix& 
     }
 }
 
+// Within a shadowing light's map: the shadowExtent box round its target, as the circle that holds it.
+bool inFootprint(const Cull& k, Vector3 c, float r) {
+    for (const Cull::Footprint& f : k.footprints) {
+        const Vector3 rel = Vector3Subtract(c, f.target);
+        const Vector3 across = Vector3Subtract(rel, Vector3Scale(f.dir, Vector3DotProduct(rel, f.dir)));
+        if (Vector3Length(across) <= f.extent * 1.4143f + r) return true;
+    }
+    return false;
+}
+
 // Instance::tint x Instance::shade as the shader's instTint() reads it.
 float packTint(Color tint, float shade) {
     auto q = [shade](unsigned char c) {
@@ -1633,15 +1841,33 @@ void gatherInstances(const Object3D& o, const Matrix& world, const Cull& k, std:
     if (am.frames <= 0) return;
     out.reserve(in.list.size());
     for (const Instance& i : in.list) {
-        const Matrix tilt = MatrixRotateXYZ(Vector3Scale({ i.pitch, 0, i.bank }, DEG2RAD));
-        const Matrix turn = MatrixMultiply(MatrixRotateXYZ(Vector3Scale({ 0, i.yaw, 0 }, DEG2RAD)),
-                                           MatrixTranslate(i.position.x, i.position.y, i.position.z));
-        Matrix m = MatrixMultiply(MatrixMultiply(MatrixMultiply(MatrixScale(i.scale, i.scale, i.scale), tilt), turn), world);
+        Matrix m;
+        if (Vector3LengthSqr(i.aim) > 1e-12f) {
+            // Directions to a basis: z along aim, y as near aimUp as it can be, x = y cross z.
+            const Vector3 z = Vector3Normalize(i.aim);
+            Vector3 y = Vector3Subtract(i.aimUp, Vector3Scale(z, Vector3DotProduct(i.aimUp, z)));
+            if (Vector3LengthSqr(y) < 1e-8f) y = Vector3Subtract({ 0, 1, 0 }, Vector3Scale(z, z.y));
+            if (Vector3LengthSqr(y) < 1e-8f) y = { 0, 0, 1 };
+            y = Vector3Normalize(y);
+            const Vector3 x = Vector3CrossProduct(y, z);
+            const Matrix basis = { x.x, y.x, z.x, i.position.x,
+                                   x.y, y.y, z.y, i.position.y,
+                                   x.z, y.z, z.z, i.position.z,
+                                   0, 0, 0, 1 };
+            m = MatrixMultiply(MatrixMultiply(MatrixScale(i.scale, i.scale, i.scale), basis), world);
+        } else {
+            const Matrix tilt = MatrixRotateXYZ(Vector3Scale({ i.pitch, 0, i.bank }, DEG2RAD));
+            const Matrix turn = MatrixMultiply(MatrixRotateXYZ(Vector3Scale({ 0, i.yaw, 0 }, DEG2RAD)),
+                                               MatrixTranslate(i.position.x, i.position.y, i.position.z));
+            m = MatrixMultiply(MatrixMultiply(MatrixMultiply(MatrixScale(i.scale, i.scale, i.scale), tilt), turn), world);
+        }
         if (k.on) {
             const float sc = std::max({ std::sqrt(m.m0 * m.m0 + m.m1 * m.m1 + m.m2 * m.m2),
                                         std::sqrt(m.m4 * m.m4 + m.m5 * m.m5 + m.m6 * m.m6),
                                         std::sqrt(m.m8 * m.m8 + m.m9 * m.m9 + m.m10 * m.m10) });
             if (!inSight(k, Vector3Transform(am.centre, m), am.radius * sc)) continue;
+            // A copy that only casts is of use where a shadow map covers it.
+            if (o.material.shadowOnly && !inFootprint(k, Vector3Transform(am.centre, m), am.radius * sc)) continue;
         }
         const int len = std::max(1, i.clipLength);
         float f = std::fmod(i.frame, (float)len);
@@ -1651,7 +1877,8 @@ void gatherInstances(const Object3D& o, const Matrix& world, const Cull& k, std:
         m.m3 = (float)std::clamp(i.clipStart + a, 0, last);
         m.m7 = (float)std::clamp(i.clipStart + (a + 1) % len, 0, last);
         const float fade = std::isfinite(i.fade) ? std::clamp(i.fade, -1.f, 1.f) : 1.f;
-        m.m11 = std::min(f - (float)a, 0.999f) + (float)std::lround((fade + 1) * 32);   // see setupInstance
+        const float from = std::isfinite(i.fadeFrom) && fade > 0 ? std::clamp(i.fadeFrom, 0.f, 1.f) : 0.f;
+        m.m11 = std::min(f - (float)a, 0.999f) + (float)std::lround((fade + 1) * 32) + 65.f * (float)std::lround(from * 32);   // see setupInstance
         m.m15 = packTint(i.tint, i.shade);
         out.push_back(m);
     }
@@ -1768,10 +1995,15 @@ void gatherField(const Object3D& o, const Matrix& world, const Cull& k, std::vec
             const float nearest = std::max(0.f, Vector3Distance(cw, k.cam->position) - r);
             const float keep = maps.tileDensity[ti] * fieldFar(f, nearest);
             if (keep <= 0) continue;
-            if (k.on && !inSight(k, cw, r)) continue;
+            // Seen; or, only when the grass casts shadows, casting one that can fall into view.
+            const bool seen = !k.on || visibleSphere(*k.cam, k.aspect, cw, r);
+            if (!seen && !(f.castShadows && inSight(k, cw, r))) continue;
             const int count = (int)std::min<double>(full, std::ceil(full * keep * (1 + FIELD_BAND)));
             if (count <= 0) continue;
-            out.push_back({ tx, tz, count, nearest < f.detailDistance ? segments : 1, nearest < f.shadowDistance });
+            int shadowCount = 0;     // the first blades by rank, as the main pass has them
+            if (f.castShadows && nearest < f.shadowDistance && (!k.on || inFootprint(k, cw, r)))
+                shadowCount = std::max(1, (int)std::ceil(count * std::clamp(f.shadowDensity, 0.02f, 1.f)));
+            out.push_back({ tx, tz, count, nearest < f.detailDistance ? segments : 1, shadowCount, seen });
         }
 }
 
@@ -1864,7 +2096,7 @@ void setMaterial(const g3d::Material& m) {
     SetShaderValue(sh, gpu.L.receiveShadow, &receive, SHADER_UNIFORM_INT);
     const float translucency = std::max(m.translucency, 0.f), normalScale = m.normalScale;
     const Vector3 tc = linear(m.translucencyColor);
-    const int hasRough = m.roughnessMap.empty() ? 0 : 1, hasNormal = m.normalMap.empty() && !m.dynamicNormalMap ? 0 : 1;
+    const int hasRough = m.roughnessMap.empty() ? 0 : 1, hasNormal = m.normalMap.empty() && !m.dynamicNormalMap ? 0 : m.normalAlphaShade ? 2 : 1;
     SetShaderValue(sh, gpu.L.translucency, &translucency, SHADER_UNIFORM_FLOAT);
     SetShaderValue(sh, gpu.L.translucencyColor, &tc, SHADER_UNIFORM_VEC3);
     SetShaderValue(sh, gpu.L.hasRoughnessMap, &hasRough, SHADER_UNIFORM_INT);
@@ -1978,6 +2210,10 @@ void drawInstances(const Item& it, Pass pass) {
     SetShaderValue(base, gpu.il[p].verts, &am.vertices, SHADER_UNIFORM_INT);
     SetShaderValue(base, gpu.il[p].rows, &vat.rows, SHADER_UNIFORM_INT);
     bindUnit(VAT_SLOT, vat.tex);
+    if (pass == Pass::Lit) {
+        gpu.instanceBodies += (long long)it.inst->size();
+        gpu.instanceTriangles += (long long)it.inst->size() * am.rest->mesh().triangleCount;
+    }
     DrawMeshInstanced(am.rest->mesh(), mat, it.inst->data(), (int)it.inst->size());
     bindUnit(VAT_SLOT, 0);
 }
@@ -2055,17 +2291,25 @@ void drawField(const Item& it, Pass pass) {
     setColor(L.dry, f.dry);
     const float bands = (float)std::clamp(f.colorBands, 0, 16);
     rlSetUniform(L.bands, &bands, SHADER_UNIFORM_FLOAT, 1);
+    // Thinned blades in a shadow map are widened to keep the shadow's weight (at most 3 times).
+    const float widen = pass == Pass::Depth ? std::min(3.f, 1.f / std::clamp(f.shadowDensity, 0.02f, 1.f)) : 1.f;
+    rlSetUniform(L.widen, &widen, SHADER_UNIFORM_FLOAT, 1);
 
     const float ts = std::max(f.tileSize, 0.05f);
     const float full = (float)f.bladesPerTile();
     rlEnableVertexArray(gpu.fieldVao);
     for (const FieldTile& t : *it.tiles) {
-        if (pass == Pass::Depth && !t.shadow) continue;
+        const int n = pass == Pass::Depth ? t.shadowCount : t.seen ? t.count : 0;
+        if (n <= 0) continue;
         set4(L.tile, f.min.x + t.tx * ts, f.min.y + t.tz * ts, ts, full);
         const int key[2] = { t.tx, t.tz };
         rlSetUniform(L.key, key, SHADER_UNIFORM_IVEC2, 1);
-        rlDrawVertexArrayInstanced(gpu.fieldFirst[t.segments], gpu.fieldCount[t.segments], t.count);
-        if (pass == Pass::Lit) gpu.fieldBlades += t.count;
+        // A thinned shadow pass draws a random share of the tile's blades, not its first ones.
+        const int pick = pass == Pass::Depth && n < t.count ? t.count : 0;
+        rlSetUniform(L.pick, &pick, SHADER_UNIFORM_INT, 1);
+        rlDrawVertexArrayInstanced(gpu.fieldFirst[t.segments], gpu.fieldCount[t.segments], n);
+        if (pass == Pass::Lit) gpu.fieldBlades += n;
+        else if (pass == Pass::Depth) gpu.fieldShadowBlades += n;
     }
     rlDisableVertexArray();
     const int off = 0;
@@ -2352,7 +2596,9 @@ Shadows renderShadows(const Scene& s, const std::vector<Item>& items) {
         t.rect = { (float)col / grid, (float)row / grid, 1.f / grid, 1.f / grid };
         rlViewport(col * tile, row * tile, tile, tile);
         for (const Item& it : items)
-            if (it.obj->material.castShadow && opacityOf(it) >= 1.f && !it.obj->material.unlit) drawItem(it, Pass::Depth);
+            if (it.obj->material.castShadow && opacityOf(it) >= 1.f && !it.obj->material.unlit &&
+                !(it.tiles && !it.obj->field->castShadows))
+                drawItem(it, Pass::Depth);
         out.tiles.push_back(t);
     };
     for (int i = 0; i < count; i++) {
@@ -3226,6 +3472,8 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     std::deque<std::vector<FieldTile>> fieldStore;            // and the fields' tiles
     gpu.viewCam = cam.position;                              // fields thin out by distance from it, in every pass
     gpu.fieldBlades = 0;
+    gpu.fieldShadowBlades = 0;
+    gpu.instanceBodies = gpu.instanceTriangles = 0;
     pruneFields();
     collect(s.objects, MatrixIdentity(), items, emitters, ft, cull, instanceStore, fieldStore);
     const Texture2D envTex = s.sky.enabled ? renderSky(s, ft, target.id, target.texture.width, target.texture.height)
@@ -3240,6 +3488,7 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     rlMatrixMode(RL_PROJECTION);
     rlPushMatrix();
     const Shadows shadows = renderShadows(s, items);
+    items.erase(std::remove_if(items.begin(), items.end(), [](const Item& it) { return it.obj->material.shadowOnly; }), items.end());
 
     // Main pass, into the target or (for depth of field) a target with a depth texture.
     const int fbW = target.texture.width, fbH = target.texture.height;
@@ -3949,11 +4198,16 @@ Vector2 Field::bladeRoot(int tx, int tz, uint32_t k) const {
     return { min.x + (tx + (float)(x >> 8) / 16777216.f) * ts, min.y + (tz + (float)(z >> 8) / 16777216.f) * ts };
 }
 long long fieldBladesSubmitted() { return gpu.fieldBlades; }
+long long fieldShadowBladesSubmitted() { return gpu.fieldShadowBlades; }
+long long instanceBodiesSubmitted() { return gpu.instanceBodies; }
+long long instanceTrianglesSubmitted() { return gpu.instanceTriangles; }
 
 const Camera& drawingCamera() {
     static const Camera none{};
     return viewing ? *viewing : none;
 }
+const Scene* drawingScene() { return viewingScene; }
+float drawingViewportHeight() { return viewingHeight; }
 
 Object3D* Scene::add(std::shared_ptr<Splats> s) {
     Object3D* o = add();
@@ -4151,7 +4405,10 @@ void render(Scene& s, int t, const Ctx& c, Rectangle viewport, Camera* camera) {
             if (!l.castShadow) continue;
             if (l.type != Light::Type::Directional) { cull.on = false; break; }
             const Vector3 d = Vector3Subtract(l.target, l.position);
-            if (Vector3Length(d) > 1e-6f) cull.shadowDirs.push_back(Vector3Normalize(d));
+            if (Vector3Length(d) > 1e-6f) {
+                cull.shadowDirs.push_back(Vector3Normalize(d));
+                cull.footprints.push_back({ l.target, Vector3Normalize(d), l.shadowExtent });
+            }
         }
     }
     {
@@ -4161,9 +4418,11 @@ void render(Scene& s, int t, const Ctx& c, Rectangle viewport, Camera* camera) {
     }
     struct Viewing {                                      // drawingCamera() while the scene's `up`s run
         const Camera* before;
-        explicit Viewing(const Camera* c) : before(viewing) { viewing = c; }
-        ~Viewing() { viewing = before; }
-    } viewingNow(&cam);
+        const Scene* sceneBefore;
+        float heightBefore;
+        Viewing(const Camera* c, const Scene* s, float h) : before(viewing), sceneBefore(viewingScene), heightBefore(viewingHeight) { viewing = c; viewingScene = s; viewingHeight = h; }
+        ~Viewing() { viewing = before; viewingScene = sceneBefore; viewingHeight = heightBefore; }
+    } viewingNow(&cam, &s, cull.compH);
     animate(s.objects, t, MatrixIdentity(), cull);
     if (canvasSize().x > 0) {
         sizeSurfaces(s.objects, MatrixIdentity(), cam, cull.screenH * cull.aspect, cull.screenH);
