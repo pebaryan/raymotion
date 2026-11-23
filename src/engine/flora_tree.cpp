@@ -522,7 +522,6 @@ struct Vert {
     float branch = 0, reach = 0;
     Vector3 anchor{ 0, 0, 0 }, flutterAxis{ 0, 0, 0 };
     float flutter = 0;      // > 0 for leaves: phase
-    float vis = 1;          // impostor bake: the share of direct light that reaches it through the crown
     // Growth: the node it rides on, the node whose size scales it, the point it scales about,
     // and (leaves) when it starts to unfold.
     int node = 0, sizer = 0;
@@ -996,64 +995,162 @@ float impostorElevation(int row, int rows) {
 
 
 // The light a picture of the crown would lack. A full tree is shadowed inside by the shadow
-// map; a picture of it is not, so the baked colours carry it. The leaf cards are binned into a
-// grid by area; from each vertex a fan of rays towards the viewer's side of the sky is marched
-// through it (a lit crown is seen on the side the light comes from more often than not), and
-// the colour is scaled by the fraction of light left. Only for impostors with several rows:
-// one row stays as it always was.
-struct CrownLight {
-    Vector3 lo{ 0, 0, 0 };
-    float cell = 1, span = 1, strength = 1;
-    int nx = 0, ny = 0, nz = 0;
-    std::vector<float> area;
+// map; a picture of it is not, so the bake carries it as visibility. It is what the shadow map
+// would say, not an estimate of it: the crown (cards cut out by their pictures, wood solid) is
+// drawn as seen from each of a fixed set of directions to the light, a depth map per direction.
+// A sample's visibility is the weighted share of those maps that see it lit, over the directions
+// within FAN of the sky the viewer looks from (the sun is on the viewer's side more often than
+// not); a texel averages its covered samples. It is sun-independent: a mean over suns.
+// A card's side in the world: the leaves are two triangles each, so the mean triangle is half a card.
+float cardSide(const Soup& leaves) {
+    double tri = 0;
+    for (size_t t = 0; t + 2 < leaves.idx.size(); t += 3)
+        tri += 0.5f * Vector3Length(Vector3CrossProduct(Vector3Subtract(leaves.v[leaves.idx[t + 1]].p, leaves.v[leaves.idx[t]].p), Vector3Subtract(leaves.v[leaves.idx[t + 2]].p, leaves.v[leaves.idx[t]].p)));
+    return (float)std::sqrt(2 * tri / std::max<size_t>(1, leaves.idx.size() / 3));
+}
 
-    float cover = 0.5f;                                          // the share of a card that is leaf
-    CrownLight(const Soup& leaves, float power, float leafCover) : strength(power), cover(leafCover) {
-        if (leaves.v.empty()) return;
-        Vector3 hi = lo = leaves.v[0].p;
-        for (const Vert& v : leaves.v) { lo = Vector3Min(lo, v.p); hi = Vector3Max(hi, v.p); }
-        const Vector3 size = Vector3Subtract(hi, lo);
-        span = std::max({ size.x, size.y, size.z });
-        cell = std::max(span / 32.f, 0.05f);
-        nx = (int)(size.x / cell) + 2; ny = (int)(size.y / cell) + 2; nz = (int)(size.z / cell) + 2;
-        area.assign((size_t)nx * ny * nz, 0.f);
-        for (size_t t = 0; t + 2 < leaves.idx.size(); t += 3) {
-            const Vector3 a = leaves.v[leaves.idx[t]].p, b = leaves.v[leaves.idx[t + 1]].p, c = leaves.v[leaves.idx[t + 2]].p;
-            int x, y, z;
-            if (at(Vector3Scale(Vector3Add(Vector3Add(a, b), c), 1.f / 3), x, y, z))
-                area[((size_t)z * ny + y) * nx + x] += 0.5f * Vector3Length(Vector3CrossProduct(Vector3Subtract(b, a), Vector3Subtract(c, a)));
+// The engine's cut-out test (CUTOUT_FS) at a distance. A texture seen from afar is read at a coarser
+// mip, and its alpha is grown by 1 + mip / 4 before it meets the cutoff, so far cards keep their cover:
+// the picture a far tree is baked from, and the shadows it is baked with, must be cut the same way or
+// they show deeper, darker leaves through gaps the engine fills.
+struct CutOut {
+    std::vector<Picture> mips;
+    float card = 1;
+    CutOut(const Picture& leaf, float cardWorld) : card(std::max(cardWorld, 1e-3f)) {
+        mips.push_back(leaf);
+        while (mips.back().w > 1 && mips.back().h > 1) {
+            const Picture& up = mips.back();
+            Picture dn(up.w / 2, up.h / 2);
+            for (int y = 0; y < dn.h; y++)
+                for (int x = 0; x < dn.w; x++)
+                    for (int ch = 0; ch < 4; ch++)
+                        dn.at(x, y)[ch] = (unsigned char)((up.at(2 * x, 2 * y)[ch] + up.at(2 * x + 1, 2 * y)[ch] + up.at(2 * x, 2 * y + 1)[ch] + up.at(2 * x + 1, 2 * y + 1)[ch] + 2) / 4);
+            mips.push_back(std::move(dn));
         }
     }
-    bool at(Vector3 p, int& x, int& y, int& z) const {
-        x = (int)std::floor((p.x - lo.x) / cell); y = (int)std::floor((p.y - lo.y) / cell); z = (int)std::floor((p.z - lo.z) / cell);
-        return x >= 0 && y >= 0 && z >= 0 && x < nx && y < ny && z < nz;
+    // The mip level for samples `footprint` apart in the world.
+    float mipFor(float footprint) const { return std::max(0.f, std::log2(std::max(1e-3f, footprint * (float)mips[0].w / card))); }
+    bool away(float u, float v, float mip) const {
+        return mips[(size_t)std::min<int>((int)std::lround(mip), (int)mips.size() - 1)].sample(u, v).w * (1 + 0.25f * mip) < 0.5f;
     }
-    // Scales the colours of `soup` for a viewer in direction `to` (unit, from the tree).
-    void apply(Soup& soup, Vector3 to) const {
-        if (area.empty()) return;
-        const float volume = cell * cell * cell;
-        const float lean = 0.7f;                                // the sky seen over the shoulder, towards the viewer
-        const Vector3 axis = Vector3Normalize(Vector3Add(Vector3Scale({ to.x, 0, to.z }, lean), { 0, 1, 0 }));
-        const Vector3 side = Vector3Normalize(Vector3CrossProduct(axis, { 0.31f, 0.9f, 0.3f })), other = Vector3CrossProduct(axis, side);
-        std::vector<Vector3> rays{ axis };
-        for (int k = 0; k < 6; k++) {
-            const float a = TAU * k / 6;
-            rays.push_back(Vector3Add(Vector3Scale(axis, 0.77f), Vector3Add(Vector3Scale(side, 0.64f * std::cos(a)), Vector3Scale(other, 0.64f * std::sin(a)))));
-        }
-        for (Vert& v : soup.v) {
-            float sum = 0;
-            for (const Vector3& r : rays) {
-                float depth = 0;
-                for (float s = cell * 0.75f; s < span * 2; s += cell * 0.5f) {
-                    int x, y, z;
-                    if (!at(Vector3Add(v.p, Vector3Scale(r, s)), x, y, z)) break;
-                    depth += area[((size_t)z * ny + y) * nx + x] / volume * cell * 0.5f;
-                }
-                sum += std::exp(-cover * depth);
+};
+constexpr float VIS_ONE = 127.f;   // the normal picture's alpha holds the light a texel gets, 127 for 1 and up to 255 for twice that
+constexpr float kPictureSpread = 0.8f;
+
+struct SunMaps {
+    static constexpr float FAN = 50.f;                           // degrees: how far from the axis a direction still counts
+    static constexpr float LEAN = 0.3f;                          // the axis tips this much (of the horizontal view direction, against 1 up) towards the viewer
+    Vector3 centre{ 0, 0, 0 };
+    float radius = 1, texel = 1, depthTol = 0, cutMip = 0;
+    const CutOut* cutOut = nullptr;
+    int N = 0;
+    struct Map { Vector3 to, right, up; std::vector<float> depth; };
+    std::vector<Map> maps;
+
+    SunMaps(const Soup& wood, const Soup& leaves, const CutOut& cuts, int pixels) : N(pixels), cutOut(&cuts) {
+        if (leaves.v.empty() || pixels <= 0) { N = 0; return; }
+        Vector3 lo = leaves.v[0].p, hi = lo;
+        for (const Soup* s : { &wood, &leaves }) for (const Vert& v : s->v) { lo = Vector3Min(lo, v.p); hi = Vector3Max(hi, v.p); }
+        centre = Vector3Scale(Vector3Add(lo, hi), 0.5f);
+        radius = 0.5f * Vector3Length(Vector3Subtract(hi, lo)) * 1.01f + 1e-3f;
+        texel = 2 * radius / N;
+        depthTol = 2 * texel;                                    // as the engine's shadows' bias is a texel or two
+        cutMip = cuts.mipFor(texel);                    // the shadow pass reads the picture at the mip a shadow-map texel spans
+        // The directions: rings of elevation, evenly spaced round, and straight up.
+        const float ring[4] = { 15.f, 35.f, 55.f, 75.f };
+        const int count[4] = { 12, 10, 7, 4 };
+        auto add = [&](Vector3 to) {
+            Map m;
+            m.to = to;
+            m.right = Vector3Normalize(Vector3CrossProduct({ 0.31f, 0.9f, 0.3f }, to));
+            m.up = Vector3CrossProduct(to, m.right);
+            m.depth.assign((size_t)N * N, -1e30f);
+            for (const Soup* s : { &wood, &leaves }) draw(m, *s, s == &leaves);
+            maps.push_back(std::move(m));
+        };
+        for (int r = 0; r < 4; r++)
+            for (int k = 0; k < count[r]; k++) {
+                const float e = ring[r] * DEG2RAD, a = TAU * (k + 0.5f * (r & 1)) / count[r];
+                add({ std::cos(e) * std::sin(a), std::sin(e), std::cos(e) * std::cos(a) });
             }
-            const float f = std::pow(std::clamp(sum / (float)rays.size(), 0.02f, 1.f), strength);
-            v.vis = f;
+        add({ 0, 1, 0 });
+    }
+    // Nearest to the light, per pixel.
+    void draw(Map& m, const Soup& soup, bool cut) const {
+        auto toMap = [&](Vector3 p) {
+            const Vector3 d = Vector3Subtract(p, centre);
+            return Vector3{ (Vector3DotProduct(d, m.right) / radius * 0.5f + 0.5f) * N, (Vector3DotProduct(d, m.up) / radius * 0.5f + 0.5f) * N, Vector3DotProduct(d, m.to) };
+        };
+        for (size_t t = 0; t + 2 < soup.idx.size(); t += 3) {
+            const Vert &A = soup.v[soup.idx[t]], &B = soup.v[soup.idx[t + 1]], &C = soup.v[soup.idx[t + 2]];
+            const Vector3 a = toMap(A.p), b = toMap(B.p), c = toMap(C.p);
+            const float area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+            if (std::fabs(area) < 1e-9f) continue;
+            const int x0 = std::max(0, (int)std::floor(std::min({ a.x, b.x, c.x }))), x1 = std::min(N - 1, (int)std::ceil(std::max({ a.x, b.x, c.x })));
+            const int y0 = std::max(0, (int)std::floor(std::min({ a.y, b.y, c.y }))), y1 = std::min(N - 1, (int)std::ceil(std::max({ a.y, b.y, c.y })));
+            for (int y = y0; y <= y1; y++)
+                for (int x = x0; x <= x1; x++) {
+                    const float px = x + 0.5f, py = y + 0.5f;
+                    const float w0 = ((b.x - px) * (c.y - py) - (b.y - py) * (c.x - px)) / area;
+                    const float w1 = ((c.x - px) * (a.y - py) - (c.y - py) * (a.x - px)) / area;
+                    const float w2 = 1 - w0 - w1;
+                    if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+                    const float z = w0 * a.z + w1 * b.z + w2 * c.z;
+                    float& at = m.depth[(size_t)y * N + x];
+                    if (z <= at) continue;
+                    if (cut && cutOut->away(w0 * A.uv.x + w1 * B.uv.x + w2 * C.uv.x, w0 * A.uv.y + w1 * B.uv.y + w2 * C.uv.y, cutMip)) continue;
+                    at = z;
+                }
         }
+    }
+    bool lit(const Map& m, Vector3 p) const {
+        const Vector3 d = Vector3Subtract(p, centre);
+        const int x = (int)std::floor((Vector3DotProduct(d, m.right) / radius * 0.5f + 0.5f) * N), y = (int)std::floor((Vector3DotProduct(d, m.up) / radius * 0.5f + 0.5f) * N);
+        if (x < 0 || y < 0 || x >= N || y >= N) return true;
+        return Vector3DotProduct(d, m.to) >= m.depth[(size_t)y * N + x] - depthTol;
+    }
+    // The directions that count for a viewer looking from `to` (unit, from the tree), with their weights.
+    std::vector<std::pair<int, float>> fan(Vector3 to) const {
+        const Vector3 axis = Vector3Normalize(Vector3Add(Vector3Scale({ to.x, 0, to.z }, LEAN), { 0, 1, 0 }));
+        std::vector<std::pair<int, float>> out;
+        const float cosFan = std::cos(FAN * DEG2RAD);
+        for (size_t i = 0; i < maps.size(); i++) {
+            const float c = Vector3DotProduct(axis, maps[i].to);
+            if (c > cosFan) out.push_back({ (int)i, (c - cosFan) / (1 - cosFan) });
+        }
+        return out;
+    }
+    // The mean of max(n.l, 0) over a cone of normals about a mean normal whose cosine with l is c, the
+    // cone's half-angle acos(cosPsi): n.l = A + B cos(phi), A = cosPsi c, B = sinPsi sin(c). The same as
+    // the lit shader's coneNdl, which is how an impostor texel is lit.
+    static float cone(float c, float cosPsi) {
+        const float sinPsi = std::sqrt(std::max(1 - cosPsi * cosPsi, 0.f));
+        const float A = cosPsi * c, B = sinPsi * std::sqrt(std::max(1 - c * c, 0.f));
+        if (B < 1e-4f) return std::max(A, 0.f);
+        if (A >= B) return A;
+        if (A <= -B) return 0.f;
+        return (A * std::acos(-A / B) + std::sqrt(B * B - A * A)) / 3.14159265f;
+    }
+    // What a texel's baked visibility is: the factor that makes the lit shader's light on the texel (the
+    // cone of normals about its mean `mean`, `covered` samples of it, each weighted by its colour's
+    // luminance since the picture holds the mean colour) the light its samples would get here (each
+    // sample's own cosine, if the shadow maps see it lit). Over the fan of directions, so what it
+    // folds in is shadowing and the cone's error alike; it can exceed 1 where the cone underlights.
+    template <class S> float visibility(const std::vector<std::pair<int, float>>& f, const S* subs, int covered, Vector3 mean) const {
+        const float len = std::min(Vector3Length(mean), 1.f);
+        const Vector3 m = len > 1e-4f ? Vector3Scale(mean, 1 / Vector3Length(mean)) : Vector3{ 0, 1, 0 };
+        float lums = 0;
+        for (int k = 0; k < covered; k++) lums += subs[k].lum;
+        float num = 0, den = 0, wsum = 0;
+        for (const auto& [i, w] : f) {
+            const Map& map = maps[(size_t)i];
+            for (int k = 0; k < covered; k++)
+                num += w * subs[k].lum * std::max(Vector3DotProduct(subs[k].n, map.to), 0.f) * (lit(map, subs[k].p) ? 1.f : 0.f);
+            den += w * lums * cone(Vector3DotProduct(m, map.to), len);
+            wsum += w;
+        }
+        const float floor = 0.02f * wsum * lums;                  // facing away from every light: neither is worth much
+        return wsum > 0 ? (num + floor) / (den + floor) : 1.f;
     }
 };
 
@@ -1079,13 +1176,15 @@ Baked impostorLayout(float top, float reach, int elevations, float crownMiddle) 
 }
 
 Baked bakeViews(const Soup& wood, const Soup& leaves, const Picture& bark, const Picture& leaf, int views, int size, float top, float reach,
-                bool cutLeaves = true, int elevations = 1, float crownMiddle = 0, const CrownLight* shade = nullptr, float trunkBelow = 1e9f) {
+                bool cutLeaves = true, int elevations = 1, float crownMiddle = 0, bool shade = false, float trunkBelow = 1e9f) {
     const int S = size, SS = size * 2;
     Baked b = impostorLayout(top, reach, elevations, crownMiddle);
     const bool one = elevations == 1;
     b.colour = std::make_shared<Picture>(S * views, S * elevations);
     b.normal = std::make_shared<Picture>(S * views, S * elevations);
     const Vector3 pivot{ 0, b.pivot, 0 };
+    const CutOut cutOut(leaf, cardSide(leaves));
+    const std::unique_ptr<SunMaps> sun = shade ? std::make_unique<SunMaps>(wood, leaves, cutOut, std::clamp(S * 3, 192, 512)) : nullptr;
     for (int row = 0; row < elevations; row++) {
     const float elev = std::min(impostorElevation(row, elevations), 89.5f) * DEG2RAD;   // 90 is taken from 89.5: image up stays defined
     const float side = b.rowSide[(size_t)row];
@@ -1099,11 +1198,12 @@ Baked bakeViews(const Soup& wood, const Soup& leaves, const Picture& bark, const
         std::vector<float> depth((size_t)SS * SS, -1e30f);
         std::vector<Vector4> col((size_t)SS * SS, { 0, 0, 0, 0 });
         std::vector<Vector3> nor((size_t)SS * SS, { 0, 0, 0 });
-        std::vector<float> visPx((size_t)SS * SS, 1.f);
+        std::vector<Vector3> world3((size_t)SS * SS, { 0, 0, 0 });   // where each sample is, for its visibility
         auto toScreen = [&](Vector3 p) {
             const float v = one ? p.y / side : Vector3DotProduct(Vector3Subtract(p, pivot), up) / side + 0.5f;   // the horizon row as it always was
             return Vector3{ (Vector3DotProduct(p, right) / side + 0.5f) * SS, (1 - v) * SS, Vector3DotProduct(p, dir) };
         };
+        const float bakeMip = cutOut.mipFor(side / (float)SS);   // the engine's cut at this picture's scale
         auto raster = [&](const Soup& soup, const Picture& pic, bool cut) {
             for (size_t t = 0; t + 2 < soup.idx.size(); t += 3) {
                 const Vert& A = soup.v[soup.idx[t]]; const Vert& B = soup.v[soup.idx[t + 1]]; const Vert& C = soup.v[soup.idx[t + 2]];
@@ -1127,45 +1227,50 @@ Baked bakeViews(const Soup& wood, const Soup& leaves, const Picture& bark, const
                         if (z <= depth[at]) continue;
                         const float u = w0 * A.uv.x + w1 * B.uv.x + w2 * C.uv.x, v = w0 * A.uv.y + w1 * B.uv.y + w2 * C.uv.y;
                         const Vector4 tex = pic.sample(u, v);
-                        if (cut && tex.w < 0.5f) continue;
+                        if (cut && cutOut.away(u, v, bakeMip)) continue;
                         depth[at] = z;
                         col[at] = { tex.x * (w0 * A.c.r + w1 * B.c.r + w2 * C.c.r) / 255, tex.y * (w0 * A.c.g + w1 * B.c.g + w2 * C.c.g) / 255,
                                     tex.z * (w0 * A.c.b + w1 * B.c.b + w2 * C.c.b) / 255, 1 };
                         Vector3 n = Vector3Normalize(Vector3Add(Vector3Add(Vector3Scale(A.n, w0), Vector3Scale(B.n, w1)), Vector3Scale(C.n, w2)));
                         if (cut && facing < 0) n = Vector3Negate(n);
                         nor[at] = n;
-                        visPx[at] = w0 * A.vis + w1 * B.vis + w2 * C.vis;
+                        world3[at] = Vector3Add(Vector3Add(Vector3Scale(A.p, w0), Vector3Scale(B.p, w1)), Vector3Scale(C.p, w2));
                     }
             }
         };
-        Soup shadedWood, shadedLeaves;                           // the share of light each vertex gets, for this view
-        if (shade) { shadedWood = wood; shadedLeaves = leaves; shade->apply(shadedWood, dir); shade->apply(shadedLeaves, dir); }
-        if (elev * RAD2DEG < trunkBelow) raster(shade ? shadedWood : wood, bark, false);   // low-poly trees seen from above: crown only
-        raster(shade ? shadedLeaves : leaves, leaf, cutLeaves);
+        if (elev * RAD2DEG < trunkBelow) raster(wood, bark, false);   // low-poly trees seen from above: crown only
+        raster(leaves, leaf, cutLeaves);
+        const std::vector<std::pair<int, float>> fan = sun ? sun->fan(dir) : std::vector<std::pair<int, float>>{};
         // 2x2 down to the cell; colour averaged over what is covered, coverage as alpha.
         for (int y = 0; y < S; y++)
             for (int x = 0; x < S; x++) {
                 Vector4 sum{ 0, 0, 0, 0 };
                 Vector3 ns{ 0, 0, 0 };
-                float visSum = 0;
+                struct Sub { Vector3 n, p; float lum; } subs[4];
+                int covered = 0;
                 for (int j = 0; j < 2; j++)
                     for (int i = 0; i < 2; i++) {
                         const size_t at = (size_t)(y * 2 + j) * SS + (x * 2 + i);
                         if (col[at].w <= 0) continue;
                         sum = { sum.x + col[at].x, sum.y + col[at].y, sum.z + col[at].z, sum.w + 1 };
                         ns = Vector3Add(ns, nor[at]);
-                        visSum += visPx[at];
+                        subs[covered++] = { nor[at], world3[at], 0.2126f * col[at].x + 0.7152f * col[at].y + 0.0722f * col[at].z + 1e-4f };
                     }
                 unsigned char* c = b.colour->at(k * S + x, row * S + y);
                 unsigned char* nn = b.normal->at(k * S + x, row * S + y);
                 // Tangent space of the quad: u along `right`, v down, out towards the viewer.
                 // Many to a texel: more than one way the surface faces. The mean keeps its length (the spread) when there are rows.
                 const Vector3 n = sum.w <= 0 ? dir : one ? Vector3Normalize(ns) : Vector3Scale(ns, 1.f / sum.w);
-                const Vector3 tsn{ Vector3DotProduct(n, right), -(one ? n.y : Vector3DotProduct(n, up)), Vector3DotProduct(n, dir) };
+                // A low-poly picture's spread is kept at kPictureSpread of what the facets say: the picture
+                // is lit as a spread, and fully so it would be more sensitive to the sun than the crown is.
+                const float spreadK = cutLeaves ? 1.f : kPictureSpread;
+                const Vector3 tsn{ spreadK * Vector3DotProduct(n, right), -spreadK * (one ? n.y : Vector3DotProduct(n, up)), spreadK * Vector3DotProduct(n, dir) };
                 nn[0] = (unsigned char)std::lround((tsn.x * 0.5f + 0.5f) * 255);
                 nn[1] = (unsigned char)std::lround((tsn.y * 0.5f + 0.5f) * 255);
                 nn[2] = (unsigned char)std::lround((tsn.z * 0.5f + 0.5f) * 255);
-                nn[3] = sum.w > 0 ? (unsigned char)std::lround(std::clamp(visSum / sum.w, 0.f, 1.f) * 255) : 255;
+                float vis = 1;
+                if (sun && covered > 0) vis = sun->visibility(fan, subs, covered, n);
+                nn[3] = sum.w > 0 ? (unsigned char)std::lround(std::clamp(vis, 0.f, 2.f) * VIS_ONE) : (unsigned char)VIS_ONE;
                 if (sum.w > 0) {
                     c[0] = (unsigned char)std::lround(sum.x / sum.w * 255);
                     c[1] = (unsigned char)std::lround(sum.y / sum.w * 255);
@@ -1181,7 +1286,7 @@ Baked bakeViews(const Soup& wood, const Soup& leaves, const Picture& bark, const
         for (int y = 0; y < S * elevations; y++)
             for (int x = 0; x < S * views; x++) {
                 if (b.colour->at(x, y)[3] > 0 || cn.at(x, y)[0] + cn.at(x, y)[1] + cn.at(x, y)[2] > 0) continue;
-                int sc[3] = { 0, 0, 0 }, sn[3] = { 0, 0, 0 }, n = 0;
+                int sc[3] = { 0, 0, 0 }, sn[4] = { 0, 0, 0, 0 }, n = 0;
                 for (int dy = -1; dy <= 1; dy++)
                     for (int dx = -1; dx <= 1; dx++) {
                         const int xx = x + dx, yy = y + dy;
@@ -1189,14 +1294,42 @@ Baked bakeViews(const Soup& wood, const Soup& leaves, const Picture& bark, const
                         const unsigned char* q = b.colour->at(xx, yy);
                         if (q[0] + q[1] + q[2] == 0) continue;
                         for (int ch = 0; ch < 3; ch++) { sc[ch] += q[ch]; sn[ch] += b.normal->at(xx, yy)[ch]; }
+                        sn[3] += b.normal->at(xx, yy)[3];
                         n++;
                     }
                 if (!n) continue;
                 for (int ch = 0; ch < 3; ch++) { cn.at(x, y)[ch] = (unsigned char)(sc[ch] / n); nn.at(x, y)[ch] = (unsigned char)(sn[ch] / n); }
+                nn.at(x, y)[3] = (unsigned char)(sn[3] / n);          // and the light they get: a clear texel is not fully lit
             }
         *b.colour = std::move(cn);
         *b.normal = std::move(nn);
     }
+    // What the passes did not reach takes its cell's mean (of the texels the trees covers): a far tree's
+    // mips average a whole cell, and a clear texel left black, or facing the viewer with all the light,
+    // drags the average down (or away) by the share of the cell the tree does not fill.
+    for (int row = 0; row < elevations; row++)
+        for (int k = 0; k < views; k++) {
+            double c[3] = { 0, 0, 0 }, n[4] = { 0, 0, 0, 0 };
+            int covered = 0;
+            for (int y = 0; y < S; y++)
+                for (int x = 0; x < S; x++) {
+                    const unsigned char* q = b.colour->at(k * S + x, row * S + y);
+                    if (q[3] == 0) continue;
+                    const unsigned char* m = b.normal->at(k * S + x, row * S + y);
+                    for (int ch = 0; ch < 3; ch++) c[ch] += q[ch];
+                    for (int ch = 0; ch < 4; ch++) n[ch] += m[ch];
+                    covered++;
+                }
+            if (!covered) continue;
+            for (int y = 0; y < S; y++)
+                for (int x = 0; x < S; x++) {
+                    unsigned char* q = b.colour->at(k * S + x, row * S + y);
+                    unsigned char* m = b.normal->at(k * S + x, row * S + y);
+                    if (q[3] > 0 || q[0] + q[1] + q[2] > 0) continue;
+                    for (int ch = 0; ch < 3; ch++) q[ch] = (unsigned char)std::lround(c[ch] / covered);
+                    for (int ch = 0; ch < 4; ch++) m[ch] = (unsigned char)std::lround(n[ch] / covered);
+                }
+        }
     return b;
 }
 
@@ -1601,9 +1734,6 @@ TreePtr makeTree(const TreeSpec& specIn, const TreeBuild& buildIn) {
         float crown = 0;
         for (const Vert& v : heroLeaves.v) crown += v.p.y;
         crown = heroLeaves.v.empty() ? t->top * 0.5f : crown / (float)heroLeaves.v.size();
-        float leafShare = 0;
-        for (size_t px = 3; px < leafPic->px.size(); px += 4) leafShare += leafPic->px[px] / 255.f;
-        leafShare = std::clamp(leafShare / std::max<float>(1, (float)(leafPic->px.size() / 4)), 0.05f, 1.f);
         // The pictures are made when a texture first needs them (a draw), not here: building a tree
         // for a list or a prepare costs nothing for them. They depend only on what is captured.
         baked = impostorLayout(t->top, t->radius, b.elevations, crown);
@@ -1613,9 +1743,8 @@ TreePtr makeTree(const TreeSpec& specIn, const TreeBuild& buildIn) {
         lazy->run = [=] {
             Picture one(1, 1);
             one.px = { 255, 255, 255, 255 };
-            const CrownLight inside(*hl, 0.7f, leafShare);
             return bakeViews(*hw, *hl, solid ? one : *barkPic, solid ? one : *leafPic, b.views, b.viewSize, top, reach, !solid,
-                             b.elevations, crown, b.elevations > 1 ? &inside : nullptr,
+                             b.elevations, crown, b.elevations > 1,
                              b.style == TreeStyle::LowPoly ? 45.f : 1e9f);
         };
         baked.lazy = lazy;
@@ -1757,39 +1886,39 @@ constexpr float CANOPY_GAIN = 1.8f;        // the patch's colour against the cro
 // Axes: view elevation (7 20 35 50 70), sun elevation (15 25 40 55 70), angle between sun and camera seen from above (0 45 90 135 180).
 constexpr float CANOPY_SHADE[5][5][5] = {
     {
-        { 1.08f, 1.05f, 1.09f, 1.03f, 0.87f },
-        { 1.09f, 1.09f, 0.93f, 0.77f, 0.56f },
-        { 1.05f, 0.93f, 0.72f, 0.53f, 0.37f },
-        { 0.86f, 0.77f, 0.58f, 0.41f, 0.33f },
-        { 0.67f, 0.62f, 0.50f, 0.39f, 0.35f },
+        { 1.06f, 1.05f, 1.02f, 1.05f, 1.05f },
+        { 1.08f, 1.09f, 1.07f, 1.00f, 0.94f },
+        { 0.94f, 0.94f, 0.89f, 0.74f, 0.62f },
+        { 0.81f, 0.78f, 0.72f, 0.60f, 0.52f },
+        { 0.69f, 0.67f, 0.61f, 0.55f, 0.51f },
     },
     {
-        { 1.04f, 1.12f, 1.09f, 1.02f, 0.93f },
-        { 1.14f, 1.12f, 0.94f, 0.75f, 0.62f },
-        { 1.08f, 0.99f, 0.76f, 0.55f, 0.45f },
-        { 0.94f, 0.85f, 0.66f, 0.49f, 0.42f },
-        { 0.79f, 0.73f, 0.62f, 0.51f, 0.47f },
+        { 1.02f, 1.06f, 1.10f, 1.10f, 1.01f },
+        { 1.15f, 1.14f, 1.10f, 1.01f, 0.99f },
+        { 1.08f, 1.05f, 0.95f, 0.82f, 0.76f },
+        { 0.98f, 0.94f, 0.86f, 0.74f, 0.69f },
+        { 0.88f, 0.86f, 0.79f, 0.73f, 0.70f },
     },
     {
-        { 1.12f, 1.15f, 1.07f, 1.00f, 1.00f },
-        { 1.15f, 1.10f, 0.93f, 0.75f, 0.71f },
-        { 1.07f, 0.97f, 0.77f, 0.58f, 0.53f },
-        { 0.94f, 0.85f, 0.68f, 0.54f, 0.49f },
-        { 0.80f, 0.75f, 0.64f, 0.56f, 0.53f },
+        { 1.09f, 1.11f, 1.12f, 1.08f, 0.98f },
+        { 1.15f, 1.13f, 1.10f, 1.05f, 1.06f },
+        { 1.08f, 1.04f, 0.96f, 0.89f, 0.87f },
+        { 0.97f, 0.94f, 0.87f, 0.80f, 0.78f },
+        { 0.89f, 0.87f, 0.82f, 0.77f, 0.75f },
     },
     {
-        { 1.16f, 1.13f, 1.02f, 0.96f, 0.98f },
-        { 1.11f, 1.04f, 0.87f, 0.73f, 0.71f },
-        { 1.01f, 0.92f, 0.73f, 0.58f, 0.55f },
-        { 0.91f, 0.83f, 0.67f, 0.55f, 0.52f },
-        { 0.80f, 0.75f, 0.65f, 0.58f, 0.55f },
+        { 1.11f, 1.12f, 1.12f, 1.09f, 1.01f },
+        { 1.15f, 1.12f, 1.09f, 1.07f, 1.08f },
+        { 1.05f, 1.01f, 0.95f, 0.90f, 0.90f },
+        { 0.95f, 0.92f, 0.86f, 0.81f, 0.80f },
+        { 0.87f, 0.85f, 0.81f, 0.78f, 0.77f },
     },
     {
-        { 1.06f, 1.00f, 0.89f, 0.85f, 0.87f },
-        { 0.96f, 0.88f, 0.76f, 0.69f, 0.68f },
-        { 0.86f, 0.79f, 0.67f, 0.60f, 0.59f },
-        { 0.81f, 0.75f, 0.65f, 0.60f, 0.59f },
-        { 0.76f, 0.73f, 0.68f, 0.63f, 0.62f },
+        { 1.13f, 1.14f, 1.12f, 1.09f, 1.04f },
+        { 1.11f, 1.10f, 1.07f, 1.08f, 1.10f },
+        { 1.00f, 0.98f, 0.94f, 0.95f, 0.96f },
+        { 0.91f, 0.90f, 0.86f, 0.86f, 0.86f },
+        { 0.85f, 0.84f, 0.83f, 0.82f, 0.82f },
     },
 };
 // `toSun` and `toEye` are unit vectors from the patch.
@@ -2765,8 +2894,19 @@ g3d::Object3D* forest(g3d::Object3D& parent, SurfacePtr s, const std::vector<geo
             float pictureShade = 1;
             Color pictureTint = WHITE;
             if (tree.build.style == flora::TreeStyle::LowPoly) {
-                const float x = std::clamp((pick.elevation - 25.f) / 60.f, 0.f, 1.f);
-                pictureShade = 1.0f - 0.10f * x * x * (3 - 2 * x);
+                // Fitted, not derived: a picture's brightness against the crown's, as seen over a map forest
+                // (ring means of the map-forest test: RMTN_MAPFOREST_ONLY=1 RMTN_TOPDOWN_ONLY=1
+                // ./raymotion_scene3d_tests, straight down and 60 degrees, 1.5 to 3.5 radii, default light) and
+                // for one tree (the same test's "vs its picture" lines: 0, 30, 60, 85, 90 degrees). Shade by
+                // camera elevation, 0 / 30 / 60 / 90 degrees; re-measure after any change to the bake's shading.
+                // Where the two disagree the forest wins: at 60 degrees a forest of pictures is 5% over its
+                // meshes while one tree's picture is 0.71-0.81 of its crown (a known limit, noted in the tests).
+                constexpr float kShade[4] = { 0.85f, 1.0f, 0.82f, 0.96f };
+                const float el = pick.elevation;
+                auto smooth = [](float u) { u = std::clamp(u, 0.f, 1.f); return u * u * (3 - 2 * u); };
+                const int k = el < 30.f ? 0 : el < 60.f ? 1 : 2;
+                const float u = smooth((el - 30.f * k) / 30.f);
+                pictureShade = kShade[k] + (kShade[k + 1] - kShade[k]) * u;
                 // A picture is smoother and less yellow than the crown's lit facets; a per-tree spread of
                 // brightness gives the forest back its speckle, and the tint its yellow-green.
                 const float tone = flora::hashUnit((uint32_t)index, 97u);

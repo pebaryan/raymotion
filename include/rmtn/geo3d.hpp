@@ -121,7 +121,7 @@ struct ForestCover {
     // A picture is smoother than the mesh it stands for, so each picture's brightness is spread
     // by a stable per-tree factor of 1 +- pictureSpeckle (and its colour made a little yellower),
     // which gives a far forest back the speckle of the mesh forest. 0: none.
-    float pictureSpeckle = 0.35f;
+    float pictureSpeckle = 0.30f;
     // Trees shorter than this many px are not drawn at all (0: all are). Off by default: dropping
     // them lightens the forest's colour, merging does not.
     float dropBelow = 0;

@@ -566,6 +566,8 @@ out vec4 finalColor;
 
 // A tangent-space normal map without stored tangents: the frame is rebuilt from the screen
 // derivatives of position and uv (Schüler, "Normal Mapping Without Precomputed Tangents", 2013).
+vec2 texDx, texDy;                                                 // uvDx, uvDy for material reads (impostors: finer)
+const float PICTURE_SHARPEN = 0.35;                                  // 2^-mips
 vec3 posDx, posDy;                                                 // fragPos's, taken with uvDx and uvDy
 vec3 mapNormal(vec3 n, vec3 p, vec2 uv) {                          // p, uv: fragPos, fragTexCoord
     vec3 dp1 = posDx, dp2 = posDy;
@@ -576,18 +578,26 @@ vec3 mapNormal(vec3 n, vec3 p, vec2 uv) {                          // p, uv: fra
     float m = max(dot(t, t), dot(b, b));
     if (m < 1e-20) return n;                                       // no uv change: nothing to map
     float inv = inversesqrt(m);
-    vec3 s = textureGrad(texture2, uv, uvDx, uvDy).xyz * 2.0 - 1.0;
+    vec3 s = textureGrad(texture2, uv, texDx, texDy).xyz * 2.0 - 1.0;
     s.xy *= normalScale;
     return normalize(mat3(t * inv, b * inv, n) * s);
 }
 
+)" R"(
 const float PI = 3.14159265;
-// An impostor texel stands for many leaves: its normal map holds their mean normal, whose
-// length is how alike they face (1: one way; 0.5: spread evenly over the half facing the
-// viewer). Lit, such a spread averages its clamped cosines: for the even half-sphere about
-// the mean that is (1 + cos) / 4, never the mean's own cosine, so it does not go dark
-// where the mean turns from the light. spreadW blends towards it (0 off).
-float spreadW = 0.0;
+// An impostor texel's normal is the mean of the leaves it stands for, its length how alike they face.
+// Lit, they are a cone about the mean (half-angle acos of the length), not one normal.
+float spreadCos = 1.0;
+// The cone's mean of max(n.l, 0), c = cos of the mean with l: n.l = A + B cos(phi).
+float coneNdl(float c, float cosPsi) {
+    float sinPsi = sqrt(max(1.0 - cosPsi * cosPsi, 0.0));
+    float A = cosPsi * c, B = sinPsi * sqrt(max(1.0 - c * c, 0.0));
+    if (B < 1e-4) return max(A, 0.0);
+    if (A >= B) return A;
+    if (A <= -B) return 0.0;
+    float phi0 = acos(-A / B);
+    return (A * phi0 + sqrt(B * B - A * A)) / 3.14159265;
+}
 
 // ---- shadows: atlas tiles; params = (near, far, perspective, texel size per unit depth)
 float linearDepth(float d, vec4 prm) {
@@ -678,7 +688,7 @@ float lightAt(int i, vec3 n, out vec3 l, out float ndl) {
         if (lightType[i] == 2) atten *= smoothstep(lightCosOuter[i], lightCosInner[i], dot(-l, lightDir[i]));
     }
     ndl = dot(n, l);
-    if (spreadW > 0.0) ndl = mix(max(ndl, 0.0), 0.25 + 0.25 * ndl, spreadW);
+    if (spreadCos < 0.999) ndl = coneNdl(clamp(ndl, -1.0, 1.0), spreadCos);
     if (ndl <= 0.0 || atten <= 0.0) return 0.0;
     if (lightShadow[i] >= 0 && receiveShadow == 1) {
         int tile = lightShadow[i] + (lightType[i] == 1 ? cubeFace(fragPos - lightPos[i]) : 0);
@@ -759,6 +769,8 @@ vec3 hatch(vec3 albedo, vec3 n) {
 void main() {
     uvDx = dFdx(fragTexCoord); uvDy = dFdy(fragTexCoord);           // before any discard (see uvDx)
     posDx = dFdx(fragPos); posDy = dFdy(fragPos);
+    texDx = uvDx; texDy = uvDy;
+    if (hasNormalMap == 2) { texDx *= PICTURE_SHARPEN; texDy *= PICTURE_SHARPEN; }
     if (skybox == 1) {
         if (waterOn == 1 && viewPos.y < waterEye) { finalColor = encode(waterScatter, 1.0); return; }
         finalColor = encode(env(normalize(fragPos - viewPos), 0.0) * backdropScale, 1.0);
@@ -768,9 +780,10 @@ void main() {
     float cutDist = clipPlane.w - dot(fragPos, clipPlane.xyz);     // < 0: beyond the cut
     if (cutDist < 0.0) discard;
     if (fadedAway(fragFade)) discard;
-    vec4 base = textureGrad(texture0, fragTexCoord, uvDx, uvDy) * colDiffuse * fragColor;
+    vec4 base = textureGrad(texture0, fragTexCoord, texDx, texDy) * colDiffuse * fragColor;
     if (alphaCutoff > 0.0) {
-        if (cutAway(base.a, fragTexCoord)) discard;
+        float cutA = hasNormalMap == 2 ? textureGrad(texture0, fragTexCoord, uvDx, uvDy).a * colDiffuse.a * fragColor.a : base.a;
+        if (cutAway(cutA, fragTexCoord)) discard;
         base.a = 1.0;                                              // what a cut-out keeps is solid
     }
     if (unlit == 1) { finalColor = vec4(base.rgb, base.a * opacity); return; }
@@ -793,6 +806,8 @@ void main() {
         rough = clamp(rough, 0.0, 1.0);
         vec3 specColor = mix(vec3(0.04), albedo, metal);
         vec3 diffColor = albedo * (1.0 - metal);
+        float sunVis = 1.0;                                         // baked self-shadow, and the spread of the normals a texel stands for
+        if (hasNormalMap == 2) { vec4 bk = textureGrad(texture2, fragTexCoord, texDx, texDy); sunVis = bk.a * (255.0 / 127.0); spreadCos = clamp(length(bk.xyz * 2.0 - 1.0), 0.0, 1.0); }
         if (hasEnv == 1) {
             float ndv = max(dot(n, v), 1e-4);
             vec3 r = reflect(-v, n);
@@ -800,15 +815,14 @@ void main() {
             // average the whole sky and ground together.
             float blurLod = max(envMaxLod - 4.0, 0.0);
             color = diffColor * env(n, blurLod) + env(r, rough * blurLod) * envBRDF(specColor, rough, ndv) * reflection;
-        } else color = mix(groundColor, skyColor, n.y * 0.5 + 0.5) * albedo;
+        } else color = mix(groundColor, skyColor, n.y * spreadCos * 0.5 + 0.5) * albedo;
 
-        float sunVis = 1.0;                                         // baked self-shadow, and the spread of the normals a texel stands for
-        if (hasNormalMap == 2) { vec4 bk = textureGrad(texture2, fragTexCoord, uvDx, uvDy); sunVis = bk.a; spreadW = clamp(2.0 * (1.0 - length(bk.xyz * 2.0 - 1.0)), 0.0, 1.0); }
         float shininess = exp2(10.0 * (1.0 - rough) + 1.0);
+        shininess *= spreadCos / (spreadCos + shininess * (1.0 - spreadCos));      // Toksvig: the normals a texel stands for widen its lobe
         for (int i = 0; i < 8; i++) {
             if (i >= lightCount) break;
             vec3 l; float ndl;
-            float atten = lightAt(i, n, l, ndl) * sunVis;
+            float atten = lightAt(i, n, l, ndl) * (lightShadow[i] >= 0 ? sunVis : 1.0);   // the baked shadow stands in for the shadow map the full tree would have
             if (atten <= 0.0) {
                 // Translucency: the light falls on the far side; it comes through diffused,
                 // and more of it when looking towards the light (forward scattering).
@@ -818,7 +832,7 @@ void main() {
                 if (back <= 0.0) continue;
                 float forward = pow(clamp(dot(v, -lb), 0.0, 1.0), 6.0);
                 color += diffColor * translucencyColor * lightColor[i] * waterLight(i) * back
-                       * translucency * sunVis * (0.6 * ndlb + 1.4 * forward);
+                       * translucency * (lightShadow[i] >= 0 ? sunVis : 1.0) * (0.6 * ndlb + 1.4 * forward);
                 continue;
             }
             vec3 h = normalize(l + v);
@@ -1049,7 +1063,6 @@ uniform vec3 haze; uniform float hazeAmount;
 uniform float stars; uniform float clouds; uniform vec3 cloudColor; uniform vec3 cloudShade;
 uniform float cloudScale; uniform vec2 cloudOffset; uniform float frame; uniform float seed;
 const float PI = 3.14159265;
-const float SPREAD_POW = 1.5;
 float hash(vec3 p) { p = fract(p * 0.3183099 + vec3(0.71, 0.113, 0.419) + seed * 0.0137); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
 float vnoise(vec2 x) {
     vec2 i = floor(x), f = fract(x), u = f * f * (3.0 - 2.0 * f);

@@ -253,7 +253,7 @@ from `frameTime`.
 - A map forest's pictures are matched to the mesh forest's look (`LowPoly` trees only): dimmed a
   little from above (a faceted crown's picture is brighter than the crown seen from 60 to 90
   degrees), tinted a little yellower, and each picture's brightness spread by a stable per-tree
-  factor, `pictureSpeckle` (0.35 = 1 +- 35%). The default trees bake four rows (0, 30, 60 and
+  factor, `pictureSpeckle` (0.30 = 1 +- 30%). The default trees bake four rows (0, 30, 60 and
   90 degrees, the top row taken from 89.5), and bake no trunk above 45 degrees: from above
   only a crown shows. Seen from straight above:
   - from 50 to 75 degrees up, the direction the picture is taken from and its top turn to the
@@ -265,11 +265,17 @@ from `frameTime`.
     (red above green) and brown pixels, luminance in five rings round the middle, the darkest
     9 px box, the radial structure of the strokes, blotchiness and grain.
   The known difference: a picture is smoother at the pixel scale than the facets of a mesh a
-  few pixels high (local 3x3 contrast 0.58 to 0.7 of the mesh's at 3.5 to 2.0 radii, top-down) and its
-  crowns read as rounded blotches (8 px cell spread 1.4 to 1.7 of the mesh's). More spread gets
-  grain at the price of blotches (0.5: grain 0.7, blotches 2.2), so 0.35 is the compromise;
-  `impostorBelow` is 10 px so the pictures stand only where a tree is under a dozen pixels and
-  the difference is the least visible. At 2 radii and closer the forest is meshes.
+  few pixels high (local 3x3 contrast 0.52 of the mesh's top-down and 0.45 from 60 degrees, at
+  3.5 and 2.6 radii) and its crowns read as rounded blotches (8 px cell spread about 1.5 of the
+  mesh's). Pictures are read about 1.5 mipmap levels finer than their footprint (a mesh that
+  small aliases, one facet a pixel), which gives back part of the grain. From 60 degrees a
+  forest of pictures is also about 5% brighter than its meshes while one tree's picture alone is
+  0.71 to 0.81 of its crown: one shade by camera elevation serves the forest (a known limit of
+  0.13; the tests say so where they allow it). Normal mipmaps that keep one facet's normal
+  instead of the mean were tried and changed nothing measurable, so the missing contrast is in
+  the 60-degree picture itself. `impostorBelow` is 10 px so the pictures stand only where a tree
+  is under a dozen pixels and the difference is the least visible. At 2 radii and closer the
+  forest is meshes.
 
 ## Prefabs
 
@@ -455,19 +461,22 @@ Tests: `flora_tests`, `scene3d_tests`, `flora2d_render_tests` and `test_script.p
 - Where the canopy is off, is not allowed (a high camera), or does not cover a cell (a forest's
   edge, a clearing), nothing replaces far trees but the impostors. Fog covers that range, or
   `hideFrom` fades trees out.
-- Impostor brightness follows the full tree to about 15% (mean linear luminance of the
-  pixels both cover, default sun with shadows: 0.85 to 1.17 for oak, birch and pine at 0, 30,
-  60 and 80 degrees; `tests/scene3d_tests.cpp` prints all twelve). Two things were behind it.
-  The leaf pictures left clear texels black, so a full tree's leaf mipmaps darkened with
-  distance (fixed: colour is spread into every clear texel, which also makes full trees at a
-  distance a little lighter than before). And a picture has no shadow inside the crown, nor
-  the spread of facings a texel stands for: the bake stores, in the normal map's alpha, how
-  much direct light reaches each texel through the crown (`Material::normalAlphaShade`), and
-  keeps the length of the mean normal, which scales direct light. Ambient is not touched. The
-  sun's direction is not known at bake time, so the shade is an average one (a fan of sky
-  directions leaning to the viewer); a low or backlit sun will show it off. A picture is of a
-  tree at one elevation, so between rows a
+- Impostor brightness follows the full tree to about 20%, pine side-on to 30% (mean linear
+  luminance of the pixels both cover, default sun with shadows: oak 0.97 to 1.06, birch 0.81 to
+  0.98, pine 0.78 to 1.29 at 0, 30, 60 and 80 degrees; `tests/scene3d_tests.cpp` prints all
+  twelve). A picture has no shadow inside the crown, nor the spread of facings a texel stands
+  for. The bake draws the crown (cards cut out exactly as the engine cuts them) into depth maps
+  from a fan of directions to the light and stores, in the normal map's alpha, the share of them
+  that light each texel (`Material::normalAlphaShade`); it scales only lights that cast shadows.
+  The mean normal keeps its length, and the light treats it as a cone of facings (the average of
+  the clamped cosine over the cone, not the mean's cosine). The sun's direction is not known at
+  bake time, so the shade is an average over the fan; a low or backlit sun will show it off, and
+  a dense pine seen side-on most. A picture is of a tree at one elevation, so between rows a
   tall trunk shows doubled (the crown is aligned, the trunk is not).
+- Until 0.13 the lit shaders read screen derivatives and mipmapped textures after a `discard`
+  (undefined in GLSL): NVIDIA gave convenient values, Mesa did not, and impostors were shaded
+  differently per driver. Derivatives are now taken before any discard; the impostor, canopy
+  and map-picture calibrations were measured again on that.
 - Grass shadows (`castShadows`) are only as fine as the shadow map: a blade is about 1.7
   texels wide at `shadowExtent` 14 and a 4096 map, so under a low sun the soil seen between
   blades from 1.5 m up shows a blocky basket-weave of blade shadows in the nearest metres
