@@ -353,6 +353,7 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   add_executable(raymotion_scene3d_tests tests/scene3d_tests.cpp)
   target_link_libraries(raymotion_scene3d_tests PRIVATE rmtn_engine)
   add_test(NAME scene3d COMMAND raymotion_scene3d_tests)
+  set_tests_properties(scene3d PROPERTIES TIMEOUT 3600)   # 20-30 min under Mesa's llvmpipe on the Linux runners
 
   add_executable(raymotion_media_tests tests/media_tests.cpp)
   target_link_libraries(raymotion_media_tests PRIVATE rmtn_engine)
