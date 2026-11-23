@@ -62,7 +62,9 @@ jobs:
       - name: Test
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
-        run: xvfb-run -a -s "-screen 0 1920x1080x24" ctest --test-dir build --output-on-failure
+        # scene3d is left out: under 22.04's Mesa it runs for well over an hour (14 min on
+        # 24.04), and CI already runs it on every change that reaches main.
+        run: xvfb-run -a -s "-screen 0 1920x1080x24" ctest --test-dir build --output-on-failure -E "^scene3d$"
       - name: Package
         run: bash tools/package-unix.sh build "$VERSION" linux-x64 dist
       - name: Smoke test the package
