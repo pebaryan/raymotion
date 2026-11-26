@@ -759,6 +759,102 @@ struct Clouds {
     Vector2 travel(const Weather& w, double seconds) const;
 };
 
+// ------------------------------------------------------------------ precipitation
+// GPU rain, snow and sleet in a volume that follows the camera (Scene::precipitation), made the way
+// the grass Field is: no drop exists on the CPU. Every drop is generated in the vertex shader from a
+// hash of (tile, number), as an instanced quad, and its world position is a pure function of t.
+//
+// How the volume is laid out. Space is cut into fixed world tiles `kTile` metres across and `kCell`
+// metres tall, indexed (ix, iy, iz). Drop k of a tile starts at a hashed spot on the tile's base and
+// falls through the tile's height with period kCell / its speed, then wraps to the top, so a drop's
+// place is a function of the tile, k and t alone. Moving the camera changes which tiles are drawn,
+// never where a drop is. Wind slants every trajectory (the drop at height h above its tile's base
+// sits `slant * h` upwind of its spot there), so the lines of fall are parallel and one top-down map
+// can tell which of them a roof covers.
+//
+// Rain is drawn as a streak along its velocity, as long as speed x `exposure` (the shutter), thin
+// and semi-transparent, lit by the scene's lights (a drop between the camera and a lamp or the low sun
+// glints) and fogged by the scene's fog. Snow is a soft round flake that sways on a deterministic
+// sinusoid and drifts with the wind. Sleet mixes the two. Far drops are thinned by rank (the first
+// n of a tile are kept, so any prefix is an even sample) with the survivors keeping the weight;
+// beyond `radius` a cheaper layer of sparse, wider and fainter streaks carries the rain to
+// `farRadius` as curtains.
+//
+// Occlusion. Each frame the opaque scene is drawn into a depth map from above, looking along the
+// fall, over `radius` round the camera. A drop that lies deeper than the map at its place has a
+// roof, a tree or a bridge over it and is not drawn: under a porch there is no rain, beside it there
+// is. Objects with Object3D::cullRadius that lie in the volume are kept even when out of view, as the
+// map needs them. The map reaches 80 m above the camera. Transparent objects and grass do not block.
+//
+// Splashes (rain and the rain share of sleet): where a drop's period reaches the surface the map
+// found (the ground, a roof) or the water level, a ring and a few droplets appear for about 0.2 s.
+// Their position and time come from the same hash, so they are pure functions of t too. Snow
+// makes none. The splash tiles reach `splashRadius`.
+//
+// Under Scene::weather (enabled) the kind, the intensity and the wind come from the weather
+// (Weather::precipitation, Weather::wind); `ownWeather` and `ownWind` keep this struct's own. A weather
+// whose kind is None draws nothing then. Rain follows the wind by Weather::kRainFollow, snow by
+// kSnowFollow. Reflections in the water do not include precipitation; the water's own splashes
+// are drawn in the main pass. fx::rain3d and fx::snow3d are unchanged.
+struct Downfall {
+    bool enabled = false;               // false: nothing is drawn and no pixel changes
+    Precipitation kind = Precipitation::Rain;       // Rain, Snow or Sleet (None draws nothing)
+    float intensity = 0.5f;             // 0..1: drizzle to downpour; drop count is proportional to it
+
+    // Rain: terminal speeds m/s (bigger drops fall faster) and drop diameters in metres, many small
+    // and few large. Snow: speeds and flake sizes. Densities are drops a cubic metre at intensity 1.
+    Vector2 rainSpeed{ 6, 9 }, rainSize{ 0.0005f, 0.004f };
+    Vector2 snowSpeed{ 0.5f, 1.5f }, snowSize{ 0.010f, 0.030f };
+    float rainDensity = 90, snowDensity = 150;
+    float flutter = 0.25f;              // metres: the sideways sway of a flake (a sinusoid, 1 to 2 rad/s)
+
+    float radius = 30;                  // metres: the near volume, drawn drop by drop
+    float farRadius = 150;              // metres: the far curtains reach this far
+    bool farLayer = true;               // false: nothing beyond `radius`
+    float farDensity = 0.15f;           // far drops a cubic metre (they are drawn wide and faint)
+    float exposure = 1.f / 60.f;        // seconds: the streak is speed x exposure long. Comp::motionBlur blurs on top of it, so shorten it then
+    float opacity = 1;                  // overall strength of the drops, 0..2
+    bool occlusion = true;              // roofs, trees and bridges keep the rain off what is under them
+    int occlusionSize = 1024;           // texels across the map (60 m / 1024 = 6 cm for the default radius)
+    bool splashes = true;
+    float splashRadius = 12;            // metres from the camera that splashes are drawn
+    uint32_t seed = 1;                  // another seed, another pattern of drops
+    float fps = 30;                     // the film's frames per second (the weather's, when it sets the wind)
+
+    // The wind when no weather sets it: the direction in degrees about +y it blows towards (0 = +x, 90 = +z)
+    // and its speed in m/s. A drop takes up Weather::kRainFollow (snow kSnowFollow) of it sideways.
+    float windDirection = 17, windSpeed = 0;
+    bool ownWeather = false;            // with Scene::weather: keep this struct's kind and intensity
+    bool ownWind = false;               // with Scene::weather: keep this struct's wind
+    bool worldFixed = true;             // comparison switch: false carries the drops along with the camera, to prove the test sees it
+
+    static constexpr float kTile = 5, kCell = 10;           // the near layer's tile: metres across and tall
+    static constexpr float kFarTile = 30, kFarCell = 60;    // the far layer's
+
+    // The drift of a falling drop, metres sideways for each metre of fall (x, z): wind x follow / the
+    // mean fall speed. Sleet falls at the rain's slant.
+    Vector2 slant(bool snow) const;
+    // How many drops a near tile holds at intensity 1 (kind decides the density), and a far tile.
+    uint32_t dropsPerTile() const;
+    uint32_t farDropsPerTile() const;
+    // What the shader makes of drop k of tile (ix, iy, iz) at `seconds`, on the CPU (for tests). `faraway`
+    // selects the far layer's tile. `rank` is (k + 0.5) / the tile's drops: below it a drop is kept.
+    struct Drop {
+        Vector3 position{ 0, 0, 0 }, velocity{ 0, 0, 0 };
+        float diameter = 0, rank = 0;
+        bool snow = false;
+        float phase = 0;                // 0 at the top of its tile to 1 at the base: how far through its fall
+    };
+    Drop drop(int ix, int iy, int iz, uint32_t k, double seconds, bool faraway = false) const;
+};
+// `d` as drawn at this moment: with the weather enabled, its kind, intensity and wind from `w` (unless
+// ownWeather / ownWind); the fps from the weather when it sets the wind. Else `d` itself.
+Downfall inWeather(const Downfall& d, const Weather& w);
+// Drops (near and far layers) and splashes the last rendered frame submitted in its main pass, after
+// the tiles outside the view are dropped and far ones thinned (the shader thins further): for budgets.
+long long precipitationDropsSubmitted();
+long long precipitationSplashesSubmitted();
+
 // ------------------------------------------------------------------ scenes
 struct Scene {
     Camera camera;
@@ -804,6 +900,7 @@ struct Scene {
     Water water;                    // a water surface (water.enabled)
     Weather weather;                // one wind, clouds, haze... for everything above (weather.enabled)
     Clouds clouds;                  // volumetric clouds (clouds.enabled), drawn after the opaque objects
+    Downfall precipitation;         // GPU rain, snow or sleet round the camera (precipitation.enabled)
     // With weather enabled the haze sets the fog: exponential, density from the haze, taking the
     // sky's colour (fogMode, fogDensity and fogFromSky are replaced; fogHeight and fogFalloff stay).
     // true keeps the scene's own fog.

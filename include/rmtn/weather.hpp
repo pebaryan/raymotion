@@ -50,7 +50,7 @@ struct Weather {
     } clouds;
 
     struct Precip {
-        Precipitation kind = Precipitation::None;   // used by the rain and snow systems (not drawn yet)
+        Precipitation kind = Precipitation::None;   // used by the rain and snow systems (Scene::precipitation draws it)
         float intensity = 0;            // 0..1: drizzle to downpour
     } precipitation;
 

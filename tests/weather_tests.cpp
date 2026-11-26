@@ -2758,6 +2758,755 @@ static void cloudImages(const char* dir) {
     }
 }
 
+// ---------------------------------------------------------------- W3: precipitation (rain and snow at scale)
+// A side-on orthographic view (no perspective, so a drop's pixel is its world place) of rain on a black background,
+// 16.2 pixels a metre: 0.37 m is 6.0 px. Drops are drawn fat (6-9 cm) so a pixel is a measurement, and thin so they
+// rarely overlap. Every check has a break that must fail it (see the comments).
+static constexpr int PW = 320, PH = 180;
+static constexpr float P_HEIGHT = 11.1f, P_PPM = PH / P_HEIGHT;
+
+static g3d::Downfall testRain(float density = 0.3f) {
+    g3d::Downfall d;
+    d.enabled = true;
+    d.kind = g3d::Precipitation::Rain;
+    d.intensity = 1;
+    d.rainDensity = density;
+    d.snowDensity = density;
+    d.rainSize = { 0.06f, 0.09f };
+    d.opacity = 2;
+    d.snowSize = { 0.07f, 0.10f };
+    d.farLayer = false;
+    d.splashes = false;
+    return d;
+}
+static g3d::ScenePtr dropScene(const g3d::Downfall& d, Vector3 cam = { 0, 1.5f, 8 }) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = cam;
+    s->camera.target = { cam.x, cam.y, cam.z - 8 };
+    s->camera.orthographic = true;
+    s->camera.orthoHeight = P_HEIGHT;
+    s->ambient = 1;
+    s->skyColor = WHITE;
+    s->groundColor = WHITE;
+    s->precipitation = d;
+    return s;
+}
+static g3d::ScenePtr tunnelScene(const g3d::Downfall& d) {          // a roof 3 m wide and 120 m long over the camera and the view
+    auto s = dropScene(d, { 0, 1.5f, 30 });
+    g3d::Material m;
+    m.color = { 40, 40, 44, 255 };
+    s->add(g3d::Geometry::box(3, 0.1f, 120), m)->position = { 0, 3.0f, 0 };
+    return s;
+}
+// Pixels in the rectangle that `img` lights more than `base` does.
+static int litIn(const std::vector<float>& img, const std::vector<float>& base, int x0, int y0, int x1, int y1, float thr = 25) {
+    int n = 0;
+    for (int y = y0; y < y1; y++)
+        for (int x = x0; x < x1; x++)
+            if (img[(size_t)y * PW + x] - base[(size_t)y * PW + x] > thr) n++;
+    return n;
+}
+static std::vector<float> dropLuma(g3d::ScenePtr s, int frame = 5) {
+    Image img = look(std::move(s), PW, PH, frame);
+    std::vector<float> v = lumaOf(img);
+    UnloadImage(img);
+    return v;
+}
+static std::vector<float> noRain(bool tunnel) {
+    g3d::Downfall off = testRain();
+    off.enabled = false;
+    return dropLuma(tunnel ? tunnelScene(off) : dropScene(off));
+}
+static int totalLit(const std::vector<float>& a, const std::vector<float>& b) { return litIn(a, b, 0, 0, PW, PH); }
+
+// (a) Under a roof there is no rain, beside it there is. Break: occlusion off.
+static void roofKeepsRainOff() {
+    const std::vector<float> base = noRain(true);
+    const int ux0 = PW / 2 - (int)(1.2f * P_PPM), ux1 = PW / 2 + (int)(1.2f * P_PPM), bx0 = PW / 2 + (int)(3.0f * P_PPM);
+    const int y0 = PH / 2 - (int)((2.8f - 1.5f) * P_PPM), y1 = PH / 2 + (int)(1.5f * P_PPM), wdt = ux1 - ux0;
+    g3d::Downfall d = testRain();
+    const std::vector<float> on = dropLuma(tunnelScene(d));
+    d.occlusion = false;
+    const std::vector<float> off = dropLuma(tunnelScene(d));
+    const int under = litIn(on, base, ux0, y0, ux1, y1), beside = litIn(on, base, bx0, y0, bx0 + wdt, y1);
+    const int underBroken = litIn(off, base, ux0, y0, ux1, y1);
+    std::printf("[weather] roof: lit pixels under %d, beside %d (same size, %dx%d); occlusion off: under %d\n", under, beside, wdt, y1 - y0, underBroken);
+    CHECK(under <= 2);
+    CHECK(beside > 60);
+    CHECK(underBroken > 60);
+}
+
+// (b) Drop coverage grows in proportion to the intensity.
+static void intensityScales() {
+    const std::vector<float> base = noRain(false);
+    int c[3];
+    const float levels[3] = { 0.25f, 0.5f, 1.f };
+    for (int i = 0; i < 3; i++) {
+        g3d::Downfall d = testRain();
+        d.intensity = levels[i];
+        c[i] = totalLit(dropLuma(dropScene(d)), base);
+    }
+    const float r25 = (float)c[0] / (0.25f * c[2]), r50 = (float)c[1] / (0.5f * c[2]);
+    std::printf("[weather] intensity: lit pixels %d, %d, %d at 0.25, 0.5, 1 (coverage / (intensity x full): %.2f, %.2f)\n", c[0], c[1], c[2], r25, r50);
+    CHECK(c[2] > 2000);
+    CHECK(r25 > 0.75f && r25 < 1.25f);
+    CHECK(r50 > 0.75f && r50 < 1.25f);
+}
+
+// The separate streaks of a picture: 4-connected blobs of lit pixels (luma over 25) with their extent and second moments.
+struct StreakBlob { int area = 0, minY = 0, maxY = 0; bool border = false; double mx = 0, my = 0, mxx = 0, myy = 0, mxy = 0; };
+static std::vector<StreakBlob> findStreakBlobs(const std::vector<float>& v) {
+    std::vector<unsigned char> on((size_t)PW * PH), seen((size_t)PW * PH, 0);
+    for (size_t i = 0; i < on.size(); i++) on[i] = v[i] > 25 ? 1 : 0;
+    std::vector<StreakBlob> out;
+    for (int y0 = 0; y0 < PH; y0++)
+        for (int x0 = 0; x0 < PW; x0++) {
+            if (!on[(size_t)y0 * PW + x0] || seen[(size_t)y0 * PW + x0]) continue;
+            std::vector<int> stack{ y0 * PW + x0 };
+            seen[(size_t)y0 * PW + x0] = 1;
+            StreakBlob b;
+            b.minY = b.maxY = y0;
+            while (!stack.empty()) {
+                const int p = stack.back(); stack.pop_back();
+                const int x = p % PW, y = p / PW;
+                b.area++; b.minY = std::min(b.minY, y); b.maxY = std::max(b.maxY, y);
+                b.mx += x; b.my += y; b.mxx += (double)x * x; b.myy += (double)y * y; b.mxy += (double)x * y;
+                if (x == 0 || y == 0 || x == PW - 1 || y == PH - 1) b.border = true;
+                const int nb[4][2] = { { x + 1, y }, { x - 1, y }, { x, y + 1 }, { x, y - 1 } };
+                for (const auto& q : nb)
+                    if (q[0] >= 0 && q[1] >= 0 && q[0] < PW && q[1] < PH && on[(size_t)q[1] * PW + q[0]] && !seen[(size_t)q[1] * PW + q[0]]) {
+                        seen[(size_t)q[1] * PW + q[0]] = 1;
+                        stack.push_back(q[1] * PW + q[0]);
+                    }
+            }
+            out.push_back(b);
+        }
+    return out;
+}
+
+// The median tilt from vertical, in degrees (positive: the streaks lean to the right going down), of the long streaks' principal axes.
+static float streakTilt(const std::vector<float>& v) {
+    std::vector<float> tilts;
+    for (const StreakBlob& b : findStreakBlobs(v)) {
+        if (b.border || b.area < 15) continue;
+        const double n = b.area, mx = b.mx / n, my = b.my / n;
+        const double cxx = b.mxx / n - mx * mx, cyy = b.myy / n - my * my, cxy = b.mxy / n - mx * my;
+        tilts.push_back((float)(0.5 * std::atan2(2 * cxy, cyy - cxx) * RAD2DEG));
+    }
+    if (tilts.size() < 10) return 999.f;
+    std::sort(tilts.begin(), tilts.end());
+    return tilts[tilts.size() / 2];
+}
+
+// (c) The streaks lean as atan(follow x wind / the mean fall speed). Break: the wind not applied.
+static void windSlants() {
+    float err[2];
+    const float winds[2] = { 4.f, 10.f };
+    for (int i = 0; i < 2; i++) {
+        g3d::Downfall d = testRain(0.1f);
+        d.exposure = 0.15f;
+        d.windDirection = 0;                                       // towards +x: to the right of this view
+        d.windSpeed = winds[i];
+        const float want = std::atan(g3d::Weather::kRainFollow * winds[i] / 7.5f) * RAD2DEG;
+        const float got = streakTilt(dropLuma(dropScene(d)));
+        g3d::Downfall still = d;
+        still.windSpeed = 0;
+        const float broken = streakTilt(dropLuma(dropScene(still)));
+        err[i] = std::fabs(got - want);
+        std::printf("[weather] slant at %.0f m/s: measured %.1f deg, expected %.1f; with the wind ignored %.1f\n", winds[i], got, want, broken);
+        CHECK(err[i] < 5);
+        CHECK(std::fabs(broken - want) > 8);
+    }
+}
+
+// Pearson correlation of two luma images shifted by `dx` pixels (a[x] against b[x - dx]), over the overlap less a margin.
+static float shiftedCorrelation(const std::vector<float>& a, const std::vector<float>& b, int dx) {
+    double sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
+    long long n = 0;
+    for (int y = 12; y < PH - 12; y++)
+        for (int x = 20; x < PW - 20; x++) {
+            const double p = a[(size_t)y * PW + x], q = b[(size_t)y * PW + x - dx];
+            sa += p; sb += q; saa += p * p; sbb += q * q; sab += p * q; n++;
+        }
+    const double cov = sab / n - sa / n * sb / n, va = saa / n - sa / n * sa / n, vb = sbb / n - sb / n * sb / n;
+    return (float)(cov / std::sqrt(std::max(va * vb, 1e-9)));
+}
+
+// (d) Moving the camera 0.37 m sideways (not a tile multiple) moves the picture by exactly that, nothing else. Break: positions made
+// relative to the camera (worldFixed off).
+static void worldFixed() {
+    float good[3], broken[3];
+    const int shifts[3] = { 6, 3, 9 };
+    for (int pass = 0; pass < 2; pass++) {
+        g3d::Downfall d = testRain(0.15f);
+        d.exposure = 0.05f;
+        d.worldFixed = pass == 0;
+        const std::vector<float> a = dropLuma(dropScene(d, { 0, 1.5f, 8 })), b = dropLuma(dropScene(d, { 0.37f, 1.5f, 8 }));
+        for (int i = 0; i < 3; i++) (pass == 0 ? good : broken)[i] = shiftedCorrelation(a, b, shifts[i]);
+    }
+    std::printf("[weather] world-fixed: correlation at the 6 px parallax %.2f (3 px %.2f, 9 px %.2f); drops carried with the camera: %.2f at 6 px\n", good[0], good[1], good[2], broken[0]);
+    CHECK(good[0] > 0.9f);
+    CHECK(good[1] < 0.5f && good[2] < 0.5f);
+    CHECK(broken[0] < 0.5f);
+}
+
+// The mean height in pixels of the separate streaks (blobs that do not touch the border).
+static float meanStreakHeight(const std::vector<float>& v, int* count = nullptr) {
+    double sum = 0;
+    int n = 0;
+    for (const StreakBlob& b : findStreakBlobs(v))
+        if (!b.border && b.area >= 4) { sum += b.maxY - b.minY + 1; n++; }
+    if (count) *count = n;
+    return n ? (float)(sum / n) : 0.f;
+}
+
+// (e) A streak is as long as speed x shutter: double the exposure, double the streak. Break: a fixed length.
+static void streakLength() {
+    float m[2];
+    int n[2];
+    const float exposures[2] = { 0.1f, 0.2f };
+    for (int i = 0; i < 2; i++) {
+        g3d::Downfall d = testRain(0.04f);
+        d.exposure = exposures[i];
+        m[i] = meanStreakHeight(dropLuma(dropScene(d)), &n[i]);
+    }
+    std::printf("[weather] streak length: mean %.1f px over %d streaks at 0.1 s, %.1f px over %d at 0.2 s (ratio %.2f; expected 2, 7.5 m/s x 0.1 s = %.1f px)\n",
+                m[0], n[0], m[1], n[1], m[1] / std::max(m[0], 1e-3f), 7.5f * 0.1f * P_PPM);
+    CHECK(n[0] > 15 && n[1] > 15);
+    CHECK(m[1] / m[0] > 1.7f && m[1] / m[0] < 2.3f);
+    CHECK(m[0] > 0.7f * 7.5f * 0.1f * P_PPM && m[0] < 1.3f * 7.5f * 0.1f * P_PPM);
+}
+
+// ---- the shader against its CPU twin, projected into the picture
+// How many of the CPU mirror's drops sit on a lit pixel (3x3 around where the mirror says they are), the picture
+// shifted `shift` px sideways (0: the real thing; a shift is the control that must find fewer).
+static float mirrorHits(const g3d::Downfall& d, int frame, int shift, int* tested = nullptr) {
+    Image shot = look(dropScene(d), PW, PH, frame);
+    const std::vector<float> v = lumaOf(shot);
+    const double secs = frame / 30.0;
+    int hit = 0, total = 0;
+    for (int iy = -1; iy <= 0; iy++)
+        for (int iz = -1; iz <= 1; iz++)
+            for (int ix = -2; ix <= 1; ix++)
+                for (uint32_t k = 0; k < d.dropsPerTile(); k++) {
+                    const g3d::Downfall::Drop p = d.drop(ix, iy, iz, k, secs);
+                    const float dist = Vector3Distance(p.position, { 0, 1.5f, 8 });
+                    if (p.rank > 0.85f || dist > 9.5f || dist < 2.5f || p.position.z > 5.5f) continue;     // in front of the camera: an orthographic one clips what is behind it
+                    const int px = (int)std::floor(PW * 0.5f + p.position.x * P_PPM) + shift, py = (int)std::floor(PH * 0.5f - (p.position.y - 1.5f) * P_PPM);
+                    if (px < 12 || py < 12 || px >= PW - 12 || py >= PH - 12) continue;
+                    total++;
+                    float best = 0;
+                    for (int dy = -1; dy <= 1; dy++)
+                        for (int dx = -1; dx <= 1; dx++) best = std::max(best, v[(size_t)(py + dy) * PW + px + dx]);
+                    if (best > 20) hit++;
+                }
+    UnloadImage(shot);
+    if (tested) *tested = total;
+    return total ? (float)hit / total : 0.f;
+}
+
+// (h) Snow falls slowly and sways: its drops over one second move sideways by a bounded, nonzero amount and fall 0.5-1.5 m.
+static void snowSways() {
+    for (int wind = 0; wind < 2; wind++) {
+        g3d::Downfall d = testRain();
+        d.kind = g3d::Precipitation::Snow;
+        d.windDirection = 40;
+        d.windSpeed = wind ? 3.f : 0.f;
+        double hMin = 1e9, hMax = 0, fMin = 1e9, fMax = 0, hSum = 0;
+        int n = 0;
+        for (uint32_t k = 0; k < d.dropsPerTile(); k++) {
+            const g3d::Downfall::Drop a = d.drop(0, 0, 0, k, 3.0), b = d.drop(0, 0, 0, k, 4.0);
+            if (b.phase < a.phase) continue;                                   // wrapped to the top of its tile this second
+            const double h = std::hypot(b.position.x - a.position.x, b.position.z - a.position.z), f = a.position.y - b.position.y;
+            hMin = std::min(hMin, h); hMax = std::max(hMax, h); fMin = std::min(fMin, f); fMax = std::max(fMax, f); hSum += h; n++;
+        }
+        std::printf("[weather] snow (wind %d m/s): %d flakes, sideways %.3f..%.3f m in 1 s (mean %.2f), fall %.2f..%.2f m/s\n", wind * 3, n, hMin, hMax, hSum / std::max(n, 1), fMin, fMax);
+        CHECK(n > 50);
+        CHECK(hMin > 0.002 && hMax < (wind ? 3.0 : 0.8));
+        CHECK(fMin > 0.49 && fMax < 1.51);
+    }
+    // The shader draws the same flakes as the mirror says: where it says, not where it does not.
+    g3d::Downfall d = testRain(0.2f);
+    d.kind = g3d::Precipitation::Snow;
+    d.windSpeed = 2;
+    d.windDirection = 0;
+    int n = 0;
+    const float real = mirrorHits(d, 40, 0, &n), control = mirrorHits(d, 40, 9);
+    std::printf("[weather] snow flakes on the mirror's places: %.2f of %d (shifted 9 px: %.2f)\n", real, n, control);
+    CHECK(n > 40);
+    CHECK(real > 0.9f && control < 0.5f);
+}
+
+// Rain, too, is where the mirror puts it.
+static void mirrorsRain() {
+    g3d::Downfall d = testRain(0.2f);
+    d.windSpeed = 6;
+    d.windDirection = 0;
+    d.exposure = 0.05f;
+    int n = 0;
+    const float real = mirrorHits(d, 17, 0, &n), control = mirrorHits(d, 17, 9);
+    std::printf("[weather] rain drops on the mirror's places: %.2f of %d (shifted 9 px: %.2f)\n", real, n, control);
+    CHECK(n > 40);
+    CHECK(real > 0.9f && control < 0.5f);
+}
+
+// (f) A frame is the same alone as after others; a different frame is different.
+static void precipitationPurity() {
+    auto make = [] {
+        g3d::Downfall d = testRain(0.3f);
+        d.splashes = true;
+        d.farLayer = true;
+        d.splashRadius = 40;
+        d.windSpeed = 6;
+        d.windDirection = 20;
+        auto s = tunnelScene(d);
+        s->camera.orthographic = false;
+        s->camera.position = { 0, 2.2f, 30 };
+        s->camera.target = { 0, 1.0f, 22 };
+        s->camera.fov = 60;
+        g3d::Material m;
+        m.color = { 30, 40, 30, 255 };
+        s->add(g3d::Geometry::plane(200, 200), m);
+        return s;
+    };
+    Image alone = look(make(), PW, PH, 7);
+    Comp c = comp(make(), PW, PH);
+    Image x1 = render(c, 2), x2 = render(c, 20), after = render(c, 7), other = render(c, 8);
+    const long long same = diffImages(alone, after), differs = diffImages(after, other);
+    std::printf("[weather] precipitation purity: frame 7 alone vs after frames 2, 20: diff %lld; frame 8 vs 7: diff %lld\n", same, differs);
+    CHECK(same == 0);
+    CHECK(differs > 5000);
+    UnloadImage(alone); UnloadImage(x1); UnloadImage(x2); UnloadImage(after); UnloadImage(other);
+}
+
+// (g) Disabled, the precipitation changes no pixel and submits no drop, whatever else it holds.
+static void precipitationOff() {
+    auto make = [](bool set, bool enabled) {
+        g3d::Downfall d = testRain(0.3f);
+        d.kind = g3d::Precipitation::Snow;
+        d.intensity = 1;
+        d.splashes = true;
+        d.farLayer = true;
+        d.enabled = enabled;
+        auto s = tunnelScene(g3d::Downfall{});
+        if (set) s->precipitation = d;
+        return s;
+    };
+    Image never = look(make(false, false), PW, PH, 9), off = look(make(true, false), PW, PH, 9);
+    const long long dOff = diffImages(never, off);
+    const long long dropsOff = g3d::precipitationDropsSubmitted();
+    Image on = look(make(true, true), PW, PH, 9);
+    const long long dOn = diffImages(never, on);
+    std::printf("[weather] precipitation off: diff %lld, drops submitted %lld; on: diff %lld, drops %lld, splashes %lld\n", dOff, dropsOff, dOn, g3d::precipitationDropsSubmitted(), g3d::precipitationSplashesSubmitted());
+    CHECK(dOff == 0 && dropsOff == 0);
+    CHECK(dOn > 20000);
+    UnloadImage(never); UnloadImage(off); UnloadImage(on);
+}
+
+// (i) Splashes sit on the surface they land on: on the ground and on a table top, not above them. A 3/4 view from above; the
+// CPU mirror says where every splash should be (from the hash alone), and the picture is searched there and, as the control, 0.6 m higher.
+static g3d::ScenePtr splashScene(const g3d::Downfall& d, Vector3* right, Vector3* up, Vector3* target) {
+    auto s = std::make_shared<g3d::Scene>();
+    const Vector3 tgt{ 0, 0.5f, 0 };
+    const Vector3 back = Vector3Scale(Vector3Normalize({ 0, std::sin(35 * DEG2RAD), std::cos(35 * DEG2RAD) }), 14.f);
+    s->camera.position = Vector3Add(tgt, back);
+    s->camera.target = tgt;
+    s->camera.orthographic = true;
+    s->camera.orthoHeight = P_HEIGHT;
+    s->ambient = 1;
+    s->skyColor = WHITE;
+    s->groundColor = WHITE;
+    g3d::Material dark;
+    dark.color = { 6, 6, 6, 255 };
+    dark.unlit = true;
+    s->add(g3d::Geometry::plane(300, 300), dark);
+    s->add(g3d::Geometry::box(10, 0.2f, 10), dark)->position = { 0, 0.9f, 0 };     // the top is at y = 1
+    s->precipitation = d;
+    const Vector3 fwd = Vector3Normalize(Vector3Subtract(tgt, s->camera.position));
+    *right = Vector3Normalize(Vector3CrossProduct(fwd, { 0, 1, 0 }));
+    *up = Vector3CrossProduct(*right, fwd);
+    *target = tgt;
+    return s;
+}
+static void splashesLand() {
+    g3d::Downfall d = testRain(0.15f);
+    d.splashes = true;
+    d.splashRadius = 40;
+    d.exposure = 0.001f;                          // the drops themselves nearly vanish: what is left is the splashes
+    d.rainSize = { 0.008f, 0.012f };              // so a splash is about 0.2 m across: a few pixels
+    const int frame = 21;
+    const double secs = frame / 30.0;
+    Vector3 right, up, tgt;
+    const std::vector<float> with = dropLuma(splashScene(d, &right, &up, &tgt), frame);
+    g3d::Downfall none = d;
+    none.splashes = false;
+    const std::vector<float> without = dropLuma(splashScene(none, &right, &up, &tgt), frame);
+    int expected = 0, onSurface = 0, floating = 0, onTable = 0, onGround = 0;
+    for (int iy = -1; iy <= 0; iy++)
+        for (int iz = -2; iz <= 1; iz++)
+            for (int ix = -2; ix <= 1; ix++)
+                for (uint32_t k = 0; k < d.dropsPerTile(); k++) {
+                    const g3d::Downfall::Drop p = d.drop(ix, iy, iz, k, secs);
+                    if (p.snow || p.rank > 0.9f) continue;
+                    // The surface this drop's line of fall meets (no wind: it falls straight): the table if over it, else the ground.
+                    const bool overTable = std::fabs(p.position.x) < 5 && std::fabs(p.position.z) < 5;
+                    const float ys = overTable ? 1.f : 0.f, yBase = iy * g3d::Downfall::kCell, hL = ys - yBase;
+                    if (hL <= 0 || hL > g3d::Downfall::kCell) continue;      // the drop belongs to another tile's cell
+                    const float fl = 1 - hL / g3d::Downfall::kCell, v = -p.velocity.y;
+                    if (p.phase < fl || (p.phase - fl) * g3d::Downfall::kCell / v > 0.2f) continue;      // not splashing now (or just born)
+                    const Vector3 at{ p.position.x, ys + 0.004f, p.position.z };
+                    auto lit = [&](Vector3 w) {
+                        const Vector3 r = Vector3Subtract(w, tgt);
+                        const int px = (int)std::floor(PW * 0.5f + Vector3DotProduct(r, right) * P_PPM), py = (int)std::floor(PH * 0.5f - Vector3DotProduct(r, up) * P_PPM);
+                        if (px < 10 || py < 10 || px >= PW - 10 || py >= PH - 10) return -1;
+                        return litIn(with, without, px - 3, py - 3, px + 4, py + 4, 2) > 0 ? 1 : 0;
+                    };
+                    const int a = lit(at), b = lit({ at.x, at.y + 1.0f, at.z });
+                    if (a < 0 || b < 0) continue;
+                    expected++; onSurface += a; floating += b;
+                    (overTable ? onTable : onGround)++;
+                }
+    const int pixels = litIn(with, without, 0, 0, PW, PH, 2);
+    std::printf("[weather] splashes: %d expected by the hash (%d on the table, %d on the ground), %d found at the surface, %d found 1 m above it; %d splash pixels in all\n",
+                expected, onTable, onGround, onSurface, floating, pixels);
+    CHECK(expected > 40 && onTable > 8 && onGround > 10);
+    CHECK(onSurface > 0.8f * expected);
+    CHECK(floating < 0.6f * onSurface);
+    CHECK(pixels > 120);                       // the splashes are sparse and faint now (a spray, not blobs); see splashesAreSparks
+}
+
+// What the rain costs at 1080p: a porch-sized scene with a few objects, drops at intensity 1, with and without splashes and the far layer.
+static g3d::ScenePtr timingRain(g3d::Precipitation kind, bool on, bool splashes, bool farLayer, bool occlusion) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = { -1.2f, 1.55f, 9 };
+    s->camera.target = { 0.4f, 1.45f, 0 };
+    s->camera.fov = 48;
+    s->ambient = 0.3f;
+    s->skyColor = { 111, 127, 163, 255 };
+    s->groundColor = { 42, 46, 36, 255 };
+    s->background = { 90, 100, 120, 255 };
+    s->fogMode = g3d::FogMode::Exponential;
+    s->fogDensity = 0.004f;
+    s->fogColor = { 120, 128, 144, 255 };
+    s->lights.push_back(g3d::Light::directional({ -10, 1.8f, -14 }, { 255, 185, 138, 255 }, 2.4f));
+    s->lights.push_back(g3d::Light::point({ 3.2f, 2.6f, 3.2f }, { 255, 183, 102, 255 }, 3.2f, 11));
+    g3d::Material ground, wall, roof;
+    ground.color = { 43, 50, 37, 255 };
+    wall.color = { 148, 134, 114, 255 };
+    roof.color = { 74, 59, 51, 255 };
+    s->add(g3d::Geometry::plane(300, 300), ground);
+    s->add(g3d::Geometry::box(12, 3.5f, 5), wall)->position = { 0, 1.75f, -4.5f };
+    s->add(g3d::Geometry::box(5.6f, 0.16f, 3.8f), roof)->position = { 0, 2.78f, -0.2f };
+    g3d::Downfall& d = s->precipitation;
+    d.enabled = on;
+    d.kind = kind;
+    d.intensity = 1;
+    d.splashes = splashes;
+    d.farLayer = farLayer;
+    d.occlusion = occlusion;
+    return s;
+}
+// How many near-layer drops of the timing scene are in the view and survive the shader's thinning (by the CPU mirror: every tile
+// in range, every drop whose rank is under intensity x keep(distance), seen inside the frustum of the 1920 x 1080 view).
+static long long visibleNearDrops(const g3d::Scene& s) {
+    const g3d::Downfall& d = s.precipitation;
+    const g3d::Camera& cam = s.camera;
+    const Vector3 f = Vector3Normalize(Vector3Subtract(cam.target, cam.position)), r = Vector3Normalize(Vector3CrossProduct(f, cam.upVector)), u = Vector3CrossProduct(r, f);
+    const float ty = std::tan(cam.fov * 0.5f * DEG2RAD), tx = ty * 1920.f / 1080.f;
+    const float R = d.radius, S = g3d::Downfall::kTile, Hc = g3d::Downfall::kCell;
+    long long n = 0;
+    for (int iy = (int)std::floor((cam.position.y - R) / Hc); iy <= (int)std::floor((cam.position.y + R) / Hc); iy++)
+        for (int iz = (int)std::floor((cam.position.z - R) / S) - 2; iz <= (int)std::floor((cam.position.z + R) / S) + 2; iz++)
+            for (int ix = (int)std::floor((cam.position.x - R) / S) - 2; ix <= (int)std::floor((cam.position.x + R) / S) + 2; ix++) {
+                const Vector3 centre{ (ix + 0.5f) * S, (iy + 0.5f) * Hc, (iz + 0.5f) * S };
+                const Vector3 cv = Vector3Subtract(centre, cam.position);
+                const float cz = Vector3DotProduct(cv, f);
+                if (Vector3Length(cv) > R + 9 || cz < -9 || std::fabs(Vector3DotProduct(cv, r)) > cz * tx + 12 || std::fabs(Vector3DotProduct(cv, u)) > cz * ty + 12) continue;
+                for (uint32_t k = 0; k < d.dropsPerTile(); k++) {
+                    const g3d::Downfall::Drop p = d.drop(ix, iy, iz, k, 0.4);
+                    const Vector3 v = Vector3Subtract(p.position, cam.position);
+                    const float z = Vector3DotProduct(v, f), dist = Vector3Length(v);
+                    if (z < 0.4f || std::fabs(Vector3DotProduct(v, r)) > z * tx || std::fabs(Vector3DotProduct(v, u)) > z * ty) continue;
+                    const float t1 = std::clamp((dist - 0.75f * R) / (0.25f * R), 0.f, 1.f), t2 = std::clamp((dist - 0.4f) / 1.6f, 0.f, 1.f);
+                    const float keep = std::min(1.f, std::pow(0.35f * R / dist, 1.5f)) * (1 - t1 * t1 * (3 - 2 * t1)) * (t2 * t2 * (3 - 2 * t2));
+                    if (p.rank < d.intensity * keep) n++;
+                }
+            }
+    return n;
+}
+
+static void precipitationTiming() {
+    constexpr int W = 1920, H = 1080;
+    struct Row { const char* name; g3d::Precipitation kind; bool on, splashes, farLayer, occlusion; };
+    const Row rows[] = { { "no rain", g3d::Precipitation::Rain, false, false, false, false },
+                         { "rain: near drops only", g3d::Precipitation::Rain, true, false, false, false },
+                         { "rain: + occlusion map", g3d::Precipitation::Rain, true, false, false, true },
+                         { "rain: + far curtains", g3d::Precipitation::Rain, true, false, true, true },
+                         { "rain: + splashes (everything)", g3d::Precipitation::Rain, true, true, true, true },
+                         { "snow: everything", g3d::Precipitation::Snow, true, true, true, true } };
+    for (const Row& row : rows) {
+        g3d::ScenePtr scene = timingRain(row.kind, row.on, row.splashes, row.farLayer, row.occlusion);
+        if (row.on && row.splashes && row.kind == g3d::Precipitation::Rain)
+            std::printf("[weather] W3 near drops in view after thinning (rain, intensity 1, 1080p): %lld\n", visibleNearDrops(*scene));
+        Comp c = comp(scene, W, H);
+        Canvas canvas;
+        canvas.load(W, H, 1);
+        presentFrame(c, 0, canvas);
+        Image warm = LoadImageFromTexture(canvas.output().texture);
+        UnloadImage(warm);
+        double best = 1e9, mean = 0;
+        for (int i = 0; i < 12; i++) {
+            const double t0 = GetTime();
+            presentFrame(c, i, canvas);
+            Image img = LoadImageFromTexture(canvas.output().texture);
+            const double dt = (GetTime() - t0) * 1000;
+            UnloadImage(img);
+            best = std::min(best, dt);
+            mean += dt / 12;
+        }
+        canvas.unload();
+        std::printf("[weather] W3 timing 1080p, %s: best %.1f ms, mean %.1f ms; drops submitted %lld, splashes %lld\n", row.name, best, mean,
+                    g3d::precipitationDropsSubmitted(), g3d::precipitationSplashesSubmitted());
+    }
+}
+
+// (j) A lamp in rain: streaks near a point light are brighter than streaks far from it, falling off with distance. The sun is out of
+// the scene. Break: the lamp's light term removed (here: the lamp switched off, which must bring the ratio to about 1).
+static float lampRatio(float lampIntensity, float* nearMean = nullptr, float* farMean = nullptr, int* nNear = nullptr, int* nFar = nullptr) {
+    constexpr int W = 640, H = 360;
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = { 0, 1.6f, 10 };
+    s->camera.target = { 0, 1.6f, 0 };
+    s->camera.fov = 70;
+    s->ambient = 0.02f;
+    s->skyColor = WHITE; s->groundColor = WHITE;
+    s->background = BLACK;
+    if (lampIntensity > 0) s->lights.push_back(g3d::Light::point({ 0, 1.6f, 0 }, WHITE, lampIntensity, 40));
+    g3d::Downfall d;
+    d.enabled = true; d.kind = g3d::Precipitation::Rain; d.intensity = 1;
+    d.rainDensity = 120; d.rainSize = { 0.02f, 0.03f };
+    d.farLayer = false; d.splashes = false; d.radius = 40; d.opacity = 1;
+    s->precipitation = d;
+    Image img = look(s, W, H, 5);
+    const std::vector<float> v = lumaOf(img);
+    if (std::getenv("RMTN_W3_DEBUG") && lampIntensity > 0) ExportImage(img, "out/w3/lamp_test.png");
+    UnloadImage(img);
+    const g3d::Camera& cam = s->camera;
+    const Vector3 f = Vector3Normalize(Vector3Subtract(cam.target, cam.position)), r = Vector3Normalize(Vector3CrossProduct(f, cam.upVector)), u = Vector3CrossProduct(r, f);
+    const float ty = std::tan(cam.fov * 0.5f * DEG2RAD), tx = ty * (float)W / H, S = g3d::Downfall::kTile, Hc = g3d::Downfall::kCell;
+    double sum[2] = {}; int n[2] = {};
+    for (int iy = -1; iy <= 0; iy++)
+        for (int iz = -6; iz <= 2; iz++)
+            for (int ix = -6; ix <= 5; ix++)
+                for (uint32_t k = 0; k < d.dropsPerTile(); k++) {
+                    const g3d::Downfall::Drop p = d.drop(ix, iy, iz, k, 5 / 30.0);
+                    if (p.rank > 0.5f) continue;
+                    const Vector3 rel = Vector3Subtract(p.position, cam.position);
+                    const float z = Vector3DotProduct(rel, f);
+                    if (z < 2) continue;
+                    const float sx = Vector3DotProduct(rel, r) / (z * tx), sy = Vector3DotProduct(rel, u) / (z * ty);
+                    const int px = (int)((sx * 0.5f + 0.5f) * W), py = (int)((0.5f - sy * 0.5f) * H);
+                    if (px < 4 || py < 4 || px >= W - 4 || py >= H - 4) continue;
+                    const float dl = Vector3Distance(p.position, { 0, 1.6f, 0 });
+                    const float dc = Vector3Length(rel);                  // both groups lie 8-12 m from the camera, so that distance does not decide the brightness
+                    if (dc < 8.f || dc > 12.f) continue;
+                    const int bin = dl < 2 ? 0 : (dl > 8 ? 1 : -1);
+                    if (bin < 0) continue;
+                    float best = 0;
+                    for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) best = std::max(best, v[(size_t)(py + dy) * W + px + dx]);
+                    if (std::getenv("RMTN_W3_DEBUG") && lampIntensity > 0 && bin == 0) { static double hs[4]; static int hn[4]; const int hb = std::min(3, (int)(dl * 2)); hs[hb] += best; hn[hb]++; if (hn[0] + hn[1] + hn[2] + hn[3] == 99999) std::printf("lamp bins: %.0f(%d) %.0f(%d) %.0f(%d) %.0f(%d)\n", hs[0] / std::max(hn[0], 1), hn[0], hs[1] / std::max(hn[1], 1), hn[1], hs[2] / std::max(hn[2], 1), hn[2], hs[3] / std::max(hn[3], 1), hn[3]); }
+                    sum[bin] += best; n[bin]++;
+                }
+    const float a = n[0] ? (float)(sum[0] / n[0]) : 0.f, b = n[1] ? (float)(sum[1] / n[1]) : 1.f;
+    if (nearMean) *nearMean = a;
+    if (farMean) *farMean = b;
+    if (nNear) *nNear = n[0];
+    if (nFar) *nFar = n[1];
+    return a / std::max(b, 1.f);
+}
+static void lampGlints() {
+    float a, b, ao, bo; int na, nb, nao, nbo;
+    const float ratio = lampRatio(3.2f, &a, &b, &na, &nb), off = lampRatio(0, &ao, &bo, &nao, &nbo);
+    std::printf("[weather] lamp in rain: mean streak brightness %.1f within 2 m of the lamp (%d streaks), %.1f beyond 8 m (%d): ratio %.2f; lamp off: %.1f vs %.1f, ratio %.2f\n",
+                a, na, b, nb, ratio, ao, bo, off);
+    CHECK(na > 12 && nb > 40);
+    CHECK(ratio >= 2.5f);
+    CHECK(off < 1.6f);
+}
+
+// (k) A flake is lit, not glowing: a flake's colour on a grey sky is the lit-white expectation from the scene's own light (albedo 0.9,
+// the sky's ambient and a white light straight behind the camera), within 15% and not above it; the mean chroma under white light is low.
+// Break: an additive glow on the flake (it lands above the expectation) or a warm tint (chroma).
+static void snowIsLit() {
+    const float I = 0.3f, amb = 0.25f;
+    g3d::Downfall d = testRain(0.3f);
+    d.kind = g3d::Precipitation::Snow;
+    d.opacity = 1;
+    d.flutter = 0;
+    auto s = dropScene(d);
+    s->ambient = amb;
+    s->skyColor = { 160, 160, 160, 255 }; s->groundColor = { 160, 160, 160, 255 };
+    s->background = { 150, 150, 150, 255 };
+    g3d::Light l = g3d::Light::directional({ 0, 1.5f, 8 }, WHITE, I);
+    l.target = { 0, 1.5f, 0 };
+    s->lights.push_back(l);
+    Image img = look(s, PW, PH, 5);
+    const float skyLin = std::pow(160 / 255.f, 2.2f) * amb;
+    const float expectLin = 0.9f * (skyLin + I);
+    const float expectDisp = std::pow(expectLin, 1 / 2.2f) * 255;
+    std::vector<float> ys; double chroma = 0, lum = 0; int n = 0;
+    for (int iy = -1; iy <= 0; iy++)
+        for (int iz = -1; iz <= 1; iz++)
+            for (int ix = -2; ix <= 1; ix++)
+                for (uint32_t k = 0; k < d.dropsPerTile(); k++) {
+                    const g3d::Downfall::Drop p = d.drop(ix, iy, iz, k, 5 / 30.0);
+                    const float dist = Vector3Distance(p.position, { 0, 1.5f, 8 });
+                    if (p.rank > 0.5f || dist < 3.f || p.position.z > 5.5f) continue;
+                    const int px = (int)std::floor(PW * 0.5f + p.position.x * P_PPM), py = (int)std::floor(PH * 0.5f - (p.position.y - 1.5f) * P_PPM);
+                    if (px < 12 || py < 12 || px >= PW - 12 || py >= PH - 12) continue;
+                    const Color c = GetImageColor(img, px, py);
+                    // undo the blend over the sky: pixel = 0.9 flake + 0.1 sky
+                    float ch[3] = { (c.r - 15.f) / 0.9f, (c.g - 15.f) / 0.9f, (c.b - 15.f) / 0.9f };
+                    ys.push_back(0.2126f * ch[0] + 0.7152f * ch[1] + 0.0722f * ch[2]);
+                    chroma += std::max({ ch[0], ch[1], ch[2] }) - std::min({ ch[0], ch[1], ch[2] });
+                    lum += ys.back(); n++;
+                }
+    UnloadImage(img);
+    std::sort(ys.begin(), ys.end());
+    const float med = ys.empty() ? 0.f : ys[ys.size() / 2];
+    const float meanChroma = n ? (float)(chroma / std::max(lum, 1.0)) : 1.f;
+    std::printf("[weather] snow lit: median flake colour %.1f of 255 over %d flakes, expected %.1f (albedo 0.9 x (sky + light)); chroma %.3f of the mean\n", med, n, expectDisp, meanChroma);
+    CHECK(n > 25);
+    CHECK(med > 0.85f * expectDisp && med < 1.15f * expectDisp);
+    CHECK(meanChroma < 0.06f);
+}
+
+// (l) Splashes are sparks, not blobs: seen from a porch-like camera at 1080p each splash is a few bright pixels (a sparse crown and a thin
+// ring), so the mean area of a connected splash component is at most 6 px and no splash pixel is more than 60% opaque. The alpha comes
+// from rendering over a white and a black ground (unlit): pixel = c a + ground (1 - a), so a = 1 - (white - black) / 255. Break: the old blobs (min 5 px, alpha 0.8).
+static void splashesAreSparks() {
+    constexpr int W = 1920, H = 1080;
+    int frame = 11;
+    auto render = [&](bool splashes, Color bg, std::vector<float>& out) {
+        auto s = std::make_shared<g3d::Scene>();
+        s->camera.position = { 0, 1.55f, 10 };
+        s->camera.target = { 0, -3.3f, 0 };
+        s->camera.fov = 48;
+        s->ambient = 0.6f;
+        s->skyColor = WHITE; s->groundColor = WHITE;
+        s->background = bg;
+        g3d::Material ground;
+        ground.color = bg; ground.unlit = true;
+        s->add(g3d::Geometry::plane(300, 300), ground);
+        g3d::Downfall d;
+        d.enabled = true; d.kind = g3d::Precipitation::Rain; d.intensity = 1;
+        d.splashes = splashes; d.farLayer = false; d.rainDensity = 0.4f;     // a few splashes a square metre, so they seldom touch
+        s->precipitation = d;
+        Image img = look(s, W, H, frame);
+        out.resize((size_t)W * H);
+        for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) out[(size_t)y * W + x] = (float)GetImageColor(img, x, y).g;
+        UnloadImage(img);
+    };
+    int comps = 0; long long area = 0, litPx = 0; float maxA = 0; std::vector<float> alphas;
+    for (frame = 11; frame < 11 + 14 * 5; frame += 5) {                // fourteen frames, so there are enough splashes to measure
+    std::vector<float> onW, onB, offW, offB;
+    render(true, WHITE, onW); render(true, BLACK, onB); render(false, WHITE, offW); render(false, BLACK, offB);
+    std::vector<float> a((size_t)W * H);
+
+    for (size_t i = 0; i < a.size(); i++) {
+        const float on = 1 - (onW[i] - onB[i]) / 255.f, off = 1 - (offW[i] - offB[i]) / 255.f;
+        a[i] = on - off;
+        maxA = std::max(maxA, a[i]);
+        if (a[i] > 0.03f) alphas.push_back(a[i]);
+    }
+    std::vector<char> seen(a.size(), 0);
+    if (std::getenv("RMTN_W3_DEBUG")) { Image dbg = GenImageColor(W, H, BLACK); for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) { const int v = (int)std::clamp(a[(size_t)y * W + x] * 1000.f, 0.f, 255.f); ImageDrawPixel(&dbg, x, y, { (unsigned char)v, (unsigned char)v, (unsigned char)v, 255 }); } ExportImage(dbg, "out/w3/spark_alpha.png"); UnloadImage(dbg); }
+    std::vector<int> stack;
+    for (int y = H / 10; y < H * 3 / 5; y++)           // the ground 3-13 m away, where a porch camera sees the path
+        for (int x = 0; x < W; x++) {
+            const size_t i = (size_t)y * W + x;
+            if (a[i] <= 0.03f) continue;
+            litPx++;
+            if (seen[i]) continue;
+            comps++;
+            stack.assign(1, (int)i); seen[i] = 1;
+            while (!stack.empty()) {
+                const int j = stack.back(); stack.pop_back();
+                area++;
+                const int jx = j % W, jy = j / W;
+                for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) {
+                    const int nx = jx + dx, ny = jy + dy;
+                    if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+                    const size_t k = (size_t)ny * W + nx;
+                    if (!seen[k] && a[k] > 0.03f) { seen[k] = 1; stack.push_back((int)k); }
+                }
+            }
+        }
+    }
+    const float mean = comps ? (float)area / comps : 0.f;
+    std::printf("[weather] splash sparks at 1080p: %d components, mean area %.1f px, %lld splash pixels, strongest splash alpha %.2f\n", comps, mean, litPx, maxA);
+    CHECK(comps > 25);
+    CHECK(mean <= 6.f);
+    std::sort(alphas.begin(), alphas.end());
+    const float p999 = alphas.empty() ? 0.f : alphas[(size_t)((alphas.size() - 1) * 0.999)];
+    std::printf("[weather] splash alpha: 99.9th percentile %.2f, maximum %.2f (the maximum is where a splash's ring and droplets, or two splashes, overlap)\n", p999, maxA);
+    CHECK(p999 <= 0.6f);
+    CHECK(maxA <= 0.8f);
+}
+
+// (m) Far snow is a veil, not speckle: with the whole snowfall on against a black sky, the per-pixel standard deviation that snow adds,
+// on a 4 x 4 downsample, stays under a bound. Break: sub-pixel flakes clamped to a 2 px dot (the old rule), which is all speckle.
+static constexpr double SNOW_VEIL_SD = 4.5;     // fine snow: 2.4 as built, 7.3 with every sub-pixel flake drawn as an opaque 2 px dot
+static void snowIsAVeil() {
+    constexpr int W = 960, H = 540;
+    auto render = [&](bool on) {
+        auto s = std::make_shared<g3d::Scene>();
+        s->camera.position = { 0, 1.6f, 0 };
+        s->camera.target = { 0, 1.6f, -10 };
+        s->camera.fov = 50;
+        s->ambient = 0.25f;
+        s->skyColor = { 160, 160, 160, 255 }; s->groundColor = { 160, 160, 160, 255 };
+        s->background = BLACK;
+        g3d::Downfall d;
+        d.enabled = on; d.kind = g3d::Precipitation::Snow; d.intensity = 1;
+        d.splashes = false;
+        d.snowSize = { 0.002f, 0.005f };               // fine snow: almost every flake is under a pixel
+        s->precipitation = d;
+        Image img = look(s, W, H, 9);
+        std::vector<float> v = lumaOf(img);
+        UnloadImage(img);
+        return v;
+    };
+    const std::vector<float> on = render(true), off = render(false);
+    const int w4 = W / 4, h4 = H / 4;
+    std::vector<double> d4((size_t)w4 * h4, 0.0);
+    for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) d4[(size_t)(y / 4) * w4 + x / 4] += (on[(size_t)y * W + x] - off[(size_t)y * W + x]) / 16.0;
+    double mean = 0, var = 0;
+    for (double v : d4) mean += v;
+    mean /= d4.size();
+    for (double v : d4) var += (v - mean) * (v - mean);
+    const double sd = std::sqrt(var / d4.size());
+    std::printf("[weather] snow veil: mean added %.1f, per-pixel stddev on the 4x downsample %.1f (of 255)\n", mean, sd);
+    CHECK(sd < SNOW_VEIL_SD);
+}
+
+static void precipitation() {
+    roofKeepsRainOff();
+    intensityScales();
+    windSlants();
+    worldFixed();
+    streakLength();
+    mirrorsRain();
+    snowSways();
+    precipitationPurity();
+    precipitationOff();
+    splashesLand();
+    lampGlints();
+    snowIsLit();
+    splashesAreSparks();
+    snowIsAVeil();
+}
+
 int main() try {
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
@@ -2773,6 +3522,13 @@ int main() try {
         shutdownGraphics(); CloseWindow(); return 0;
     }
     if (std::getenv("RMTN_W6_TIMING")) { waterTiming(); shutdownGraphics(); CloseWindow(); return 0; }
+    if (std::getenv("RMTN_W3_TIMING")) { precipitationTiming(); shutdownGraphics(); CloseWindow(); return 0; }
+    if (std::getenv("RMTN_W3_ONLY")) {
+        precipitation();
+        shutdownGraphics(); CloseWindow();
+        std::printf(failures ? "[weather] %d failures\n" : "[weather] all passed\n", failures);
+        return failures ? 1 : 0;
+    }
     if (std::getenv("RMTN_W6_ONLY")) {
         waterReflections();
         shutdownGraphics(); CloseWindow();
@@ -2805,6 +3561,7 @@ int main() try {
     nearDetail();
     noBandsInHeight();
     waterReflections();
+    precipitation();
     shutdownGraphics();
     CloseWindow();
     std::printf(failures ? "[weather] %d failures\n" : "[weather] all passed\n", failures);

@@ -353,6 +353,10 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   in it; refraction looks through to the bed along the Snell ray with absorption over the real path.
   Off by default, and Off means Off (the pixels equal the previous release's); turning it on
   changes old water scenes on purpose. `examples/scripts/lake_reflections.as`.
+* GPU rain, snow and sleet at scale (`Scene::precipitation`, `docs/weather.md`): drops from a hash
+  in fixed world tiles, streaks as long as the shutter and slanted by the wind, lit by the scene's
+  lights, stopped by roofs and trees through a top-down depth map, with splashes where rain lands.
+  Over 200 000 drops in a 1080p view for about 1.7 ms. Off by default; `examples/scripts/porch_rain.as`.
 * 2D vegetation (`flora2d::`, drawn with the node's context, so flat compositions and
   `g3d::Surface` alike): grass along a ground line, tufts, a meadow filling a shape (smaller
   toward its back), shrubs, and branching trees (oak, birch, pine; a silhouette option for

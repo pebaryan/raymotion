@@ -86,7 +86,7 @@ no pop across 0.5 (checked against the step at 0.46); overcast dims and greys; p
 fetch-limited heights from a pond to the open sea; no periodic peak in the autocorrelation
 of grazing water (filter on 2.3, off 4.7), with the distant mean conserved against 4×
 supersampling. Not driven yet: a tree's baked flutter amplitude, the gust phase under a
-changing wind, and the fixed box of `fx::rain3d` (W3 replaces it). `mix` is continuous: no frame-
+changing wind, and the fixed box of `fx::rain3d` (W3, `Scene::precipitation`, replaces it for large scenes). `mix` is continuous: no frame-
   to-frame jump larger than the rate of change. A preset change with no weather set changes
   no pixels (old scenes render unchanged).
 
@@ -171,6 +171,14 @@ in a volume that follows the camera, so rain can fill a valley.
   - Moving the camera does not change the rain's world positions: the volume follows the camera
     but drops stay put.
   - Determinism.
+
+**Done 2026-11-26 (W4's settling snow and wet ground are still open).** `Scene::precipitation`
+(`g3d::Downfall`): rain, snow and sleet from a hash in fixed world tiles, streaks of speed x shutter
+slanted by the wind, lit by the scene's lights, a far layer for curtains, a top-down occlusion map
+along the fall, and splashes. Script object `precipitation`; `examples/scripts/porch_rain.as`;
+checks in tests/weather_tests.cpp. Left out: drops do not refract the background, lightning does not
+light them, fields (grass) and particles do not shelter rain, and the GPU drop count is predicted
+by the CPU mirror, not read back.
 
 ## W4. Wet ground and settling snow
 

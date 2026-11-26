@@ -578,6 +578,16 @@ drift come from it; `"ownWeather": true` keeps the clouds' own. `flash` (`positi
 the per-pixel jitter and entry refinement off (it exists to show the banding they hide). `denoise: false` swaps the blue noise and bilateral filter for white noise and a point sample, and `extruded: true` restores the old 2D-coverage extrusion (both exist to show what they fix). The Sky's flat
 cloud layer is not drawn while these are on, and the image-based lighting stays free of clouds. Without a
 `clouds` object, or with `"enabled": false`, no pixel changes. See `docs/weather.md`.
+A scene descriptor's `precipitation` object draws GPU rain, snow or sleet (`docs/weather.md`, `examples/scripts/porch_rain.as`).
+It is off without the object or with `"enabled": false`. Kind, intensity and wind come from `weather` (rain
+follows the wind by 0.5, snow by 0.3) unless `"ownWeather": true` (then `kind`: `rain`, `snow`, `sleet`, and
+`intensity` 0..1 are its own) or `"ownWind": true` (then `windDirection` in degrees and `windSpeed` in m/s). Keys:
+`fps` (30; the frame rate the time comes from), `rainSpeed` `[6, 9]` m/s, `rainSize` `[0.0005, 0.004]` m,
+`snowSpeed` `[0.5, 1.5]`, `snowSize` `[0.01, 0.03]`, `rainDensity` (90) and `snowDensity` (150) drops per cubic metre at
+intensity 1, `flutter` (0.25 m of snowflake sway), `radius` (30 m, the near volume), `farRadius` (150) with `farLayer` (true) and
+`farDensity` (0.15), `exposure` (1/60 s: the streak length is speed x exposure), `opacity` (1), `occlusion` (true; roofs and
+trees stop the rain) with `occlusionSize` (1024 texels), `splashes` (true, rain only) with `splashRadius` (12 m), `seed` (1) and
+`worldFixed` (true; false carries the drops with the camera, which exists to show why not). Ranges are `[min, max]`; a bad value is an error.
 A scene descriptor's `environment` is an image path (equirectangular PNG/JPG/HDR), or an object
 that gives a cube skybox: `{"faces": [px, nx, py, ny, pz, nz]}` (six files in the order +x, -x,
 +y, -y, +z, -z) or `{"cross": "sky.png"}` (one horizontal cross, a 4x3 grid: `+y` above column 1,

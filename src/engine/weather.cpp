@@ -199,5 +199,78 @@ Vector2 Clouds::travel(const Weather& w, double seconds) const {
     return { (float)(drift.x * seconds), (float)(drift.y * seconds) };
 }
 
+// ---- precipitation (Downfall): the CPU twin of the shader in precip_glsl.hpp. Keep them in step.
+namespace {
+uint32_t dropHash(uint32_t x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
+float dropRand(uint32_t x) { return (float)(dropHash(x) >> 8) / 16777216.f; }
+float fract1(float x) { return x - std::floor(x); }
+} // namespace
+
+Vector2 Downfall::slant(bool snow) const {
+    const bool flake = snow && kind == Precipitation::Snow;         // sleet falls at the rain's slant
+    const Vector2 sp = flake ? snowSpeed : rainSpeed;
+    const float mean = std::max(0.5f * (sp.x + sp.y), 0.1f);
+    const float k = std::max(windSpeed, 0.f) * (flake ? Weather::kSnowFollow : Weather::kRainFollow) / mean;
+    const float d = windDirection * DEG2RAD;
+    return { std::cos(d) * k, std::sin(d) * k };
+}
+
+uint32_t Downfall::dropsPerTile() const {
+    const float density = kind == Precipitation::Snow ? snowDensity : kind == Precipitation::Sleet ? 0.5f * (rainDensity + snowDensity) : rainDensity;
+    return (uint32_t)std::max(0.f, std::round(density * kTile * kTile * kCell));
+}
+uint32_t Downfall::farDropsPerTile() const {
+    return (uint32_t)std::max(0.f, std::round(farDensity * kFarTile * kFarTile * kFarCell));
+}
+
+Downfall::Drop Downfall::drop(int ix, int iy, int iz, uint32_t k, double seconds, bool faraway) const {
+    const float S = faraway ? kFarTile : kTile, Hc = faraway ? kFarCell : kCell;
+    const uint32_t n = faraway ? farDropsPerTile() : dropsPerTile();
+    const uint32_t sd = faraway ? seed ^ 0x9E3779B9u : seed;
+    const uint32_t ck = dropHash((uint32_t)ix * 73856093u ^ (uint32_t)iz * 19349663u ^ (uint32_t)iy * 83492791u ^ sd * 2654435761u);
+    const uint32_t h = dropHash(k * 2654435769u ^ ck);
+    const float r1 = dropRand(h), r2 = dropRand(h + 1u), r3 = dropRand(h + 2u), r4 = dropRand(h + 3u);
+    const float r5 = dropRand(h + 4u), r6 = dropRand(h + 5u), r7 = dropRand(h + 6u), r8 = dropRand(h + 7u);
+    Drop d;
+    d.rank = ((float)k + 0.5f) / std::max((float)n, 1.f);
+    d.snow = kind == Precipitation::Snow || (kind == Precipitation::Sleet && r5 < 0.4f);
+    const Vector2 sp = d.snow ? snowSpeed : rainSpeed, sz = d.snow ? snowSize : rainSize;
+    const float v = d.snow ? sp.x + (sp.y - sp.x) * r6 : sp.x + (sp.y - sp.x) * r3;
+    d.diameter = sz.x + (sz.y - sz.x) * r3 * r3;
+    const Vector2 a = slant(d.snow);
+    const float s = (float)seconds;
+    const float f = fract1(s * v / Hc + r4);
+    d.phase = f;
+    const float hgt = Hc * (1 - f);
+    const float qx = ((float)ix + r1) * S, qz = ((float)iz + r2) * S;
+    Vector3 pos{ qx - a.x * hgt, (float)iy * Hc + hgt, qz - a.y * hgt };
+    Vector3 vel{ a.x * v, -v, a.y * v };
+    if (d.snow) {
+        const float w1 = 1.f + r1, w2 = 1.3f * (1.f + r2), p1 = r7 * 6.2831853f, p2 = r8 * 6.2831853f;
+        pos.x += flutter * std::sin(s * w1 + p1);
+        pos.z += flutter * std::sin(s * w2 + p2);
+        vel.x += flutter * w1 * std::cos(s * w1 + p1);
+        vel.z += flutter * w2 * std::cos(s * w2 + p2);
+    }
+    d.position = pos;
+    d.velocity = vel;
+    return d;
+}
+
+Downfall inWeather(const Downfall& d, const Weather& w) {
+    Downfall k = d;
+    if (!w.enabled) return k;
+    if (!d.ownWeather) {
+        k.kind = w.precipitation.kind;
+        k.intensity = std::clamp(w.precipitation.intensity, 0.f, 1.f);
+    }
+    if (!d.ownWind) {
+        k.windDirection = w.wind.direction;
+        k.windSpeed = w.wind.speed;
+        k.fps = w.fps;
+    }
+    return k;
+}
+
 } // namespace g3d
 } // namespace rmtn

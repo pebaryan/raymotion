@@ -101,7 +101,7 @@ A few of these in plain terms:
   growing tree's tilt node) and as how fast the loop runs; the loop's own amplitude cannot change.
 * **Gust fronts under a changing wind.** Their phase is gust speed x t in the shader, as for a
   `Field` whose `gustSpeed` is animated. Only the clouds have `windRun`.
-* **Particles in the box.** `rain3d` and `snow3d` fill a fixed box; a strong wind carries the drops
+* **Particles in the box.** `rain3d` and `snow3d` fill a fixed box (`Scene::precipitation` replaces them for large scenes); a strong wind carries the drops
   sideways out of it. Give the emitter a wider area than the view.
 * **Objects that move in the wind on their own** (cloth and rope in `physics::`, 2D `flora2d::`
   and `fx::rain`) have their own wind settings and are not driven.
@@ -228,6 +228,60 @@ about 0.3 ms. Culling against the mirrored frustum and skipping the pass when no
 small scene pays under 1 ms.
 
 `examples/scripts/lake_reflections.as` is a calm lake at dusk that breaks up as the wind rises.
+
+## Rain and snow at scale
+
+`Scene::precipitation` (`g3d::Downfall`, include/rmtn/scene3d.hpp) draws rain, snow or sleet on the
+GPU the way the grass `Field` is drawn: nothing is stored. Space is cut into fixed world tiles
+(5 m wide, 10 m tall; 30 m and 60 m for the far layer). A drop is a hash of its tile and its index:
+a place on the tile's base, a size and a speed in the ranges below, and a phase. It falls from there
+and wraps every `cell / speed` seconds, so a frame is a pure function of the frame number and the
+camera. Only tiles within `radius` of the camera are drawn, but a drop's place does not depend on
+where the camera is: move the camera 0.37 m and every drop stays where it was.
+
+* **Kind, intensity, wind.** Taken from `Scene::weather` unless `ownWeather` (kind and intensity) or
+  `ownWind` (direction and speed) is set. Rain follows the wind by 0.5 and snow by 0.3, as
+  `fx::Emitter3D` does (`Weather::kRainFollow`, `kSnowFollow`); the slant is that share of the wind
+  divided by the mean fall speed (4 m/s of wind slants rain by 14.9 degrees). Sleet uses the rain slant.
+* **Rain** is a streak as long as speed x `exposure` (1/60 s, so it matches a 180 degree shutter),
+  slanted by the wind, 0.5-4 mm wide before the pixel minimum, with a hashed spread of brightness. Each streak is lit by the
+  ambient light and by every light in the scene: a forward lobe (a drop between the camera and a lamp glints) on an
+  isotropic share, so a lamp behind the camera lights the drops too. A lamp's share falls as 1 / (1 + d^2) on top of its
+  range, and thickens the streak, so a lamp in rain has a bright cloud of streaks round it. Streaks are fogged.
+* **Snow** is a soft flake, 10-30 mm, falling at 0.5-1.5 m/s with a sideways flutter (`flutter`, in metres). It is lit, not
+  glowing: albedo 0.9 under the sky it is seen against (lifted 1.7x because the baked sky is dimmer than the sky drawn; a quarter of
+  its tint is kept) plus each light by a
+  Lambert-sphere phase and a little forward translucency. Flakes nearer than 2.5 m are larger, softer and fainter (out of focus). A flake under a pixel keeps its coverage, not its size, and thinned far flakes get that coverage back (divided by the keep share), so distant snow is a veil.
+  **Sleet** draws both.
+* **Density.** `rainDensity` (90) and `snowDensity` (150) are the drops per cubic metre at
+  intensity 1. A tile keeps its first `intensity x keep(distance)` share of drops by rank, so a lower
+  intensity removes drops without moving the rest. `keep` falls as `(0.35 radius / d)^1.5` beyond 35%
+  of the radius, which keeps the count per pixel about even. The far layer (`farLayer`, from `radius`
+  to `farRadius`, `farDensity` 0.15 of the near density, longer and thinner streaks) gives curtains
+  in a valley.
+* **Occlusion.** A depth map of the opaque scene is rendered every frame from above, along the line of
+  fall (so slanted by the wind), 1024 texels wide round the camera (`occlusionSize`). A drop that is
+  deeper than the stored depth is dropped. A porch roof keeps what is under it dry, the dry strip shifts
+  with the wind, and trees and bridges shelter what is below them. It needs the objects near the camera
+  to be kept in the draw list even outside the frustum; the radius is `radius + 6 m`. It does not see
+  fields (grass) or particles.
+* **Splashes** (rain only, `splashes`, within `splashRadius` of the camera, measured to where the drop lands): each drop whose
+  landing place is on a surface (found from the same depth map, or the water level) gets, for 0.2 s from the moment it lands, a
+  thin faint expanding ring and five droplets thrown up and out on ballistic arcs. Each droplet is a tiny lit streak along its
+  own velocity (the drops' shutter rule), at most 50% opaque; under a pixel wide it keeps its coverage as less alpha. The ring
+  is hidden when the surface is above the eye (the top of a roof is not seen), and the droplets are dimmed there. They are pure
+  functions of the same hash. Snow has none. Settling snow and wet ground are W4.
+* **Cost.** At 1080p, on a porch-sized scene (a dozen draws), intensity 1: no rain 4.4 ms;
+  near drops 5.3 ms (1.5 M drops submitted, about 245 000 of them in view after the thinning);
+  with the occlusion map 5.4 ms; with the far layer 5.7 ms (2.4 M submitted); with splashes 6.1 ms
+  (575 000 splash quads). Snow with everything on: 5.3 ms. Best of 12 frames, `RMTN_W3_TIMING=1
+  build/raymotion_weather_tests`. The drop count in view is what the CPU mirror
+  (`Downfall::drop`) predicts for that camera; the GPU's own count was not read back.
+* **Limits.** Streaks are billboards, not refracting lenses, so drops do not distort the background.
+  Lightning does not light drops yet. Rain does not enter the water's reflection pass.
+
+`fx::rain3d` and `fx::snow3d` are unchanged and still fill a fixed box. Use `precipitation` for rain
+that has to fill a valley or follow a camera; `examples/scripts/porch_rain.as` is the reference.
 
 ## Script
 

@@ -20,6 +20,7 @@
 extern "C" void UpdateModelAnimationBones(Model model, ModelAnimation anim, float frame);
 
 #include "clouds_glsl.hpp"
+#include "precip_glsl.hpp"
 
 namespace rmtn {
 namespace g3d {
@@ -1387,6 +1388,9 @@ struct Gpu {
         std::vector<float> tileArrival;                                   // and the earliest arrival
     };
     std::map<const Field*, FieldMaps> fields;
+    // GPU rain and snow (Scene::precipitation): the program, a bare VAO (the corners come from gl_VertexID) and the
+    // depth map seen from above along the fall.
+    struct PrecipGpu { Shader sh{}; unsigned int vao = 0; std::map<std::string, int> loc; DepthTarget occ; long long drops = 0, splashes = 0; } pr;
     ::Material material{};               // raylib material: owns a MAX_MATERIAL_MAPS maps array
     unsigned int atlasFbo = 0, atlasTex = 0;
     int atlasSize = 0;
@@ -1429,6 +1433,9 @@ void releaseGpu() {
         if (f.tex) rlUnloadTexture(f.tex);
     if (gpu.fieldVao) rlUnloadVertexArray(gpu.fieldVao);
     if (gpu.fieldVbo) rlUnloadVertexBuffer(gpu.fieldVbo);
+    if (gpu.pr.sh.id) UnloadShader(gpu.pr.sh);
+    if (gpu.pr.vao) rlUnloadVertexArray(gpu.pr.vao);
+    unloadDepthTarget(gpu.pr.occ);
     if (gpu.splat.id) UnloadShader(gpu.splat);
     for (auto& [cloud, s] : gpu.splats) {
         if (s.tex) rlUnloadTexture(s.tex);
@@ -1995,6 +2002,7 @@ struct Cull {
     std::vector<Footprint> footprints;   // what each shadowing light's map covers: the shadowExtent round its target
     float screenH = 1080;                // canvas px the view covers, top to bottom (surfaces)
     float compH = 1080;                  // composition px the view covers, top to bottom (line widths)
+    float rainR = 0;                     // > 0: an object within this many metres (x, z) of the camera stays: it may shelter the rain
 };
 // A Surface object's world matrix: its own, or square to the camera for a billboard (see below).
 Matrix surfaceWorld(const Object3D& o, const Matrix& world, const Camera& cam, float screenH);
@@ -2003,6 +2011,10 @@ Matrix surfaceWorld(const Object3D& o, const Matrix& world, const Camera& cam, f
 // string of spheres no further apart than its radius.
 bool inSight(const Cull& k, Vector3 c, float r, const Camera* from = nullptr) {
     if (!from) from = k.cam;
+    if (k.rainR > 0) {
+        const float dx = c.x - k.cam->position.x, dz = c.z - k.cam->position.z, reach = k.rainR + r;
+        if (dx * dx + dz * dz <= reach * reach) return true;
+    }
     if (visibleSphere(*from, k.aspect, c, r)) return true;
     for (const Vector3& away : k.shadowDirs) {
         float reach = 80;
@@ -4273,6 +4285,236 @@ DepthTarget& copyScene(const DepthTarget& src) {
     return dst;
 }
 
+// ---- precipitation (Scene::precipitation): see Downfall in scene3d.hpp and precip_glsl.hpp
+// The settings of the frame being drawn (with the weather worked in) and what the occlusion pass made.
+struct PrecipFrame {
+    bool on = false;
+    Downfall d;
+    double secs = 0;
+    Vector2 aRain{ 0, 0 }, aSnow{ 0, 0 };
+    bool map = false;                    // the depth map from above was drawn this frame
+    Matrix occVP{}, occInv{};
+    float occRange = 1;
+};
+constexpr float PRECIP_BAND = 0.1f;      // the shader's rank band (BAND)
+
+PrecipFrame precipFrame(const Scene& s) {
+    PrecipFrame f;
+    f.d = inWeather(s.precipitation, s.weather);
+    f.on = f.d.enabled && f.d.kind != Precipitation::None && f.d.intensity > 0.001f && f.d.radius > 1.f;
+    f.secs = frameTime(gpu.frame) / std::max(f.d.fps, 1.f);
+    f.aRain = f.d.slant(false);
+    f.aSnow = f.d.slant(true);
+    return f;
+}
+
+float smooth01(float e0, float e1, float x) {
+    const float u = std::clamp((x - e0) / std::max(e1 - e0, 1e-6f), 0.f, 1.f);
+    return u * u * (3 - 2 * u);
+}
+// The shader's near-layer keep fraction at a distance.
+float precipKeep(const Downfall& d, float dist) {
+    return std::min(1.f, std::pow(0.35f * d.radius / std::max(dist, 0.01f), 1.5f)) * (1 - smooth01(0.75f * d.radius, d.radius, dist));
+}
+
+// Renders the opaque scene's depth from above along the fall into gpu.pr.occ, over `radius` round the camera.
+// It is needed to keep the rain off what is under a roof (occlusion) and to find where drops land (splashes).
+void renderPrecipOcclusion(const Camera& cam, PrecipFrame& f, const std::vector<Item>& items) {
+    const Downfall& d = f.d;
+    const bool splash = d.splashes && d.kind != Precipitation::Snow;
+    if (!f.on || !(d.occlusion || splash)) return;
+    const int N = std::clamp(d.occlusionSize, 128, 4096);
+    DepthTarget& t = waterTarget(gpu.pr.occ, N, N, false);
+    const Vector2 a = d.kind == Precipitation::Snow ? f.aSnow : f.aRain;
+    const Vector3 dir = Vector3Normalize({ a.x, -1.f, a.y });                // the way a drop moves
+    const Vector3 up0 = safeUp(dir, { 0, 1, 0 });
+    const Vector3 right = Vector3Normalize(Vector3CrossProduct(dir, up0)), up = Vector3CrossProduct(right, dir);
+    const float E = d.radius + 4.f, texel = 2 * E / (float)N;
+    // The map's centre moves in whole texels, so a roof's edge does not crawl as the camera moves.
+    Vector3 target = cam.position;
+    const float cx = Vector3DotProduct(target, right), cy = Vector3DotProduct(target, up);
+    target = Vector3Add(target, Vector3Add(Vector3Scale(right, std::floor(cx / texel) * texel - cx), Vector3Scale(up, std::floor(cy / texel) * texel - cy)));
+    const float back = 80.f, zNear = 0.5f, zFar = back + 120.f;
+    rlDrawRenderBatchActive();
+    rlEnableFramebuffer(t.fbo);
+    rlViewport(0, 0, N, N);
+    rlEnableDepthTest();
+    rlEnableDepthMask();
+    rlClearColor(0, 0, 0, 0);
+    rlClearScreenBuffers();
+    rlDisableBackfaceCulling();                      // a thin roof is a roof from either side
+    Vector4 params;
+    f.occVP = loadTileCamera(Vector3Subtract(target, Vector3Scale(dir, back)), target, up0, false, E, zNear, zFar, N, params);
+    f.occInv = MatrixInvert(f.occVP);
+    f.occRange = zFar - zNear;
+    for (const Item& it : items)
+        if (!it.particle && !it.tiles && opacityOf(it) >= 1.f) drawItem(it, Pass::Depth);
+    rlDrawRenderBatchActive();
+    rlEnableBackfaceCulling();
+    f.map = true;
+}
+
+struct PrecipTile { int ix, iy, iz, n; };
+
+// The tiles of one layer (0 near, 1 far, 2 splashes) that can be seen, each with how many of its drops to draw.
+void gatherPrecip(const Downfall& d, Vector2 a, const Camera& cam, float aspect, int layer, std::vector<PrecipTile>& out) {
+    const bool farL = layer == 1;
+    const float S = farL ? Downfall::kFarTile : Downfall::kTile, Hc = farL ? Downfall::kFarCell : Downfall::kCell;
+    const uint32_t full = farL ? d.farDropsPerTile() : d.dropsPerTile();
+    const float rMax = layer == 0 ? d.radius : layer == 1 ? d.farRadius : d.splashRadius, rMin = farL ? 0.7f * d.radius : 0.f;
+    const float I = std::clamp(d.intensity, 0.f, 1.f);
+    const Vector3 c0 = cam.position;
+    const float yLo = c0.y - (farL ? 0.6f * d.farRadius : rMax), yHi = c0.y + (farL ? 0.4f * d.farRadius : rMax);
+    const int iy0 = (int)std::floor(yLo / Hc), iy1 = (int)std::floor(yHi / Hc);
+    const int ix0 = (int)std::floor((c0.x - rMax + std::min(a.x, 0.f) * Hc) / S) - 1, ix1 = (int)std::floor((c0.x + rMax + std::max(a.x, 0.f) * Hc) / S) + 1;
+    const int iz0 = (int)std::floor((c0.z - rMax + std::min(a.y, 0.f) * Hc) / S) - 1, iz1 = (int)std::floor((c0.z + rMax + std::max(a.y, 0.f) * Hc) / S) + 1;
+    const float rad = std::sqrt(std::pow(S * 0.5f + std::fabs(a.x) * Hc * 0.5f, 2.f) + Hc * Hc * 0.25f + std::pow(S * 0.5f + std::fabs(a.y) * Hc * 0.5f, 2.f));
+    for (int iy = iy0; iy <= iy1; iy++)
+        for (int iz = iz0; iz <= iz1; iz++)
+            for (int ix = ix0; ix <= ix1; ix++) {
+                const Vector3 c{ ((float)ix + 0.5f) * S - a.x * Hc * 0.5f, ((float)iy + 0.5f) * Hc, ((float)iz + 0.5f) * S - a.y * Hc * 0.5f };
+                const float dist = Vector3Distance(c, c0);
+                if (dist - rad > rMax || (farL && dist + rad < rMin)) continue;
+                if (!visibleSphere(cam, aspect, c, rad)) continue;
+                const float dn = std::max(0.f, dist - rad);
+                const float keep = layer == 0 ? precipKeep(d, dn) : layer == 1 ? 1.f : 1 - smooth01(0.5f * d.splashRadius, d.splashRadius, dn);
+                const float m = I * keep;
+                const int n = std::min((int)full, (int)std::ceil((float)full * std::min(1.f, m * (1 + PRECIP_BAND))));
+                if (n > 0) out.push_back({ ix, iy, iz, n });
+            }
+}
+
+// Draws the rain, snow and splashes of the frame into the bound target (depth tested, not written).
+void drawPrecipitation(const Scene& s, const Camera& cam, PrecipFrame& f, const Matrix& view, const Matrix& proj, int vw, int vh,
+                       Texture2D envTex) {
+    const Downfall& d = f.d;
+    Gpu::PrecipGpu& pg = gpu.pr;
+    pg.drops = pg.splashes = 0;
+    if (!pg.sh.id) {
+        pg.sh = LoadShaderFromMemory(PRECIP_VS, PRECIP_FS);
+        pg.vao = rlLoadVertexArray();
+        rlEnableVertexArray(pg.vao);
+        rlDisableVertexArray();
+    }
+    const Shader& sh = pg.sh;
+    auto L = [&](const char* name) {
+        auto it = pg.loc.find(name);
+        if (it != pg.loc.end()) return it->second;
+        return pg.loc[name] = GetShaderLocation(sh, name);
+    };
+    auto setF = [&](const char* n, float v) { SetShaderValue(sh, L(n), &v, SHADER_UNIFORM_FLOAT); };
+    auto setI = [&](const char* n, int v) { SetShaderValue(sh, L(n), &v, SHADER_UNIFORM_INT); };
+    auto set2 = [&](const char* n, float x, float y) { const float v[2] = { x, y }; SetShaderValue(sh, L(n), v, SHADER_UNIFORM_VEC2); };
+    auto set3 = [&](const char* n, Vector3 v) { SetShaderValue(sh, L(n), &v, SHADER_UNIFORM_VEC3); };
+    auto set4 = [&](const char* n, float x, float y, float z, float w) { const float v[4] = { x, y, z, w }; SetShaderValue(sh, L(n), v, SHADER_UNIFORM_VEC4); };
+
+    const float aspect = (float)vw / (float)vh;
+    std::vector<PrecipTile> nearT, farT, splashT;
+    const bool snowOnly = d.kind == Precipitation::Snow;
+    gatherPrecip(d, snowOnly ? f.aSnow : f.aRain, cam, aspect, 0, nearT);
+    if (d.farLayer && d.farRadius > d.radius) gatherPrecip(d, snowOnly ? f.aSnow : f.aRain, cam, aspect, 1, farT);
+    const bool splashOn = d.splashes && !snowOnly && f.map;
+    if (splashOn) gatherPrecip(d, f.aRain, cam, aspect, 2, splashT);
+    if (nearT.empty() && farT.empty() && splashT.empty()) return;
+
+    rlDrawRenderBatchActive();
+    rlDisableBackfaceCulling();
+    rlDisableDepthMask();
+    rlSetBlendFactorsSeparate(RL_SRC_ALPHA, RL_ONE_MINUS_SRC_ALPHA, RL_ONE, RL_ONE_MINUS_SRC_ALPHA, RL_FUNC_ADD, RL_FUNC_ADD);
+    BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+    rlEnableShader(sh.id);
+
+    // What does not change from tile to tile.
+    const Vector3 look = Vector3Subtract(cam.target, cam.position);
+    const Vector3 fwd = Vector3Normalize(look);
+    const Vector3 right = Vector3Normalize(Vector3CrossProduct(fwd, safeUp(look, cam.upVector))), upv = Vector3CrossProduct(right, fwd);
+    SetShaderValueMatrix(sh, L("prVP"), MatrixMultiply(view, proj));
+    set3("prCam", cam.position); set3("prForward", fwd); set3("prRight", right); set3("prUp", upv);
+    setI("prOrtho", cam.orthographic ? 1 : 0);
+    setF("prPixel", cam.orthographic ? cam.orthoHeight / (float)vh : 2 * std::tan(cam.fov * 0.5f * DEG2RAD) / (float)vh);
+    setF("prSecs", (float)f.secs);
+    setI("prSeed", (int)d.seed);
+    setI("prKind", d.kind == Precipitation::Rain ? 0 : d.kind == Precipitation::Snow ? 1 : 2);
+    set2("prAr", f.aRain.x, f.aRain.y); set2("prAs", f.aSnow.x, f.aSnow.y);
+    set4("prRainP", d.rainSpeed.x, d.rainSpeed.y, d.rainSize.x, d.rainSize.y);
+    set4("prSnowP", d.snowSpeed.x, d.snowSpeed.y, d.snowSize.x, d.snowSize.y);
+    setF("prFlutter", d.flutter); setF("prExposure", std::max(d.exposure, 1e-4f));
+    setF("prIntensity", std::clamp(d.intensity, 0.f, 1.f)); setF("prOpacity", std::clamp(d.opacity, 0.f, 2.f));
+    const float trueDensity = d.kind == Precipitation::Snow ? d.snowDensity : d.rainDensity;
+    set4("prRange", d.radius, 0.35f * d.radius, d.farRadius, std::max(trueDensity / std::max(d.farDensity, 1e-3f), 1.f));
+    setF("prSplashR", d.splashRadius);
+    set2("prQShift", d.worldFixed ? 0.f : cam.position.x, d.worldFixed ? 0.f : cam.position.z);
+    setI("prOccOn", f.map ? (d.occlusion ? 1 : 2) : 0);
+    if (f.map) {
+        SetShaderValueMatrix(sh, L("prOccVP"), f.occVP);
+        SetShaderValueMatrix(sh, L("prOccInv"), f.occInv);
+        setF("prOccRange", f.occRange);
+    }
+    setI("prOcc", REFR_COLOR_SLOT);
+    bindUnit(REFR_COLOR_SLOT, f.map ? gpu.pr.occ.depth : 0);
+    setF("prWater", s.water.enabled ? waterOf(s).level : -1e9f);
+    // Lights, sky and fog as the lit shader gets them.
+    const int count = std::min((int)s.lights.size(), MAX_LIGHTS);
+    int type[MAX_LIGHTS] = {};
+    Vector3 pos[MAX_LIGHTS] = {}, dir[MAX_LIGHTS] = {}, col[MAX_LIGHTS] = {};
+    float range[MAX_LIGHTS] = {}, cin[MAX_LIGHTS] = {}, cosOut[MAX_LIGHTS] = {};
+    for (int i = 0; i < count; i++) {
+        const Light& l = s.lights[(size_t)i];
+        type[i] = (int)l.type; pos[i] = l.position;
+        const Vector3 dl = Vector3Subtract(l.target, l.position);
+        dir[i] = Vector3Length(dl) > 1e-6f ? Vector3Normalize(dl) : Vector3{ 0, -1, 0 };
+        col[i] = linear(l.color, l.intensity);
+        range[i] = l.range;
+        const float outer = std::clamp(l.outerAngle, 0.1f, 89.9f), inner = std::clamp(l.innerAngle, 0.f, outer - 0.05f);
+        cin[i] = std::cos(inner * DEG2RAD); cosOut[i] = std::cos(outer * DEG2RAD);
+    }
+    setI("prLightCount", count);
+    SetShaderValueV(sh, L("prLightType"), type, SHADER_UNIFORM_INT, MAX_LIGHTS);
+    SetShaderValueV(sh, L("prLightPos"), pos, SHADER_UNIFORM_VEC3, MAX_LIGHTS);
+    SetShaderValueV(sh, L("prLightDir"), dir, SHADER_UNIFORM_VEC3, MAX_LIGHTS);
+    SetShaderValueV(sh, L("prLightColor"), col, SHADER_UNIFORM_VEC3, MAX_LIGHTS);
+    SetShaderValueV(sh, L("prLightRange"), range, SHADER_UNIFORM_FLOAT, MAX_LIGHTS);
+    SetShaderValueV(sh, L("prCosInner"), cin, SHADER_UNIFORM_FLOAT, MAX_LIGHTS);
+    SetShaderValueV(sh, L("prCosOuter"), cosOut, SHADER_UNIFORM_FLOAT, MAX_LIGHTS);
+    set3("prSky", linear(s.skyColor, s.ambient)); set3("prGround", linear(s.groundColor, s.ambient));
+    const int hasEnv = envTex.id ? 1 : 0, envLin = hasEnv && isFloatFormat(envTex.format) ? 1 : 0;
+    const float maxLod = hasEnv ? std::floor(std::log2((float)std::max(envTex.width, envTex.height))) : 0;
+    const float intensity = s.sky.enabled ? s.sky.lighting : s.environmentIntensity;
+    setI("hasEnv", hasEnv); setI("envLinear", envLin); setF("envMaxLod", maxLod); setF("envIntensity", intensity);
+    setF("envRotation", s.sky.enabled ? 0.f : s.environmentRotation / 360.f);
+    setF("backdropScale", s.sky.enabled ? 1.f / std::max(intensity, 1e-4f) : 1.f);
+    setI("envMap", ENV_SLOT);
+    set3("fogColor", linear(s.fogColor));
+    setF("fogNear", s.fogNear); setF("fogFar", s.fogFar); setI("fogMode", (int)s.fogMode); setF("fogDensity", s.fogDensity);
+    setF("fogHeight", s.fogHeight); setF("fogFalloff", s.fogFalloff); setI("fogSky", s.fogFromSky ? 1 : 0);
+
+    const int locTile = L("prTile"), locCell = L("prCell"), locSplash = L("prSplash"), locFar = L("prFar");
+    auto layer = [&](const std::vector<PrecipTile>& tiles, bool isFar, bool isSplash, uint32_t full, long long& counter) {
+        if (tiles.empty()) return;
+        const int fi = isFar ? 1 : 0, si = isSplash ? 1 : 0;
+        SetShaderValue(sh, locFar, &fi, SHADER_UNIFORM_INT);
+        SetShaderValue(sh, locSplash, &si, SHADER_UNIFORM_INT);
+        const float cell[3] = { isFar ? Downfall::kFarTile : Downfall::kTile, isFar ? Downfall::kFarCell : Downfall::kCell, (float)full };
+        SetShaderValue(sh, locCell, cell, SHADER_UNIFORM_VEC3);
+        rlEnableVertexArray(pg.vao);
+        for (const PrecipTile& t : tiles) {
+            const int key[3] = { t.ix, t.iy, t.iz };
+            SetShaderValue(sh, locTile, key, SHADER_UNIFORM_IVEC3);
+            rlDrawVertexArrayInstanced(0, isSplash ? 36 : 6, t.n);     // a splash: the ring and five droplets
+            counter += t.n;
+        }
+        rlDisableVertexArray();
+    };
+    layer(farT, true, false, d.farDropsPerTile(), pg.drops);
+    layer(nearT, false, false, d.dropsPerTile(), pg.drops);
+    layer(splashT, false, true, d.dropsPerTile(), pg.splashes);
+
+    bindUnit(REFR_COLOR_SLOT, 0);
+    rlDisableShader();
+    restoreBlend();
+    rlEnableDepthMask();
+}
+
 void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target, float scale, int t, const Cull& cull) {
     ensureGpu();
     std::vector<Item> items;
@@ -4324,6 +4566,9 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     rlPushMatrix();
     const Shadows shadows = renderShadows(s, items);
     items.erase(std::remove_if(items.begin(), items.end(), [](const Item& it) { return it.obj->material.shadowOnly; }), items.end());
+    gpu.pr.drops = gpu.pr.splashes = 0;
+    PrecipFrame precip = precipFrame(s);
+    renderPrecipOcclusion(cam, precip, items);
     if (reflect) renderReflection(s, cam, *cull.mirror, wview, mirrorItems, shadows, envTex, scale, cloudsOn ? &cloudNow : nullptr, vw0, vh0);
 
     // Main pass, into the target or (for depth of field) a target with a depth texture.
@@ -4425,6 +4670,7 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
         drawSplats(s, cam, emitters, rlGetMatrixModelview(), rlGetMatrixProjection(), vw, vh);
         drawParticles(s, cam, emitters, view, ft, cull.compH);
     }
+    if (precip.on) drawPrecipitation(s, cam, precip, rlGetMatrixModelview(), rlGetMatrixProjection(), vw, vh, envTex);
 
     bindUnit(SHADOW_SLOT, 0);
     bindUnit(ENV_SLOT, 0);
@@ -5087,6 +5333,8 @@ Vector2 Field::bladeRoot(int tx, int tz, uint32_t k) const {
     return { min.x + (tx + (float)(x >> 8) / 16777216.f) * ts, min.y + (tz + (float)(z >> 8) / 16777216.f) * ts };
 }
 long long fieldBladesSubmitted() { return gpu.fieldBlades; }
+long long precipitationDropsSubmitted() { return gpu.pr.drops; }
+long long precipitationSplashesSubmitted() { return gpu.pr.splashes; }
 long long fieldShadowBladesSubmitted() { return gpu.fieldShadowBlades; }
 long long instanceBodiesSubmitted() { return gpu.instanceBodies; }
 long long instanceTrianglesSubmitted() { return gpu.instanceTriangles; }
@@ -5361,6 +5609,10 @@ void render(Scene& s, int t, const Ctx& c, Rectangle viewport, Camera* camera) {
             mirrorCam = mirroredCamera(cam, wv.level);
             cull.mirror = &mirrorCam;
         }
+    }
+    {
+        const Downfall pd = inWeather(s.precipitation, s.weather);
+        if (pd.enabled && pd.kind != Precipitation::None && (pd.occlusion || pd.splashes)) cull.rainR = pd.radius + 6.f;   // roofs out of view still keep the rain off
     }
     animate(s.objects, t, MatrixIdentity(), cull);
     const WeatherScope weatherNow(s);
