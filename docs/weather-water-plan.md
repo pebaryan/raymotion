@@ -114,6 +114,43 @@ time by a seed. A quality setting trades steps for speed, and preview runs at lo
   - A crop of the edge, enlarged, is checked for banding. Step noise must be blue-noise
     jittered, not rings.
 
+**Done 2026-11-27 (cumulus, stratus, deck); the cumulonimbus look is open, to finish with W5.**
+`g3d::Clouds` on the scene. Shaders are in src/engine/clouds_glsl.hpp.
+
+- **Shell:** a raymarched shell round a 6 371 km planet.
+- **Noise:** Perlin-Worley shape and Worley detail baked lazily into 2D atlases (raylib has no
+  3D textures), with the two slices lerped.
+- **Coverage:** a rank-equalised map read through a cubic B-spline. Eased bilinear left
+  world-fixed straight lines along the texel centres, which was the seam.
+- **Shape:** the 3D shape noise is remapped by coverage and given a per-type height profile, with
+  a soft density toe and detail erosion that is stronger near the camera.
+- **Lighting:** Beer and powder with multi-scatter octaves, a dual-lobe HG silver lining,
+  ambient from the sky, and haze towards the horizon.
+- **Noise and filtering:** blue-noise jitter spread over the whole coarse step, a per-step
+  lattice offset, and a 5×5 depth/alpha bilateral. No temporal accumulation.
+- **Weather and shadows:** cover, type and drift follow the weather. Ground shadows come from a
+  per-frame transmittance map.
+- **Cost:** Film about 13-15 ms at 1080p.
+
+Tests (weather_tests, about 4 s):
+- cover from below within 0.08;
+- ground through the gaps from 3 km;
+- no pop through the layer (frame-refinement ratio);
+- shadow drift 60 m at 41° for 60 m at 40°;
+- depth occlusion and purity; off means off;
+- curvature from 10 km;
+- isotropy (no world-fixed lines) and yaw-joint column excess (no screen-fixed seam);
+- soft edges (a 27 px ramp);
+- stipple at most 46 (clean 35);
+- no banding against the High frame;
+- near detail at least 0.7 of the far detail;
+- cumulus rounded at the top, and the Cb anvil wider than its tower (1.89).
+
+Open: the Cb shape is connected (tower and anvil) but reads as a symmetric mushroom cap rather
+than a flat anvil spread downwind, and neighbouring towers look cloned. Finish it with W5's
+storm. Clouds do not render with the camera above about 30 km; the space-to-street release needs
+that.
+
 ## W3. Rain and snow at scale
 
 GPU precipitation, built as the grass `Field` is: drops come from a hash in the vertex shader,

@@ -19,6 +19,8 @@
 // poses the bones without CPU skinning, for skinning in our vertex shader.
 extern "C" void UpdateModelAnimationBones(Model model, ModelAnimation anim, float frame);
 
+#include "clouds_glsl.hpp"
+
 namespace rmtn {
 namespace g3d {
 namespace {
@@ -28,6 +30,9 @@ constexpr int MAX_BONES = 128;
 constexpr int MAX_TILES = 16;            // shadow-atlas tiles per scene
 constexpr int MAX_ATLAS = 8192;
 constexpr int ENV_SLOT = 13, SHADOW_SLOT = 14, DEPTH_SLOT = 15;   // material maps use units 0..11
+// Volumetric clouds. The lit shader reads the cloud shadow map from unit 11 (a material map slot the
+// engine never fills); the cloud passes, which are not lit, use units 4..8 (raylib's batch owns 0..3).
+constexpr int CLOUD_SLOT = 11, CLOUD_SHAPE_SLOT = 4, CLOUD_DETAIL_SLOT = 5, CLOUD_WEATHER_SLOT = 6, CLOUD_LOW_SLOT = 7, CLOUD_BLUE_SLOT = 8;
 
 // ---- shaders ---------------------------------------------------------------------------
 // Attribute and uniform names are raylib's defaults, so DrawMesh binds them.
@@ -576,6 +581,8 @@ uniform float envIntensity; uniform float envRotation; uniform int skybox;
 uniform vec3 fogColor; uniform float fogNear; uniform float fogFar;
 uniform int fogMode; uniform float fogDensity; uniform float fogHeight; uniform float fogFalloff; uniform int fogSky;
 uniform float backdropScale;
+uniform int cloudShadowOn; uniform int cloudShadowLight; uniform sampler2D cloudShadowTex;   // Scene::clouds' ground shadow
+uniform vec4 cloudShadowMap; uniform vec3 cloudShadowSun; uniform float cloudShadowFloor;
 uniform vec4 clipPlane; uniform vec4 clipEdge;        // Material::clip: xyz normal, w offset; rgb colour (linear), a width
 uniform int shading; uniform float pxScale;
 uniform int toonBands; uniform float toonSoftness; uniform float toonHighlight; uniform float toonHighlightSize;
@@ -697,6 +704,17 @@ vec3 envBRDF(vec3 spec, float rough, float ndv) {
 
 vec4 encode(vec3 c, float a) { return vec4(pow(clamp(c, 0.0, 1.0), vec3(1.0 / 2.2)), a); }
 
+// How much of the sun gets through the clouds to p: the shadow map is the transmittance on the plane
+// y = cloudShadowMap.w, so p is carried along the sun's rays to that plane first (a hill is shadowed
+// where its ray crosses a cloud, not where its foot does). Lit outside the map, fading in at its edge.
+float cloudShadowAt(vec3 p) {
+    float s = (cloudShadowMap.w - p.y) / cloudShadowSun.y;
+    vec2 uv = (p.xz + cloudShadowSun.xz * s - cloudShadowMap.xy) * cloudShadowMap.z + 0.5;
+    float edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+    if (edge <= 0.0) return 1.0;
+    float t = textureLod(cloudShadowTex, uv, 0.0).r;
+    return mix(1.0, mix(cloudShadowFloor, 1.0, t), smoothstep(0.0, 0.08, edge));
+}
 // Light i at this fragment: `l` points to it and `ndl` is n.l; returns the attenuation
 // times shadow (0 when the light does not reach a front-facing point).
 float lightAt(int i, vec3 n, out vec3 l, out float ndl) {
@@ -720,6 +738,7 @@ float lightAt(int i, vec3 n, out vec3 l, out float ndl) {
         vec3 ng = normalize(fragNormal);
         atten *= shadowAt(tile, lightBias[i], ndl, dot(ng, l) < 0.0 ? -ng : ng);
     }
+    if (cloudShadowOn == 1 && i == cloudShadowLight) atten *= cloudShadowAt(fragPos);
     return atten;
 }
 
@@ -1173,8 +1192,30 @@ constexpr int MAX_STYLES = 64;
 // An offscreen target with a sampleable depth texture (for depth of field).
 struct DepthTarget { unsigned int fbo = 0, color = 0, depth = 0; int w = 0, h = 0; };
 
+// Volumetric clouds (Scene::clouds): shaders and baked noise made lazily at the first cloud frame.
+struct CloudGpu {
+    Shader bake{}, march{}, shadow{}, up{};
+    RenderTexture shape{}, detail{};            // the noise volumes as tiled atlases
+    Texture2D weather{};                        // the coverage map (equalised, tiling)
+    Texture2D blue{};                           // a 64 x 64 blue-noise tile (void and cluster)
+    bool ready = false;
+    unsigned lowFbo = 0, lowTex = 0, fullFbo = 0, fullTex = 0;   // the march's image and the upsampled one (RGBA16F)
+    int lowW = 0, lowH = 0, fullW = 0, fullH = 0;
+    RenderTexture shadowRT{};                   // the ground shadow map: the sun's transmittance
+    int shadowRes = 0;
+    // This frame's shadow, for the lit shader (set by renderCloudShadow, off otherwise).
+    bool shadowOn = false;
+    Vector4 shadowMap{ 0, 0, 0, 0 };            // centre x, z, 1 / extent, the plane's y
+    Vector3 shadowSun{ 0, 1, 0 };
+    int shadowLight = -1;
+    float shadowFloor = 0.1f;
+};
+struct CloudLitLocs { int on = -1, light = -1, tex = -1, map = -1, sun = -1, floor = -1; };
+
 struct Gpu {
     bool ready = false;
+    CloudGpu cl;
+    CloudLitLocs cll;
     Shader lit{}, depth{}, dof{}, gbuf{}, line{}, particle{}, sky{};
     LitLocs L{};
     WaterLocs W{};
@@ -1265,6 +1306,15 @@ void releaseGpu() {
         if (s.indexVbo) rlUnloadVertexBuffer(s.indexVbo);
     }
     if (gpu.skyTarget.id) UnloadRenderTexture(gpu.skyTarget);
+    {
+        CloudGpu& c = gpu.cl;
+        for (Shader* sh : { &c.bake, &c.march, &c.shadow, &c.up }) if (sh->id) UnloadShader(*sh);
+        for (RenderTexture* rt : { &c.shape, &c.detail, &c.shadowRT }) if (rt->id) UnloadRenderTexture(*rt);
+        if (c.weather.id) UnloadTexture(c.weather);
+        if (c.blue.id) UnloadTexture(c.blue);
+        if (c.lowFbo) rlUnloadFramebuffer(c.lowFbo);
+        if (c.fullFbo) rlUnloadFramebuffer(c.fullFbo);
+    }
     if (gpu.material.maps) {
         gpu.material.maps[MATERIAL_MAP_DIFFUSE].texture = whiteTexture();   // cached textures are freed below
         UnloadMaterial(gpu.material);
@@ -1374,6 +1424,10 @@ void ensureGpu() {
     SetShaderValue(gpu.lit, gpu.L.shadowAtlas, &shadowUnit, SHADER_UNIFORM_INT);
     SetShaderValue(gpu.dof, gpu.D.depthTex, &depthUnit, SHADER_UNIFORM_INT);
     SetShaderValue(gpu.line, gpu.N.depthTex, &depthUnit, SHADER_UNIFORM_INT);
+    gpu.cll = { loc("cloudShadowOn"), loc("cloudShadowLight"), loc("cloudShadowTex"), loc("cloudShadowMap"),
+                loc("cloudShadowSun"), loc("cloudShadowFloor") };
+    const int cloudUnit = CLOUD_SLOT;
+    SetShaderValue(gpu.lit, gpu.cll.tex, &cloudUnit, SHADER_UNIFORM_INT);
     gpu.material = LoadMaterialDefault();
     gpu.ready = true;
     onGraphicsShutdown(releaseGpu);
@@ -1539,7 +1593,8 @@ Vector3 sunOf(const Scene& s) {
 // The sky into its equirectangular target, mipmapped for the environment's blur. Called
 // before anything else in the frame; leaves the caller's framebuffer, viewport and matrices.
 Texture2D renderSky(const Scene& s, double frame, unsigned int callerFbo, int fbW, int fbH) {
-    const Sky k = s.weather.enabled ? inWeather(s.sky, s.weather, frame) : s.sky;     // with the weather worked in
+    Sky k = s.weather.enabled ? inWeather(s.sky, s.weather, frame) : s.sky;     // with the weather worked in
+    if (s.clouds.enabled) k.clouds = 0;         // the volumetric layer replaces the flat painted one
     const int w = std::clamp(k.resolution, 32, 4096), h = w / 2;
     if (gpu.skyTarget.texture.width != w) {
         if (gpu.skyTarget.id) UnloadRenderTexture(gpu.skyTarget);
@@ -2849,6 +2904,15 @@ void setSceneUniforms(const Scene& s, const Camera& cam, const Shadows& sh, Text
     SetShaderValue(lit, L.backdropScale, &backdrop, SHADER_UNIFORM_FLOAT);
     SetShaderValue(lit, L.envRotation, &rot, SHADER_UNIFORM_FLOAT);
     SetShaderValue(lit, L.skybox, &sky0, SHADER_UNIFORM_INT);
+    const CloudGpu& cg = gpu.cl;
+    const int cloudOn = cg.shadowOn ? 1 : 0;
+    SetShaderValue(lit, gpu.cll.on, &cloudOn, SHADER_UNIFORM_INT);
+    if (cloudOn) {
+        SetShaderValue(lit, gpu.cll.light, &cg.shadowLight, SHADER_UNIFORM_INT);
+        SetShaderValue(lit, gpu.cll.map, &cg.shadowMap, SHADER_UNIFORM_VEC4);
+        SetShaderValue(lit, gpu.cll.sun, &cg.shadowSun, SHADER_UNIFORM_VEC3);
+        SetShaderValue(lit, gpu.cll.floor, &cg.shadowFloor, SHADER_UNIFORM_FLOAT);
+    }
 }
 
 void bindUnit(int slot, unsigned int id) {
@@ -3501,6 +3565,427 @@ void drawParticles(const Scene& s, const Camera& cam, const std::vector<Emitting
     rlEnableDepthMask();
 }
 
+// ---- volumetric clouds (Scene::clouds) ------------------------------------------------------
+// One frame's resolved cloud settings: the layer with the weather worked in, where the pattern has
+// drifted to, and the light it is seen by.
+struct CloudFrame {
+    Clouds c;
+    Vector2 travel{ 0, 0 };
+    Vector2 shear{ 0.8f, 0.6f };                    // the way towers lean: downwind
+    double seconds = 0;
+    Vector3 sun{ 0, 1, 0 }, sunE{ 1, 1, 1 }, ambTop{ 0.3f, 0.4f, 0.6f }, ambBot{ 0.1f, 0.1f, 0.1f };
+    Vector3 horizon{ 0.5f, 0.6f, 0.8f }, haze{ 1, 0.6f, 0.4f };
+    float hazeAmount = 0;
+    int steps = 56, lightSteps = 6, shadowSteps = 20, shadowRes = 256;
+    float res = 0.5f;
+};
+
+constexpr float CLOUD_SHAPE_SIZE = 6000, CLOUD_DETAIL_SIZE = 900, CLOUD_WEATHER_SIZE = 24000;
+
+float cloudHash(unsigned a, unsigned b, unsigned seed) {
+    unsigned h = a * 374761393u + b * 668265263u + seed * 2246822519u + 0x9e3779b9u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    h ^= h >> 16;
+    h *= 2246822519u;
+    h ^= h >> 15;
+    return (float)(h & 0xffffffu) / 16777215.f;
+}
+// Periodic value noise with f cells over 0..1.
+float cloudValueNoise(float x, float y, int f, unsigned seed) {
+    const float fx = x * f, fy = y * f;
+    const int ix = (int)std::floor(fx), iy = (int)std::floor(fy);
+    const float tx = fx - ix, ty = fy - iy;
+    auto q = [](float t) { return t * t * t * (t * (t * 6 - 15) + 10); };
+    auto h = [&](int a, int b) { return cloudHash((unsigned)(((a % f) + f) % f), (unsigned)(((b % f) + f) % f), seed); };
+    const float u = q(tx), v = q(ty);
+    return Lerp(Lerp(h(ix, iy), h(ix + 1, iy), u), Lerp(h(ix, iy + 1), h(ix + 1, iy + 1), u), v);
+}
+// The coverage map: two fields (R: where clouds are, G: how tall they grow), each pushed through its
+// own rank so its values are uniform in 0..1. A cover of c then puts cloud on exactly the share c of the
+// map, which is what lets the sky fraction match `cover`.
+Image cloudWeatherImage() {
+    constexpr int N = 256;
+    Image img = GenImageColor(N, N, BLACK);
+    Color* px = (Color*)img.data;
+    for (int ch = 0; ch < 2; ch++) {
+        std::vector<float> v((size_t)N * N);
+        for (int y = 0; y < N; y++)
+            for (int x = 0; x < N; x++) {
+                const float u = (x + 0.5f) / N, w = (y + 0.5f) / N;
+                float sum = 0;
+                const int fs[4] = { 6, 12, 24, 48 };
+                const float ws[4] = { 0.5f, 0.28f, 0.16f, 0.06f };
+                for (int o = 0; o < 4; o++) sum += ws[o] * cloudValueNoise(u, w, fs[o], 101u * (unsigned)ch + 17u * (unsigned)o + 3u);
+                v[(size_t)y * N + x] = sum;
+            }
+        std::vector<int> order(v.size());
+        for (size_t i = 0; i < order.size(); i++) order[i] = (int)i;
+        std::sort(order.begin(), order.end(), [&](int a, int b) { return v[(size_t)a] < v[(size_t)b] || (v[(size_t)a] == v[(size_t)b] && a < b); });
+        for (size_t r = 0; r < order.size(); r++) {
+            const unsigned char b = (unsigned char)std::lround(255.0 * r / (double)(order.size() - 1));
+            Color& c = px[order[r]];
+            (ch == 0 ? c.r : c.g) = b;
+        }
+    }
+    for (int i = 0; i < N * N; i++) px[i].a = 255;
+    return img;
+}
+
+// Draws `sh` over a rectangle (vx, vy, vw, vh in the framebuffer's pixels) of `fbo`, one fragment
+// per pixel (gl_FragCoord), blending off. The caller restores its framebuffer and viewport.
+void cloudPass(const Shader& sh, unsigned fbo, int vx, int vy, int vw, int vh) {
+    rlDrawRenderBatchActive();
+    rlEnableFramebuffer(fbo);
+    rlViewport(vx, vy, vw, vh);
+    rlMatrixMode(RL_PROJECTION);
+    rlPushMatrix();
+    rlLoadIdentity();
+    rlOrtho(0, vw, vh, 0, -1, 1);
+    rlMatrixMode(RL_MODELVIEW);
+    rlPushMatrix();
+    rlLoadIdentity();
+    rlDisableColorBlend();
+    BeginShaderMode(sh);
+    DrawRectangle(0, 0, vw, vh, WHITE);
+    EndShaderMode();
+    rlDrawRenderBatchActive();
+    rlEnableColorBlend();
+    rlMatrixMode(RL_MODELVIEW);
+    rlPopMatrix();
+    rlMatrixMode(RL_PROJECTION);
+    rlPopMatrix();
+    rlMatrixMode(RL_MODELVIEW);
+}
+
+void shF(const Shader& sh, const char* n, float v) { SetShaderValue(sh, GetShaderLocation(sh, n), &v, SHADER_UNIFORM_FLOAT); }
+void shI(const Shader& sh, const char* n, int v) { SetShaderValue(sh, GetShaderLocation(sh, n), &v, SHADER_UNIFORM_INT); }
+void shV2(const Shader& sh, const char* n, Vector2 v) { SetShaderValue(sh, GetShaderLocation(sh, n), &v, SHADER_UNIFORM_VEC2); }
+void shV3(const Shader& sh, const char* n, Vector3 v) { SetShaderValue(sh, GetShaderLocation(sh, n), &v, SHADER_UNIFORM_VEC3); }
+
+bool colorTarget(unsigned& fbo, unsigned& tex, int& cw, int& ch, int w, int h) {
+    if (fbo && cw == w && ch == h) return true;
+    if (fbo) rlUnloadFramebuffer(fbo);
+    fbo = rlLoadFramebuffer();
+    tex = rlLoadTexture(nullptr, w, h, RL_PIXELFORMAT_UNCOMPRESSED_R16G16B16A16, 1);
+    rlFramebufferAttach(fbo, tex, RL_ATTACHMENT_COLOR_CHANNEL0, RL_ATTACHMENT_TEXTURE2D, 0);
+    const bool ok = rlFramebufferComplete(fbo);
+    rlDisableFramebuffer();
+    if (!ok) { rlUnloadFramebuffer(fbo); fbo = tex = 0; cw = ch = 0; throw std::runtime_error("g3d: cloud render target incomplete"); }
+    cw = w; ch = h;
+    return true;
+}
+
+// Compiles the cloud shaders and bakes the noise, once. Leaves `callerFbo` and its viewport bound.
+// A 64 x 64 tileable blue-noise image by void and cluster (Ulichney): a binary pattern is relaxed until its
+// ones are as evenly spread as they can be, then every pixel gets its rank, in the order the ones would
+// be removed (the first ten percent), added (to half) and the zeros removed (the rest). Deterministic (the
+// start is a hash), toroidal, a few milliseconds, built once.
+Image cloudBlueNoiseImage() {
+    constexpr int N = 64, M = N * N, R = 6;
+    constexpr float sigma = 1.5f;
+    std::vector<float> kern((size_t)(2 * R + 1) * (2 * R + 1));
+    for (int dy = -R; dy <= R; dy++)
+        for (int dx = -R; dx <= R; dx++) kern[(size_t)(dy + R) * (2 * R + 1) + dx + R] = std::exp(-(float)(dx * dx + dy * dy) / (2 * sigma * sigma));
+    std::vector<float> e1((size_t)M, 0.f), e0((size_t)M, 0.f);        // the energy of the ones' pattern and of the zeros'
+    std::vector<char> bit((size_t)M, 0);
+    auto splat = [&](std::vector<float>& e, int i, float sgn) {
+        const int x = i % N, y = i / N;
+        for (int dy = -R; dy <= R; dy++)
+            for (int dx = -R; dx <= R; dx++)
+                e[(size_t)(((y + dy + N) % N) * N + (x + dx + N) % N)] += sgn * kern[(size_t)(dy + R) * (2 * R + 1) + dx + R];
+    };
+    auto set = [&](int i, bool on) {
+        bit[(size_t)i] = on ? 1 : 0;
+        splat(e1, i, on ? 1.f : -1.f);
+        splat(e0, i, on ? -1.f : 1.f);
+    };
+    auto pick = [&](bool among, const std::vector<float>& e, bool wantMax) {       // the pixel with bit == among, of most or least energy
+        int best = -1;
+        for (int i = 0; i < M; i++)
+            if ((bit[(size_t)i] != 0) == among && (best < 0 || (wantMax ? e[(size_t)i] > e[(size_t)best] : e[(size_t)i] < e[(size_t)best]))) best = i;
+        return best;
+    };
+    std::vector<int> order((size_t)M);
+    for (int i = 0; i < M; i++) order[(size_t)i] = i;
+    std::sort(order.begin(), order.end(), [](int a, int b) { return cloudHash((unsigned)a, 3, 77) < cloudHash((unsigned)b, 3, 77); });
+    const int K = M / 10;
+    for (int i = 0; i < M; i++) splat(e0, i, 1.f);
+    for (int i = 0; i < K; i++) set(order[(size_t)i], true);
+    for (int it = 0; it < 4000; it++) {                                           // relax: move the tightest one into the largest void
+        const int c = pick(true, e1, true);
+        set(c, false);
+        const int v = pick(false, e1, false);
+        set(v, true);
+        if (v == c) break;
+    }
+    const std::vector<char> bit0 = bit;
+    const std::vector<float> e10 = e1, e00 = e0;
+    std::vector<int> rank((size_t)M, 0);
+    for (int r = K - 1; r >= 0; r--) { const int c = pick(true, e1, true); rank[(size_t)c] = r; set(c, false); }
+    bit = bit0; e1 = e10; e0 = e00;
+    for (int r = K; r < M / 2; r++) { const int v = pick(false, e1, false); rank[(size_t)v] = r; set(v, true); }
+    for (int r = M / 2; r < M; r++) { const int c = pick(false, e0, true); rank[(size_t)c] = r; set(c, true); }
+    Image img = GenImageColor(N, N, BLACK);
+    for (int i = 0; i < M; i++) {
+        const unsigned char v = (unsigned char)std::lround(255.0 * rank[(size_t)i] / (M - 1));
+        ImageDrawPixel(&img, i % N, i / N, { v, v, v, 255 });
+    }
+    return img;
+}
+
+void ensureCloudGpu(unsigned callerFbo, int fbW, int fbH) {
+    CloudGpu& c = gpu.cl;
+    if (c.ready) return;
+    auto build = [](const char* fs) {
+        std::string src = fs;
+        const size_t at = src.find("\nCOMMON\n");
+        if (at != std::string::npos) src.replace(at + 1, 6, CLOUD_COMMON);
+        return LoadShaderFromMemory(nullptr, src.c_str());
+    };
+    c.bake = LoadShaderFromMemory(nullptr, CLOUD_BAKE_FS);
+    c.march = build(CLOUD_MARCH_FS);
+    c.shadow = build(CLOUD_SHADOW_FS);
+    c.up = LoadShaderFromMemory(nullptr, CLOUD_UP_FS);
+    if (!IsShaderValid(c.bake) || !IsShaderValid(c.march) || !IsShaderValid(c.shadow) || !IsShaderValid(c.up))
+        throw std::runtime_error("g3d: cloud shader compilation failed");
+    auto bake = [&](RenderTexture& rt, int w, int h, int mode) {
+        rt = LoadRenderTexture(w, h);
+        SetTextureFilter(rt.texture, TEXTURE_FILTER_BILINEAR);
+        SetTextureWrap(rt.texture, TEXTURE_WRAP_CLAMP);
+        shI(c.bake, "mode", mode);
+        cloudPass(c.bake, rt.id, 0, 0, w, h);
+    };
+    bake(c.shape, 2080, 1040, 0);                     // 128 slices of 128 x 128, padded to 130, 16 x 8 tiles
+    bake(c.detail, 272, 136, 1);                      // 32 slices of 32 x 32, padded to 34, 8 x 4 tiles
+    Image w = cloudWeatherImage();
+    c.weather = LoadTextureFromImage(w);
+    UnloadImage(w);
+    GenTextureMipmaps(&c.weather);                    // read by explicit LOD, so far clouds see a blurred coverage
+    SetTextureFilter(c.weather, TEXTURE_FILTER_TRILINEAR);
+    SetTextureWrap(c.weather, TEXTURE_WRAP_REPEAT);
+    Image bn = cloudBlueNoiseImage();
+    c.blue = LoadTextureFromImage(bn);
+    UnloadImage(bn);
+    SetTextureFilter(c.blue, TEXTURE_FILTER_POINT);
+    SetTextureWrap(c.blue, TEXTURE_WRAP_REPEAT);
+    rlEnableFramebuffer(callerFbo);
+    rlViewport(0, 0, fbW, fbH);
+    c.ready = true;
+}
+
+bool cloudsActive(const Scene& s, const Camera& cam) {
+    if (!s.clouds.enabled || cam.orthographic) return false;
+    if (s.water.enabled && cam.position.y < waterOf(s).level) return false;       // from under the sea: no clouds
+    return true;
+}
+
+CloudFrame cloudFrame(const Scene& s, double frame) {
+    CloudFrame f;
+    f.c = s.weather.enabled ? inWeather(s.clouds, s.weather) : s.clouds;
+    const double fps = s.weather.enabled && !s.clouds.ownWeather ? s.weather.fps : s.clouds.fps;
+    f.seconds = frame / std::max(1.0, fps);
+    f.travel = s.clouds.travel(s.weather, f.seconds);
+    { const Vector2 w = (s.weather.enabled && !s.clouds.ownWeather) ? Vector2{ std::cos(s.weather.wind.direction * DEG2RAD), std::sin(s.weather.wind.direction * DEG2RAD) } : Vector2{ s.clouds.drift.x, s.clouds.drift.y };
+      const float l = std::sqrt(w.x * w.x + w.y * w.y); if (l > 1e-4f) f.shear = { w.x / l, w.y / l }; }
+    struct Q { int steps, light, shadowSteps, shadowRes; float res; };
+    static const Q table[3] = { { 28, 4, 12, 128, 0.5f }, { 96, 6, 20, 256, 1.f }, { 160, 10, 32, 384, 1.f } };
+    const Q& q = table[std::clamp((int)f.c.quality, 0, 2)];
+    f.steps = q.steps; f.lightSteps = q.light; f.shadowSteps = q.shadowSteps; f.shadowRes = q.shadowRes;
+    f.res = std::clamp(f.c.resolution > 0 ? f.c.resolution : q.res, 0.1f, 1.f);
+    // The sun: the sky's, else the first directional light's.
+    const Sky k = s.sky.enabled ? (s.weather.enabled ? inWeather(s.sky, s.weather, frame) : s.sky) : Sky{};
+    f.sun = sunOf(s);
+    Vector3 sunCol{ 1, 0.96f, 0.88f };
+    if (s.sky.enabled) sunCol = linear3(k.sunColor);
+    else
+        for (const Light& l : s.lights)
+            if (l.type == Light::Type::Directional) {
+                const Vector3 d = Vector3Subtract(l.position, l.target);
+                if (Vector3Length(d) > 1e-6f) { f.sun = Vector3Normalize(d); sunCol = linear3(l.color); }
+                break;
+            }
+    const float vis = std::clamp((f.sun.y + 0.02f) / 0.08f, 0.f, 1.f);
+    f.sunE = Vector3Scale(sunCol, 0.62f * vis * vis * (3 - 2 * vis));
+    Vector3 zen, hor, gr;
+    if (s.sky.enabled) { zen = linear3(k.zenith); hor = linear3(k.horizon); gr = linear3(k.ground); f.haze = linear3(k.haze); f.hazeAmount = k.hazeAmount; }
+    else { zen = linear3(s.skyColor); hor = Vector3Lerp(zen, { 1, 1, 1 }, 0.4f); gr = linear3(s.groundColor); f.haze = hor; f.hazeAmount = 0; }
+    f.horizon = hor;
+    f.ambTop = Vector3Add(Vector3Scale(Vector3Add(Vector3Scale(zen, 0.5f), Vector3Scale(hor, 0.5f)), 0.85f), { 0.08f, 0.08f, 0.08f });
+    f.ambBot = Vector3Scale(Vector3Add(Vector3Scale(gr, 0.3f), Vector3Scale(hor, 0.7f)), 0.7f);
+    return f;
+}
+
+// The shared uniforms of the march and the shadow shaders, and the noise textures on their units.
+void setCloudCommon(const Shader& sh, const CloudFrame& f) {
+    const Clouds& c = f.c;
+    shF(sh, "planetR", Clouds::kPlanetRadius);
+    shF(sh, "cloudBase", c.base);
+    shF(sh, "cloudTop", std::max(c.top, c.base + 50));
+    shF(sh, "cover", std::clamp(c.cover, 0.f, 1.f));
+    shF(sh, "densityScale", std::max(c.density, 0.f));
+    shF(sh, "detailAmt", std::clamp(c.detail, 0.f, 1.f));
+    shI(sh, "cloudType", (int)c.type);
+    shV2(sh, "windOffset", f.travel);
+    const Vector3 dir = Vector3Normalize({ 0.5f, 1.0f, 0.3f });
+    const float ev = c.evolution * (float)f.seconds;
+    const Vector3 off{ cloudHash(c.seed, 11, 5) * CLOUD_SHAPE_SIZE, cloudHash(c.seed, 12, 5) * CLOUD_SHAPE_SIZE, cloudHash(c.seed, 13, 5) * CLOUD_SHAPE_SIZE };
+    shV3(sh, "slide", { off.x + dir.x * ev, off.y + dir.y * ev, off.z + dir.z * ev });
+    shV2(sh, "seedOffset", { cloudHash(c.seed, 21, 9), cloudHash(c.seed, 22, 9) });
+    shF(sh, "shapeSize", CLOUD_SHAPE_SIZE);
+    shF(sh, "detailSize", CLOUD_DETAIL_SIZE);
+    shF(sh, "weatherSize", CLOUD_WEATHER_SIZE);
+    shI(sh, "shapeTex", CLOUD_SHAPE_SLOT);
+    shI(sh, "detailTex", CLOUD_DETAIL_SLOT);
+    shI(sh, "weatherTex", CLOUD_WEATHER_SLOT);
+    bindUnit(CLOUD_SHAPE_SLOT, gpu.cl.shape.texture.id);
+    bindUnit(CLOUD_DETAIL_SLOT, gpu.cl.detail.texture.id);
+    bindUnit(CLOUD_WEATHER_SLOT, gpu.cl.weather.id);
+    shI(sh, "extruded", c.extruded ? 1 : 0);
+    shF(sh, "nearestZ", c.nearestSlice ? 1.f : 0.f);
+    shV2(sh, "shearDir", f.shear);
+}
+void unbindCloudUnits() {
+    for (int slot : { CLOUD_SHAPE_SLOT, CLOUD_DETAIL_SLOT, CLOUD_WEATHER_SLOT, CLOUD_LOW_SLOT, CLOUD_BLUE_SLOT, DEPTH_SLOT }) bindUnit(slot, 0);
+}
+
+// The ground shadow map, before the scene is drawn: the sun's transmittance through the clouds, on the
+// plane y = 0 over `shadowExtent` metres round the view. Leaves the caller's framebuffer and viewport.
+void renderCloudShadow(const Scene& s, const CloudFrame& f, const Camera& cam, unsigned callerFbo, int fbW, int fbH) {
+    CloudGpu& g = gpu.cl;
+    g.shadowOn = false;
+    if (!f.c.shadows || f.sun.y < 0.03f || f.c.cover <= 0) return;
+    int light = -1;
+    if (s.sky.enabled && s.sky.sunLight >= 0 && s.sky.sunLight < (int)s.lights.size()) light = s.sky.sunLight;
+    else
+        for (int i = 0; i < (int)s.lights.size() && i < MAX_LIGHTS; i++) {
+            const Light& l = s.lights[(size_t)i];
+            const Vector3 d = Vector3Subtract(l.position, l.target);
+            if (l.type == Light::Type::Directional && Vector3Length(d) > 1e-6f && Vector3DotProduct(Vector3Normalize(d), f.sun) > 0.97f) { light = i; break; }
+        }
+    if (light < 0) return;                       // no light along the sun to dim
+    ensureCloudGpu(callerFbo, fbW, fbH);
+    const int res = f.shadowRes;
+    if (g.shadowRT.id && g.shadowRes != res) { UnloadRenderTexture(g.shadowRT); g.shadowRT = RenderTexture{}; }
+    if (!g.shadowRT.id) {
+        g.shadowRT = LoadRenderTexture(res, res);
+        SetTextureFilter(g.shadowRT.texture, TEXTURE_FILTER_BILINEAR);
+        SetTextureWrap(g.shadowRT.texture, TEXTURE_WRAP_CLAMP);
+        g.shadowRes = res;
+    }
+    const float extent = std::max(f.c.shadowExtent, 100.f);
+    Vector3 fwd = Vector3Subtract(cam.target, cam.position);
+    fwd.y = 0;
+    fwd = Vector3Length(fwd) > 1e-4f ? Vector3Normalize(fwd) : Vector3{ 0, 0, 0 };
+    const Vector2 centre{ cam.position.x + fwd.x * extent * 0.2f, cam.position.z + fwd.z * extent * 0.2f };
+    const Shader& sh = g.shadow;
+    setCloudCommon(sh, f);
+    shV2(sh, "shSize", { (float)res, (float)res });
+    shV2(sh, "shCentre", centre);
+    shF(sh, "shExtent", extent);
+    shF(sh, "shY", 0);
+    shV3(sh, "sunDir", f.sun);
+    shI(sh, "shSteps", f.shadowSteps);
+    cloudPass(sh, g.shadowRT.id, 0, 0, res, res);
+    unbindCloudUnits();
+    rlEnableFramebuffer(callerFbo);
+    rlViewport(0, 0, fbW, fbH);
+    g.shadowOn = true;
+    g.shadowMap = { centre.x, centre.y, 1.f / extent, 0 };
+    g.shadowSun = f.sun;
+    g.shadowLight = light;
+    g.shadowFloor = 0.1f;
+}
+
+// The clouds over the finished opaque scene in `scene` (colour and depth), inside the viewport
+// (vx, vyGL, vw, vh: framebuffer pixels, y up). The march runs at `res` of the viewport and a
+// depth-aware upsample brings it to full size, where it is blended over the scene.
+void drawClouds(const Scene& s, const CloudFrame& f, const Camera& cam, const DepthTarget& scene, int fbW, int fbH,
+                int vx, int vyGL, int vw, int vh) {
+    CloudGpu& g = gpu.cl;
+    ensureCloudGpu(scene.fbo, fbW, fbH);
+    const int lw = std::max(8, (int)std::ceil(vw * f.res)), lh = std::max(8, (int)std::ceil(vh * f.res));
+    colorTarget(g.lowFbo, g.lowTex, g.lowW, g.lowH, lw, lh);
+    colorTarget(g.fullFbo, g.fullTex, g.fullW, g.fullH, vw, vh);
+
+    // The march.
+    const Shader& m = g.march;
+    setCloudCommon(m, f);
+    const Vector3 look = Vector3Subtract(cam.target, cam.position);
+    const Vector3 fwd = Vector3Normalize(look);
+    const Vector3 right = Vector3Normalize(Vector3CrossProduct(fwd, safeUp(look, cam.upVector)));
+    const Vector3 up = Vector3CrossProduct(right, fwd);
+    const float tanY = std::tan(cam.fov * 0.5f * DEG2RAD), aspect = (float)vw / (float)vh;
+    shV2(m, "lowSize", { (float)lw, (float)lh });
+    shV3(m, "camPos", cam.position);
+    shV3(m, "camFwd", fwd);
+    shV3(m, "camRight", right);
+    shV3(m, "camUp", up);
+    shV2(m, "tanHalf", { tanY * aspect, tanY });
+    shV2(m, "vpOrigin", { (float)vx, (float)vyGL });
+    shV2(m, "vpSize", { (float)vw, (float)vh });
+    shV2(m, "zNF", { cam.nearPlane, cam.farPlane });
+    shI(m, "depthTex", DEPTH_SLOT);
+    shV3(m, "sunDir", f.sun);
+    shV3(m, "sunE", f.sunE);
+    shV3(m, "ambTop", f.ambTop);
+    shV3(m, "ambBot", f.ambBot);
+    shV3(m, "horizonCol", f.horizon);
+    shV3(m, "hazeCol", f.haze);
+    shF(m, "hazeAmount", f.hazeAmount);
+    shF(m, "airK", 3.0e-5f * std::max(f.c.haze, 0.f));
+    shI(m, "steps", f.steps);
+    shI(m, "lightSteps", f.lightSteps);
+    shF(m, "jitterOn", f.c.jitter ? 1.f : 0.f);
+    shF(m, "denoiseOn", f.c.denoise ? 1.f : 0.f);
+    shI(m, "blueTex", CLOUD_BLUE_SLOT);
+    bindUnit(CLOUD_BLUE_SLOT, g.blue.id);
+    shF(m, "waterLevel", s.water.enabled ? waterOf(s).level : 0.f);
+    shI(m, "waterOn", s.water.enabled ? 1 : 0);
+    const Clouds::Flash& fl = f.c.flash;
+    const float fi = std::max(fl.intensity, 0.f);
+    shV3(m, "flashPos", fl.position);
+    shV3(m, "flashCol", Vector3Scale(linear3(fl.color), fi));
+    shF(m, "flashRadius", std::max(fl.radius, 1.f));
+    bindUnit(DEPTH_SLOT, scene.depth);
+    cloudPass(m, g.lowFbo, 0, 0, lw, lh);
+
+    // The upsample, into a viewport-sized image.
+    const Shader& u = g.up;
+    shV2(u, "lowSize", { (float)lw, (float)lh });
+    shV2(u, "vpOrigin", { (float)vx, (float)vyGL });
+    shV2(u, "vpSize", { (float)vw, (float)vh });
+    shV2(u, "zNF", { cam.nearPlane, cam.farPlane });
+    shI(u, "lowTex", CLOUD_LOW_SLOT);
+    shF(u, "denoiseOn", f.c.denoise ? 1.f : 0.f);
+    shI(u, "depthTex", DEPTH_SLOT);
+    bindUnit(CLOUD_LOW_SLOT, g.lowTex);
+    cloudPass(u, g.fullFbo, 0, 0, vw, vh);
+    unbindCloudUnits();
+
+    // Over the scene (straight colour and alpha onto a premultiplied target).
+    rlEnableFramebuffer(scene.fbo);
+    rlViewport(vx, vyGL, vw, vh);
+    rlMatrixMode(RL_PROJECTION);
+    rlPushMatrix();
+    rlLoadIdentity();
+    rlOrtho(0, vw, vh, 0, -1, 1);
+    rlMatrixMode(RL_MODELVIEW);
+    rlPushMatrix();
+    rlLoadIdentity();
+    rlSetBlendFactorsSeparate(RL_SRC_ALPHA, RL_ONE_MINUS_SRC_ALPHA, RL_ONE, RL_ONE_MINUS_SRC_ALPHA, RL_FUNC_ADD, RL_FUNC_ADD);
+    BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+    const Texture2D full{ g.fullTex, vw, vh, 1, PIXELFORMAT_UNCOMPRESSED_R16G16B16A16 };
+    DrawTexturePro(full, { 0, 0, (float)vw, -(float)vh }, { 0, 0, (float)vw, (float)vh }, { 0, 0 }, 0, WHITE);
+    EndBlendMode();
+    rlDrawRenderBatchActive();
+    rlMatrixMode(RL_MODELVIEW);
+    rlPopMatrix();
+    rlMatrixMode(RL_PROJECTION);
+    rlPopMatrix();
+    rlMatrixMode(RL_MODELVIEW);
+    rlViewport(0, 0, fbW, fbH);
+}
+
 void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target, float scale, int t, const Cull& cull) {
     ensureGpu();
     std::vector<Item> items;
@@ -3517,6 +4002,13 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     collect(s.objects, MatrixIdentity(), items, emitters, ft, cull, instanceStore, fieldStore);
     const Texture2D envTex = s.sky.enabled ? renderSky(s, ft, target.id, target.texture.width, target.texture.height)
                                            : environmentTexture(s);
+    gpu.cl.shadowOn = false;
+    const bool cloudsOn = cloudsActive(s, cam);
+    CloudFrame cloudNow;
+    if (cloudsOn) {
+        cloudNow = cloudFrame(s, ft);
+        renderCloudShadow(s, cloudNow, cam, target.id, target.texture.width, target.texture.height);
+    }
 
     // Background, in 2D before the viewport changes.
     if (s.background.a > 0) {
@@ -3531,9 +4023,8 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
 
     // Main pass, into the target or (for depth of field) a target with a depth texture.
     const int fbW = target.texture.width, fbH = target.texture.height;
-    const bool dof = cam.dof.aperture > 0 && cam.dof.maxBlur > 0;
-    const DepthTarget* dofTarget = nullptr;
-    if (dof) {
+    const bool dof = cam.dof.aperture > 0 && cam.dof.maxBlur > 0;    const DepthTarget* dofTarget = nullptr;
+    if (dof || cloudsOn) {                      // clouds need the opaque depth as a texture: draw into the depth target
         dofTarget = &sceneTarget(fbW, fbH);
         rlEnableFramebuffer(dofTarget->fbo);
         rlViewport(0, 0, fbW, fbH);
@@ -3566,6 +4057,7 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     setSceneUniforms(s, cam, shadows, envTex, scale);
     bindUnit(SHADOW_SLOT, shadows.tiles.empty() ? 0 : gpu.atlasTex);
     bindUnit(ENV_SLOT, envTex.id);
+    if (gpu.cl.shadowOn) bindUnit(CLOUD_SLOT, gpu.cl.shadowRT.texture.id);
     if (envTex.id && (s.sky.enabled ? s.sky.show : s.showEnvironment)) drawSkybox(cam);
     std::vector<Item> clear;
     for (Item& it : items) {
@@ -3593,6 +4085,7 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
 
     bindUnit(SHADOW_SLOT, 0);
     bindUnit(ENV_SLOT, 0);
+    bindUnit(CLOUD_SLOT, 0);
     LineStyles styles;
     const DepthTarget* lt = nullptr;
     if (s.lines.enabled) {
@@ -3606,6 +4099,7 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     rlMatrixMode(RL_MODELVIEW);
     rlLoadIdentity();
     rlViewport(0, 0, fbW, fbH);
+    if (cloudsOn) drawClouds(s, cloudNow, cam, *dofTarget, fbW, fbH, vx, fbH - vy - vh, vw, vh);
     if (lt && styles.table.size() > 1) {
         rlEnableFramebuffer(dofTarget ? dofTarget->fbo : target.id);
         compositeLines(s, cam, *lt, styles, vh, scale, t);
@@ -3613,7 +4107,15 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     if (dofTarget) {
         rlEnableFramebuffer(target.id);
         rlScalef(scale, scale, 1.f);                    // the 2D state drawOffscreen bound
-        compositeDof(*dofTarget, cam, scale, { (float)(fbH - vy - vh) / fbH, (float)vh / fbH });
+        if (dof) compositeDof(*dofTarget, cam, scale, { (float)(fbH - vy - vh) / fbH, (float)vh / fbH });
+        else {                                          // clouds only: the depth target is copied over (premultiplied)
+            rlSetBlendFactorsSeparate(RL_ONE, RL_ONE_MINUS_SRC_ALPHA, RL_ONE, RL_ONE_MINUS_SRC_ALPHA, RL_FUNC_ADD, RL_FUNC_ADD);
+            BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+            const Texture2D color{ dofTarget->color, dofTarget->w, dofTarget->h, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
+            DrawTexturePro(color, { 0, 0, (float)dofTarget->w, -(float)dofTarget->h }, { 0, 0, dofTarget->w / scale, dofTarget->h / scale }, { 0, 0 }, 0, WHITE);
+            EndBlendMode();
+            rlDrawRenderBatchActive();
+        }
     }
 }
 

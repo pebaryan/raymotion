@@ -239,6 +239,67 @@ void draw(int frame) {
         return self.run_cli("still", "weather", "--script", self.path, "--png", "x.png", ok=False)
 
     @unittest.skipUnless(GL, "needs OpenGL")
+    def test_clouds(self):
+        # A scene's "clouds" object draws volumetric clouds; without it, or disabled, the frame is exactly
+        # what it was; the same frame comes out the same in any order; the weather's cover and type are
+        # read unless ownWeather keeps the clouds' own; and bad values say what is wrong. The example
+        # flies through the layer: under, inside and above are three different pictures.
+        def frame(clouds=None, weather=None, at=5, name="c.png"):
+            world = {
+                "fps": 30, "camera": {"position": [0, 2, 0], "target": [0, 60, -100], "fov": 60, "far": 300000},
+                "ambient": 0.35, "sky": {"enabled": True, "sunLight": 0, "sunDirection": [0.3, 0.8, -0.4],
+                                         "ownClouds": True, "ownLight": True},           # the sky does not read the weather's cover
+                "lights": [{"type": "directional", "position": [30, 80, -40], "intensity": 2}],
+                "objects": [{"geometry": "plane", "width": 600000, "depth": 600000, "material": {"color": "#4f5b2c"}}],
+            }
+            if clouds is not None:
+                world["clouds"] = clouds
+            if weather is not None:
+                world["weather"] = weather
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "clouds"; c.w = 160; c.h = 90; c.fps = 30; c.duration = 20; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) {
+    g3d::draw(%s, frame, 0, 0, 160, 90);
+}
+''' % json.dumps(json.dumps(world)))
+            self.run_cli("still", "clouds", "--script", self.path, "--at", at, "--png", name)
+            return (self.cwd / name).read_bytes()
+
+        plain = frame()
+        clouds = {"cover": 0.6, "quality": "preview"}
+        on = frame(clouds)
+        self.assertNotEqual(plain, on)                                                # the clouds are drawn
+        self.assertEqual(plain, frame(dict(clouds, enabled=False)))                   # off means off
+        self.assertEqual(on, frame(clouds, at=5, name="d.png"))                       # the same frame, the same pixels
+        self.assertNotEqual(on, frame(dict(clouds, cover=0.2)))                       # cover is read
+        self.assertNotEqual(on, frame(dict(clouds, cloudType="deck")))
+        thin, thick = {"preset": "clear", "cover": 0.1}, {"preset": "clear", "cover": 0.9}
+        self.assertNotEqual(frame(clouds, thin), frame(clouds, thick))                # the weather's cover is read
+        own = dict(clouds, ownWeather=True)
+        self.assertEqual(frame(own, thin), frame(own, thick))                         # unless the clouds keep their own
+        self.assertIn("cloudType", self._bad_clouds({"cloudType": "fog"}))
+        self.assertIn("base < top", self._bad_clouds({"base": 3000, "top": 1000}))
+        example = pathlib.Path(__file__).resolve().parents[1] / "examples/scripts/cloud_flight.as"
+        shots = []
+        for at in (0, 150, 299):
+            self.run_cli("still", "cloud-flight", "--script", example, "--at", at, "--png", f"f{at}.png")
+            shots.append((self.cwd / f"f{at}.png").read_bytes())
+        self.assertEqual(len(set(shots)), 3)
+
+    def _bad_clouds(self, clouds):
+        self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "clouds"; c.w = 64; c.h = 36; c.fps = 30; c.duration = 2; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) {
+    g3d::draw(%s, frame, 0, 0, 64, 36);
+}
+''' % json.dumps(json.dumps({"clouds": clouds})))
+        return self.run_cli("still", "clouds", "--script", self.path, "--png", "x.png", ok=False)
+
+    @unittest.skipUnless(GL, "needs OpenGL")
     def test_flora_area_scatter_terrain(self):
         # One area feeds a terrain, grass and scattered instances; frames repeat exactly, and
         # bad areas and oversized scatters say what is wrong.

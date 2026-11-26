@@ -659,6 +659,79 @@ struct Water {
     bool submerged(Vector3 p, double seconds) const { return enabled && p.y < height(p.x, p.z, seconds); }
 };
 
+// ------------------------------------------------------------------ volumetric clouds
+// A layer of real clouds, raymarched through a shell round a planet of Earth's size (centre 6 371 km
+// below the world origin, so the layer curves away to the horizon and is seen from orbit as well as
+// from the ground). They are lit by the sun with self-shadow, a silver lining and dark bases; they
+// can be flown through (the view greys out inside and clears again outside); they cast moving
+// shadows on whatever the sun reaches; and they fade into the haze with distance.
+//
+//     scene->clouds.enabled = true;
+//     scene->clouds.base = 1500; scene->clouds.top = 3200;      // metres above y = 0
+//     scene->clouds.cover = 0.45f;
+//     scene->clouds.type = g3d::CloudType::Cumulus;
+//
+// With Clouds enabled the Sky's flat painted layer (Sky::clouds) is not drawn for that frame. The
+// sky's own lighting of the scene (its diffuse and reflections) is still the cloud-free sky: the
+// volumetric clouds do not darken image-based light yet.
+//
+// What is drawn: after the opaque objects and the sky; the march stops at the opaque depth (a
+// hill can poke into a low cloud, clouds behind a mountain are hidden) and at the water plane
+// (water behind a cloud is hidden by it). Transparent objects are not in the depth buffer, so one
+// in front of a cloud is covered by it. Not drawn with an orthographic camera or from under the
+// water. Distant clouds fade by their own aerial perspective (`haze`), not by the scene's fog.
+// Everything is a pure function of the frame: nothing carries from one frame to the next, and the
+// step noise is jittered per pixel (interleaved gradient noise), never accumulated over time.
+//
+// Cost: the march is the price of a frame. `quality` and `resolution` trade it: Film at half size
+// is meant for about 40 ms at 1920x1080 on a mid-range GPU, Preview for a few.
+struct Clouds {
+    enum class Quality { Preview, Film, High };
+    bool enabled = false;               // false: nothing here is read, no pixel changes
+    // The layer: world y of its base and top. The planet's surface passes through y = 0, so these are
+    // heights above the ground under the origin. The shape of the profile between them depends on `type`.
+    float base = 1500, top = 3500;
+    float cover = 0.5f;                 // 0..1: the share of the sky under cloud (looking up, about that share of pixels)
+    CloudType type = CloudType::Cumulus;    // Cumulus: puffs with flat bases; Stratus: a thin sheet near the base;
+                                            // Cumulonimbus: tall towers with an anvil; Deck: a flat-topped sea of cloud
+                                            // (under a Weather the layer top is raised to at least 12 km for Cumulonimbus)
+    float density = 1;                  // times the extinction: 0.5 thin and see-through, 2 dense and dark
+    float detail = 0.5f;                // 0..1: how far fine noise erodes the edges (wispy, cauliflower)
+    unsigned seed = 1;                  // another seed, another pattern of clouds
+    float evolution = 1;                // metres a second the shape noise slides through the clouds, so they slowly change (0: only drift)
+    Quality quality = Quality::Film;    // march steps: Preview 28, Film 96, High 160; light steps 4, 6, 10
+    float resolution = 0;               // fraction of the frame the march renders at (then a depth-aware filter); 0: by quality (1/2, 1, 1)
+    float haze = 1;                     // aerial perspective: 1 clouds fade to the horizon colour over ~80 km; 0 none
+    bool shadows = true;                // a ground shadow map of the clouds, multiplied into the sun's light
+    float shadowExtent = 8000;          // metres: the width of the area round the view the shadow map covers
+    // The drift when no weather sets it: metres a second (x, z) and the film's rate.
+    Vector2 drift{ 3, 1 };
+    float fps = 30;
+    // With Scene::weather enabled the cover and type come from it and the clouds drift with its wind
+    // (Weather::cloudTravel, so a changing wind does not make them swim). true keeps these. This is
+    // its own flag, not Sky::ownClouds, because the volumetric layer needs no Sky.
+    bool ownWeather = false;
+    // Hook for lightning (a later release): a flash inside the cloud lights it from within, as a point
+    // light of this position, colour and strength (0: none). It is read by the march and does nothing else.
+    struct Flash { Vector3 position{ 0, 0, 0 }; Color color{ 200, 210, 255, 255 }; float intensity = 0, radius = 1500; } flash;
+    // Test and comparison switch. false: every ray starts at the same place in its step and the entry
+    // into the cloud is not refined, so the steps show as rings (it exists to prove the jitter and the
+    // refinement hide them).
+    bool jitter = true;
+    // Comparison switches, to prove what they hide. denoise false: the march's own per-pixel noise, white-ish
+    // (interleaved gradient noise) instead of the blue-noise tile, and no bilateral filter on the result.
+    // extruded true: the old shape, a 2D coverage map pushed straight up by a height profile (flat vertical
+    // sides, hard surfaces), instead of the 3D shaping.
+    bool denoise = true;
+    bool extruded = false;
+    bool nearestSlice = false;                  // comparison switch: sample the noise atlas at the nearest slice (bands in height)
+
+    static constexpr float kPlanetRadius = 6371000;     // metres
+    // The metres the clouds have moved (x, z) by `seconds` under this weather: with weather enabled
+    // (and not ownWeather) the wind's run, else `drift` x seconds.
+    Vector2 travel(const Weather& w, double seconds) const;
+};
+
 // ------------------------------------------------------------------ scenes
 struct Scene {
     Camera camera;
@@ -703,6 +776,7 @@ struct Scene {
     Sky sky;                        // a procedural sky (sky.enabled); replaces `environment`
     Water water;                    // a water surface (water.enabled)
     Weather weather;                // one wind, clouds, haze... for everything above (weather.enabled)
+    Clouds clouds;                  // volumetric clouds (clouds.enabled), drawn after the opaque objects
     // With weather enabled the haze sets the fog: exponential, density from the haze, taking the
     // sky's colour (fogMode, fogDensity and fogFromSky are replaced; fogHeight and fogFalloff stay).
     // true keeps the scene's own fog.
@@ -772,6 +846,9 @@ fx::Emitter3D inWeather(const fx::Emitter3D& e, const Weather& w, const Matrix& 
 // The water as drawn at this moment: scene.water, with the weather worked in if it is enabled.
 // Its height() and slope() are the surface the shader draws (for a boat to ride).
 Water waterOf(const Scene& scene);
+// The clouds as drawn this moment: `c` with the weather's cover and type worked in (unless
+// c.ownWeather or the weather is off). Their drift is c.travel(w, seconds).
+Clouds inWeather(const Clouds& c, const Weather& w);
 
 // A procedural studio environment for Scene::environmentGenerator: a vertical gradient
 // (top, horizon, bottom) with `panels` soft light boxes above the horizon that shiny

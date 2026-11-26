@@ -181,5 +181,23 @@ fx::Emitter3D inWeather(const fx::Emitter3D& e, const Weather& w, const Matrix& 
 
 Water waterOf(const Scene& scene) { return inWeather(scene.water, scene.weather); }
 
+Clouds inWeather(const Clouds& c, const Weather& w) {
+    Clouds k = c;
+    if (!w.enabled || c.ownWeather) return k;
+    k.cover = std::clamp(w.clouds.cover, 0.f, 1.f);
+    k.type = w.clouds.type;
+    if (k.type == CloudType::Cumulonimbus) k.top = std::max(k.top, 12000.f);   // the tower reaches the tropopause
+    return k;
+}
+
+Vector2 Clouds::travel(const Weather& w, double seconds) const {
+    if (w.enabled && !ownWeather) {
+        const Vector2 d = w.windVector();
+        const float run = w.cloudTravel(seconds);
+        return { d.x * run, d.y * run };
+    }
+    return { (float)(drift.x * seconds), (float)(drift.y * seconds) };
+}
+
 } // namespace g3d
 } // namespace rmtn

@@ -557,12 +557,26 @@ integral of the wind speed when the speed changes over the shot, or leave it out
 `cover` (0..1), `cloudType` (`cumulus`, `stratus`, `cumulonimbus`, `deck`), `precipitation` (`none`,
 `rain`, `snow`, `sleet`), `intensity`, `wetness`, `snowCover`, `haze` (0..1; sets the fog) and
 `lightningRate`; `enabled` (default true) and `fps` (default the scene's `fps`) too. The cloud type,
-precipitation, wetness, snow cover and lightning are data for later releases and draw nothing yet.
+precipitation, wetness, snow cover and lightning are data for later releases and draw nothing yet; the cloud
+type and cover are drawn by a `clouds` object (below).
 Everything that takes the weather's wind has an opt-out that keeps its own: `"ownWind": true` (and, on `water`, `"fetch"`: metres of open water upwind, default 50000, `calm` 2000, `choppy` 10000, `storm` 200000, which limits how high the wind raises the waves) on a
 `grass`, `forest` or `water` descriptor and on a `particles` object (whose `particleConfig` also takes
 `windFollow`, 0..2, the share of the wind's speed a particle takes up sideways, and `drift`, a constant
 `[x,y,z]` velocity in units per frame), `"ownClouds"` and `"ownLight"` on `sky`, and `"ownFog": true` at the top of the scene.
 Without a `weather` object, or with `"enabled": false`, no pixel changes.
+A scene descriptor's `clouds` object draws volumetric clouds: a raymarched layer between `base` and `top`
+(metres above the ground under the origin, defaults 1500 and 3500) round a 6 371 km planet, lit by the
+sky's sun, that the camera can fly through (`examples/scripts/cloud_flight.as`). `cover` (0..1, the share of
+the sky under cloud looking up), `cloudType` (`cumulus`, `stratus`, `cumulonimbus`, `deck`), `density`
+(1; 0.5 thin, 2 dense), `detail` (0..1), `seed`, `evolution` (m/s the shape slides), `quality` (`preview`,
+`film` the default, `high`), `resolution` (the fraction of the frame the march runs at, 0: by quality),
+`haze` (aerial perspective, 1; 0 none), `shadows` (a ground shadow map, default true) with `shadowExtent`
+(metres, 8000), `drift` `[x, z]` (m/s, `[3, 1]`) and `fps`. With a `weather` object the cover, type and
+drift come from it; `"ownWeather": true` keeps the clouds' own. `flash` (`position`, `color`,
+`intensity`, `radius`) is the hook for lightning and draws nothing at intensity 0. `jitter: false` turns
+the per-pixel jitter and entry refinement off (it exists to show the banding they hide). `denoise: false` swaps the blue noise and bilateral filter for white noise and a point sample, and `extruded: true` restores the old 2D-coverage extrusion (both exist to show what they fix). The Sky's flat
+cloud layer is not drawn while these are on, and the image-based lighting stays free of clouds. Without a
+`clouds` object, or with `"enabled": false`, no pixel changes. See `docs/weather.md`.
 A scene descriptor's `environment` is an image path (equirectangular PNG/JPG/HDR), or an object
 that gives a cube skybox: `{"faces": [px, nx, py, ny, pz, nz]}` (six files in the order +x, -x,
 +y, -y, +z, -z) or `{"cross": "sky.png"}` (one horizontal cross, a 4x3 grid: `+y` above column 1,

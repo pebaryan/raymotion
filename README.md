@@ -341,6 +341,12 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   read, so they lean, roll and slant the same way; presets `clear`, `overcast`, `rain`, `storm`,
   `snow`, `fog` and `Weather::mix` turn a clear morning into a storm across a shot. Off by
   default (nothing changes), and each system has an `ownWind`-style opt-out.
+* Volumetric clouds (`Scene::clouds`, `docs/weather.md`): a raymarched layer round a 6 371 km planet
+  that a camera can fly through, from orbit to the street. Baked Perlin-Worley noise, per-type height
+  profiles (cumulus, stratus, cumulonimbus with an anvil, a flat deck), Beer and powder lighting with a
+  silver lining, aerial perspective, a depth-aware upsample, and a ground shadow map that moves with the
+  drift; cover, type and drift follow `Scene::weather`. Preview, Film and High quality (about 1, 2 and
+  3.5 ms a 1080p frame). Off by default; `examples/scripts/cloud_flight.as`.
 * 2D vegetation (`flora2d::`, drawn with the node's context, so flat compositions and
   `g3d::Surface` alike): grass along a ground line, tufts, a meadow filling a shape (smaller
   toward its back), shrubs, and branching trees (oak, birch, pine; a silhouette option for

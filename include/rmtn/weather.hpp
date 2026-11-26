@@ -46,7 +46,7 @@ struct Weather {
 
     struct Clouds {
         float cover = 0.25f;            // 0..1: the share of the sky under cloud
-        CloudType type = CloudType::Cumulus;    // used by volumetric clouds (not drawn yet)
+        CloudType type = CloudType::Cumulus;    // read by Scene::clouds (volumetric clouds) unless Clouds::ownWeather
     } clouds;
 
     struct Precip {
