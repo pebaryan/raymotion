@@ -432,6 +432,7 @@ static g3d::ScenePtr world(const g3d::Weather* w, bool setButOff, bool allOwn, b
     if (w) {
         s->weather = *w;
         s->weather.enabled = !setButOff;
+        s->ground.ownWeather = allOwn;
     }
     return s;
 }
@@ -522,6 +523,7 @@ static void mixContinuous() {
 static g3d::ScenePtr mixingWorld(bool breakIt = false, bool busy = true) {
     auto s = world(nullptr, false, false, busy);
     s->weather = g3d::Weather::clear();
+    s->ground.ownWeather = true;                     // the ground would jump where the kind of rain switches: this test is about the sky
     s->up = [breakIt](int t, g3d::Scene& self) {
         const float u = t / 100.f;
         self.weather = g3d::Weather::mix(g3d::Weather::clear(), g3d::Weather::storm(), u);
@@ -3507,6 +3509,683 @@ static void precipitation() {
     snowIsAVeil();
 }
 
+
+// ================================================================ W4: wet ground and settling snow
+// A uniform bright environment (sky = ground colour), so what a surface reflects does not depend on where it faces.
+static constexpr int WW = 320, WH = 180;
+static g3d::ScenePtr w4Base(float ambient = 1.f) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->skyColor = { 215, 218, 225, 255 };
+    s->groundColor = s->skyColor;
+    s->ambient = ambient;
+    return s;
+}
+static float roiLuma(const Image& img, int x0, int y0, int x1, int y1) {
+    double sum = 0;
+    int n = 0;
+    for (int y = y0; y < y1; y++)
+        for (int x = x0; x < x1; x++) { sum += luma(GetImageColor(img, x, y)); n++; }
+    return n ? (float)(sum / n) : 0.f;
+}
+static float peakDiff(const Image& a, const Image& b, int x0, int y0, int x1, int y1) {
+    float m = 0;
+    for (int y = y0; y < y1; y++)
+        for (int x = x0; x < x1; x++) {
+            const Color p = GetImageColor(a, x, y), q = GetImageColor(b, x, y);
+            m = std::max(m, (float)std::max({ std::abs(p.r - q.r), std::abs(p.g - q.g), std::abs(p.b - q.b) }));
+        }
+    return m;
+}
+
+// (a) A puddle where the ground is flat, none on a 60 degree slope: the same plane, once flat and once tipped, seen
+// from the same angle against its surface (the camera turns with it) in a uniform environment.
+static float tiltedGain(float degrees, float puddles) {
+    auto make = [&](float wet) {
+        auto s = w4Base();
+        s->ground.wetness = wet;
+        s->ground.puddles = puddles;
+        s->ground.puddleSize = 2;
+        g3d::Material m;
+        m.color = { 70, 70, 74, 255 };
+        m.roughness = 0.8f;
+        g3d::Object3D* p = s->add(g3d::Geometry::plane(60, 60), m);
+        p->rotation = { degrees, 0, 0 };
+        const Matrix r = MatrixRotateX(degrees * DEG2RAD);
+        s->camera.position = Vector3Transform({ 0, 1.2f, 3.0f }, r);
+        s->camera.target = Vector3Transform({ 0, 0, -6 }, r);
+        s->camera.upVector = Vector3Transform({ 0, 1, 0 }, r);
+        s->camera.fov = 50;
+        return s;
+    };
+    Image dry = look(make(0), WW, WH, 3), wet = look(make(1), WW, WH, 3);
+    const float g = roiLuma(wet, 60, 100, 260, 170) - roiLuma(dry, 60, 100, 260, 170);
+    dump(degrees < 1 ? (puddles > 0 ? "w4-puddle-flat.png" : "w4-puddle-off.png") : "w4-puddle-slope.png", wet);
+    UnloadImage(dry); UnloadImage(wet);
+    return g;
+}
+static void puddleOnFlatNotSlope() {
+    const float flat = tiltedGain(0, 2), slope = tiltedGain(60, 2), noPuddles = tiltedGain(0, 0);
+    std::printf("[weather] wet gain in mean luma: flat plane %.1f, 60 degree slope %.1f, flat with puddles off %.1f\n", flat, slope, noPuddles);
+    CHECK(flat > 25.f);                         // the film of standing water reflects the sky
+    CHECK(slope < 0.35f * flat);                // the slope is damp (darker, a faint film) but holds no puddle
+    CHECK(noPuddles < 0.5f * flat);
+}
+
+// (b) Rain rings. A top-down view of a puddle that fills the plane, drawing the surface normal as colour (Ground::debug).
+// The CPU twin says where the rings are.
+static g3d::ScenePtr ringScene(float rate, float cx, float cz) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->ground.wetness = 1; s->ground.puddles = 2; s->ground.debug = 1; s->ground.rippleRate = rate; s->ground.seed = 1;
+    s->precipitation.enabled = true;
+    s->precipitation.kind = g3d::Precipitation::Rain;
+    s->precipitation.intensity = 1;
+    s->precipitation.splashes = false;
+    s->precipitation.occlusion = false;
+    s->precipitation.farLayer = false;
+    s->precipitation.radius = 2;
+    s->precipitation.rainDensity = 0;
+    s->precipitation.seed = 11;
+    s->camera.position = { cx, 5, cz }; s->camera.target = { cx, 0, cz }; s->camera.upVector = { 0, 0, -1 };
+    s->camera.orthographic = true; s->camera.orthoHeight = 1.2f;
+    g3d::Material m;
+    m.color = { 90, 90, 90, 255 };
+    s->add(g3d::Geometry::plane(60, 60), m);
+    return s;
+}
+// The tilt of the debug colour (0.5 + n.x, 0.5 + n.z): the normal's x and z at a pixel.
+static Vector2 tiltAt(const Image& img, int x, int y) {
+    const Color c = GetImageColor(img, x, y);
+    return { c.r / 255.f - 0.5f, c.g / 255.f - 0.5f };
+}
+// Every ring that can reach the view round (cx, cz): the twin's rings from nine points, without repeats.
+static std::vector<g3d::Ground::Ring> ringsNear(const g3d::Ground& g, float cx, float cz, double t, float rate) {
+    std::vector<g3d::Ground::Ring> all;
+    for (int i = -1; i <= 1; i++)
+        for (int j = -1; j <= 1; j++)
+            for (const auto& r : g.rings(cx + 0.7f * i, cz + 0.7f * j, t, rate, 11)) {
+                bool dup = false;
+                for (const auto& a : all) dup = dup || (std::fabs(a.centre.x - r.centre.x) < 1e-5f && std::fabs(a.centre.y - r.centre.y) < 1e-5f);
+                if (!dup) all.push_back(r);
+            }
+    return all;
+}
+static float s_ringStretch = 1;       // 1: round; another value makes the roundness check measure an ellipse (to show it fails)
+static void ringsRoundAndSpaced() {
+    // CPU: alive rings a square metre are rate x the ring's life, counted over 400 cells and 8 moments.
+    for (float rate : { 1.f, 3.f, 6.f }) {
+        g3d::Ground g;
+        g.seed = 5;
+        long long n = 0;
+        int samples = 0;
+        for (int k = 0; k < 8; k++)
+            for (int i = 0; i < 20; i++)
+                for (int j = 0; j < 20; j++) {
+                    const float x = (i + 0.5f) * g3d::Ground::kCell, z = (j + 0.5f) * g3d::Ground::kCell;
+                    for (const auto& r : g.rings(x, z, 3.1 + 2.3 * k, rate))
+                        if (std::floor(r.centre.x / g3d::Ground::kCell) == i && std::floor(r.centre.y / g3d::Ground::kCell) == j) n++;
+                    samples++;
+                }
+        const float density = (float)n / (samples * g3d::Ground::kCell * g3d::Ground::kCell), want = rate * g3d::Ground::kPeriod;
+        std::printf("[weather] rings alive per m2 at rate %.0f: %.2f (rate x life %.2f)\n", rate, density, want);
+        CHECK(std::fabs(density / want - 1.f) < 0.25f);
+    }
+    // The picture: one ring alone in the view, found by the CPU twin, is round and as wide as the speed says.
+    const float cx = 0.37f, cz = 0.41f;
+    g3d::Ground g;
+    g.seed = 1;
+    int found = -1;
+    float age = 0;
+    Vector2 centre{ 0, 0 };
+    for (int f = 0; f < 9000 && found < 0; f++) {
+        const auto rs = ringsNear(g, cx, cz, f / 30.0, 0.4f);
+        int inside = 0;
+        bool good = false;
+        Vector2 gc{ 0, 0 };
+        float ga = 0;
+        for (const auto& r : rs) {
+            const float d = Vector2Distance(r.centre, { cx, cz });
+            if (d < 1.1f) inside++;
+            if (d < 0.3f && r.age > 0.35f && r.age < 0.75f) { good = true; gc = r.centre; ga = r.age; }
+        }
+        if (good && inside == 1) { found = f; age = ga; centre = gc; }
+    }
+    CHECK(found >= 0);
+    if (found < 0) return;
+    if (std::getenv("RMTN_RING_DEBUG"))
+        for (const auto& r : ringsNear(g, cx, cz, found / 30.0, 0.4f))
+            std::printf("ring centre px (%.0f, %.0f) age %.2f\n", (r.centre.x - cx) / (1.2f / (WH * 2)) + WW, (r.centre.y - cz) / (1.2f / (WH * 2)) + WH, r.age);
+    Image img = look(ringScene(0.4f, cx, cz), WW * 2, WH * 2, found);
+    dump("w4-ring.png", img);
+    const float m = 1.2f / (WH * 2), r0 = g3d::Ground::kSpeed * age;
+    const float px = (centre.x - cx) / m + WW, py = (centre.y - cz) / m + WH;
+    std::vector<float> radii;
+    for (int a = 0; a < 48; a++) {
+        const float th = a * 2 * PI / 48, ca = std::cos(th), sa = std::sin(th) * s_ringStretch;
+        float best = 0, at = 0;
+        for (float r = 0.4f * r0; r < 1.5f * r0; r += m * 0.5f) {
+            const int x = (int)std::lround(px + ca * r / m), y = (int)std::lround(py + sa * r / m);
+            if (x < 0 || y < 0 || x >= img.width || y >= img.height) { at = -1; break; }
+            const Vector2 t = tiltAt(img, x, y);
+            const float v = std::fabs(t.x * std::cos(th) + t.y * std::sin(th));
+            if (v > best) { best = v; at = r; }
+        }
+        if (at > 0 && best > 0.03f) radii.push_back(at);
+    }
+    double mean = 0, var = 0;
+    for (float r : radii) mean += r;
+    mean /= std::max<size_t>(radii.size(), 1);
+    for (float r : radii) var += (r - mean) * (r - mean);
+    const double spread = radii.empty() ? 1.0 : std::sqrt(var / radii.size()) / mean;
+    std::printf("[weather] one ring at age %.2f s: radius %.3f m expected %.3f, over %zu of 48 angles, spread %.3f of the radius\n", age, mean, r0, radii.size(), spread);
+    CHECK(radii.size() >= 40);
+    CHECK(std::fabs(mean / r0 - 1.f) < 0.06f);
+    CHECK(spread < 0.045);
+    UnloadImage(img);
+    // The rate shows in the picture: three times the rate, about three times the tilt (averaged over twelve moments).
+    auto energy = [&](float rate) {
+        double e = 0;
+        for (int k = 0; k < 12; k++) {
+            Image im = look(ringScene(rate, cx, cz), WW, WH, 40 + 37 * k);
+            for (int y = 0; y < im.height; y++)
+                for (int x = 0; x < im.width; x++) { const Vector2 t = tiltAt(im, x, y); e += std::fabs(t.x) + std::fabs(t.y); }
+            UnloadImage(im);
+        }
+        return e / 12;
+    };
+    const double e1 = energy(1.f), e3 = energy(3.f), e0 = energy(0.f);
+    std::printf("[weather] ring tilt energy: none %.0f, rate 1 %.0f, rate 3 %.0f (ratio %.2f)\n", e0, e1, e3, (e3 - e0) / std::max(e1 - e0, 1.0));
+    CHECK(e1 > e0 + 250);
+    CHECK((e3 - e0) / (e1 - e0) > 2.2 && (e3 - e0) / (e1 - e0) < 3.9);
+}
+
+// (c) Snow is zero at the start and never falls; the top of a cube whitens, its sides do not.
+static void snowSettlesOnTops() {
+    g3d::Weather w = g3d::Weather::snow();
+    w.precipitation.intensity = 0.6f;
+    w.accumulationScale = 500;
+    double prev = -1, end = 0;
+    const double d0 = w.snowDepthAt(0);
+    bool mono = true;
+    for (int i = 0; i <= 80; i++) {
+        const double d = w.snowDepthAt(i * 0.25);
+        mono = mono && d >= prev;
+        prev = d;
+        end = d;
+    }
+    std::printf("[weather] snow depth: t = 0: %.4f m, 10 s: %.3f m, 20 s: %.3f m, nondecreasing %d\n", d0, w.snowDepthAt(10), end, mono ? 1 : 0);
+    CHECK(d0 == 0 && mono && end > 0.04 && end < 0.12 && w.snowDepthAt(10) < end);
+    // The drawing: a cube seen from above and the side, bare and then under 8 cm of snow.
+    auto make = [](float cover) {
+        auto s = w4Base(0.6f);
+        s->ground.snowCover = cover;
+        s->lights.push_back(g3d::Light::directional({ -3, 6, 4 }, WHITE, 1.2f));
+        g3d::Material m;
+        m.color = { 150, 80, 60, 255 };
+        s->add(g3d::Geometry::box(1.5f, 1.5f, 1.5f), m)->position = { 0, 0.75f, 0 };
+        s->camera.position = { 2.6f, 3.2f, 3.6f }; s->camera.target = { 0, 0.7f, 0 }; s->camera.fov = 45;
+        return s;
+    };
+    Image bare = look(make(0), WW, WH, 5);
+    float topPrev = -1;
+    bool rises = true;
+    for (float cover : { 0.1f, 0.3f, 0.6f, 0.9f }) {
+        Image im = look(make(cover), WW, WH, 5);
+        const float top = roiLuma(im, 130, 52, 200, 70);
+        rises = rises && top >= topPrev - 1;
+        topPrev = top;
+        UnloadImage(im);
+    }
+    Image snowy = look(make(0.9f), WW, WH, 5);
+    dump("w4-cube-bare.png", bare); dump("w4-cube-snow.png", snowy);
+    const float topBare = roiLuma(bare, 130, 52, 200, 70), topSnow = roiLuma(snowy, 130, 52, 200, 70);
+    const float sideBare = roiLuma(bare, 100, 110, 140, 135), sideSnow = roiLuma(snowy, 100, 110, 140, 135);
+    const float side2Bare = roiLuma(bare, 175, 110, 215, 135), side2Snow = roiLuma(snowy, 175, 110, 215, 135);
+    std::printf("[weather] cube top %.0f -> %.0f; sides %.0f -> %.0f and %.0f -> %.0f; top rises with cover %d\n", topBare, topSnow, sideBare, sideSnow, side2Bare, side2Snow, rises ? 1 : 0);
+    CHECK(topSnow > topBare + 50);
+    CHECK(std::fabs(sideSnow - sideBare) < 4 && std::fabs(side2Snow - side2Bare) < 4);
+    CHECK(rises);
+    UnloadImage(bare); UnloadImage(snowy);
+}
+
+// (d) Wetness soaks in while it rains and dries when it stops: it never rises after the rain, and is under 0.1 by dryingTime().
+static void wetnessDries() {
+    g3d::Weather w = g3d::Weather::rain();
+    w.accumulationScale = 20;
+    w.history = { { 0, g3d::Precipitation::Rain, 1 }, { 60, g3d::Precipitation::None, 0 } };
+    w.precipitation.kind = g3d::Precipitation::None;
+    w.precipitation.intensity = 0;
+    const float dryFilm = w.dryingTime() / w.accumulationScale;                   // film seconds
+    float prev = -1;
+    const float wetAtStop = w.wetnessAt(60);
+    bool risesWhileRaining = true, neverRises = true;
+    for (int i = 0; i <= 60; i++) { const float v = w.wetnessAt(i); risesWhileRaining = risesWhileRaining && v >= prev; prev = v; }
+    for (int i = 0; i <= 240; i++) { const float v = w.wetnessAt(60 + i * dryFilm / 100.f); neverRises = neverRises && v <= prev + 1e-6f; prev = v; }
+    const float atDry = w.wetnessAt(60 + dryFilm), half = w.wetnessAt(60 + 0.4f * dryFilm);
+    std::printf("[weather] wetness: %.2f when the rain stops (60 s), %.2f at 0.4 x the drying time, %.3f at the drying time (%.0f weather s = %.1f film s); never rises %d\n",
+                wetAtStop, half, atDry, w.dryingTime(), dryFilm, neverRises ? 1 : 0);
+    CHECK(risesWhileRaining && neverRises);
+    CHECK(wetAtStop > 0.9f);
+    CHECK(atDry < 0.1f && half > 0.1f);
+    // Wind dries it faster; a pin holds.
+    g3d::Weather windy = w, calm = w;
+    windy.wind.speed = 20; calm.wind.speed = 0;
+    CHECK(windy.dryingTime() < calm.dryingTime());
+    g3d::Weather pinned = w;
+    pinned.wetness = 0.4f;
+    CHECK(pinned.wetnessAt(1) == 0.4f && pinned.wetnessAt(500) == 0.4f);
+    // Snow melts above freezing.
+    g3d::Weather sn = g3d::Weather::snow();
+    sn.accumulationScale = 500;
+    sn.history = { { 0, g3d::Precipitation::Snow, 1 }, { 10, g3d::Precipitation::None, 0 } };
+    sn.temperature = -2;
+    const float cold = sn.snowDepthAt(30);
+    sn.temperature = 6;
+    const float warm = sn.snowDepthAt(30);
+    std::printf("[weather] snow depth after 30 s: %.3f m at -2 C, %.3f m at +6 C\n", cold, warm);
+    CHECK(cold > 0.03f && warm < 0.5f * cold);
+}
+
+// A street: a wet plane, two boxes, rain with a history, under a grey sky; the camera low.
+static g3d::ScenePtr streetScene(bool reflections, bool dryGround = false, float puddles = 1) {
+    auto s = w4Base(0.8f);
+    s->skyColor = { 150, 160, 180, 255 };
+    s->groundColor = { 90, 90, 95, 255 };
+    s->weather = g3d::Weather::rain();
+    s->weather.accumulationScale = 400;
+    s->weather.history = { { 0, g3d::Precipitation::Rain, 0.8f } };
+    s->ground.reflections = reflections;
+    s->ground.puddleSize = 2.5f;
+    s->ground.puddles = puddles;
+    if (dryGround) s->ground.wetness = 0;
+    s->precipitation.enabled = true;
+    s->precipitation.splashes = false;
+    s->precipitation.farLayer = false;
+    s->precipitation.opacity = 0;
+    s->lights.push_back(g3d::Light::directional({ -4, 6, 3 }, { 255, 235, 210, 255 }, 1.0f));
+    g3d::Material m;
+    m.color = { 120, 118, 116, 255 };
+    m.roughness = 0.9f;
+    s->add(g3d::Geometry::plane(80, 80), m);
+    g3d::Material red = m, blue = m;
+    red.color = { 230, 30, 20, 255 };
+    blue.color = { 30, 60, 220, 255 };
+    s->add(g3d::Geometry::box(0.8f, 1.6f, 0.8f), red)->position = { -0.8f, 0.8f, -4 };
+    s->add(g3d::Geometry::box(0.8f, 1.2f, 0.8f), blue)->position = { 1.0f, 0.6f, -5.5f };
+    s->camera.position = { 0, 0.55f, 2.5f }; s->camera.target = { 0, 0.3f, -4 }; s->camera.fov = 50;
+    return s;
+}
+
+// (e) Purity: a frame alone equals the same frame after others, with the accumulators, rings and the reflection all on.
+static g3d::ScenePtr visibleRain(g3d::ScenePtr s) { s->precipitation.opacity = 1; return s; }
+static void groundPurity() {
+    Image alone = look(visibleRain(streetScene(true)), WW, WH, 200);
+    Comp c = comp(visibleRain(streetScene(true)), WW, WH);
+    Image a = render(c, 20), b = render(c, 400), after = render(c, 200), other = render(c, 260);
+    const long long same = diffImages(alone, after), differs = diffImages(after, other);
+    std::printf("[weather] ground purity: frame 200 alone vs after frames 20, 400: diff %lld; frame 260 vs 200: diff %lld\n", same, differs);
+    CHECK(same == 0 && differs > 2000);
+    g3d::Weather w = streetScene(true)->weather;
+    const float w1 = w.wetnessAt(7.3);
+    (void)w.wetnessAt(1.0);
+    CHECK(w.wetnessAt(7.3) == w1);
+    UnloadImage(alone); UnloadImage(a); UnloadImage(b); UnloadImage(after); UnloadImage(other);
+}
+
+// (f) Scenes with no ground state are untouched: configuring the ground changes nothing while it holds no wetness or snow.
+static void groundOffMeansOff() {
+    auto base = [](bool weather, bool configure, bool pinZero) {
+        auto s = w4Base(0.7f);
+        if (weather) s->weather = g3d::Weather::clear();
+        if (configure) { s->ground.puddles = 2; s->ground.rippleRate = 9; s->ground.seed = 77; s->ground.reflections = true; s->ground.puddleSize = 1; }
+        if (pinZero) { s->ground.wetness = 0; s->ground.snowCover = 0; }
+        s->lights.push_back(g3d::Light::directional({ -3, 5, 2 }, WHITE, 1.f));
+        g3d::Material m;
+        m.color = { 120, 140, 90, 255 };
+        s->add(g3d::Geometry::plane(30, 30), m);
+        s->add(g3d::Geometry::box(1, 1, 1), m)->position = { 0, 0.5f, -3 };
+        s->camera.position = { 0, 1.6f, 4 }; s->camera.target = { 0, 0.5f, -3 };
+        return s;
+    };
+    Image none = look(base(false, false, false), WW, WH, 4), set = look(base(false, true, false), WW, WH, 4);
+    Image clear = look(base(true, false, false), WW, WH, 4), clearPinned = look(base(true, true, true), WW, WH, 4);
+    const long long d1 = diffImages(none, set), d2 = diffImages(clear, clearPinned);
+    // A weather that never rains or snows: wetness 0, depth 0.
+    g3d::Weather w = g3d::Weather::overcast();
+    const bool zero = w.wetnessAt(300) == 0 && w.snowDepthAt(300) == 0;
+    std::printf("[weather] ground off: no weather vs ground configured: diff %lld; clear weather vs configured and pinned at 0: diff %lld; overcast accumulates nothing %d\n", d1, d2, zero ? 1 : 0);
+    CHECK(d1 == 0 && d2 == 0 && zero);
+    UnloadImage(none); UnloadImage(set); UnloadImage(clear); UnloadImage(clearPinned);
+}
+
+// (g) A material with weathering off stays dry and bare under the same weather; the default one changes.
+static void weatheringOptOut() {
+    auto make = [](bool ground) {
+        auto s = w4Base(0.7f);
+        if (ground) { s->ground.wetness = 1; s->ground.snowCover = 0.8f; s->ground.puddles = 0; }
+        s->lights.push_back(g3d::Light::directional({ -3, 6, 3 }, WHITE, 1.f));
+        g3d::Material m;
+        m.color = { 110, 120, 140, 255 };
+        s->add(g3d::Geometry::plane(30, 30), m);
+        g3d::Material a = m, b = m;
+        b.weathering = false;
+        s->add(g3d::Geometry::box(1, 1, 1), a)->position = { -1.0f, 0.5f, 0 };
+        s->add(g3d::Geometry::box(1, 1, 1), b)->position = { 1.0f, 0.5f, 0 };
+        s->camera.position = { 0, 3.0f, 5 }; s->camera.target = { 0, 0.5f, 0 }; s->camera.fov = 40;
+        return s;
+    };
+    Image dry = look(make(false), WW, WH, 2), wet = look(make(true), WW, WH, 2);
+    dump("w4-optout.png", wet);
+    const float kept = peakDiff(dry, wet, 190, 85, 225, 110), changed = peakDiff(dry, wet, 95, 85, 130, 110);
+    std::printf("[weather] weathering off: opted-out box changes by at most %.0f levels, the default box by %.0f\n", kept, changed);
+    CHECK(kept <= 1 && changed > 20);
+    UnloadImage(dry); UnloadImage(wet);
+}
+
+// (h) A porous surface at full wetness has about 0.5-0.7 of the dry albedo under the same diffuse light, and a stronger
+// sky reflection at a grazing view.
+static void wetDarkens() {
+    auto make = [](float wet, float elevation, Color albedo) {
+        auto s = w4Base(1);
+        s->ground.wetness = wet; s->ground.puddles = 0;
+        s->skyColor = { 235, 240, 255, 255 };
+        s->groundColor = s->skyColor;
+        s->lights.push_back(g3d::Light::directional({ 3, 4, 0 }, WHITE, 1.f));    // off the view's axis: no highlight
+        g3d::Material m;
+        m.color = albedo;
+        m.roughness = 0.9f;
+        s->add(g3d::Geometry::plane(60, 60), m);
+        const float e = elevation * DEG2RAD;
+        s->camera.position = { 0, 4.f * std::sin(e), 4.f * std::cos(e) }; s->camera.target = { 0, 0, 0 }; s->camera.fov = 30;
+        return s;
+    };
+    Image dryTop = look(make(0, 88, { 190, 180, 165, 255 }), WW, WH, 1), wetTop = look(make(1, 88, { 190, 180, 165, 255 }), WW, WH, 1);
+    const float rTop = std::pow(roiLuma(wetTop, 120, 70, 200, 110) / roiLuma(dryTop, 120, 70, 200, 110), 2.2f);
+    UnloadImage(dryTop); UnloadImage(wetTop);
+    Image dryLow = look(make(0, 6, { 60, 55, 50, 255 }), WW, WH, 1), wetLow = look(make(1, 6, { 60, 55, 50, 255 }), WW, WH, 1);
+    const float low0 = roiLuma(dryLow, 120, 100, 200, 140), low1 = roiLuma(wetLow, 120, 100, 200, 140);
+    dump("w4-grazing-wet.png", wetLow);
+    UnloadImage(dryLow); UnloadImage(wetLow);
+    std::printf("[weather] wet porous ground: linear brightness x%.2f of dry looking down; grazing %.0f -> %.0f levels\n", rTop, low0, low1);
+    CHECK(rTop > 0.5f && rTop < 0.7f);
+    CHECK(low1 > low0 + 8);
+}
+
+// (i) The scene is reflected in wet ground: a red box stands on a wet street seen at a low angle; the glow below its
+// base is reddish only when the reflection march is on (the sky reflection alone is not red).
+static void wetReflectsScene() {
+    Image on = look(streetScene(true, false, 2), WW, WH, 200), off = look(streetScene(false, false, 2), WW, WH, 200), dry = look(streetScene(true, true, 2), WW, WH, 200);
+    dump("w4-street-ssr.png", on); dump("w4-street-nossr.png", off); dump("w4-street-dry.png", dry);
+    auto redness = [](const Image& img, int x0, int x1, int y0, int y1) {
+        double r = 0;
+        int n = 0;
+        for (int y = y0; y < y1; y++)
+            for (int x = x0; x < x1; x++) { const Color c = GetImageColor(img, x, y); r += std::max(0, c.r - (c.g + c.b) / 2 - 12); n++; }
+        return (float)(r / std::max(n, 1));
+    };
+    auto isRed = [](Color c) { return c.r > 150 && c.g < 90 && c.b < 90; };
+    int base = -1;
+    for (int y = WH - 1; y > 0 && base < 0; y--) {
+        int hits = 0;
+        for (int x = 0; x < WW; x++) if (isRed(GetImageColor(dry, x, y))) hits++;
+        if (hits > 6) base = y;
+    }
+    CHECK(base > 0);
+    if (base < 0) { UnloadImage(on); UnloadImage(off); UnloadImage(dry); return; }
+    int xa = WW, xb = 0;
+    for (int x = 0; x < WW; x++) if (isRed(GetImageColor(dry, x, base - 4))) { xa = std::min(xa, x); xb = std::max(xb, x); }
+    const int y0 = base + 3, y1 = std::min(WH, base + 3 + (base - 40) / 2);
+    const float redOn = redness(on, xa, xb, y0, y1), redOff = redness(off, xa, xb, y0, y1), redDry = redness(dry, xa, xb, y0, y1);
+    std::printf("[weather] reddish glow below the red box (x %d..%d, rows %d..%d): reflection on %.1f, off %.1f, dry ground %.1f\n", xa, xb, y0, y1, redOn, redOff, redDry);
+    CHECK(xb > xa);
+    CHECK(redOn > redOff + 2.f && redOn > redDry + 2.f);
+    UnloadImage(on); UnloadImage(off); UnloadImage(dry);
+}
+
+// (j) Under a roof the rain does not reach: no wetness there, while the open ground beside it changes.
+static void shelterStaysDry() {
+    auto make = [](bool ground, bool roof) {
+        auto s = w4Base(0.8f);
+        if (ground) { s->ground.wetness = 1; s->ground.snowCover = 0; s->ground.puddles = 0; }
+        s->precipitation.enabled = true;
+        s->precipitation.kind = g3d::Precipitation::Rain;
+        s->precipitation.intensity = 0.3f;
+        s->precipitation.opacity = 0;
+        s->precipitation.splashes = false;
+        s->precipitation.farLayer = false;
+        s->precipitation.occlusion = true;
+        g3d::Material m;
+        m.color = { 170, 150, 130, 255 };
+        s->add(g3d::Geometry::plane(40, 40), m);
+        if (roof) s->add(g3d::Geometry::box(5, 0.1f, 20), m)->position = { -2.5f, 3.0f, 0 };
+        s->camera.position = { 8, 1.2f, 0 }; s->camera.target = { -3, 0.3f, 0 }; s->camera.fov = 40;
+        return s;
+    };
+    Image d = look(make(false, true), WW, WH, 3), w = look(make(true, true), WW, WH, 3), open = look(make(true, false), WW, WH, 3);
+    dump("w4-shelter.png", w); dump("w4-shelter-open.png", open);
+
+
+    // Seen along the street from its open side at 1.2 m: the ground under the roof (x -5..0, 8 to 13 m away) lies at rows 93 to 107.
+    const float under = peakDiff(d, w, 90, 95, 230, 105), exposed = peakDiff(d, open, 90, 95, 230, 105);
+    std::printf("[weather] shelter: the ground under a roof changes by %.0f levels when the ground gets wet, the same ground with no roof by %.0f\n", under, exposed);
+    CHECK(exposed > 12);
+    CHECK(under < 0.15f * exposed);
+    UnloadImage(d); UnloadImage(w); UnloadImage(open);
+}
+
+// W4 cost at 1080p: the street scene with the ground at wetness 0 (the wet path off), wet with puddles and rings, and wet with the SSR pass.
+static void groundTiming() {
+    constexpr int W = 1920, H = 1080;
+    struct Row { const char* name; bool reflections, dry; };
+    const Row rows[] = { { "wetness 0 (dry, path off)", false, true }, { "wet, puddles and rings, no SSR", false, false }, { "wet + SSR", true, false } };
+    for (const Row& row : rows) {
+        Comp c = comp(streetScene(row.reflections, row.dry, 1), W, H);
+        Canvas canvas;
+        canvas.load(W, H, 1);
+        presentFrame(c, 200, canvas);
+        Image warm = LoadImageFromTexture(canvas.output().texture);
+        UnloadImage(warm);
+        double best = 1e9, mean = 0;
+        for (int i = 0; i < 12; i++) {
+            const double t0 = GetTime();
+            presentFrame(c, 200 + i, canvas);
+            Image img = LoadImageFromTexture(canvas.output().texture);
+            const double dt = (GetTime() - t0) * 1000;
+            UnloadImage(img);
+            best = std::min(best, dt);
+            mean += dt / 12;
+        }
+        canvas.unload();
+        std::printf("[weather] W4 timing 1080p, %s: best %.1f ms, mean %.1f ms\n", row.name, best, mean);
+    }
+}
+
+// A thin rail (6 cm deep, 8 cm tall) at 1 m, in snowfall with the rain's depth map on: its own top is the nearest thing in the
+// map, so it must not shelter itself. The top whitens, the face towards the camera stays bare.
+static g3d::ScenePtr railScene(float cover, bool shelter = true) {
+    auto s = w4Base(0.2f);
+    s->ground.snowCover = cover;
+    s->precipitation.enabled = true;
+    s->precipitation.kind = g3d::Precipitation::Snow;
+    s->precipitation.intensity = 0.3f;
+    s->precipitation.opacity = 0;
+    s->precipitation.splashes = false;
+    s->precipitation.farLayer = false;
+    s->precipitation.occlusion = shelter;
+    s->lights.push_back(g3d::Light::directional({ -3, 6, 4 }, WHITE, 0.45f));
+    g3d::Material m;
+    m.color = { 110, 70, 40, 255 };
+    m.roughness = 0.9f;
+    auto* rail = s->add(g3d::Geometry::box(4.f, 0.08f, 0.06f), m);
+    rail->position = { 0, 1.0f, 0 };
+    rail->rotation = { 25, 0, 0 };                            // rolled 25 degrees (a rail that has sagged on its post): the depth map then slopes over a texel
+    s->camera.position = { 0, 1.9f, 1.7f }; s->camera.target = { 0, 1.0f, 0 }; s->camera.fov = 30;
+    return s;
+}
+static void railTop() {
+    Image bare = look(railScene(0), WW * 2, WH * 2, 5), snowy = look(railScene(0.8f), WW * 2, WH * 2, 5);
+    dump("w4-rail-bare.png", bare); dump("w4-rail-snow.png", snowy);
+    // The rail runs across the middle of the picture: find its top (the rows that brighten) and its front face (the rows that do not).
+    const int x0 = 200, x1 = 440;
+    int topRows = 0, faceRows = 0;
+    float topLuma = 0;
+    for (int y = 0; y < bare.height; y++) {
+        const float a = roiLuma(bare, x0, y, x1, y + 1), b = roiLuma(snowy, x0, y, x1, y + 1);
+        if (a < 12) continue;                                   // not the rail
+        if (b > a + 50) { topRows++; topLuma = std::max(topLuma, b); }
+        else if (std::fabs(b - a) < 6) faceRows++;
+    }
+    std::printf("[weather] rail under snow: %d pixel rows of its top whiten (by 50+ levels, brightest %.0f), %d rows of its front face keep their colour\n", topRows, topLuma, faceRows);
+    CHECK(topRows >= 3);
+    CHECK(faceRows >= 3);
+    // Self-shelter: the same rail with the depth map off is the answer the map must agree with.
+    Image open = look(railScene(0.8f, false), WW * 2, WH * 2, 5);
+    float topOpen = 0;
+    for (int y = 0; y < open.height; y++) topOpen = std::max(topOpen, roiLuma(open, 200, y, 440, y + 1));
+    float topMap = 0;
+    for (int y = 0; y < snowy.height; y++) topMap = std::max(topMap, roiLuma(snowy, 200, y, 440, y + 1));
+    std::printf("[weather] rail top, brightest row: depth map on %.0f, depth map off %.0f\n", topMap, topOpen);
+    CHECK(topMap > 0.97f * topOpen);
+    UnloadImage(open);
+    UnloadImage(bare); UnloadImage(snowy);
+}
+
+// Far ground at a grazing view: the puddle mask, the rings and the snow edge are noise a pixel there is far larger than, and
+// must fade to their mean instead of aliasing. High-frequency energy = mean |pixel - 5x5 blur| over a band of rows.
+static double hfEnergy(const Image& img, int y0, int y1) {
+    const auto L = lumaOf(img);
+    const int w = img.width, h = img.height;
+    double e = 0;
+    long n = 0;
+    for (int y = std::max(y0, 2); y < std::min(y1, h - 2); y++)
+        for (int x = 2; x < w - 2; x++) {
+            double s = 0;
+            for (int j = -2; j <= 2; j++)
+                for (int i = -2; i <= 2; i++) s += L[(size_t)(y + j) * w + x + i];
+            e += std::fabs(L[(size_t)y * w + x] - s / 25);
+            n++;
+        }
+    return n ? e / n : 0;
+}
+static g3d::ScenePtr grazingGround(bool snow) {
+    auto s = w4Base(0.6f);
+    s->precipitation.enabled = true;
+    s->precipitation.kind = snow ? g3d::Precipitation::Snow : g3d::Precipitation::Rain;
+    s->precipitation.intensity = 1.f;
+    s->precipitation.opacity = 0;
+    s->precipitation.splashes = false;
+    s->precipitation.farLayer = false;
+    if (snow) s->ground.snowCover = 0.35f;
+    else { s->ground.wetness = 1; s->ground.puddles = 1.4f; s->ground.puddleSize = 1.7f; s->ground.rippleRate = 3; }
+    s->lights.push_back(g3d::Light::directional({ -3, 6, 4 }, WHITE, 1.2f));
+    g3d::Material m;
+    m.color = { 120, 105, 85, 255 };
+    m.roughness = 0.9f;
+    s->add(g3d::Geometry::plane(600, 600), m);
+    s->camera.position = { 0, 1.6f, 0 }; s->camera.target = { 0, 0.9f, -20 }; s->camera.fov = 40;
+    return s;
+}
+static void farGroundBandLimited() {
+    for (int snow = 0; snow < 2; snow++) {
+        Image img = look(grazingGround(snow != 0), WW * 2, WH * 2, 250);
+        dump(snow ? "w4-far-snow.png" : "w4-far-wet.png", img);
+        const int h0 = 2 * 81;                                   // the horizon is a little above the middle of the picture
+        const int third = (img.height - h0) / 3;
+        const double far = hfEnergy(img, h0 + 6, h0 + third), mid = hfEnergy(img, h0 + third, h0 + 2 * third), near = hfEnergy(img, h0 + 2 * third, img.height);
+        std::printf("[weather] far %s ground, high-frequency energy: far third %.2f, middle %.2f, near %.2f levels\n", snow ? "snow" : "wet", far, mid, near);
+        CHECK(far < 1.5);                                        // with the band limit off: 9 (wet) and 17 (snow)
+        UnloadImage(img);
+    }
+}
+
+// The edge of a shelter is a ramp: snow on the ground goes from the dusting under a slab to the full cover in the open over
+// at least 0.3 m, with no row of the picture stepping by more than a fifth of the whole change.
+static g3d::ScenePtr rampScene() {
+    auto s = w4Base(0.25f);
+    s->ground.snowCover = 0.9f;
+    s->precipitation.enabled = true;
+    s->precipitation.kind = g3d::Precipitation::Snow;
+    s->precipitation.intensity = 0.3f;
+    s->precipitation.opacity = 0;
+    s->precipitation.splashes = false;
+    s->precipitation.farLayer = false;
+    s->precipitation.occlusion = true;
+    s->lights.push_back(g3d::Light::directional({ -3, 6, 4 }, WHITE, 0.5f));
+    g3d::Material m;
+    m.color = { 90, 80, 60, 255 };
+    m.roughness = 0.9f;
+    s->add(g3d::Geometry::plane(60, 60), m);
+    g3d::Material roof;
+    roof.color = { 60, 60, 60, 255 };
+    s->add(g3d::Geometry::box(30, 0.1f, 15), roof)->position = { 0, 3.0f, -7.5f };       // covers z -15..0
+    s->camera.position = { 0, 7, 7 }; s->camera.target = { 0, 0, 0 }; s->camera.fov = 30;
+    return s;
+}
+static void shelterRamp() {
+    constexpr int PW = WW * 2, PH = WH * 2;
+    Image img = look(rampScene(), PW, PH, 5);
+    dump("w4-ramp.png", img);
+    // Ground z for a row of the centre column: the ray of a pinhole camera at (0,7,7) looking at the origin.
+    const float fy = 1.f / std::tan(15.f * DEG2RAD), pitch = std::atan2(7.f, 7.f);
+    auto groundZ = [&](int row) {
+        const float v = (PH * 0.5f - (row + 0.5f)) / (PH * 0.5f) / fy;          // tan of the angle above the axis
+        const float ang = pitch - std::atan(v);                                   // angle below the horizon
+        return ang > 0.01f ? 7.f - 7.f / std::tan(ang) : -1000.f;
+    };
+    std::vector<float> prof;
+    std::vector<float> zs;
+    for (int row = 0; row < PH; row++) {
+        const float z = groundZ(row);
+        if (z < -4.f || z > 4.f) continue;
+        prof.push_back(roiLuma(img, 200, row, 440, row + 1));
+        zs.push_back(z);
+    }
+    // The bare level under the slab (z -6..-2) and the full cover in the open (z 2..6).
+    double lo = 0, hi = 0;
+    int nlo = 0, nhi = 0;
+    for (size_t i = 0; i < prof.size(); i++) {
+        if (zs[i] < -2.f) { lo += prof[i]; nlo++; }
+        if (zs[i] > 2.f) { hi += prof[i]; nhi++; }
+    }
+    lo /= std::max(nlo, 1); hi /= std::max(nhi, 1);
+    float z10 = 1e9f, z90 = -1e9f, step = 0;
+    for (size_t i = 0; i < prof.size(); i++) {
+        const float s = (float)((prof[i] - lo) / std::max(hi - lo, 1.0));
+        if (s > 0.1f) z10 = std::min(z10, zs[i]);
+        if (s > 0.9f) z90 = std::max(z90, zs[i]);
+        if (i > 0) step = std::max(step, std::fabs(s - (float)((prof[i - 1] - lo) / std::max(hi - lo, 1.0))));
+    }
+    // z10 is the nearest row above 10%, z90 the first row at 90%: take the first crossing of each going out from the slab.
+    float first10 = 1e9f, first90 = 1e9f;
+    for (size_t i = 0; i < prof.size(); i++) {
+        const float s = (float)((prof[i] - lo) / std::max(hi - lo, 1.0));
+        if (s > 0.1f) first10 = std::min(first10, zs[i]);
+        if (s > 0.9f) first90 = std::min(first90, zs[i]);
+    }
+    if (std::getenv("RMTN_RAMP_DEBUG"))
+        for (size_t i = 0; i < prof.size(); i++) std::printf("z %.2f luma %.0f\n", zs[i], prof[i]);
+    std::printf("[weather] shelter edge: bare level %.0f, open level %.0f; 10%% at z %.2f, 90%% at z %.2f (width %.2f m); largest row step %.2f of the change\n", lo, hi, first10, first90, first90 - first10, step);
+    CHECK(hi > lo + 40);
+    CHECK(first90 - first10 >= 0.3f);
+    CHECK(step < 0.25f);
+    UnloadImage(img);
+}
+
+static void wetAndSnow() {
+    puddleOnFlatNotSlope();
+    ringsRoundAndSpaced();
+    snowSettlesOnTops();
+    wetnessDries();
+    groundPurity();
+    groundOffMeansOff();
+    weatheringOptOut();
+    wetDarkens();
+    wetReflectsScene();
+    shelterStaysDry();
+    railTop();
+    shelterRamp();
+    farGroundBandLimited();
+}
+
 int main() try {
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
@@ -3522,9 +4201,16 @@ int main() try {
         shutdownGraphics(); CloseWindow(); return 0;
     }
     if (std::getenv("RMTN_W6_TIMING")) { waterTiming(); shutdownGraphics(); CloseWindow(); return 0; }
+    if (std::getenv("RMTN_W4_TIMING")) { groundTiming(); shutdownGraphics(); CloseWindow(); return 0; }
     if (std::getenv("RMTN_W3_TIMING")) { precipitationTiming(); shutdownGraphics(); CloseWindow(); return 0; }
     if (std::getenv("RMTN_W3_ONLY")) {
         precipitation();
+        shutdownGraphics(); CloseWindow();
+        std::printf(failures ? "[weather] %d failures\n" : "[weather] all passed\n", failures);
+        return failures ? 1 : 0;
+    }
+    if (std::getenv("RMTN_W4_ONLY")) {
+        wetAndSnow();
         shutdownGraphics(); CloseWindow();
         std::printf(failures ? "[weather] %d failures\n" : "[weather] all passed\n", failures);
         return failures ? 1 : 0;
@@ -3562,6 +4248,7 @@ int main() try {
     noBandsInHeight();
     waterReflections();
     precipitation();
+    wetAndSnow();
     shutdownGraphics();
     CloseWindow();
     std::printf(failures ? "[weather] %d failures\n" : "[weather] all passed\n", failures);

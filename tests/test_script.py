@@ -202,6 +202,8 @@ void draw(int frame) {
             }
             if weather is not None:
                 world["weather"] = weather
+                if own:
+                    world["ground"] = {"ownWeather": True}                       # the ground wets from the storm unless it keeps its own
             self.path.write_text('''void configure(Composition &inout c) {
     c.name = "weather"; c.w = 160; c.h = 90; c.fps = 30; c.duration = 20; c.supersample = 1;
     scene(0, c.duration, "draw");

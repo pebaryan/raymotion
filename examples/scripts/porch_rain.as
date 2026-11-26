@@ -51,7 +51,14 @@ void draw(int frame) {
     float u = frame / 299.0f;
     float intensity = 0.06f + 0.94f * smooth(u);
     float speed = 0.4f + 9.6f * smooth((u - 0.4f) / 0.6f);
-    string weather = "{\"preset\":\"rain\",\"intensity\":" + intensity + ",\"windDirection\":0,\"windSpeed\":" + speed + ",\"gust\":0.2,\"cover\":0.9,\"haze\":0.3}";
+    // The rain's history, for the ground: the same ramp as the intensity, a key every half second. The ground's clock runs 150 times the film's.
+    string history = "";
+    for (int i = 0; i <= 20; ++i) {
+        float k = (0.5f * i / 9.97f > 1.0f) ? 1.0f : 0.5f * i / 9.97f;
+        if (i > 0) history += ",";
+        history += "{\"seconds\":" + (0.5f * i) + ",\"kind\":\"rain\",\"intensity\":" + (0.06f + 0.94f * smooth(k)) + "}";
+    }
+    string weather = "{\"preset\":\"rain\",\"intensity\":" + intensity + ",\"windDirection\":0,\"windSpeed\":" + speed + ",\"gust\":0.2,\"cover\":0.9,\"haze\":0.3,\"accumulationScale\":150,\"history\":[" + history + "]}";
     string cam = "{\"position\":[-1.2," + 1.55f + "," + (9.6f - 0.9f * u) + "],\"target\":[0.4,1.45,0],\"fov\":48}";
     string path = "";
     for (int i = 0; i < 11; ++i) {
@@ -63,6 +70,7 @@ void draw(int frame) {
         "\"sky\":{\"enabled\":true,\"sunLight\":0,\"sunDirection\":[-0.57,0.09,-0.8],\"sunGlow\":1.1,\"clouds\":0.3,\"seed\":5,\"show\":true,"
         "\"zenith\":\"#2c3b5e\",\"horizon\":\"#c98f6a\"},"
         "\"precipitation\":{\"splashes\":true,\"occlusion\":true,\"radius\":30,\"farRadius\":160,\"seed\":7},"
+        "\"ground\":{\"puddleSize\":1.7,\"puddles\":0.85,\"seed\":3},"
         "\"lights\":["
         "{\"type\":\"directional\",\"position\":[-10,1.8,-14],\"target\":[0,0,0],\"color\":\"#ffb98a\",\"intensity\":2.4},"
         "{\"type\":\"point\",\"position\":[3.2,2.6,3.2],\"color\":\"#ffb766\",\"intensity\":3.2,\"range\":11},"

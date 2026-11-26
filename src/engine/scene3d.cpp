@@ -21,6 +21,7 @@ extern "C" void UpdateModelAnimationBones(Model model, ModelAnimation anim, floa
 
 #include "clouds_glsl.hpp"
 #include "precip_glsl.hpp"
+#include "wet_glsl.hpp"
 
 namespace rmtn {
 namespace g3d {
@@ -401,6 +402,7 @@ vec4 waterSurface() {
     float h = waveHeightLod(fragPos.xz, foot, g);
     float lost = waveLost;
     float dist = length(viewPos - fragPos);
+    if (rippleRate > 0.0) g += rippleSlope(fragPos.xz, max(length(dFdx(fragPos.xz)), length(dFdy(fragPos.xz))));    // rain rings
     vec3 n = normalize(vec3(-g.x, 1.0, -g.y));
     vec3 v = normalize(viewPos - fragPos);
     if (viewPos.y < waterEye) {                      // from below: a window onto the sky, ringed by mirror
@@ -870,7 +872,9 @@ float lightAt(int i, vec3 n, out vec3 l, out float ndl) {
     return atten;
 }
 
+//@RIPPLE_FS@
 //@WATER_FS@
+//@WET_FS@
 // ---- stylised shading
 // x in 0..1 to `toonBands` flat steps; each step's edge ramps over toonSoftness.
 float band(float x) {
@@ -964,7 +968,23 @@ void main() {
     vec3 n = normalize(fragNormal);
     if ((reflClip == 1 ? gl_FrontFacing : !gl_FrontFacing) && fieldOn == 0) n = -n;   // a field's blades face the camera already; mirrored, the winding is too
     vec3 v = normalize(viewPos - fragPos);
+    vec3 ng = n;
     if (hasNormalMap >= 1 && shading == 0) n = mapNormal(n, fragPos, fragTexCoord);
+    if (ssrPass == 1 && !(wetOn == 1 && wetMat == 1)) discard;
+    if (wetOn == 1 && wetMat == 1) {
+        weatherSurface(ng, n, albedo, max(length(posDx.xz), length(posDy.xz)));
+        if (ssrPass == 1) {                                         // the second draw: the scene's reflection over flat wet ground
+            if (gFilm <= 0.003 || ng.y < 0.9) discard;
+            vec3 rr = reflect(-v, n);
+            if (rr.y <= 0.02) discard;
+            vec4 hit = ssrTrace(fragPos + ng * 0.01, rr);
+            float a = wetFresnel(max(dot(n, v), 1e-3), gPuddle) * gFilm * (1.0 - gSnow) * hit.a * mix(0.45, 1.0, gPuddle);
+            if (a <= 0.002) discard;
+            finalColor = vec4(hit.rgb, clamp(a, 0.0, 1.0));
+            return;
+        }
+        if (wetDebug == 1 && gPuddle > 0.001) { finalColor = vec4(0.5 + n.x, 0.5 + n.z, 0.5, 1.0); return; }
+    }
 
     vec3 color;
     if (shading == 1) color = toon(albedo, n, v);
@@ -977,6 +997,11 @@ void main() {
             rough *= mr.g; metal *= mr.b;
         }
         rough = clamp(rough, 0.0, 1.0);
+        if (wetOn == 1 && wetMat == 1) {                            // wet ground is smoother, standing water a mirror, snow matte and not metal
+            rough = mix(rough * (1.0 - 0.65 * gWet), 0.05, gPuddle);
+            rough = mix(rough, 0.9, gSnow);
+            metal *= 1.0 - gSnow;
+        }
         vec3 specColor = mix(vec3(0.04), albedo, metal);
         vec3 diffColor = albedo * (1.0 - metal);
         float sunVis = 1.0;                                         // baked self-shadow, and the spread of the normals a texel stands for
@@ -1011,6 +1036,11 @@ void main() {
             vec3 h = normalize(l + v);
             float spec = pow(max(dot(n, h), 0.0), shininess) * (shininess + 8.0) / 25.1327;
             color += (diffColor + specColor * spec) * lightColor[i] * waterLight(i) * atten * ndl;
+        }
+        if (wetOn == 1 && wetMat == 1 && gFilm > 0.0) {             // the film of water: a Fresnel mirror of the sky
+            float c = max(dot(n, v), 1e-3);
+            float blur = max(envMaxLod - 4.0, 0.0) * 0.75 * (1.0 - gPuddle);
+            color += wetSky(reflect(-v, n), blur) * (wetFresnel(c, gPuddle) * gFilm * (1.0 - gSnow));
         }
     }
     color += emissive;
@@ -1303,6 +1333,7 @@ struct WaterLocs { int on, mode, level, eye, time, centre, count, waveA, waveB, 
                    open, invAmp, glint, band, filter,
                    reflMode, reflTex, reflVP, reflSize, reflDistort, refrMode, refrColor, refrDepth, refrMap, refrInvVP, reflClip; };
 constexpr int REFL_SLOT = 8, REFR_COLOR_SLOT = 9, REFR_DEPTH_SLOT = 10;    // the water's textures (the lit shader reads maps 0..2)
+constexpr int WET_OCC_SLOT = 7;          // the rain's depth map from above, for the ground's shelter test
 struct ClipLocs { int plane, edge; };
 struct SplatLocs { int data, view, world, proj, viewport, camObj, scaleMul, opacityMul, shDegree, clipPlane, clipBand, scatter, corner, index; };
 constexpr int SPLAT_SLOT = 13;           // a splat cloud's texture
@@ -1369,6 +1400,7 @@ struct Gpu {
     LineLocs N{};
     int depthSkinned = -1, depthBones = -1;
     int cutoff[3] = { -1, -1, -1 };      // alphaCutoff in the lit, depth and g-buffer programs
+    int wetMat = -1;                     // the lit program's wetMat: whether this material takes the ground's weather
     Shader inst[3]{};                    // lit, depth, gbuf, for DrawMeshInstanced
     std::array<int, 32> instLocs[3]{};
     InstLocs il[3];
@@ -1477,7 +1509,7 @@ void ensureGpu() {
     const std::string head = std::string(SKIN_VS_HEAD) + FIELD_VS;
     auto splice = [](std::string src) {
         for (const auto& [marker, text] : { std::pair<const char*, const char*>{ "//@WATER_COMMON@", WATER_COMMON },
-                                            { "//@WATER_FS@", WATER_FS }, { "//@CUTOUT_FS@", CUTOUT_FS } }) {
+                                            { "//@RIPPLE_FS@", RIPPLE_FS }, { "//@WATER_FS@", WATER_FS }, { "//@WET_FS@", WET_FS }, { "//@CUTOUT_FS@", CUTOUT_FS } }) {
             const size_t at = src.find(marker);
             if (at != std::string::npos) src.replace(at, std::strlen(marker), text);
         }
@@ -1512,6 +1544,8 @@ void ensureGpu() {
               loc("translucency"), loc("translucencyColor"), loc("hasRoughnessMap"), loc("hasNormalMap"),
               loc("normalScale") };
     gpu.cutoff[0] = loc("alphaCutoff");
+    gpu.wetMat = loc("wetMat");
+    { const int occUnit = WET_OCC_SLOT; SetShaderValue(gpu.lit, loc("wetOcc"), &occUnit, SHADER_UNIFORM_INT); }
     gpu.cutoff[1] = GetShaderLocation(gpu.depth, "alphaCutoff");
     gpu.cutoff[2] = GetShaderLocation(gpu.gbuf, "alphaCutoff");
     gpu.W = { loc("waterOn"), loc("waterMode"), loc("waterLevel"), loc("waterEye"), loc("waterTime"), loc("waterCentre"),
@@ -2333,6 +2367,8 @@ void setMaterial(const g3d::Material& m) {
     SetShaderValue(sh, gpu.L.unlit, &unlit, SHADER_UNIFORM_INT);
     SetShaderValue(sh, gpu.L.opacity, &m.opacity, SHADER_UNIFORM_FLOAT);
     SetShaderValue(sh, gpu.L.receiveShadow, &receive, SHADER_UNIFORM_INT);
+    const int weathers = m.weathering && !m.unlit ? 1 : 0;
+    SetShaderValue(sh, gpu.wetMat, &weathers, SHADER_UNIFORM_INT);
     const float translucency = std::max(m.translucency, 0.f), normalScale = m.normalScale;
     const Vector3 tc = linear(m.translucencyColor);
     const int hasRough = m.roughnessMap.empty() ? 0 : 1, hasNormal = m.normalMap.empty() && !m.dynamicNormalMap ? 0 : m.normalAlphaShade ? 2 : 1;
@@ -4515,6 +4551,84 @@ void drawPrecipitation(const Scene& s, const Camera& cam, PrecipFrame& f, const 
     rlEnableDepthMask();
 }
 
+// ---- the ground (Scene::ground): the wet and snow state of this frame, and the uniforms that carry it
+struct WetFrame {
+    bool on = false;                     // there is wetness or snow to draw
+    bool ssr = false;                    // and the scene is to be reflected in it (a second draw after the opaque pass)
+    Weather::GroundState g;
+};
+
+WetFrame wetFrame(const Scene& s) {
+    WetFrame w;
+    const float fps = s.weather.enabled ? s.weather.fps : s.precipitation.fps;
+    w.g = groundOf(s, frameTime(gpu.frame) / std::max(fps, 1.f));
+    w.on = w.g.wetness > 0.001f || w.g.snowDepth > 0.0005f;
+    w.ssr = w.on && s.ground.reflections && w.g.wetness > 0.05f && w.g.wetness > w.g.snowDepth / Weather::kSnowFull;
+    return w;
+}
+
+// Sets the ground's uniforms of the lit program for this frame (the rain's rings too, which water uses without a
+// wet ground) and binds the rain's depth map for the shelter test. Call before any pass that draws lit items.
+void setWetUniforms(const Scene& s, const WetFrame& w, const PrecipFrame& pf) {
+    const Shader& sh = gpu.lit;
+    auto I = [&](const char* n, int v) { SetShaderValue(sh, GetShaderLocation(sh, n), &v, SHADER_UNIFORM_INT); };
+    auto F = [&](const char* n, float v) { SetShaderValue(sh, GetShaderLocation(sh, n), &v, SHADER_UNIFORM_FLOAT); };
+    const Ground& g = s.ground;
+    I("ssrPass", 0);
+    I("wetOn", w.on ? 1 : 0);
+    F("wetLevel", w.g.wetness);
+    F("snowDepth", w.g.snowDepth);
+    F("wetPuddles", std::clamp(g.puddles, 0.f, 2.f));
+    F("wetPuddleSize", std::max(g.puddleSize, 0.1f));
+    I("wetSeed", (int)g.seed);
+    I("wetGrass", g.snowOnGrass ? 1 : 0);
+    I("wetDebug", g.debug);
+    const bool shelter = w.on && pf.map;
+    I("wetOccOn", shelter ? 1 : 0);
+    if (shelter) {
+        SetShaderValueMatrix(sh, GetShaderLocation(sh, "wetOccVP"), pf.occVP);
+        F("wetOccRange", pf.occRange);
+    }
+    bindUnit(WET_OCC_SLOT, shelter ? gpu.pr.occ.depth : 0);
+    // The rings: rain and the rain share of sleet, as many a square metre as the rate and the intensity say.
+    const float share = pf.d.kind == Precipitation::Rain ? 1.f : pf.d.kind == Precipitation::Sleet ? 0.6f : 0.f;
+    const float rate = pf.on ? std::clamp(g.rippleRate, 0.f, Ground::maxRate()) * std::clamp(pf.d.intensity, 0.f, 1.f) * share : 0.f;
+    F("rippleRate", rate);
+    F("rippleTime", (float)pf.secs);
+    I("rippleSeed", (int)(pf.d.seed * 2654435761u + g.seed));
+}
+
+// The scene's reflection in flat wet ground and puddles: a copy of the opaque picture, then the plain opaque meshes
+// drawn again over it (the depth test keeps what is the nearest surface), each fragment on flat wet ground marching
+// its reflected ray through the copy and blending in what it finds by the film's Fresnel. Rays that find nothing leave the
+// sky reflection the first pass already added.
+void drawWetReflections(const std::vector<Item>& items, const DepthTarget& scene, const Vector4& map) {
+    const Matrix vpm = MatrixMultiply(rlGetMatrixModelview(), rlGetMatrixProjection());
+    const DepthTarget& copy = copyScene(scene);
+    SetShaderValueMatrix(gpu.lit, gpu.W.reflVP, vpm);
+    SetShaderValueMatrix(gpu.lit, gpu.W.refrInvVP, MatrixInvert(vpm));
+    SetShaderValue(gpu.lit, gpu.W.refrMap, &map, SHADER_UNIFORM_VEC4);
+    bindUnit(REFR_COLOR_SLOT, copy.color);
+    bindUnit(REFR_DEPTH_SLOT, copy.depth);
+    const int on = 1, off = 0;
+    SetShaderValue(gpu.lit, GetShaderLocation(gpu.lit, "ssrPass"), &on, SHADER_UNIFORM_INT);
+    rlDrawRenderBatchActive();
+    rlDisableDepthMask();
+    rlSetBlendFactorsSeparate(RL_SRC_ALPHA, RL_ONE_MINUS_SRC_ALPHA, RL_ZERO, RL_ONE, RL_FUNC_ADD, RL_FUNC_ADD);
+    BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+    for (const Item& it : items) {
+        const g3d::Material& m = it.obj->material;
+        if (it.inst || it.tiles || it.particle || opacityOf(it) < 1.f || !m.weathering || m.unlit || m.shading != Shading::Standard) continue;
+        drawItem(it, Pass::Lit);
+    }
+    rlDrawRenderBatchActive();
+    restoreBlend();
+    rlEnableDepthMask();
+    SetShaderValue(gpu.lit, GetShaderLocation(gpu.lit, "ssrPass"), &off, SHADER_UNIFORM_INT);
+    bindUnit(REFR_COLOR_SLOT, 0);
+    bindUnit(REFR_DEPTH_SLOT, 0);
+}
+
 void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target, float scale, int t, const Cull& cull) {
     ensureGpu();
     std::vector<Item> items;
@@ -4569,12 +4683,14 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     gpu.pr.drops = gpu.pr.splashes = 0;
     PrecipFrame precip = precipFrame(s);
     renderPrecipOcclusion(cam, precip, items);
+    const WetFrame wet = wetFrame(s);
+    setWetUniforms(s, wet, precip);
     if (reflect) renderReflection(s, cam, *cull.mirror, wview, mirrorItems, shadows, envTex, scale, cloudsOn ? &cloudNow : nullptr, vw0, vh0);
 
     // Main pass, into the target or (for depth of field) a target with a depth texture.
     const int fbW = target.texture.width, fbH = target.texture.height;
     const bool dof = cam.dof.aperture > 0 && cam.dof.maxBlur > 0;    const DepthTarget* dofTarget = nullptr;
-    if (dof || cloudsOn || refractOn) {         // clouds and the water need the opaque depth as a texture: draw into the depth target
+    if (dof || cloudsOn || refractOn || wet.ssr) {         // clouds and the water need the opaque depth as a texture: draw into the depth target
         dofTarget = &sceneTarget(fbW, fbH);
         rlEnableFramebuffer(dofTarget->fbo);
         rlViewport(0, 0, fbW, fbH);
@@ -4618,6 +4734,8 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
             clear.push_back(it);
         } else drawItem(it, Pass::Lit);
     }
+    if (wet.ssr && dofTarget)
+        drawWetReflections(items, *dofTarget, { (float)vx / fbW, (float)(fbH - vy - vh) / fbH, (float)vw / fbW, (float)vh / fbH });
     // Stable: at equal depth keep scene order, so coplanar layers do not swap between frames.
     if (s.water.enabled) clear.push_back({ &waterObject(), MatrixIdentity(), std::numeric_limits<float>::max() });
     std::stable_sort(clear.begin(), clear.end(), [](const Item& a, const Item& b) { return a.viewDepth > b.viewDepth; });
@@ -4675,6 +4793,7 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     bindUnit(SHADOW_SLOT, 0);
     bindUnit(ENV_SLOT, 0);
     bindUnit(CLOUD_SLOT, 0);
+    bindUnit(WET_OCC_SLOT, 0);
     LineStyles styles;
     const DepthTarget* lt = nullptr;
     if (s.lines.enabled) {

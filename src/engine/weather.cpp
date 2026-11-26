@@ -10,6 +10,7 @@ namespace g3d {
 
 namespace {
 float lerp(float a, float b, float t) { return a + (b - a) * t; }
+float smoothstepF(float e0, float e1, float x) { const float u = std::clamp((x - e0) / (e1 - e0), 0.f, 1.f); return u * u * (3 - 2 * u); }
 
 Color mixC(Color a, Color b, float t) {
     auto m = [t](unsigned char x, unsigned char y) { return (unsigned char)std::lround(x + (y - x) * t); };
@@ -32,8 +33,7 @@ Weather preset(float speed, float gust, float gustSpeed, float cover, CloudType 
     w.wind.gustSpeed = gustSpeed;
     w.clouds = { cover, type };
     w.precipitation = { kind, intensity };
-    w.wetness = wet;
-    w.snowCover = snow;
+    (void)wet; (void)snow;                          // the ground accumulates from the precipitation (wetness, snowCover stay -1)
     w.haze = haze;
     w.lightningRate = strikes;
     return w;
@@ -62,8 +62,13 @@ Weather Weather::mix(const Weather& a, const Weather& b, float t) {
     w.windRun = a.windRun >= 0 && b.windRun >= 0 ? lerp(a.windRun, b.windRun, t) : -1.f;
     w.clouds.cover = lerp(a.clouds.cover, b.clouds.cover, t);
     w.precipitation.intensity = lerp(a.precipitation.intensity, b.precipitation.intensity, t);
-    w.wetness = lerp(a.wetness, b.wetness, t);
-    w.snowCover = lerp(a.snowCover, b.snowCover, t);
+    // A pin (>= 0) mixes with a pin; against an unpinned ground the pin switches at 0.5, like a kind.
+    w.wetness = a.wetness >= 0 && b.wetness >= 0 ? lerp(a.wetness, b.wetness, t) : w.wetness;
+    w.snowCover = a.snowCover >= 0 && b.snowCover >= 0 ? lerp(a.snowCover, b.snowCover, t) : w.snowCover;
+    w.temperature = a.temperature != Weather::kAutoTemperature && b.temperature != Weather::kAutoTemperature
+                        ? lerp(a.temperature, b.temperature, t) : w.temperature;
+    w.accumulationScale = lerp(a.accumulationScale, b.accumulationScale, t);
+    if (w.history.empty()) w.history = t < 0.5f ? b.history : a.history;          // the history is the film's, not a state to mix
     w.haze = lerp(a.haze, b.haze, t);
     w.lightningRate = lerp(a.lightningRate, b.lightningRate, t);
     return w;
@@ -95,6 +100,76 @@ float Weather::wavePeakLength(float fetch) const {
     return g * tp * tp / (2 * PI);
 }
 float Weather::cloudTravel(double seconds) const { return windRun >= 0 ? windRun : (float)(wind.speed * seconds); }
+
+// ---- the ground: wetness and settled snow, accumulated from the history
+float Weather::airTemperature() const {
+    if (temperature != kAutoTemperature) return temperature;
+    switch (precipitation.kind) {
+        case Precipitation::Snow: case Precipitation::Sleet: return -3.f;
+        case Precipitation::Rain: return 8.f;
+        default: return 10.f;
+    }
+}
+float Weather::dryTimeConstant() const {
+    // Calm air under full sun dries in kDryTime; each m/s of wind and each part of unclouded sun dries faster.
+    return kDryTime / ((1 + 0.08f * std::max(wind.speed, 0.f)) * (0.5f + sunScale()));
+}
+float Weather::dryingTime() const { return std::log(10.f) * dryTimeConstant(); }
+
+namespace {
+// What fell at `sec` of film time: the rain and the snow, each as an intensity 0..1.
+struct Fall { float rain = 0, snow = 0; };
+Fall fallAt(const Weather& w, double sec) {
+    Precipitation kind = w.precipitation.kind;
+    float intensity = w.precipitation.intensity;
+    if (!w.history.empty()) {
+        const std::vector<Weather::Key>& k = w.history;
+        if (sec < k.front().seconds) return {};
+        size_t i = 0;
+        while (i + 1 < k.size() && k[i + 1].seconds <= sec) i++;
+        kind = k[i].kind;
+        intensity = k[i].intensity;
+        if (i + 1 < k.size() && k[i + 1].kind == kind && k[i + 1].seconds > k[i].seconds)
+            intensity += (k[i + 1].intensity - intensity) * (float)((sec - k[i].seconds) / (k[i + 1].seconds - k[i].seconds));
+    }
+    intensity = std::clamp(intensity, 0.f, 1.f);
+    switch (kind) {
+        case Precipitation::Rain: return { intensity, 0 };
+        case Precipitation::Snow: return { 0, intensity };
+        case Precipitation::Sleet: return { 0.6f * intensity, 0.4f * intensity };
+        default: return {};
+    }
+}
+} // namespace
+
+Weather::GroundState Weather::ground(double seconds) const {
+    GroundState g;
+    seconds = std::max(seconds, 0.0);
+    const bool pinWet = wetness >= 0, pinSnow = snowCover >= 0;
+    if (pinWet) g.wetness = std::clamp(wetness, 0.f, 1.f);
+    if (pinSnow) g.snowDepth = std::clamp(snowCover, 0.f, 1.f) * kSnowFull;
+    if (pinWet && pinSnow) return g;
+    const double scale = std::max(accumulationScale, 0.f);
+    const double dt = std::max(0.1, seconds / 4000.0);                    // film seconds a step: 0.1 s, coarser past 400 s
+    const int steps = (int)std::ceil(seconds / dt);
+    const float T = airTemperature();
+    const float stick = 1.f - smoothstepF(0.f, 3.f, T);                  // wet flakes stick up to 0, none from 3 degrees
+    const float melt = std::max(T, 0.f) * kMeltRate * (0.5f + sunScale());
+    const float dry = 1.f / dryTimeConstant();
+    float wet = 0, depth = 0;
+    for (int i = 0; i < steps; i++) {
+        const double a = i * dt, b = std::min(seconds, a + dt), mid = 0.5 * (a + b);
+        const float ds = (float)((b - a) * scale);                        // weather seconds
+        const Fall f = fallAt(*this, mid);
+        const float inflow = f.rain / kSoakTime, outflow = dry * (1.f - 0.8f * f.rain);
+        const float k = inflow + outflow, target = k > 0 ? inflow / k : wet;
+        wet = target + (wet - target) * std::exp(-k * ds);
+        depth = std::max(0.f, depth + (f.snow * kSnowRate * stick - melt) * ds);
+    }
+    if (!pinWet) g.wetness = std::clamp(wet, 0.f, 1.f);
+    if (!pinSnow) g.snowDepth = depth;
+    return g;
+}
 
 // ---- each system
 
@@ -270,6 +345,49 @@ Downfall inWeather(const Downfall& d, const Weather& w) {
         k.fps = w.fps;
     }
     return k;
+}
+
+} // namespace g3d
+} // namespace rmtn
+
+// ---- wet ground and snow: the pins, and the CPU twin of the ripple rings in wet_glsl.hpp
+namespace rmtn {
+namespace g3d {
+
+Weather::GroundState groundOf(const Scene& scene, double seconds) {
+    Weather::GroundState g;
+    if (scene.weather.enabled && !scene.ground.ownWeather) g = scene.weather.ground(seconds);
+    if (scene.ground.wetness >= 0) g.wetness = std::clamp(scene.ground.wetness, 0.f, 1.f);
+    if (scene.ground.snowCover >= 0) g.snowDepth = std::clamp(scene.ground.snowCover, 0.f, 1.f) * Weather::kSnowFull;
+    return g;
+}
+
+namespace {
+uint32_t ringHash(uint32_t x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
+float ringRand(uint32_t x) { return (float)(ringHash(x) >> 8) / 16777216.f; }
+} // namespace
+
+// Mirrors rippleSum() in wet_glsl.hpp: cells of kCell metres, kSlots slots a cell, each slot one impact every
+// kPeriod seconds at its own phase, kept when its hash is under rate / maxRate. Keep the two in step.
+std::vector<Ground::Ring> Ground::rings(float x, float z, double seconds, float rate, uint32_t precipSeed) const {
+    std::vector<Ring> out;
+    const float act = std::clamp(rate / maxRate(), 0.f, 1.f), t = (float)seconds;
+    const uint32_t sd = precipSeed * 2654435761u + seed;
+    const int c0 = (int)std::floor(x / kCell), r0 = (int)std::floor(z / kCell);
+    for (int dz = -1; dz <= 1; dz++)
+        for (int dx = -1; dx <= 1; dx++) {
+            const int cx = c0 + dx, cz = r0 + dz;
+            for (int s = 0; s < kSlots; s++) {
+                const uint32_t ck = ringHash((uint32_t)cx * 73856093u ^ (uint32_t)cz * 19349663u ^ (uint32_t)s * 83492791u ^ sd * 2654435761u);
+                const float phase = ringRand(ck) * kPeriod;
+                const float n = std::floor((t - phase) / kPeriod);
+                const float age = t - phase - n * kPeriod;
+                const uint32_t h = ringHash((uint32_t)(int)n * 2654435769u ^ ck);
+                if (ringRand(h) >= act) continue;
+                out.push_back({ { ((float)cx + ringRand(h + 1u)) * kCell, ((float)cz + ringRand(h + 2u)) * kCell }, age });
+            }
+        }
+    return out;
 }
 
 } // namespace g3d

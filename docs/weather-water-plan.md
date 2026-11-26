@@ -180,7 +180,10 @@ checks in tests/weather_tests.cpp. Left out: drops do not refract the background
 light them, fields (grass) and particles do not shelter rain, and the GPU drop count is predicted
 by the CPU mirror, not read back.
 
-## W4. Wet ground and settling snow
+
+**Done 2026-11-26 (W4):** `Scene::ground`, wet surfaces with screen-space reflection, puddles and rain rings, snow cover, per-material `weathering`; see "Wet ground and snow cover" in docs/weather.md.
+
+
 
 - **Wetness:**
   - Surfaces darken, roughness drops and reflections strengthen.

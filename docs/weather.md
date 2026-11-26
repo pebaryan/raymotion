@@ -38,8 +38,10 @@ frame and puts them back when it ends.
 | `clouds.type` | enum | `Cumulus`, `Stratus`, `Cumulonimbus`, `Deck`: read by the volumetric clouds (`Scene::clouds`) |. A `Cumulonimbus` raises the layer top to at least 12 km (a tower with a connected anvil that shears downwind with the wind; each is one shape round its own centre); cumulus edges and the weather map are smoothed with a cubic B-spline so no flat plateaus show, and the nearest clouds get detail contrast so they are not a blur
 | `precipitation.kind` | enum | `None`, `Rain`, `Snow`, `Sleet`: for the rain and snow system, not drawn yet |
 | `precipitation.intensity` | 0..1 | drizzle to downpour (not drawn yet) |
-| `wetness` | 0..1 | how wet the ground is (not drawn yet) |
-| `snowCover` | 0..1 | settled snow (not drawn yet) |
+| `wetness` | 0..1 | pin on the ground's wetness (-1: accumulate from the history); see Wet ground and snow cover |
+| `temperature` | degrees C | decides snow against rain on the ground (default from the preset) |
+| `accumulationScale` | x | runs the ground's clock faster than the film's |
+| `snowCover` | 0..1 | pin on the settled snow (-1: accumulate) |
 | `haze` | 0..1 | 0 clear air, 1 thick fog; sets the fog |
 | `lightningRate` | strikes / minute | for lightning (not drawn yet) |
 
@@ -282,6 +284,50 @@ where the camera is: move the camera 0.37 m and every drop stays where it was.
 
 `fx::rain3d` and `fx::snow3d` are unchanged and still fill a fixed box. Use `precipitation` for rain
 that has to fill a valley or follow a camera; `examples/scripts/porch_rain.as` is the reference.
+
+## Wet ground and snow cover
+
+`Scene::ground` (`g3d::Ground`) is what rain and snow leave behind. It is two numbers that are pure
+functions of the time: `wetness` (0..1) and `snowDepth` (m). With `Scene::weather` enabled they come from
+`Weather::ground(seconds)`; set `ground.wetness` or `ground.snowCover` (a pin, 0..1 of 10 cm) and the pin
+wins. `ground.ownWeather` keeps a scene's pins against a `weather` object. Without a `ground` object and
+with no weather precipitation, no pixel changes.
+
+**Accumulation.** The weather integrates its precipitation history in fixed steps, so frame N is the
+same however you reach it. Wetness soaks in over about 150 weather seconds of rain and dries with an
+exponential (time constant 1500 s in calm air, shorter with wind and unclouded sun). Snow adds 5 cm an hour at intensity 1 below
+freezing and melts at 0.5 cm an hour per degree above 0 (faster in sun); `temperature` (degrees C, default from the
+preset) decides which. `accumulationScale` runs the ground's clock faster than the film's (500 turns a
+20 s clip into 2 h 45 min). `history` is a list of keys `{seconds, kind, intensity}` for rain that
+started earlier, or changes kind mid-shot; the ground follows the keys.
+
+**Wet surfaces.** A wet surface is darker (x0.55 in albedo), smoother, and mirrors more sky at grazing
+angles (a thin film, Fresnel from 0.02). Slopes dry first (a 60 degree slope gets about a quarter of the
+effect of flat ground). Where `reflections` is on, a screen-space march adds the scene's own reflection
+on wet ground and puddles: a second draw over a copy of the opaque picture, off when the frame is dry.
+
+**Puddles.** Low-noise, flat-only (up-facing within about 10 degrees), growing with wetness as the water
+level rises through a hashed height field (`puddleSize` metres, `puddles` 0..2 for the share). The edges
+are warped, so they are irregular rather than round. Rain rings (`rippleRate`, rings a m2 a second at
+intensity 1) run on puddles and on open `water`: circular, expanding at 0.4 m/s, six slots a 0.75 m cell
+with one ring a slot every 1.1 s; `Ground::rings()` is the CPU twin.
+
+**Snow.** Up-facing faces only (a smoothstep of the normal from 0.5 to 0.9), with two octaves of noise so
+the cover first lies in patches and closes by about 5 cm. Grass tips whiten first; trees take cover on
+their upward-facing tiers. Sheltered ground (under a roof or a tree) stays bare when the precipitation
+has `occlusion` on, since the rain's top-down depth map decides shelter.
+
+**Opt-out.** `Material::weathering = false` (`"weathering": false` in a script) leaves a material alone:
+lit windows, screens, emissive things. Unlit materials are always left alone.
+
+**Limits.** Shelter needs `precipitation.occlusion`; without it the ground is open everywhere. The
+rings are not at the exact splash points of the falling drops. The SSR sees only what is on screen (a
+ray leaving the picture finds the sky), and it adds a second pass over the opaque scene. Grass is not
+shortened by snow, only whitened.
+
+**Script.** `"ground": {"wetness", "snowCover", "puddles", "puddleSize", "rippleRate", "reflections",
+"snowOnGrass", "ownWeather", "seed"}`; weather keys `temperature`, `accumulationScale`, `history`.
+`examples/scripts/porch_rain.as` (puddles and rings on the path) and `first_snow.as` (settling snow).
 
 ## Script
 

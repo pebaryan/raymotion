@@ -44,7 +44,13 @@ void draw(int frame) {
     float a = u * u * (3 - 2 * u);                                   // how far into the storm
     float run = 8.0f * (3 * a + 17 * (a * a * a - a * a * a * a / 2));
     float speed = 3 + 17 * a;
-    string weather = "{\"preset\":\"clear\",\"to\":\"storm\",\"amount\":" + a + ",\"windDirection\":20,\"windRun\":" + run + "}";
+    // The storm's rain begins where the mix crosses 0.5 (frame 120); the ground wets from then (a history, so it does not jump). The ground's clock runs 30 times the film's.
+    string history = "{\"seconds\":0,\"kind\":\"none\"}";
+    for (int k = 120; k <= 239; k += 17) {
+        float ku = k / 239.0f, ka = ku * ku * (3 - 2 * ku);
+        history += ",{\"seconds\":" + (k / 30.0f) + ",\"kind\":\"rain\",\"intensity\":" + ka + "}";
+    }
+    string weather = "{\"preset\":\"clear\",\"to\":\"storm\",\"amount\":" + a + ",\"windDirection\":20,\"windRun\":" + run + ",\"accumulationScale\":30,\"history\":[" + history + "]}";
     string cam = "{\"position\":[" + (-4.5f + 2.5f * u) + ",2.6,10],\"target\":[3,0.4,-3.5],\"fov\":50}";
     string world = "{\"fps\":30,\"camera\":" + cam + ",\"ambient\":0.35,\"shadowMapSize\":2048,\"weather\":" + weather + ","
                    "\"sky\":{\"enabled\":true,\"sunLight\":0,\"sunGlow\":0.7,\"clouds\":0.2,\"cloudScale\":1.4,\"seed\":6,\"show\":true},"

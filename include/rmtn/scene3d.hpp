@@ -207,6 +207,10 @@ struct Material {
     // and a multiplier on the scene's line width (0 = no lines around this object).
     Color lineColor = BLANK;
     float lineWidth = 1;
+
+    // Wet and snowy weather (Scene::ground): false keeps this surface dry and bare under any weather
+    // (glass, an interior, a painted sign). Standard materials that are lit only.
+    bool weathering = true;
 };
 
 // ------------------------------------------------------------------ instancing
@@ -855,6 +859,60 @@ Downfall inWeather(const Downfall& d, const Weather& w);
 long long precipitationDropsSubmitted();
 long long precipitationSplashesSubmitted();
 
+// ------------------------------------------------------------------ wet ground and settled snow
+// What rain and snow do to surfaces (the lit shader, every Standard material with `weathering`). The state
+// comes from the weather's history (Weather::ground: wetness 0..1 and the depth of snow in metres, accumulated
+// as a pure function of t) unless pinned here. Nothing is drawn while both are zero (the shader keeps no extra
+// path then), and nothing without Scene::weather enabled or a pin.
+//
+// Wetness w. A porous surface darkens (albedo x (1 - 0.45 w)) and gets smoother (roughness x (1 - 0.65 w)),
+// and a water film adds a Fresnel reflection of the sky (F0 0.02). It dries from the top of slopes first:
+// the wetness a surface keeps is clamp((w - 0.6 s) / (1 - 0.6 s)), s = 1 - normal.y. Where the ground is flat
+// (normal.y above 0.96) and low in a world-space noise (puddleSize metres across, thresholded by w so that
+// puddles grow as it rains and shrink from their edges as it dries) there is a puddle: a still film that
+// mirrors, ringed by rain. With `reflections` on, flat wet ground and puddles also reflect what stands in the
+// scene by a screen-space march of the opaque picture (a second draw of the plain meshes over the first, where
+// the picture is the copy made before it), the sky where the ray leaves it or finds nothing.
+//
+// Rain on puddles and on open water (Scene::water) draws expanding rings: where Scene::precipitation rains
+// (Downfall::kind Rain or Sleet, the weather's intensity) each square metre gets about `rippleRate` x
+// intensity impacts a second, each a ring that spreads at 0.4 m/s for 1.1 s with a wavelength of 3.5 cm, its
+// slope dying away, summed where they overlap. Impact places and times are hashed from the cell, slot, period
+// and Downfall::seed, as a pure function of t, with the same hash as the splashes; the rings are a thinned
+// stream of their own, not the splashes' impact points. Surfaces under a roof or a tree (the precipitation's
+// occlusion map, drawn while it is raining) get no rain, so no puddle and no ring and no snow there.
+//
+// Snow depth d metres. Snow covers faces that point up: the mask is smoothstep(0.5, 0.9, normal.y) x
+// smoothstep(noise - 0.15, noise + 0.15, d / 0.05) with a metre-scale noise, so cover creeps in as patches
+// and whole by 5 cm; steep faces and the undersides of overhangs stay bare (normal.y alone: the roof of a
+// shelter is told by the occlusion map). Snow is white and rough, a little blue in shadow (lit by the sky).
+// Trees and grass are tinted by cover the same way, blades whitening at the tips first.
+struct Ground {
+    float wetness = -1;                 // pin 0..1 (-1: from the weather)
+    float snowCover = -1;               // pin 0..1 of Weather::kSnowFull (-1: from the weather)
+    bool ownWeather = false;            // with Scene::weather enabled: true keeps this struct's pins and ignores the weather's ground
+    float puddles = 1;                  // 0 none, 1 as the wetness gives, 2 more of the ground under water
+    float puddleSize = 3;               // metres across the puddle pattern
+    float rippleRate = 6;               // rings a square metre a second at intensity 1 (at most 9.7)
+    bool reflections = true;            // wet ground reflects the scene (a screen-space march), not only the sky
+    bool snowOnGrass = true;            // fields and trees whiten with cover
+    uint32_t seed = 1;                  // another pattern of puddles, snow patches and rings
+    int debug = 0;                      // 1: puddles and water draw their ripple normals as colour (for tests)
+
+    // The most rings a square metre can carry (cells x slots): rippleRate is clamped to it.
+    static constexpr float kCell = 0.75f, kPeriod = 1.1f, kSpeed = 0.4f, kWavelength = 0.035f, kRingWidth = 0.045f;
+    static constexpr int kSlots = 6;
+    static constexpr float maxRate() { return (float)kSlots / (kPeriod * kCell * kCell); }
+    // The rings the shader draws at ground point (x, z) at `seconds` for `rate` rings a square metre a second:
+    // centre and age of each alive ring within kCell of the point's cell (for tests).
+    struct Ring { Vector2 centre; float age; };
+    // `precipSeed` is Downfall::seed: the rings hash it in with `seed` (the shader gets precipSeed * 2654435761 + seed).
+    std::vector<Ring> rings(float x, float z, double seconds, float rate, uint32_t precipSeed = 0) const;
+};
+// The ground as drawn at `seconds`: this scene's pin, else the weather's (a pin or the accumulation, if the
+// weather is enabled), else dry and bare.
+Weather::GroundState groundOf(const struct Scene& scene, double seconds);
+
 // ------------------------------------------------------------------ scenes
 struct Scene {
     Camera camera;
@@ -901,6 +959,7 @@ struct Scene {
     Weather weather;                // one wind, clouds, haze... for everything above (weather.enabled)
     Clouds clouds;                  // volumetric clouds (clouds.enabled), drawn after the opaque objects
     Downfall precipitation;         // GPU rain, snow or sleet round the camera (precipitation.enabled)
+    Ground ground;                  // wet ground, puddles, ripples and snow cover (needs weather.enabled, or a pin here)
     // With weather enabled the haze sets the fog: exponential, density from the haze, taking the
     // sky's colour (fogMode, fogDensity and fogFromSky are replaced; fogHeight and fogFalloff stay).
     // true keeps the scene's own fog.

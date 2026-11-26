@@ -555,15 +555,21 @@ across a shot (`examples/scripts/weather_mix.as`). Single fields then override: 
 `gustSpeed` (m/s), `gustScale` (m), `windRun` (metres the wind has carried the clouds; give it from the
 integral of the wind speed when the speed changes over the shot, or leave it out for a steady wind),
 `cover` (0..1), `cloudType` (`cumulus`, `stratus`, `cumulonimbus`, `deck`), `precipitation` (`none`,
-`rain`, `snow`, `sleet`), `intensity`, `wetness`, `snowCover`, `haze` (0..1; sets the fog) and
-`lightningRate`; `enabled` (default true) and `fps` (default the scene's `fps`) too. The cloud type,
-precipitation, wetness, snow cover and lightning are data for later releases and draw nothing yet; the cloud
+`rain`, `snow`, `sleet`), `intensity`, `wetness`, `snowCover` (pins on the ground's state), `temperature`,
+`accumulationScale`, `history` (keys `{seconds, kind, intensity}`), `haze` (0..1; sets the fog) and
+`lightningRate`; `enabled` (default true) and `fps` (default the scene's `fps`) too. The cloud type and
+lightning are data for later releases and draw nothing yet; wetness and snow are drawn through the scene `ground` (below); the cloud
 type and cover are drawn by a `clouds` object (below).
 Everything that takes the weather's wind has an opt-out that keeps its own: `"ownWind": true` (and, on `water`, `"fetch"`: metres of open water upwind, default 50000, `calm` 2000, `choppy` 10000, `storm` 200000, which limits how high the wind raises the waves) on a
 `grass`, `forest` or `water` descriptor and on a `particles` object (whose `particleConfig` also takes
 `windFollow`, 0..2, the share of the wind's speed a particle takes up sideways, and `drift`, a constant
 `[x,y,z]` velocity in units per frame), `"ownClouds"` and `"ownLight"` on `sky`, and `"ownFog": true` at the top of the scene.
 Without a `weather` object, or with `"enabled": false`, no pixel changes.
+The scene's `ground` object is what rain and snow leave behind (docs/weather.md, "Wet ground and snow
+cover"): `wetness` and `snowCover` (0..1 pins that win over the weather's accumulation), `puddles`
+(0..2), `puddleSize` (m), `rippleRate` (rain rings a m2 a second), `reflections` (screen-space reflection
+on wet ground), `snowOnGrass`, `ownWeather` (keep these pins against a `weather` object), `seed`, `debug`.
+A material takes `"weathering": false` to stay dry and bare (a lit window).
 `water` takes `"reflections"` (`off` the default, `scene`, `half`, `quarter`: a planar reflection pass at that share of the frame, drawn only when water is on screen), `"reflectionDistort"` (1; how far the waves bend it, 0 a flat mirror) and `"refraction"` (false; the bed seen through the surface, refracted and absorbed over the real path). With the defaults no pixel changes. See `docs/weather.md` and `examples/scripts/lake_reflections.as`.
 A scene descriptor's `clouds` object draws volumetric clouds: a raymarched layer between `base` and `top`
 (metres above the ground under the origin, defaults 1500 and 3500) round a 6 371 km planet, lit by the

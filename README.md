@@ -357,6 +357,11 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   in fixed world tiles, streaks as long as the shutter and slanted by the wind, lit by the scene's
   lights, stopped by roofs and trees through a top-down depth map, with splashes where rain lands.
   Over 200 000 drops in a 1080p view for about 1.7 ms. Off by default; `examples/scripts/porch_rain.as`.
+* Wet ground and settling snow (`Scene::ground`, `docs/weather.md`): wetness and snow depth are pure
+  functions of time from the weather's precipitation history (or pinned). Wet surfaces darken and
+  mirror the sky and the scene (screen-space reflection), puddles gather on flat ground and dry from
+  the edges, rain rings run on puddles and water, snow settles on up-facing faces and tints trees and
+  grass, and `weathering: false` opts a material out. `porch_rain.as`, `first_snow.as`.
 * 2D vegetation (`flora2d::`, drawn with the node's context, so flat compositions and
   `g3d::Surface` alike): grass along a ground line, tufts, a meadow filling a shape (smaller
   toward its back), shrubs, and branching trees (oak, birch, pine; a silhouette option for

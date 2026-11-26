@@ -15,10 +15,11 @@
 // `ownLight` on Sky; `ownFog` on Scene) that keeps its own settings. With `enabled` false (the
 // default) nothing is read and nothing changes. docs/weather.md has the rules and the table.
 //
-// Some fields (cloud type, precipitation, wetness, snow cover, lightning) are data for the
-// systems that come later in this release: setting them changes no pixel yet.
+// Lightning is data for a system that comes later in this release: setting it changes no pixel yet.
+// The ground (wetness, settled snow) is drawn by the lit shader; see Weather::ground and Scene::ground.
 #pragma once
 #include <raylib.h>
+#include <vector>
 
 namespace rmtn {
 namespace g3d {
@@ -54,19 +55,60 @@ struct Weather {
         float intensity = 0;            // 0..1: drizzle to downpour
     } precipitation;
 
-    float wetness = 0;                  // 0..1: how wet the ground is (not drawn yet)
-    float snowCover = 0;                // 0..1: how much settled snow (not drawn yet)
+    // Wet ground and settled snow (W4). Both are accumulated from the weather's history, as a pure function of
+    // the time (see ground()). A value >= 0 here PINS that quantity instead (ground wet to that degree, snow that
+    // deep, whatever the history says); the default -1 lets it accumulate.
+    float wetness = -1;                 // 0..1 pin: how wet the ground is (-1: soaks in and dries by itself)
+    float snowCover = -1;               // 0..1 pin: settled snow as a share of kSnowFull (-1: builds and melts by itself)
     float haze = 0.05f;                 // 0..1: 0 clear air, 1 thick fog; sets the exponential fog
     float lightningRate = 0;            // strikes a minute (not drawn yet)
 
-    // Presets. All have `enabled` true and a wind towards 17 degrees; change what you need.
-    //             wind m/s  gust  cover  type          precipitation   wet  snow  haze  strikes/min
-    //   clear         3      0.2   0.15   cumulus       none             0    0    0.05    0
-    //   overcast      5      0.25  0.90   stratus       none             0    0    0.15    0
-    //   rain          7      0.4   0.95   stratus       rain 0.5         0.8  0    0.25    0
-    //   storm        20      0.8   1.00   cumulonimbus  rain 1.0         1    0    0.30    6
-    //   snow          4      0.2   0.90   stratus       snow 0.5         0    0.6  0.35    0
-    //   fog           1      0.05  0.60   deck          none             0.3  0    0.90    0
+    // Air temperature in degrees Celsius: snow sticks and builds below about 0, melts above it. kAutoTemperature
+    // (the default) takes it from the kind of precipitation: -3 for snow and sleet, 8 for rain, 10 otherwise.
+    static constexpr float kAutoTemperature = 1000;
+    float temperature = kAutoTemperature;
+    float airTemperature() const;
+
+    // How fast the ground's clock runs against the film's. Real snow lays 1-5 cm an hour and a puddle takes
+    // minutes to fill, so a 20 s clip shows nothing at 1. With 600 a second of film is ten minutes of weather:
+    // a 20 s clip is 3 hours (about 15 cm of snow at intensity 1). Applies to wetness and snow depth only.
+    float accumulationScale = 1;
+
+    // What the weather has been, to build the ground up from: key i holds from `seconds` (film time) until the
+    // next key, and between two keys of the same kind the intensity changes linearly. Keys in ascending time.
+    // Before the first key nothing fell; after the last its value holds, so end with { t, None, 0 } where the
+    // rain stops. Empty (the default): the current kind and intensity are taken to have held since t = 0.
+    struct Key { float seconds = 0; Precipitation kind = Precipitation::None; float intensity = 0; };
+    std::vector<Key> history;
+
+    struct GroundState { float wetness = 0, snowDepth = 0; };
+    // The ground at `seconds` of film time: wetness 0..1 and the depth of settled snow in metres.
+    //   wetness: dw/ds = rain / kSoakTime * (1 - w) - w / dryTime, s in weather seconds (film seconds x
+    //            accumulationScale), rain = the intensity of rain (0.6 of sleet's); dryTime from dryTimeConstant().
+    //   snow:    depth grows at kSnowRate * intensity (0.4 of sleet's) while the air is cold (it sticks fully
+    //            at or under 0, not at all from 3 degrees up), and melts at kMeltRate per degree above 0, faster in sun.
+    // It is integrated by fixed steps of 0.1 s of film (coarser past 400 s) over the history, so it is a function of
+    // `seconds` and this struct alone, never of an earlier frame. A pinned wetness or snowCover replaces its value.
+    GroundState ground(double seconds) const;
+    float wetnessAt(double seconds) const { return ground(seconds).wetness; }
+    float snowDepthAt(double seconds) const { return ground(seconds).snowDepth; }
+    float dryTimeConstant() const;      // weather seconds: wetness falls to 1/e in this long once the rain has stopped
+    float dryingTime() const;           // weather seconds for wetness to fall from 1 to under 0.1 (2.3 time constants)
+    static constexpr float kSoakTime = 150;         // s: time constant of soaking at intensity 1
+    static constexpr float kDryTime = 1500;         // s: time constant of drying in calm air under full sun
+    static constexpr float kSnowRate = 0.05f / 3600;    // m/s: 5 cm an hour at intensity 1
+    static constexpr float kMeltRate = 0.005f / 3600;   // m/s per degree above 0 (0.5 cm an hour per degree), times 0.5 + sunScale()
+    static constexpr float kSnowFull = 0.10f;       // m: snowCover 1 is this deep (and the shader's snow is whole by 6 cm)
+
+    // Presets. All have `enabled` true and a wind towards 17 degrees; change what you need. The ground
+    // (wetness, snow cover) is left to accumulate (-1); the precipitation decides.
+    //             wind m/s  gust  cover  type          precipitation   haze  strikes/min
+    //   clear         3      0.2   0.15   cumulus       none            0.05    0
+    //   overcast      5      0.25  0.90   stratus       none            0.15    0
+    //   rain          7      0.4   0.95   stratus       rain 0.5        0.25    0
+    //   storm        20      0.8   1.00   cumulonimbus  rain 1.0        0.30    6
+    //   snow          4      0.2   0.90   stratus       snow 0.5        0.35    0
+    //   fog           1      0.05  0.60   deck          none            0.90    0
     static Weather clear();
     static Weather overcast();
     static Weather rain();
