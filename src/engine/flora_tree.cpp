@@ -2175,7 +2175,10 @@ Sway swayOf(const ForestSpec& f, Vector2 wind, const Placement& p, const Tree& t
 }
 
 void place(g3d::Object3D& group, const std::shared_ptr<ForestState>& st, int t) {
-    const ForestSpec& f = st->spec;
+    const g3d::Scene* weatherScene = g3d::drawingScene();
+    const bool inWind = weatherScene && weatherScene->weather.enabled && !st->spec.ownWind;     // a copy, for this frame only
+    const ForestSpec windy = inWind ? inWeather(st->spec, weatherScene->weather) : ForestSpec{};
+    const ForestSpec& f = inWind ? windy : st->spec;
     const Vector3 eye = g3d::drawingCamera().position;
     const float seconds = t / std::max(f.fps, 1e-3f);
     Vector2 wind = f.windDirection;
@@ -2569,7 +2572,10 @@ void reshape(const g3d::GeometryPtr& geo, std::shared_ptr<const TreeGrowth> g, b
 }
 
 void growAll(const std::shared_ptr<Growing>& st, int t) {
-    const ForestSpec& f = st->spec;
+    const g3d::Scene* weatherScene = g3d::drawingScene();
+    const bool inWind = weatherScene && weatherScene->weather.enabled && !st->spec.ownWind;     // a copy, for this frame only
+    const ForestSpec windy = inWind ? inWeather(st->spec, weatherScene->weather) : ForestSpec{};
+    const ForestSpec& f = inWind ? windy : st->spec;
     const float seconds = t / std::max(f.fps, 1e-3f);
     Vector2 wind = f.windDirection;
     if (Vector2Length(wind) < 1e-6f) wind = { 1, 0 };
@@ -2649,6 +2655,17 @@ g3d::Object3D* addGrowingTree(g3d::Scene& scene, TreePtr tree, Vector3 position,
     std::function<float(int, const Placement&)> g;
     if (grow) g = [grow](int t, const Placement&) { return grow(t); };
     return addGrowingTrees(scene, { p }, { std::move(tree) }, std::move(g), wind);
+}
+
+ForestSpec inWeather(const ForestSpec& spec, const g3d::Weather& w) {
+    ForestSpec out = spec;
+    if (!w.enabled || spec.ownWind) return out;
+    out.windDirection = w.windVector();
+    out.wind = w.treeWind();
+    out.gust = w.treeGust();
+    out.gustSpeed = w.wind.gustSpeed;
+    out.gustScale = w.wind.gustScale;
+    return out;
 }
 
 }  // namespace flora

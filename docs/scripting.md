@@ -545,6 +545,24 @@ with a 2:1 image. The callback uses the same `void pixels(int frame, array<uint>
 signature as dynamic maps, receives frame 0, and must fill exactly `width*(width/2)` packed
 pixels. It runs once when the environment is first generated; its width must be even and 16..2048.
 Do not combine the JSON callback with an `environment` path or `studioEnvironment` object.
+A scene descriptor's `weather` object switches on one weather state that the grass, forests and
+growing trees, the water's waves, `rain` and `snow` particles, the sky and the fog all read (see
+`docs/weather.md` for what each reads and the numbers). `"preset"` names the state (`clear`,
+`overcast`, `rain`, `storm`, `snow`, `fog`; the default is `clear`); `"to"` and `"amount"` (0..1) mix
+it towards a second preset, as `Weather::mix`, so a frame-derived `amount` turns one into the other
+across a shot (`examples/scripts/weather_mix.as`). Single fields then override: `windDirection`
+(degrees about +y the wind blows towards, 0 = +x, 90 = +z), `windSpeed` (m/s), `gust` (0..1),
+`gustSpeed` (m/s), `gustScale` (m), `windRun` (metres the wind has carried the clouds; give it from the
+integral of the wind speed when the speed changes over the shot, or leave it out for a steady wind),
+`cover` (0..1), `cloudType` (`cumulus`, `stratus`, `cumulonimbus`, `deck`), `precipitation` (`none`,
+`rain`, `snow`, `sleet`), `intensity`, `wetness`, `snowCover`, `haze` (0..1; sets the fog) and
+`lightningRate`; `enabled` (default true) and `fps` (default the scene's `fps`) too. The cloud type,
+precipitation, wetness, snow cover and lightning are data for later releases and draw nothing yet.
+Everything that takes the weather's wind has an opt-out that keeps its own: `"ownWind": true` (and, on `water`, `"fetch"`: metres of open water upwind, default 50000, `calm` 2000, `choppy` 10000, `storm` 200000, which limits how high the wind raises the waves) on a
+`grass`, `forest` or `water` descriptor and on a `particles` object (whose `particleConfig` also takes
+`windFollow`, 0..2, the share of the wind's speed a particle takes up sideways, and `drift`, a constant
+`[x,y,z]` velocity in units per frame), `"ownClouds"` and `"ownLight"` on `sky`, and `"ownFog": true` at the top of the scene.
+Without a `weather` object, or with `"enabled": false`, no pixel changes.
 A scene descriptor's `environment` is an image path (equirectangular PNG/JPG/HDR), or an object
 that gives a cube skybox: `{"faces": [px, nx, py, ny, pz, nz]}` (six files in the order +x, -x,
 +y, -y, +z, -z) or `{"cross": "sky.png"}` (one horizontal cross, a 4x3 grid: `+y` above column 1,

@@ -501,6 +501,8 @@ void flight(const Emitter3D& e, const Seeded3& s, double age, Vector3& pos, Vect
     axisMotion(e.drag, s.p0.x, s.v0.x, e.gravity.x, age, pos.x, vel.x);
     axisMotion(e.drag, s.p0.y, s.v0.y, e.gravity.y, age, pos.y, vel.y);
     axisMotion(e.drag, s.p0.z, s.v0.z, e.gravity.z, age, pos.z, vel.z);
+    pos.x += e.drift.x * (float)age; pos.y += e.drift.y * (float)age; pos.z += e.drift.z * (float)age;
+    vel.x += e.drift.x; vel.y += e.drift.y; vel.z += e.drift.z;
     if (e.turbulence > 0) {
         const double f = e.turbulenceFreq, ramp = std::min(1.0, age * f), k = e.turbulence * ramp;
         auto ph = [&](Slot3 sl) { return rnd(e, s.index, sl) * 2 * PI; };
@@ -670,6 +672,7 @@ Emitter3D snow3d(float width, float depth, float height) {
     e.colors = { { 255, 255, 255, 220 } };
     e.fadeIn = 0.02f;
     e.fadeOut = 0.05f;
+    e.windFollow = 0.3f;                    // g3d::Weather::kSnowFollow
     return e;
 }
 
@@ -689,6 +692,7 @@ Emitter3D rain3d(float width, float depth, float height) {
     e.colors = { { 170, 190, 230, 150 } };
     e.fadeIn = 0;
     e.fadeOut = 0.05f;
+    e.windFollow = 0.5f;                    // g3d::Weather::kRainFollow
     return e;
 }
 

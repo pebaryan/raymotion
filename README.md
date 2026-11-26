@@ -336,6 +336,11 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   canopy of Gaussian splats; one object a tree, at most 256, and casting no shadow), with
   `TreeBuild::shading` for Toon, Gooch or Hatch; `flora::toonGrass()` draws blades in flat
   colour bands (`g3d::Field::colorBands`).
+* One weather state (`g3d::Weather`, `Scene::weather`, `docs/weather.md`): a wind, cloud cover,
+  haze and more that the grass, trees, water waves, rain and snow particles, sky and fog all
+  read, so they lean, roll and slant the same way; presets `clear`, `overcast`, `rain`, `storm`,
+  `snow`, `fog` and `Weather::mix` turn a clear morning into a storm across a shot. Off by
+  default (nothing changes), and each system has an `ownWind`-style opt-out.
 * 2D vegetation (`flora2d::`, drawn with the node's context, so flat compositions and
   `g3d::Surface` alike): grass along a ground line, tufts, a meadow filling a shape (smaller
   toward its back), shrubs, and branching trees (oak, birch, pine; a silhouette option for

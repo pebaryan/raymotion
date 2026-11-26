@@ -199,6 +199,15 @@ struct Emitter3D {
     float turbulenceFreq = 0.08f;
     bool floor = false;             // particles that fall to y = floorY (object space) stop there
     float floorY = 0;
+    // Wind (g3d::Scene::weather, in a 3D scene whose weather is enabled): the share of the wind's
+    // speed that each particle takes up sideways, 0 = none (rain3d 0.5, snow3d 0.3). Above 0 the
+    // emitter's own sideways direction is dropped, so the wind sets the slant. `ownWind` keeps the
+    // emitter's own motion.
+    float windFollow = 0;
+    bool ownWind = false;
+    // A steady extra velocity (units per frame, object space) every particle drifts with, free of
+    // drag. The weather sets it from the wind; set it yourself for a constant breeze.
+    Vector3 drift{ 0, 0, 0 };
 
     // ---- look (for mesh particles, give the emitter a geometry instead)
     Look look = Look::Dot;

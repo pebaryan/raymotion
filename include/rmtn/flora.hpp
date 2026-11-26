@@ -266,7 +266,14 @@ struct ForestSpec {
     float gustSpeed = 7, gustScale = 50;
     float fps = 30;                 // frames a second, for the wind's clock
     bool impostorShadows = true;    // far trees cast the shadow of their picture, seen from the light
+    // With g3d::Scene::weather enabled the wind comes from it each frame: windDirection, wind (speed / 8),
+    // gust, gustSpeed and gustScale (see weather.hpp). true keeps this spec's own. What cannot follow the
+    // weather: the sway loop baked into the tree's meshes (its flutter and its amplitude per tree).
+    bool ownWind = false;
 };
+// `spec` with the weather's wind worked in (unless it is disabled or spec.ownWind). The forest
+// and growing trees call this every frame on a copy, never on your spec.
+ForestSpec inWeather(const ForestSpec& spec, const g3d::Weather& weather);
 // Trees at the placements (Placement::variant picks from `trees`, wrapping round). Returns
 // the forest's group; its children are the instanced levels.
 g3d::Object3D* addForest(g3d::Scene& scene, const std::vector<Placement>& at, std::vector<TreePtr> trees,

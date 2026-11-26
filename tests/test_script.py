@@ -182,6 +182,63 @@ void draw(int frame) {
         self.assertIn("grass mask needs", self.run_cli("still", "grass", "--script", self.path, "--png", "x.png", ok=False))
 
     @unittest.skipUnless(GL, "needs OpenGL")
+    def test_weather(self):
+        # A scene's "weather" object drives the grass, trees, water, rain, sky and fog; without it, or
+        # disabled, or with every opt-out set, the frame is exactly what it was; the same frame comes
+        # out the same in any order; and a bad preset says what is wrong.
+        def frame(weather=None, own=False, at=5, name="w.png"):
+            world = {
+                "fps": 30, "camera": {"position": [0, 1.6, 7], "target": [0, 1, 0], "fov": 50}, "ambient": 0.35,
+                "sky": {"enabled": True, "sunLight": 0, "clouds": 0.3, "ownClouds": own, "ownLight": own},
+                "ownFog": own, "fogMode": "exponential", "fogDensity": 0.004, "fogFromSky": True,
+                "water": {"preset": "choppy", "level": -0.5, "ownWind": own},
+                "lights": [{"type": "directional", "position": [3, 6, 4], "intensity": 2}],
+                "objects": [
+                    {"geometry": "box", "width": 14, "height": 1, "depth": 6, "position": [0, -0.5, 0], "material": {"color": "#4f5b2c"}},
+                    {"grass": {"preset": "meadow", "min": [-6, -3], "max": [6, 3], "density": 150, "seed": 3, "ownWind": own}},
+                    {"forest": {"trees": ["oak"], "at": [[-4, 0, -2, 30, 0.6, 0]], "ownWind": own}},
+                    {"particles": "rain", "width": 10, "depth": 8, "height": 5, "seed": 2, "position": [0, 5, 0], "ownWind": own},
+                ],
+            }
+            if weather is not None:
+                world["weather"] = weather
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "weather"; c.w = 160; c.h = 90; c.fps = 30; c.duration = 20; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) {
+    g3d::draw(%s, frame, 0, 0, 160, 90);
+}
+''' % json.dumps(json.dumps(world)))
+            self.run_cli("still", "weather", "--script", self.path, "--at", at, "--png", name)
+            return (self.cwd / name).read_bytes()
+
+        plain = frame()
+        storm = frame({"preset": "storm"})
+        self.assertNotEqual(plain, storm)                                            # the weather is read
+        self.assertEqual(plain, frame({"preset": "storm", "enabled": False}))        # off means off
+        self.assertEqual(plain, frame({"preset": "storm"}, own=True))                # every opt-out keeps its own
+        self.assertNotEqual(storm, frame({"preset": "storm", "windDirection": 200}))   # a field overrides the preset
+        self.assertNotEqual(storm, frame({"preset": "clear", "to": "storm", "amount": 0.3}))
+        self.assertEqual(frame({"preset": "clear", "to": "storm", "amount": 0.3}, at=7, name="a.png"),
+                         frame({"preset": "clear", "to": "storm", "amount": 0.3}, at=7, name="b.png"))
+        frame({"preset": "overcast", "cover": 0.5, "haze": 0.2, "windSpeed": 9, "gust": 0.5, "cloudType": "deck",
+               "precipitation": "snow", "intensity": 0.5, "wetness": 0.2, "snowCover": 0.1, "lightningRate": 2, "windRun": 40})
+        self.assertIn("preset", self._bad_weather())
+
+    def _bad_weather(self):
+        # frame() raises on a failing run, so run the CLI directly on a script with a bad preset.
+        self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "weather"; c.w = 64; c.h = 36; c.fps = 30; c.duration = 2; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) {
+    g3d::draw("{\\"weather\\":{\\"preset\\":\\"hurricane\\"}}", frame, 0, 0, 64, 36);
+}
+''')
+        return self.run_cli("still", "weather", "--script", self.path, "--png", "x.png", ok=False)
+
+    @unittest.skipUnless(GL, "needs OpenGL")
     def test_flora_area_scatter_terrain(self):
         # One area feeds a terrain, grass and scattered instances; frames repeat exactly, and
         # bad areas and oversized scatters say what is wrong.

@@ -72,6 +72,7 @@ add_library(rmtn_engine STATIC
   src/engine/layout.cpp
   src/engine/json.cpp
   src/engine/scene3d.cpp
+  src/engine/weather.cpp
   src/engine/devices.cpp
   src/engine/media.cpp
   src/engine/prefab.cpp
@@ -354,6 +355,11 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   target_link_libraries(raymotion_scene3d_tests PRIVATE rmtn_engine)
   add_test(NAME scene3d COMMAND raymotion_scene3d_tests)
   set_tests_properties(scene3d PROPERTIES TIMEOUT 3600)   # 20-30 min under Mesa's llvmpipe on the Linux runners
+
+  add_executable(raymotion_weather_tests tests/weather_tests.cpp)
+  target_link_libraries(raymotion_weather_tests PRIVATE rmtn_engine)
+  add_test(NAME weather COMMAND raymotion_weather_tests)
+  set_tests_properties(weather PROPERTIES LABELS gl SKIP_RETURN_CODE 77 TIMEOUT 900)
 
   add_executable(raymotion_media_tests tests/media_tests.cpp)
   target_link_libraries(raymotion_media_tests PRIVATE rmtn_engine)

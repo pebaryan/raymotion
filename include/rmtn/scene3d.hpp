@@ -24,6 +24,7 @@
 #include <vector>
 #include "timeline.hpp"
 #include "particles.hpp"
+#include "weather.hpp"
 
 namespace rmtn {
 namespace splat { struct Cloud; }
@@ -306,8 +307,11 @@ struct Field {
     float gustSpeed = 5;                        // metres a second the gust fronts travel downwind
     float gustScale = 14;                       // metres between gust fronts
     float fps = 30;                             // the film's frames per second: wind moves in seconds
+    // With Scene::weather enabled the five wind settings above come from it (see weather.hpp:
+    // the direction, sway from the speed, gust, gustSpeed, gustScale); true keeps this field's own.
+    bool ownWind = false;
 
-    float tileSize = 4;                         // metres
+    float tileSize = 4;                       // metres
     float detailDistance = 14;                  // nearer tiles get full blades, further one segment
     float fadeStart = 35, fadeEnd = 70;         // blades thin out over this band (metres from the camera)
     float shadowDistance = 18;                  // with castShadows: only tiles nearer than this to the camera cast (all receive)
@@ -566,6 +570,16 @@ struct Sky {
     Color cloudColor{ 255, 255, 255, 255 }, cloudShade{ 150, 158, 176, 255 };   // sunlit side, underside
     float cloudScale = 1;                   // larger: smaller clouds
     Vector2 cloudDrift{ 0.0004f, 0.0001f }; // per frame
+    // Added to the drift's travel (sky-image units, not per frame). Scene::weather sets it, from
+    // the wind's travel, so a changing wind does not make the clouds swim; leave it 0 otherwise.
+    Vector2 cloudShift{ 0, 0 };
+    // With Scene::weather enabled: the cover follows weather.clouds.cover, the colours grey with it
+    // and the clouds drift downwind (cloudDrift and cloudShift are replaced). true keeps this sky's own.
+    bool ownClouds = false;
+    // With Scene::weather enabled: the sky lights the scene less under cloud (`lighting` x
+    // 1 - 0.35 cover), and with `sunLight` set that light dims (x 1 - 0.75 cover) while the ambient
+    // light rises a little (x 1 + 0.35 cover). true keeps the scene's own light.
+    bool ownLight = false;
     unsigned seed = 1;
     int resolution = 1024;                  // width of the sky's equirectangular image (2:1)
     float lighting = 1;                     // how strongly it lights the scene
@@ -611,6 +625,21 @@ struct Water {
     std::vector<Wave> waves;            // up to 8
     float speed = 1;                    // times every wave's speed
     float fps = 30;                     // the film's frames per second: waves move in seconds
+    // Metres of open water upwind. Under Scene::weather the wind can only raise waves as high as
+    // this fetch allows (JONSWAP, see Weather::waveHeight): a 20 m pond ruffles, a bay chops, the
+    // open sea swells. Default 50 km; calm() 2 km (a lagoon), choppy() 10 km (a bay), storm()
+    // 200 km (open sea). Without weather it is unused.
+    float fetch = 50000;
+    // The shading band-limits the waves by the pixel footprint: a wave under a few pixels long fades out of
+    // the normal, and the slope variance it takes away is added to the glint's roughness, so a far or tiny
+    // chop reads as a broad rough sheen rather than an aliased pattern. false draws every wave at every
+    // distance (for comparison). Only the shading filters: height(), slope() and the vertices are exact.
+    bool filter = true;
+    // With Scene::weather enabled the waves follow its wind: they head downwind (their spread of
+    // directions kept, about their amplitude-weighted mean heading) and their height and length
+    // become those the wind raises over `fetch` (authored shape kept).
+    // true keeps this water's own waves. Use waterOf(scene) for the surface that is drawn.
+    bool ownWind = false;
 
     Color deep{ 6, 62, 84, 255 };       // what the water scatters back
     Vector3 absorb{ 0.34f, 0.07f, 0.04f };   // loss per metre of path, per red/green/blue
@@ -673,6 +702,11 @@ struct Scene {
     bool fogFromSky = false;        // fog takes the sky's (or environment's) colour in each direction
     Sky sky;                        // a procedural sky (sky.enabled); replaces `environment`
     Water water;                    // a water surface (water.enabled)
+    Weather weather;                // one wind, clouds, haze... for everything above (weather.enabled)
+    // With weather enabled the haze sets the fog: exponential, density from the haze, taking the
+    // sky's colour (fogMode, fogDensity and fogFromSky are replaced; fogHeight and fogFalloff stay).
+    // true keeps the scene's own fog.
+    bool ownFog = false;
     int shadowMapSize = 1024;       // per atlas tile (shrunk if the atlas would pass 8192)
     // Culling (Object3D::cullRadius) keeps an out-of-view subtree whose shadow can fall into
     // view. It assumes shadows land no lower than this y, so it needs only follow the light
@@ -709,6 +743,35 @@ struct Scene {
     Object3D* find(const std::string& name);         // depth-first, nullptr when absent
 };
 using ScenePtr = std::shared_ptr<Scene>;
+
+// ------------------------------------------------------------------ weather (weather.hpp)
+// What each system draws when Scene::weather is enabled: its own struct with the weather's
+// values worked in (unless its `own...` flag is set). render() calls these every frame on
+// copies, never on your structs; they are public so a test or a boat can read the same numbers.
+//
+// The wind, in each system's own units (speed s in m/s, direction d the unit vector (x, z)):
+//   Field         windDirection = d (turned into the field's object space by `world`), sway =
+//                 0.015 s (at most 0.6), gust = 0.7 * wind.gust, gustSpeed and gustScale as given.
+//   ForestSpec    windDirection = d, wind = s / 8 (at least 0.05), gust = 1.2 * wind.gust,
+//                 gustSpeed and gustScale as given (flora::inWeather in flora.hpp).
+//   Water         every wave's direction turned by (wind direction - the waves' mean heading), so
+//                 they head downwind with their spread kept; their significant height and longest
+//                 wavelength become the fetch-limited JONSWAP values for the wind speed and
+//                 Water::fetch (Weather::waveHeight, wavePeakLength), shape kept, steepness 2a/L
+//                 clamped to 0.12.
+//   Emitter3D     a sideways velocity of windFollow * s / fps along d, in the emitter's own space.
+//                 With windFollow > 0 the emitter's own sideways direction is dropped, so the wind
+//                 alone sets the slant of rain and snow (Weather::kRainFollow, kSnowFollow).
+//   Sky           clouds drift along d: cloudShift = -d * 0.0012 * (metres of travel), since the
+//                 sky shader moves a cloud against the sign of its offset.
+// The sky and fog follow the cover and haze; see Weather and Sky::ownClouds, ownLight, Scene::ownFog.
+Field inWeather(const Field& f, const Weather& w, const Matrix* world = nullptr);
+Water inWeather(const Water& water, const Weather& w);
+Sky inWeather(const Sky& sky, const Weather& w, double frame);
+fx::Emitter3D inWeather(const fx::Emitter3D& e, const Weather& w, const Matrix& world);
+// The water as drawn at this moment: scene.water, with the weather worked in if it is enabled.
+// Its height() and slope() are the surface the shader draws (for a boat to ride).
+Water waterOf(const Scene& scene);
 
 // A procedural studio environment for Scene::environmentGenerator: a vertical gradient
 // (top, horizon, bottom) with `panels` soft light boxes above the horizon that shiny
