@@ -300,6 +300,43 @@ void draw(int frame) {
         return self.run_cli("still", "clouds", "--script", self.path, "--png", "x.png", ok=False)
 
     @unittest.skipUnless(GL, "needs OpenGL")
+    def test_water_reflections(self):
+        # The water's reflection keys: off by default (the pixels do not change), read when on, bad values named,
+        # and the lake example renders three different frames.
+        def frame(water, name="w.png"):
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "w"; c.w = 96; c.h = 54; c.fps = 30; c.duration = 2; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) {
+    g3d::draw(%s, frame, 0, 0, 96, 54);
+}
+''' % json.dumps(json.dumps({"camera": {"position": [0, 1.5, 8], "target": [0, 1, -20]}, "ambient": 0.4,
+                             "sky": {"enabled": True, "show": True}, "water": dict({"preset": "calm", "level": 0}, **water),
+                             "objects": [{"geometry": "box", "width": 2, "height": 3, "depth": 2, "position": [0, 1.5, -10],
+                                          "material": {"color": "#e02020"}}]})))
+            self.run_cli("still", "w", "--script", self.path, "--png", name)
+            return (self.cwd / name).read_bytes()
+        off = frame({})
+        self.assertEqual(off, frame({"reflections": "off", "refraction": False}, "w2.png"))
+        on = frame({"reflections": "scene"})
+        self.assertNotEqual(off, on)
+        self.assertNotEqual(on, frame({"reflections": "scene", "reflectionDistort": 0}, "w3.png"))
+        self.assertNotEqual(off, frame({"refraction": True}, "w4.png"))
+        for mode in ("half", "quarter"):
+            frame({"reflections": mode}, "w5.png")
+        self.path.write_text('''void configure(Composition &inout c) { c.name = "w"; c.w = 64; c.h = 36; c.fps = 30; c.duration = 2; c.supersample = 1; scene(0, c.duration, "draw"); }
+void draw(int frame) { g3d::draw("{\\"water\\":{\\"reflections\\":\\"mirror\\"}}", frame, 0, 0, 64, 36); }
+''')
+        self.assertIn("reflections must be", self.run_cli("still", "w", "--script", self.path, "--png", "x.png", ok=False))
+        example = pathlib.Path(__file__).resolve().parents[1] / "examples/scripts/lake_reflections.as"
+        shots = []
+        for at in (0, 120, 239):
+            self.run_cli("still", "lake-reflections", "--script", example, "--at", at, "--png", f"l{at}.png")
+            shots.append((self.cwd / f"l{at}.png").read_bytes())
+        self.assertEqual(len(set(shots)), 3)
+
+    @unittest.skipUnless(GL, "needs OpenGL")
     def test_flora_area_scatter_terrain(self):
         # One area feeds a terrain, grass and scattered instances; frames repeat exactly, and
         # bad areas and oversized scatters say what is wrong.

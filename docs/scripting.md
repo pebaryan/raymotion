@@ -564,6 +564,7 @@ Everything that takes the weather's wind has an opt-out that keeps its own: `"ow
 `windFollow`, 0..2, the share of the wind's speed a particle takes up sideways, and `drift`, a constant
 `[x,y,z]` velocity in units per frame), `"ownClouds"` and `"ownLight"` on `sky`, and `"ownFog": true` at the top of the scene.
 Without a `weather` object, or with `"enabled": false`, no pixel changes.
+`water` takes `"reflections"` (`off` the default, `scene`, `half`, `quarter`: a planar reflection pass at that share of the frame, drawn only when water is on screen), `"reflectionDistort"` (1; how far the waves bend it, 0 a flat mirror) and `"refraction"` (false; the bed seen through the surface, refracted and absorbed over the real path). With the defaults no pixel changes. See `docs/weather.md` and `examples/scripts/lake_reflections.as`.
 A scene descriptor's `clouds` object draws volumetric clouds: a raymarched layer between `base` and `top`
 (metres above the ground under the origin, defaults 1500 and 3500) round a 6 371 km planet, lit by the
 sky's sun, that the camera can fly through (`examples/scripts/cloud_flight.as`). `cover` (0..1, the share of

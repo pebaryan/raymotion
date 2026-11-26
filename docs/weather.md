@@ -166,6 +166,69 @@ slower GPU costs proportionally more; the march is the fill-rate work, so `resol
 `examples/scripts/cloud_flight.as` flies under cumulus over hills, up through the base and out over a
 sea of cloud with gaps.
 
+## Water that reflects the scene
+
+`Water::reflections` (`Off`, `Scene`, `Half`, `Quarter`), `reflectionDistort` and `refraction`
+(include/rmtn/scene3d.hpp; script keys `reflections`, `reflectionDistort`, `refraction` on `water`).
+
+**Default: Off, and Off means Off.** With `reflections` Off and `refraction` false the pixels equal the
+previous release's (the test compares a busy water scene with a recording made before W6: the worst cell
+mean is off by 0.005 levels). Turning the default on would have changed every old water scene and cost
+about 60% more per frame, so it is a deliberate choice you make per scene. `Scene` is the setting to
+use for a finished shot; `Half` and `Quarter` trade sharpness for time.
+
+* The pass mirrors the camera about `level` and draws the scene again into a target (full, half or
+  quarter of the frame). Lights, shadows and world positions stay real; only the view is mirrored, and
+  anything under the water is clipped. The mirrored view is culled against its own frustum, and the pass
+  is skipped when no water is on screen. The sky box is not drawn into it (the analytic sky fills where
+  nothing was drawn, so the sky and the clouds reflect); line art, billboard particles and splats are not
+  in the reflection.
+* The shader samples it at the fragment's own screen position bent by the band-limited normal (waves
+  too fine for the pixel stop bending it and widen the blur instead, so it does not shimmer in the
+  distance), blends it with the sky by Fresnel and blurs it by the water's roughness through a mip chain.
+  `reflectionDistort` scales the bend (0 is a flat mirror, 1 the real slope).
+* `refraction` copies the opaque colour and depth before the water is drawn and marches the Snell ray
+  through them: the bed is found where the refracted ray meets it, shifted as it would be, and the
+  absorption is applied over that real path, so a shallow plate is clearer than a deep one.
+* How far the waves bend the reflection also follows how tall the sea is: `reflectionDistort` is scaled by
+  smoothstep(1 cm, 10 cm) of the significant wave height Hs = 4 sqrt(sum a^2 / 2). A 1 m/s wind over 900 m
+  (Hs 1.5 cm) leaves a mirror, 3 m/s and up breaks it. This is a deliberate choice, not optics: the weather
+  scales the calm preset's short waves to very short wavelengths with slopes of about 0.1, which at a grazing
+  camera would smear a far shore to half its height; a calm lake must not. Raise `reflectionDistort` to break
+  it earlier. (Before the scaling, the 1 m/s lake reflected the far cones 0.53 of their height, correlation 0.55
+  with the flipped cone, and no cloud; now 0.93, 0.94 and a cloud correlation of 0.75.)
+* A refracted ray that leaves the picture before it meets anything goes on with the colour at the edge it crossed,
+  absorbed over the length down to the depth seen there, so the bottom of the frame has no edge where rays that hit
+  meet rays that left (the old fallback was deep colour: a ragged dark band that followed the waves; the sand-floor
+  test measures a worst row step of 18.8 levels with it, 0.10 now). What is under the water is absorbed once, by the
+  surface that looks through it; the opaque pass skips its own tint when refraction is on (applied twice, the floor was 16
+  levels too dark).
+* The reflection is blurred by how far the bend throws the sample (a quarter of it in texels, and the footprint of the
+  bend on the target), so a heavy chop smears a reflected cloud edge into a glow instead of thin closed rings.
+* The `calm()`, `choppy()` and `storm()` presets now keep every wave within 40 degrees of one heading (calm 20,
+  choppy 15, storm 10) at lengths that are not simple ratios of each other; before, calm's eight waves were 140 degrees
+  either side of its heading and the near water at a grazing camera read as a grid of dots. The Hs and the longest
+  length of each preset are exactly what they were, so the fetch-limited scaling gives the same sea height. The look of
+  every old scene that uses a preset changes (a busy choppy test scene moved by 68 levels in its worst 53 x 45 pixel
+  cell mean); a scene that needs the old waves can list them in `Water::waves`.
+
+Cost at 1920 x 1080 on an RTX 5060 Ti (best and mean of 10 frames; `RMTN_W6_TIMING=1
+build/raymotion_weather_tests.exe` prints them):
+
+| Scene (best / mean of 10, ms) | Off | Quarter | Half | Full | Refraction only | Full + refraction |
+|---|---|---|---|---|---|---|
+| 40 draws, no clouds | 5.0 / 5.2 | 5.4 / 5.9 | 5.4 / 5.8 | 5.4 / 5.7 | 5.4 / 5.5 | 5.9 / 6.3 |
+| 600 trees (1 200 draws), no clouds | 15.6 / 16.9 | 26.9 / 29.0 | 27.3 / 29.4 | 27.1 / 30.0 | 16.2 / 16.8 | 27.0 / 29.9 |
+| 600 trees and Film clouds | 24.4 / 25.7 | 39.0 / 41.6 | 40.6 / 43.2 | 39.1 / 41.2 | 24.6 / 25.8 | 39.9 / 41.9 |
+
+The reflection costs a second walk over the scene, so it scales with the number of draws, not with the
+target's size: Quarter is no cheaper than Full here because the frame is limited by submitting the
+1 200 draws (a fill-bound scene would gain from Half and Quarter; none of these is). Refraction alone costs
+about 0.3 ms. Culling against the mirrored frustum and skipping the pass when no water shows are why a
+small scene pays under 1 ms.
+
+`examples/scripts/lake_reflections.as` is a calm lake at dusk that breaks up as the wind rises.
+
 ## Script
 
 The scene descriptor's `clouds` object (docs/scripting.md) takes the `Clouds` fields by name. Its `weather` object takes a `preset`, optionally `to` and

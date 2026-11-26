@@ -223,6 +223,45 @@ in a volume that follows the camera, so rain can fill a valley.
     expected direction.
   - Turning reflections off restores today's pixels.
 
+**Done 2026-11-27.** `Water::reflections` (Off by default, or Scene, Half, Quarter),
+`reflectionDistort` and `refraction` (off by default).
+
+- **Reflection pass:** the scene is mirrored about the water level. Lights, shadows and world
+  positions stay real, and fragments below the water are discarded. It includes the volumetric
+  clouds, is culled with the mirrored frustum, and is skipped when no water is on screen.
+- **Sampling:** the band-limited wave normal bends the reflection, blended by Fresnel into the
+  sky reflection. The blur level follows both the footprint and the bend, which took out the
+  ringed cloud contours on rough water.
+- **Calm water stays a mirror:** the distortion fades in with significant wave height (1-10 cm),
+  a documented perceptual choice.
+- **Refraction:** a screen-space Snell march with absorption over the real path. A ray that
+  leaves the picture keeps the edge colour, absorbed over its path, so the screen edge leaves no
+  dark band. The opaque pass's straight-line tint is skipped when refraction is on; before that,
+  absorption was applied twice.
+- **Presets:** calm, choppy and storm now spread their waves within ±40° at irregular lengths,
+  with the same Hs and peak length, so they no longer alias into a grid. **This changes the look
+  of existing water scenes**, e.g. the Bundaran HI banner and voxel_splats showcases.
+- **Cost at 1080p:** reflections roughly double the draw cost of the scene (1 200 draws: 16 → 27
+  ms). Refraction costs about 0.6 ms.
+
+Tests (weather_tests):
+- off means off (0.005 levels);
+- the pole upside down and in place (length ratio 0.96);
+- waves break it up but keep its colour;
+- no leak below the water;
+- the refraction offset as predicted;
+- clouds in the water (correlation 0.88);
+- purity;
+- no far shimmer;
+- a calm lake is a mirror: a cone's reflection spans 0.93 of its height, flip correlation 0.94,
+  cloud 0.75, and the same scene at 8 m/s breaks it;
+- no refraction edge (row step 0.10);
+- no rings (on/off 7.6% against 6.4%);
+- preset spread within 45°.
+
+Open: the screen-space march leaves a hatched band on the top rim of a submerged rock. Line art,
+billboard particles and splats are not reflected.
+
 ## W7. Lakes, rivers and pools
 
 `Water` bodies beyond the one endless sea:

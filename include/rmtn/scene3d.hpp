@@ -641,6 +641,33 @@ struct Water {
     // true keeps this water's own waves. Use waterOf(scene) for the surface that is drawn.
     bool ownWind = false;
 
+    // What the surface mirrors. Off (the default) reflects the sky only, as always: no extra pass, no pixel
+    // changes. Scene also reflects what stands in the scene: the scene is drawn again, mirrored about the water
+    // level (everything below the level cut away, so nothing under the water leaks in), into an offscreen
+    // image that the surface samples where it is seen from above. That image holds the opaque objects,
+    // grass, trees, other transparent objects and the volumetric clouds; the sky is not drawn into it, the
+    // water's own sky reflection shows where nothing was drawn. Not in it: the water itself, line art,
+    // billboard particles and splats. Half and Quarter draw the pass at that share of the screen's width and
+    // height (a quarter of the cost, softer edges). The pass is skipped when no water can be on screen, from
+    // under the surface and with an orthographic camera.
+    enum class Reflections { Off, Scene, Half, Quarter };
+    Reflections reflections = Reflections::Off;
+    // How far the wave normals bend the reflection: 1 follows the optics (a reflected object is displaced as
+    // the tilted surface turns the ray), 0 is a flat mirror, 2 doubles it. The normal is the shading's own,
+    // band-limited one, so far water does not shimmer, and the bending fades with distance.
+    // The slope variance the filter takes out also blurs the reflection (a few taps of a mipmapped image).
+    // It also follows how tall the sea is: scaled by smoothstep(0.01 m, 0.1 m) of the significant wave height
+    // Hs = 4 sqrt(sum a^2 / 2), so a lake rippled a centimetre high stays a mirror (a 1 m/s wind over 900 m is
+    // Hs 1.5 cm) and a chop of 10 cm and more breaks the image fully. This is a choice, not optics: steep
+    // millimetre ripples would smear a grazing reflection, and a calm lake should not.
+    float reflectionDistort = 1;
+    // true: what lies under the surface is seen refracted from above. The picture of the opaque scene is
+    // copied before the water is drawn; the surface looks through it along the refracted ray (Snell, index
+    // 1.333, steered by the same normal) and absorbs over the real path through the water, from the depth
+    // buffer, with `absorb`. Off: the objects are tinted where they are, by the straight view path, as always.
+    // Seen from under the surface nothing changes either way.
+    bool refraction = false;
+
     Color deep{ 6, 62, 84, 255 };       // what the water scatters back
     Vector3 absorb{ 0.34f, 0.07f, 0.04f };   // loss per metre of path, per red/green/blue
     float openDepth = 0;                // > 0: water this deep under the surface, so it is opaque

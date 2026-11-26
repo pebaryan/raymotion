@@ -347,6 +347,12 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   silver lining, aerial perspective, a depth-aware upsample, and a ground shadow map that moves with the
   drift; cover, type and drift follow `Scene::weather`. Preview, Film and High quality (about 1, 2 and
   3.5 ms a 1080p frame). Off by default; `examples/scripts/cloud_flight.as`.
+* Water that reflects the scene (`Water::reflections` Off/Scene/Half/Quarter, `reflectionDistort`,
+  `refraction`; `docs/weather.md`): a planar reflection pass mirrors the camera about the water
+  level, bent by the band-limited waves, blended by Fresnel, blurred by roughness, with the clouds
+  in it; refraction looks through to the bed along the Snell ray with absorption over the real path.
+  Off by default, and Off means Off (the pixels equal the previous release's); turning it on
+  changes old water scenes on purpose. `examples/scripts/lake_reflections.as`.
 * 2D vegetation (`flora2d::`, drawn with the node's context, so flat compositions and
   `g3d::Surface` alike): grass along a ground line, tufts, a meadow filling a shape (smaller
   toward its back), shrubs, and branching trees (oak, birch, pine; a silhouette option for

@@ -1951,6 +1951,748 @@ static void noBandsInHeight() {
     CHECK(good < 3.f);
 }
 
+// ---------------------------------------------------------------- water that reflects the scene (W6)
+// (e) Off means off. A busy water scene (a sun with shadows, fog, a choppy sea, a red pole, a plate and a box
+// under the surface) drawn by the engine before W6 existed: the mean colour of a 6 x 4 grid of cells, recorded
+// then. With reflections and refraction off the pictures must be the same, to the level or two a driver
+// differs by.
+static g3d::ScenePtr w6Golden() {
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = { 0, 2.2f, 9 };
+    s->camera.target = { 0, 0.4f, 0 };
+    s->camera.fov = 50;
+    s->sky = g3d::Sky::day();
+    s->sky.clouds = 0.35f;
+    s->sky.sunLight = 0;
+    s->lights.push_back(g3d::Light::directional(Vector3Scale(Vector3Normalize(s->sky.sunDirection), 60), WHITE, 2.0f));
+    s->lights[0].castShadow = true;
+    s->lights[0].shadowExtent = 14;
+    s->shadowMapSize = 1024;
+    s->ambient = 0.4f;
+    s->fogMode = g3d::FogMode::Exponential;
+    s->fogDensity = 0.004f;
+    s->fogFromSky = true;
+    s->water = g3d::Water::choppy();
+    s->water.waves = { { 15, 14.0f, 0.16f, 1.6f, 1 }, { -30, 7.0f, 0.1f, 1.8f, 1 }, { 60, 3.3f, 0.06f, 1.5f, 1 }, { -75, 1.8f, 0.035f, 1, 1 }, { 5, 0.9f, 0.02f, 1, 1 }, { 120, 0.5f, 0.01f, 1, 1 } };    // the choppy preset as it was when the golden was recorded
+    s->water.openDepth = 0;
+    g3d::Material red; red.color = { 220, 30, 30, 255 };
+    s->add(g3d::Geometry::cylinder(0.15f, 2.0f), red)->position = { -1.5f, 1.0f, 0 };
+    g3d::Material white; white.color = { 240, 240, 240, 255 };
+    s->add(g3d::Geometry::box(3, 0.05f, 3), white)->position = { 2.2f, -1.0f, 0 };
+    g3d::Material green; green.color = { 30, 190, 60, 255 };
+    s->add(g3d::Geometry::box(0.8f, 1.4f, 0.3f), green)->position = { 0.2f, -0.3f, -1.5f };
+    g3d::Material rock; rock.color = { 120, 110, 100, 255 };
+    s->add(g3d::Geometry::sphere(2.5f), rock)->position = { 3.5f, -0.5f, -9 };
+    return s;
+}
+static std::vector<float> gridMeans(const Image& img, int gx, int gy) {
+    std::vector<float> out;
+    for (int j = 0; j < gy; j++)
+        for (int i = 0; i < gx; i++) {
+            double r = 0, g = 0, b = 0; int n = 0;
+            for (int y = j * img.height / gy; y < (j + 1) * img.height / gy; y++)
+                for (int x = i * img.width / gx; x < (i + 1) * img.width / gx; x++) {
+                    const Color c = GetImageColor(img, x, y); r += c.r; g += c.g; b += c.b; n++;
+                }
+            out.push_back((float)(r / n)); out.push_back((float)(g / n)); out.push_back((float)(b / n));
+        }
+    return out;
+}
+
+// Recorded from the engine before W6 (RMTN_W6_GOLDEN=1 prints it), RGB per cell, 6 x 4 cells of 320 x 180, frame 7.
+static const float W6_GOLD[72] = {
+    159.40f, 178.88f, 216.09f, 156.94f, 175.46f, 213.63f, 158.38f, 176.13f, 213.77f, 154.51f, 174.41f, 213.79f, 153.03f, 175.50f, 215.60f, 159.50f, 182.37f, 219.94f,
+    147.28f, 162.28f, 189.27f, 142.22f, 155.28f, 181.14f, 140.33f, 146.52f, 168.90f, 115.26f, 130.38f, 149.97f, 135.93f, 152.87f, 179.86f, 142.01f, 161.02f, 190.52f,
+    93.12f, 97.95f, 108.29f, 93.59f, 98.21f, 108.72f, 92.70f, 96.46f, 104.20f, 107.16f, 145.37f, 154.49f, 112.18f, 135.10f, 147.28f, 108.21f, 115.39f, 128.14f,
+    81.66f, 83.03f, 86.00f, 79.21f, 79.70f, 81.09f, 79.43f, 79.27f, 79.40f, 79.51f, 79.54f, 79.88f, 79.55f, 79.75f, 80.39f, 113.56f, 112.74f, 111.14f };
+static void offMeansOffWater() {
+    auto s = w6Golden();
+    s->water.reflections = g3d::Water::Reflections::Off;     // explicit: the defaults are these
+    s->water.refraction = false;
+    s->water.reflectionDistort = 3;
+    Image img = look(s, 320, 180, 7);
+    dump("w6-off.png", img);
+    const std::vector<float> m = gridMeans(img, 6, 4);
+    float worst = 0;
+    for (size_t i = 0; i < m.size(); i++) worst = std::max(worst, std::fabs(m[i] - W6_GOLD[i]));
+    std::printf("[weather] W6 off means off: the busy water scene against the pre-W6 recording, worst cell mean off by %.3f levels\n", worst);
+    CHECK(worst < 1.5f);
+    // Control: reflections on is a different picture.
+    auto on = w6Golden();
+    on->water.reflections = g3d::Water::Reflections::Scene;
+    Image img2 = look(on, 320, 180, 7);
+    const std::vector<float> m2 = gridMeans(img2, 6, 4);
+    float worstOn = 0;
+    for (size_t i = 0; i < m2.size(); i++) worstOn = std::max(worstOn, std::fabs(m2[i] - W6_GOLD[i]));
+    std::printf("[weather] W6 off means off, control: with reflections on the worst cell moves by %.1f levels\n", worstOn);
+    CHECK(worstOn > 0.8f);
+    // And refraction alone moves it too, and both settings back to off restore it exactly (same process, same pixels).
+    auto both = w6Golden();
+    both->water.reflections = g3d::Water::Reflections::Scene;
+    both->water.refraction = true;
+    Image img3 = look(both, 320, 180, 7);
+    Image img4 = look(s, 320, 180, 7);
+    CHECK(diffImages(img, img4) == 0);
+    CHECK(diffImages(img, img3) > 20000);
+    UnloadImage(img); UnloadImage(img2); UnloadImage(img3); UnloadImage(img4);
+}
+
+// A lake at y = 0: flat when `chop` is 0, else four short crossing waves. openDepth 30 makes it opaque unless asked.
+static g3d::Water w6Water(float chop, float open = 30) {
+    g3d::Water w;
+    w.enabled = true;
+    w.foam = 0; w.sunGlint = 0; w.caustics = 0; w.openDepth = open;
+    w.deep = { 20, 70, 90, 255 };
+    if (chop > 0) w.waves = { { 10, 3.0f, 0.06f * chop, 1, 1 }, { -25, 1.7f, 0.035f * chop, 1, 1 }, { 40, 1.1f, 0.02f * chop, 1, 1 }, { 70, 0.7f, 0.012f * chop, 1, 1 } };
+    w.reflections = g3d::Water::Reflections::Scene;
+    return w;
+}
+static g3d::ScenePtr w6Scene(const g3d::Water& water, Vector3 pos, Vector3 target, float fov = 40) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = pos;
+    s->camera.target = target;
+    s->camera.fov = fov;
+    s->camera.farPlane = 2000;
+    s->sky = g3d::Sky::day();
+    s->sky.clouds = 0;
+    s->lights.push_back(g3d::Light::directional({ 10, 14, 6 }, WHITE, 1.6f));
+    s->ambient = 0.5f;
+    s->water = water;
+    return s;
+}
+static g3d::Material flat(Color c) { g3d::Material m; m.color = c; m.unlit = true; return m; }
+static float redness(Color c) { return (float)c.r - (float)std::max(c.g, c.b); }
+static float greenness(Color c) { return (float)c.g - (float)std::max(c.r, c.b); }
+static float rowAvg(const Image& img, int x, int y, int hw, float (*f)(Color)) {
+    float s = 0;
+    for (int i = -hw; i <= hw; i++) s += f(GetImageColor(img, x + i, y));
+    return s / (2 * hw + 1);
+}
+// What the reflection adds: the picture with reflections on minus the same one with them off, per channel,
+// averaged across the column x +- hw at row y (the waves, the sky and the pole are in both).
+static Vector3 addedAt(const Image& on, const Image& off, int x, int y, int hw) {
+    Vector3 s{ 0, 0, 0 };
+    for (int i = -hw; i <= hw; i++) {
+        const Color a = GetImageColor(on, x + i, y), b = GetImageColor(off, x + i, y);
+        s.x += a.r - b.r; s.y += a.g - b.g; s.z += a.b - b.b;
+    }
+    return Vector3Scale(s, 1.f / (2 * hw + 1));
+}
+
+// A red pole 1.2 m tall stands in a lake, seen from 1.5 m up, 9 m away, level.
+static g3d::ScenePtr poleLake(float chop, float distort, bool reflections) {
+    auto s = w6Scene(w6Water(chop), { 0, 1.5f, 9 }, { 0, 1.5f, 0 });
+    s->water.reflectionDistort = distort;
+    if (!reflections) s->water.reflections = g3d::Water::Reflections::Off;
+    s->add(g3d::Geometry::cylinder(0.12f, 1.2f), flat({ 215, 25, 25, 255 }))->position = { 0, 0.6f, 0 };
+    return s;
+}
+
+// (a) A red pole in calm water: upside down below its base, as long as it is, starting at its base.
+struct PoleLook { int top, base, end, gap; float lengthRatio; };
+static PoleLook poleLook(const char* tag, float chop = 0, std::function<void(g3d::Scene&)> tweak = nullptr) {
+    constexpr int W = 480, H = 270;
+    auto s = poleLake(chop, 1, true);
+    if (tweak) tweak(*s);
+    auto off = poleLake(chop, 1, false);
+    Image img = look(s, W, H, 3), ref = look(off, W, H, 3);
+    dump((std::string("w6-pole-") + tag + ".png").c_str(), img);
+    const int x = (int)std::lround(project(s->camera, { 0, 0, 0 }, W, H).x);
+    const int baseRow = (int)std::lround(project(s->camera, { 0, 0, 0 }, W, H).y);
+    PoleLook r{};
+    int y = baseRow - 3;
+    while (y > 0 && rowAvg(img, x, y, 2, redness) > 90) y--;
+    r.top = y + 1;
+    y = baseRow - 3;
+    while (y < H - 1 && rowAvg(img, x, y, 2, redness) > 90) y++;
+    r.base = y;                                       // the pole's last row
+    auto added = [&](int yy) { const Vector3 a = addedAt(img, ref, x, yy, 2); return std::fabs(a.x) + std::fabs(a.y) + std::fabs(a.z); };
+    int end = r.base, gap = 0;
+    for (int yy = r.base + 1; yy < H - 1; yy++) {     // the reflection: rows it changes, a gap or two allowed
+        if (added(yy) > 30) { end = yy; gap = 0; } else if (++gap > 3) break;
+    }
+    r.end = end;
+    int first = r.base + 1;
+    while (first < H - 1 && added(first) <= 30) first++;
+    r.gap = first - r.base;
+    r.lengthRatio = (float)(r.end - r.base) / std::max(1, r.base - r.top);
+    UnloadImage(img); UnloadImage(ref);
+    return r;
+}
+static void poleUpsideDown() {
+    const PoleLook p = poleLook("calm");
+    std::printf("[weather] W6 pole: top row %d, base row %d, reflection ends at row %d (starts %d rows below the base), length ratio %.2f\n", p.top, p.base, p.end, p.gap, p.lengthRatio);
+    CHECK(p.end > p.base + 10);                       // the reflection's far end is lower on screen than its base
+    CHECK(p.gap <= 3);                                // it starts at the base
+    CHECK(p.lengthRatio > 0.85f && p.lengthRatio < 1.15f);
+}
+
+// (b) Waves break the reflection up and keep its colour. The reflection's profile down the pole's column is what
+// it adds to the picture (red channel). Its total variation over its range: 1 for a smooth fade, more for a broken one.
+struct Breakup { float variation; Vector3 mean, picture; };
+static Breakup choppyPole(float chop, float distort, const char* tag) {
+    constexpr int W = 480, H = 270;
+    auto s = poleLake(chop, distort, true);
+    auto off = poleLake(chop, distort, false);
+    Image img = look(s, W, H, 5), ref = look(off, W, H, 5);
+    dump((std::string("w6-choppy-") + tag + ".png").c_str(), img);
+    const int x = (int)std::lround(project(s->camera, { 0, 0, 0 }, W, H).x);
+    const int y0 = (int)std::lround(project(s->camera, { 0, 0, 0 }, W, H).y) + 4, y1 = (int)std::lround(project(s->camera, { 0, -1.2f, 0 }, W, H).y);
+    std::vector<float> p;
+    for (int y = y0; y <= y1; y++) p.push_back(addedAt(img, ref, x, y, 3).x);
+    if (std::getenv("RMTN_W6_PROFILE")) { std::printf("%s:", tag); for (float v : p) std::printf(" %.0f", v); std::printf("\n"); }
+    double sum = 0, sq = 0;
+    for (float v : p) { sum += v; sq += (double)v * v; }
+    const double mean = sum / p.size(), sd = std::sqrt(std::max(sq / p.size() - mean * mean, 0.0));
+    Breakup b{};
+    b.variation = (float)(sd / std::max(mean, 5.0));
+    Vector3 m{ 0, 0, 0 };
+    int n = 0;
+    for (int y = y0; y < H; y++) { m = Vector3Add(m, addedAt(img, ref, x, y, 60)); n++; }
+    b.mean = Vector3Scale(m, 1.f / n);
+    Vector3 pm{ 0, 0, 0 };
+    for (int y = y0; y < H; y++)
+        for (int xx = x - 60; xx <= x + 60; xx++) { const Color c = GetImageColor(img, xx, y); pm = Vector3Add(pm, { (float)c.r, (float)c.g, (float)c.b }); }
+    b.picture = Vector3Scale(pm, 1.f / (n * 121.f));
+    UnloadImage(img); UnloadImage(ref);
+    return b;
+}
+static void wavesBreakIt() {
+    const Breakup calm = choppyPole(0, 1, "calm"), rough = choppyPole(0.5f, 1, "rough"), bendOff = choppyPole(0.5f, 0, "rough-nobend");
+    std::printf("[weather] W6 waves: spread of the reflection down its column (std / mean of the red it adds), calm %.2f, choppy %.2f (choppy, bending off %.2f); mean added colour over the patch calm (%.1f %.1f %.1f), choppy (%.1f %.1f %.1f)\n",
+                calm.variation, rough.variation, bendOff.variation, calm.mean.x, calm.mean.y, calm.mean.z, rough.mean.x, rough.mean.y, rough.mean.z);
+    std::printf("[weather] W6 waves: whole picture over the patch, mean colour calm (%.1f %.1f %.1f), choppy (%.1f %.1f %.1f), choppy with the bending off (%.1f %.1f %.1f)\n",
+                calm.picture.x, calm.picture.y, calm.picture.z, rough.picture.x, rough.picture.y, rough.picture.z, bendOff.picture.x, bendOff.picture.y, bendOff.picture.z);
+    CHECK(calm.variation < 0.12f);
+    CHECK(rough.variation > 0.5f);
+    CHECK(bendOff.variation < 0.3f * rough.variation);      // the bending, not something else, breaks it
+    // Breaking the reflection up must not change the patch's colour: the same waves with the bending off, and the calm lake (which has no
+    // wave shading of its own), within a few levels.
+    CHECK(std::fabs(rough.picture.x - bendOff.picture.x) < 4 && std::fabs(rough.picture.y - bendOff.picture.y) < 4 && std::fabs(rough.picture.z - bendOff.picture.z) < 4);
+    CHECK(std::fabs(rough.picture.x - calm.picture.x) < 9 && std::fabs(rough.picture.y - calm.picture.y) < 9 && std::fabs(rough.picture.z - calm.picture.z) < 9);
+}
+
+// (c) No leak: a green box standing in the lake from 1.3 m under the surface to 0.3 m above it. The water is opaque,
+// so under the line only its reflection shows green: the 0.3 m that stands out, not the 1.6 m of the whole box.
+static int greenBelow(bool clip, int* aboveRows) {
+    constexpr int W = 480, H = 270;
+    auto s = w6Scene(w6Water(0), { 0, 1.0f, 7 }, { 0, 1.0f, 0 });
+    s->add(g3d::Geometry::box(1.0f, 1.6f, 0.3f), flat({ 30, 200, 60, 255 }))->position = { 0, -0.5f, 0 };
+    (void)clip;
+    Image img = look(s, W, H, 3);
+    dump(clip ? "w6-sunk-box.png" : "w6-sunk-box-noclip.png", img);
+    const int x = (int)std::lround(project(s->camera, { 0, 0, 0 }, W, H).x);
+    const int line = (int)std::lround(project(s->camera, { 0, 0, 0.15f }, W, H).y);     // where the front face meets the water
+    int up = 0;
+    for (int y = line - 1; y > 0 && rowAvg(img, x, y, 2, greenness) > 40; y--) up++;
+    int down = 0, gap = 0;
+    for (int y = line + 1; y < H; y++) {
+        if (rowAvg(img, x, y, 2, greenness) > 8) { down = y - line; gap = 0; } else if (++gap > 3) break;
+    }
+    if (aboveRows) *aboveRows = up;
+    UnloadImage(img);
+    return down;
+}
+static void noLeak() {
+    int up = 0;
+    const int down = greenBelow(true, &up);
+    std::printf("[weather] W6 no leak: the box stands %d rows above the line and its reflection runs %d rows below it (the whole box would be %d)\n", up, down, (int)std::lround(up * 1.6 / 0.3));
+    CHECK(up > 8);
+    CHECK(down > 0.5f * up && down < 1.6f * up);
+}
+
+// (d) Refraction: a white plate under clear water.
+static g3d::ScenePtr plateScene(float depth, bool refract) {
+    auto s = w6Scene(w6Water(0, 0), { 0, 2.5f, 6 }, { 0, -0.4f, 1 }, 40);
+    s->water.reflections = g3d::Water::Reflections::Off;
+    s->water.refraction = refract;
+    s->water.absorb = { 0.34f, 0.07f, 0.04f };
+    s->add(g3d::Geometry::box(6, 0.04f, 6), flat({ 255, 255, 255, 255 }))->position = { 0, -depth, 0 };
+    return s;
+}
+// The row of the plate's far edge (z = -3) down the middle: the strongest rise in brightness going down.
+static int plateEdgeRow(const Image& img) {
+    int best = 0; float bestStep = 0;
+    for (int y = 4; y < img.height - 4; y++) {
+        float a = 0, b = 0;
+        for (int i = -3; i <= 3; i++) { a += luma(GetImageColor(img, img.width / 2 + i, y - 2)); b += luma(GetImageColor(img, img.width / 2 + i, y + 2)); }
+        if (b - a > bestStep) { bestStep = b - a; best = y; }
+    }
+    return best;
+}
+static void refraction() {
+    constexpr int W = 480, H = 270;
+    const float depth = 1.0f, camH = 2.5f, camZ = 6, edgeZ = -3;
+    auto s = plateScene(depth, true);
+    // Where the surface point must be so that the refracted ray (Snell, 1.333) reaches the edge at depth 1.
+    float lo = edgeZ, hi = camZ - 0.01f;
+    for (int i = 0; i < 60; i++) {
+        const float zs = 0.5f * (lo + hi), dc = camZ - zs, ti = std::atan2(dc, camH), tt = std::asin(std::sin(ti) / 1.333f);
+        if (zs - depth * std::tan(tt) > edgeZ) hi = zs; else lo = zs;
+    }
+    const float zs = 0.5f * (lo + hi);
+    const float refrRow = project(s->camera, { 0, 0, zs }, W, H).y, straightRow = project(s->camera, { 0, -depth, edgeZ }, W, H).y;
+    Image on = look(s, W, H, 3), off = look(plateScene(depth, false), W, H, 3);
+    dump("w6-plate-refract.png", on); dump("w6-plate-straight.png", off);
+    const int rowOn = plateEdgeRow(on), rowOff = plateEdgeRow(off);
+    std::printf("[weather] W6 refraction: the plate's far edge is at row %d with refraction (predicted %.1f; straight view predicts %.1f, drawn without refraction at %d)\n", rowOn, refrRow, straightRow, rowOff);
+    CHECK(std::fabs(rowOn - refrRow) < 3.5f);
+    CHECK(std::fabs(rowOn - straightRow) > 4.f);
+    CHECK(std::fabs(rowOff - straightRow) < 3.5f);
+    // Deeper is dimmer and bluer.
+    auto patch = [&](float d) {
+        Image img = look(plateScene(d, true), W, H, 3);
+        dump(d < 0.5f ? "w6-plate-shallow.png" : "w6-plate-deep.png", img);
+        double r = 0, g = 0, b = 0; int n = 0;
+        for (int y = 110; y < 170; y++) for (int x = 200; x < 280; x++) { const Color c = GetImageColor(img, x, y); r += c.r; g += c.g; b += c.b; n++; }
+        UnloadImage(img);
+        return Vector3{ (float)(r / n), (float)(g / n), (float)(b / n) };
+    };
+    const Vector3 shallow = patch(0.2f), deep = patch(1.0f);
+    const float lumShallow = 0.2126f * shallow.x + 0.7152f * shallow.y + 0.0722f * shallow.z, lumDeep = 0.2126f * deep.x + 0.7152f * deep.y + 0.0722f * deep.z;
+    std::printf("[weather] W6 refraction: plate at 0.2 m (%.0f %.0f %.0f), at 1 m (%.0f %.0f %.0f)\n", shallow.x, shallow.y, shallow.z, deep.x, deep.y, deep.z);
+    CHECK(lumDeep < 0.985f * lumShallow);
+    CHECK(deep.z / std::max(deep.x, 1.f) > 1.1f * shallow.z / std::max(shallow.x, 1.f));
+    UnloadImage(on); UnloadImage(off);
+}
+
+// (f) Clouds and sky are in the reflection: the sky above the horizon, flipped, is the water below it (compared
+// without each row's mean, so the gradient does not count), and not flipped sideways.
+static g3d::ScenePtr cloudLake(bool clouds) {
+    auto s = w6Scene(w6Water(0), { 0, 1.5f, 0 }, { 0, 1.5f, -100 }, 60);
+    s->sky = g3d::Sky::at(12.5f);
+    s->sky.sunLight = 0;
+    s->lights[0] = g3d::Light::directional(Vector3Scale(Vector3Normalize(s->sky.sunDirection), 100), { 255, 244, 225, 255 }, 2.2f);
+    s->clouds.enabled = clouds;
+    s->clouds.base = 700; s->clouds.top = 2400; s->clouds.cover = 0.55f;
+    s->clouds.quality = g3d::Clouds::Quality::Film;
+    s->clouds.shadows = false;
+    s->camera.nearPlane = 0.5f;
+    s->camera.farPlane = 300000;
+    return s;
+}
+static float rowDetrended(const std::vector<float>& a, const std::vector<float>& b, int w, int h) {
+    std::vector<float> A(a), B(b);
+    for (int y = 0; y < h; y++) {
+        double ma = 0, mb = 0;
+        for (int x = 0; x < w; x++) { ma += A[(size_t)y * w + x]; mb += B[(size_t)y * w + x]; }
+        ma /= w; mb /= w;
+        for (int x = 0; x < w; x++) { A[(size_t)y * w + x] -= (float)ma; B[(size_t)y * w + x] -= (float)mb; }
+    }
+    double sab = 0, saa = 0, sbb = 0;
+    for (size_t i = 0; i < A.size(); i++) { sab += A[i] * B[i]; saa += A[i] * A[i]; sbb += B[i] * B[i]; }
+    return (float)(sab / std::sqrt(std::max(saa * sbb, 1e-9)));
+}
+struct SkyWater { float same, sideways, shifted; };
+static SkyWater cloudsInWater(bool clouds) {
+    constexpr int W = 480, H = 270, N = 90, SHIFT = 25;
+    Image img = look(cloudLake(clouds), W, H, 0);
+    dump(clouds ? "w6-cloud-lake.png" : "w6-cloud-lake-off.png", img);
+    const std::vector<float> l = lumaOf(img);
+    const int mid = H / 2;
+    std::vector<float> sky((size_t)W * N), water((size_t)W * N), sideways((size_t)W * N), shifted((size_t)W * N);
+    for (int j = 0; j < N; j++)
+        for (int x = 0; x < W; x++) {
+            sky[(size_t)j * W + x] = l[(size_t)(mid - 8 - j) * W + x];                // j rows above the horizon
+            water[(size_t)j * W + x] = l[(size_t)(mid + 8 + j) * W + x];              // j rows below it
+            sideways[(size_t)j * W + x] = l[(size_t)(mid + 8 + j) * W + (W - 1 - x)];
+            shifted[(size_t)j * W + x] = l[(size_t)(mid + 8 + j + SHIFT) * W + x];
+        }
+    UnloadImage(img);
+    return { rowDetrended(sky, water, W, N), rowDetrended(sky, sideways, W, N), rowDetrended(sky, shifted, W, N) };
+}
+static void cloudsReflect() {
+    const SkyWater on = cloudsInWater(true);
+    std::printf("[weather] W6 clouds in the water: sky/water correlation (row means removed) %.2f; flipped sideways %.2f; the water %d rows out of place %.2f\n", on.same, on.sideways, 25, on.shifted);
+    CHECK(on.same > 0.75f);
+    CHECK(on.same > on.sideways + 0.3f);
+    CHECK(on.same > on.shifted + 0.3f);
+}
+
+
+// (i) A calm lake is a mirror. The weather's wind is 1 m/s over 900 m of open water (the calm preset's waves,
+// scaled to Hs 1.5 cm), the camera is 2 m up looking along the water at cones standing on a far shore with
+// Film clouds above. The reflection of the centre cone must be as tall as the cone (>= 0.85 of its screen
+// height), must correlate with the cone flipped upside down (>= 0.8), and the big cloud must show in the water
+// (>= 0.6). The same scene with reflections off is the control, and a crop shifted off the cone the second one.
+static g3d::ScenePtr calmLake(g3d::Water::Reflections r, float wind, bool clouds) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = { 0, 2, 0 };
+    s->camera.target = { 0, 2, -100 };
+    s->camera.fov = 46;
+    s->camera.nearPlane = 0.5f;
+    s->camera.farPlane = 300000;
+    s->sky = g3d::Sky::at(12.5f);
+    s->sky.sunLight = 0;
+    s->lights.push_back(g3d::Light::directional(Vector3Scale(Vector3Normalize(s->sky.sunDirection), 100), { 255, 244, 225, 255 }, 2.2f));
+    s->ambient = 0.35f;
+    s->weather = g3d::Weather::clear();
+    s->weather.enabled = true;
+    s->weather.wind.speed = wind;
+    s->weather.clouds.cover = 0.45f;
+    s->clouds.enabled = clouds;
+    s->clouds.base = 900; s->clouds.top = 1900; s->clouds.cover = 0.45f;
+    s->clouds.quality = g3d::Clouds::Quality::Film;
+    s->clouds.shadows = false;
+    s->water = g3d::Water::calm();
+    s->water.fetch = 900;
+    s->water.openDepth = 6;
+    s->water.reflections = r;
+    for (int i = 0; i < 5; i++) {
+        g3d::Material m = flat({ 25, 55, 40, 255 });
+        s->add(g3d::Geometry::cone(2.2f, 9.f, 16), m)->position = { -40.f + 20.f * i, 4.5f, -100 };
+    }
+    return s;
+}
+struct CalmMirror { float span, flip, flipShifted, cloud, cloudSideways; };
+static CalmMirror calmMirror(float wind, bool dumpIt) {
+    constexpr int W = 960, H = 540;
+    Image onC = look(calmLake(g3d::Water::Reflections::Scene, wind, true), W, H, 0);
+    Image on = look(calmLake(g3d::Water::Reflections::Scene, wind, false), W, H, 0);
+    Image off = look(calmLake(g3d::Water::Reflections::Off, wind, false), W, H, 0);
+    if (dumpIt) { dump("w6-calm-lake.png", onC); dump("w6-calm-lake-nocloud.png", on); dump("w6-calm-lake-off.png", off); }
+    const float tanHalf = std::tan(23.f * DEG2RAD), pxm = (H * 0.5f) / (100.f * tanHalf);
+    const int cx = W / 2, base = (int)std::lround(H * 0.5f + 2.f * pxm), top = (int)std::lround(H * 0.5f - 7.f * pxm), ht = base - top;
+    // How far down the reflection reaches: rows below the waterline where it changes the picture, contiguous from the line.
+    int last = base;
+    for (int y = base + 1; y < base + 2 * ht && y < H; y++) {
+        float d = 0;
+        for (int x = cx - 1; x <= cx + 1; x++) d += std::fabs(luma(GetImageColor(on, x, y)) - luma(GetImageColor(off, x, y)));
+        if (d / 3 < 18) break;
+        last = y;
+    }
+    const std::vector<float> lo = lumaOf(on), lc = lumaOf(onC);
+    auto pearson = [&](int shiftX, int shiftY) {
+        const int hw = 22;
+        std::vector<float> a, b;
+        for (int j = 3; j < ht - 3; j++)
+            for (int x = cx - hw; x <= cx + hw; x++) {
+                a.push_back(lo[(size_t)(base - 1 - j) * W + x]);
+                b.push_back(lo[(size_t)(base + 1 + j + shiftY) * W + x + shiftX]);
+            }
+        double ma = 0, mb = 0;
+        for (size_t i = 0; i < a.size(); i++) { ma += a[i]; mb += b[i]; }
+        ma /= a.size(); mb /= b.size();
+        double sab = 0, saa = 0, sbb = 0;
+        for (size_t i = 0; i < a.size(); i++) { sab += (a[i] - ma) * (b[i] - mb); saa += (a[i] - ma) * (a[i] - ma); sbb += (b[i] - mb) * (b[i] - mb); }
+        return (float)(sab / std::sqrt(std::max(saa * sbb, 1e-9)));
+    };
+    CalmMirror m{};
+    m.span = (float)(last - base) / ht;
+    m.flip = pearson(0, 0);
+    m.flipShifted = pearson(0, ht / 2);
+    // The cloud: the sky above the horizon against the water below it, row means removed, over the right part of the frame.
+    constexpr int N = 120, X0 = 540, X1 = 940, GAP = 6, mid = H / 2;
+    std::vector<float> sky, water, side;
+    for (int j = 0; j < N; j++)
+        for (int x = X0; x < X1; x++) {
+            sky.push_back(lc[(size_t)(mid - GAP - j) * W + x]);
+            water.push_back(lc[(size_t)(mid + GAP + j) * W + x]);
+            side.push_back(lc[(size_t)(mid + GAP + j) * W + (W - 1 - (x - X0) - 20)]);
+        }
+    m.cloud = rowDetrended(sky, water, X1 - X0, N);
+    m.cloudSideways = rowDetrended(sky, side, X1 - X0, N);
+    UnloadImage(on); UnloadImage(off); UnloadImage(onC);
+    return m;
+}
+static void calmIsAMirror() {
+    const CalmMirror m = calmMirror(1.f, true);
+    std::printf("[weather] W6 calm lake (1 m/s): the far cone's reflection spans %.2f of its height; correlation with the cone flipped %.2f (shifted off it %.2f); the cloud in the water %.2f (mirrored sideways %.2f)\n",
+                m.span, m.flip, m.flipShifted, m.cloud, m.cloudSideways);
+    CHECK(m.span >= 0.85f);
+    CHECK(m.flip >= 0.8f);
+    CHECK(m.flip > m.flipShifted + 0.3f);
+    CHECK(m.cloud >= 0.6f);
+    CHECK(m.cloud > m.cloudSideways + 0.3f);
+    const CalmMirror rough = calmMirror(8.f, false);
+    std::printf("[weather] W6 calm lake, the same at 8 m/s: span %.2f, flip %.2f, cloud %.2f (it must break up)\n", rough.span, rough.flip, rough.cloud);
+    CHECK(rough.flip < m.flip - 0.3f);
+}
+
+// (j) Refraction has no edge at the bottom of the picture. The camera is 1.6 m over calm clear water looking
+// down at 40 degrees on a bright sandy floor 1.5 m deep. Rays under the bottom of the frame leave the picture
+// before they meet the floor; they must go on with the colour at the edge, not turn to deep water. Measured on
+// row means: no row of the bottom 30% differs from the one above by more than 1.5 levels, and the bottom rows
+// stay within 6 levels of the rows at 60% height (Fresnel alone gives +6 without refraction) (the same floor, the same water).
+static g3d::ScenePtr sandFloor(bool refract) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = { 0, 1.6f, 0 };
+    s->camera.target = { 0, -0.4f, -2.4f };
+    s->camera.fov = 50;
+    s->camera.farPlane = 1000;
+    s->sky = g3d::Sky::day();
+    s->sky.clouds = 0;
+    s->lights.push_back(g3d::Light::directional({ 10, 20, 6 }, WHITE, 1.8f));
+    s->ambient = 0.6f;
+    s->water = g3d::Water::calm();
+    s->water.openDepth = 0;
+    s->water.caustics = 0;
+    s->water.reflections = g3d::Water::Reflections::Scene;
+    s->water.refraction = refract;
+    g3d::Material sand = flat({ 232, 216, 168, 255 });
+    sand.unlit = false;
+    s->add(g3d::Geometry::box(200, 0.2f, 200), sand)->position = { 0, -1.6f, -50 };
+    return s;
+}
+static void refractionHasNoEdge() {
+    float refMid = 0;
+    constexpr int W = 480, H = 270;
+    Image img = look(sandFloor(true), W, H, 0);
+    dump("w6-sand-floor.png", img);
+    auto rowMean = [&](int y) { double s = 0; for (int x = 0; x < W; x++) s += luma(GetImageColor(img, x, y)); return (float)(s / W); };
+    float worstStep = 0;
+    for (int y = (int)(H * 0.7f); y < H; y++) worstStep = std::max(worstStep, std::fabs(rowMean(y) - rowMean(y - 1)));
+    float mid = 0, bottom = 0;
+    for (int y = (int)(H * 0.58f); y < (int)(H * 0.62f); y++) mid += rowMean(y) / (int)(H * 0.62f - (int)(H * 0.58f));
+    for (int y = H - 12; y < H; y++) bottom += rowMean(y) / 12;
+    std::printf("[weather] W6 refraction edge: worst row-to-row step of the row mean over the bottom 30%% %.2f levels; bottom rows %.1f, rows at 60%% height %.1f\n", worstStep, bottom, mid);
+{
+        Image ref = look(sandFloor(false), W, H, 0);
+        dump("w6-sand-floor-straight.png", ref);
+        double m = 0, b = 0;
+        for (int y = (int)(H * 0.58f); y < (int)(H * 0.62f); y++) for (int x = 0; x < W; x++) m += luma(GetImageColor(ref, x, y)) / (W * ((int)(H * 0.62f) - (int)(H * 0.58f)));
+        for (int y = H - 12; y < H; y++) for (int x = 0; x < W; x++) b += luma(GetImageColor(ref, x, y)) / (W * 12.0);
+        std::printf("[weather] W6 refraction edge, reference without refraction: bottom rows %.1f, rows at 60%% %.1f\n", b, m);
+        refMid = (float)m;
+        UnloadImage(ref);
+    }
+    // Absorbed once: the floor under the refracting surface is as bright as the unrefracted view's (which tints it by the straight
+    // path), not darker by a second pass of the same absorption (207 against 223 when it was applied twice).
+    CHECK(std::fabs(mid - refMid) < 5.f);
+    CHECK(worstStep < 1.5f);
+    CHECK(std::fabs(bottom - mid) < 6.f);
+    UnloadImage(img);
+}
+
+// (k) No lattice. The presets' waves used to sit 210 degrees apart (calm) at lengths in near-simple ratios, which a
+// camera 2 m up reads as a grid of dots in the near water (out/w6/w6-calm-near-water-old.png against ...-near-water.png).
+// An image statistic did not separate the two (the autocorrelation peak over the median lag was 4.8 for flat water,
+// 5.5 for the old preset and 6.5 for the new streaks, a floor set by the sky's gradient), so this checks what the fix
+// is: every preset's waves lie within 45 degrees of its amplitude-weighted heading (the old ones: 78 to 140), and the Hs and the longest
+// length are the old preset's (the W1 fetch tests rely on them).
+struct WaveSpec { float hs, longest, spread, nearestSimple; };
+static WaveSpec waveSpec(const g3d::Water& w) {
+    double sx = 0, sy = 0, sum = 0;
+    float longest = 0;
+    for (const g3d::Water::Wave& v : w.waves) {
+        sx += std::fabs(v.amplitude) * std::cos(v.direction * DEG2RAD);
+        sy += std::fabs(v.amplitude) * std::sin(v.direction * DEG2RAD);
+        sum += v.amplitude * v.amplitude / 2;
+        longest = std::max(longest, v.wavelength);
+    }
+    const double heading = std::atan2(sy, sx) * RAD2DEG;
+    float spread = 0, nearest = 9;
+    for (const g3d::Water::Wave& v : w.waves) {
+        float d = std::fabs((float)(v.direction - heading));
+        spread = std::max(spread, std::min(d, 360.f - d));
+    }
+    for (size_t i = 0; i < w.waves.size(); i++)
+        for (size_t j = i + 1; j < w.waves.size(); j++) {
+            const float r = w.waves[i].wavelength / w.waves[j].wavelength;
+            for (int p = 1; p <= 4; p++) for (int q = 1; q <= 4; q++) nearest = std::min(nearest, std::fabs(r / ((float)p / q) - 1));
+        }
+    return { (float)(4 * std::sqrt(sum)), longest, spread, nearest };
+}
+static void noLattice() {
+    g3d::Water oldCalmW = g3d::Water::calm(), oldChoppy = g3d::Water::choppy(), oldStorm = g3d::Water::storm();
+    oldCalmW.waves = { { 20, 7.0f, 0.045f, 1, 1 }, { -35, 3.1f, 0.03f, 1, 1 }, { 75, 1.7f, 0.022f, 1, 1 }, { -58, 1.05f, 0.014f, 1, 1 },
+                       { 31, 0.72f, 0.009f, 1, 1 }, { 112, 0.52f, 0.0065f, 1, 1 }, { -17, 0.4f, 0.005f, 1, 1 }, { 152, 0.29f, 0.0035f, 1, 1 } };
+    oldChoppy.waves = { { 15, 14.0f, 0.16f, 1.6f, 1 }, { -30, 7.0f, 0.1f, 1.8f, 1 }, { 60, 3.3f, 0.06f, 1.5f, 1 }, { -75, 1.8f, 0.035f, 1, 1 }, { 5, 0.9f, 0.02f, 1, 1 }, { 120, 0.5f, 0.01f, 1, 1 } };
+    oldStorm.waves = { { 10, 34.0f, 0.7f, 2.4f, 1 }, { -25, 17.0f, 0.42f, 2.6f, 1 }, { 40, 9.0f, 0.24f, 2.2f, 1 }, { -60, 4.5f, 0.12f, 1.8f, 1 }, { 80, 2.3f, 0.06f, 1.4f, 1 }, { -5, 1.2f, 0.03f, 1, 1 } };
+    const struct { const char* name; g3d::Water now, old; } sets[] = { { "calm", g3d::Water::calm(), oldCalmW }, { "choppy", g3d::Water::choppy(), oldChoppy }, { "storm", g3d::Water::storm(), oldStorm } };
+    for (const auto& s : sets) {
+        const WaveSpec n = waveSpec(s.now), o = waveSpec(s.old);
+        std::printf("[weather] W6 %s preset: Hs %.4f (was %.4f), longest %.2f m (was %.2f), directions within %.0f degrees of the heading (was %.0f), nearest length ratio to a simple one %.0f%% (was %.0f%%)\n",
+                    s.name, n.hs, o.hs, n.longest, o.longest, n.spread, o.spread);
+        CHECK(n.spread <= 45.f && o.spread > 45.f);
+        CHECK(std::fabs(n.hs - o.hs) < 1e-5f && std::fabs(n.longest - o.longest) < 1e-5f);
+    }
+    // Pictures of both, for the eye: the near water of a 1 m/s lake.
+    for (int i = 0; i < 2; i++) {
+        auto sc = calmLake(g3d::Water::Reflections::Off, 1.f, false);
+        sc->water = i == 0 ? sets[0].now : sets[0].old;
+        sc->water.fetch = 900; sc->water.openDepth = 6;
+        Image img = look(sc, 960, 540, 0);
+        dump(i == 0 ? "w6-calm-near-water.png" : "w6-calm-near-water-old.png", img);
+        UnloadImage(img);
+    }
+}
+
+// (l) No rings on a rough sea. A choppy sea at 6 m/s under Film clouds from 1.2 m up: with reflections on, the
+// reflected cloud outlines used to be thrown about by the facets into thin closed contours (out/w6/open-sea-grazing.png
+// of the previous round). The water's thin high-contrast detail (the share of water pixels more than 14 levels off their
+// 9 x 9 mean) with reflections on must stay within 1.3 times what the same sea has with them off, plus 0.3 points (7.6% against 6.4% now; 9.8% without the blur that follows the bend).
+static g3d::ScenePtr roughSea(g3d::Water::Reflections r) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = { 0, 1.2f, 0 };
+    s->camera.target = { 0, 2.2f, -100 };
+    s->camera.fov = 50;
+    s->camera.nearPlane = 0.5f;
+    s->camera.farPlane = 300000;
+    s->sky = g3d::Sky::at(20.f);
+    s->sky.sunLight = 0;
+    s->lights.push_back(g3d::Light::directional({ 50, 30, -100 }, WHITE, 2.2f));
+    s->ambient = 0.3f;
+    s->weather = g3d::Weather::clear();
+    s->weather.enabled = true;
+    s->weather.wind.speed = 6;
+    s->weather.wind.direction = 90;
+    s->weather.clouds.cover = 0.5f;
+    s->clouds.enabled = true;
+    s->clouds.base = 900; s->clouds.top = 2200;
+    s->clouds.quality = g3d::Clouds::Quality::Film;
+    s->clouds.shadows = false;
+    s->water = g3d::Water::choppy();
+    s->water.fetch = 20000;
+    s->water.reflections = r;
+    return s;
+}
+static float thinDetail(const Image& img, int y0) {
+    const int W = img.width, H = img.height, R = 4;
+    const std::vector<float> l = lumaOf(img);
+    long n = 0, hit = 0;
+    for (int y = y0; y < H - R; y++)
+        for (int x = R; x < W - R; x++) {
+            double m = 0;
+            for (int j = -R; j <= R; j++) for (int i = -R; i <= R; i++) m += l[(size_t)(y + j) * W + x + i];
+            m /= (2 * R + 1) * (2 * R + 1);
+            hit += std::fabs(l[(size_t)y * W + x] - m) > 14;
+            n++;
+        }
+    return 100.f * (float)hit / n;
+}
+static void noRings() {
+    constexpr int W = 960, H = 540;
+    Image on = look(roughSea(g3d::Water::Reflections::Scene), W, H, 0), off = look(roughSea(g3d::Water::Reflections::Off), W, H, 0);
+    dump("w6-rough-sea-on.png", on); dump("w6-rough-sea-off.png", off);
+    const float a = thinDetail(on, H / 2 + 20), b = thinDetail(off, H / 2 + 20);
+    std::printf("[weather] W6 rough sea: share of water pixels with thin detail, reflections on %.2f%%, off %.2f%%\n", a, b);
+    CHECK(a < 1.3f * b + 0.3f);
+    UnloadImage(on); UnloadImage(off);
+}
+// (g) Purity: a frame alone is the frame after others, with the reflection pass on, clouds, waves and a moving pole.
+static g3d::ScenePtr movingLake() {
+    auto s = cloudLake(true);
+    s->water = w6Water(1);
+    s->water.refraction = true;
+    s->water.openDepth = 0;
+    g3d::Object3D* pole = s->add(g3d::Geometry::box(1.2f, 1.4f, 0.3f), flat({ 215, 25, 25, 255 }));
+    pole->position = { 0, 0.7f, -6 };
+    pole->up = [](int t, g3d::Object3D& o) { o.position.x = -2.f + 0.12f * t; };
+    return s;
+}
+static void waterPurity() {
+    constexpr int W = 320, H = 180;
+    Image alone = look(movingLake(), W, H, 10);
+    Comp c = comp(movingLake(), W, H);
+    Image x = render(c, 3), y = render(c, 20), z = render(c, 10), again = render(c, 10);
+    const long long d1 = diffImages(alone, z), d2 = diffImages(z, again);
+    std::printf("[weather] W6 purity: frame 10 alone against after frames 3 and 20: difference %lld (%lld after itself); frames 3 and 20 differ by %lld\n", d1, d2, diffImages(x, y));
+    CHECK(d1 == 0 && d2 == 0);
+    CHECK(diffImages(x, y) > 20000);
+    UnloadImage(alone); UnloadImage(x); UnloadImage(y); UnloadImage(z); UnloadImage(again);
+}
+
+// (h) No shimmer far away: a bright far shore reflected in short waves, at a grazing view. One frame later the
+// water near the camera has changed, and the far water, whose waves are shorter than a pixel, must not have
+// changed more (its normal is the band-limited one).
+static void noShimmer() {
+    constexpr int W = 480, H = 270;
+    auto make = [&](int) {
+        g3d::Water w = w6Water(0);
+        w.waves.clear();
+        const float len[] = { 1.6f, 1.2f, 0.9f, 0.7f, 0.5f, 0.4f, 0.3f }, dir[] = { 80, 110, 65, 95, 120, 70, 100 };
+        for (int i = 0; i < 7; i++) w.waves.push_back({ dir[i], len[i], 0.02f * len[i], 1, 1 });
+        auto s = w6Scene(w, { 0, 1.3f, 0 }, { 0, 1.1f, -40 }, 50);
+        s->add(g3d::Geometry::box(400, 8, 2), flat({ 245, 245, 235, 255 }))->position = { 0, 4, -160 };
+        s->add(g3d::Geometry::box(400, 6, 2), flat({ 30, 60, 30, 255 }))->position = { 0, 3, -140 };
+        for (int i = -3; i <= 3; i++) s->add(g3d::Geometry::box(0.4f, 1.6f, 0.4f), flat({ 230, 230, 230, 255 }))->position = { i * 1.3f, 0.8f, -5.5f - i * 0.4f };
+        return s;
+    };
+    g3d::ScenePtr s = make(0);
+    Comp c = comp(s, W, H);
+    Image a = render(c, 10), b = render(c, 11);
+    dump("w6-shimmer-a.png", a);
+    const int horizon = (int)std::lround(project(s->camera, { 0, 0, -1e5f }, W, H).y);
+    auto change = [&](int y0, int y1) {
+        double sum = 0; int cells = 0;
+        for (int cy = y0; cy + 12 <= y1; cy += 12)
+            for (int cx = 0; cx + 12 <= W; cx += 12) {
+                double d = 0;
+                for (int y = cy; y < cy + 12; y++) for (int x = cx; x < cx + 12; x++) d += std::fabs(luma(GetImageColor(a, x, y)) - luma(GetImageColor(b, x, y)));
+                sum += d / 144; cells++;
+            }
+        return (float)(sum / std::max(cells, 1));
+    };
+    const float far = change(horizon + 3, horizon + 27), nearC = change(H - 60, H);
+    std::printf("[weather] W6 shimmer: mean per-cell change between frames 10 and 11, far water %.3f, near water %.3f (horizon row %d)\n", far, nearC, horizon);
+    CHECK(far <= nearC);
+    UnloadImage(a); UnloadImage(b);
+}
+
+// Cost at 1080p (RMTN_W6_TIMING=1): a lake with 600 trees (1 200 draws) and a jetty, with and without Film clouds, for each setting.
+static g3d::ScenePtr timingLake(g3d::Water::Reflections r, bool refract, bool clouds, int trees) {
+    auto s = cloudLake(clouds);
+    s->water = w6Water(1, 0);
+    s->water.reflections = r;
+    s->water.refraction = refract;
+    s->camera.position = { 0, 2.0f, 30 };
+    s->camera.target = { 0, 3, -100 };
+    g3d::Material bark = flat({ 90, 60, 40, 255 }), leaf = flat({ 40, 110, 50, 255 });
+    bark.unlit = leaf.unlit = false;
+    for (int i = 0; i < trees; i++) {
+        const float a = rnd01(i, 1) * 6.2831f, d = 60 + rnd01(i, 2) * 60, h = 5 + rnd01(i, 3) * 6;
+        const float x = std::cos(a) * d * 1.8f, z = -std::fabs(std::sin(a)) * d - 30;
+        s->add(g3d::Geometry::cylinder(0.3f, h * 0.4f, 8), bark)->position = { x, h * 0.2f, z };
+        s->add(g3d::Geometry::cone(2.0f, h, 12), leaf)->position = { x, h * 0.4f + h * 0.5f, z };
+    }
+    return s;
+}
+static void waterTiming() {
+    constexpr int W = 1920, H = 1080;
+    struct Row { const char* name; g3d::Water::Reflections r; bool refract; };
+    const Row rows[] = { { "off", g3d::Water::Reflections::Off, false }, { "quarter", g3d::Water::Reflections::Quarter, false },
+                         { "half", g3d::Water::Reflections::Half, false }, { "full", g3d::Water::Reflections::Scene, false },
+                         { "refraction only", g3d::Water::Reflections::Off, true }, { "full + refraction", g3d::Water::Reflections::Scene, true } };
+    for (int clouds = 0; clouds < 3; clouds++)
+        for (const Row& row : rows) {
+            const int trees = clouds == 2 ? 20 : 600;
+            Comp c = comp(timingLake(row.r, row.refract, clouds == 1, trees), W, H);
+            Canvas canvas;
+            canvas.load(W, H, 1);
+            presentFrame(c, 0, canvas);
+            Image warm = LoadImageFromTexture(canvas.output().texture);
+            UnloadImage(warm);
+            double best = 1e9, mean = 0;
+            for (int i = 0; i < 10; i++) {
+                const double t0 = GetTime();
+                presentFrame(c, i, canvas);
+                Image img = LoadImageFromTexture(canvas.output().texture);
+                const double dt = (GetTime() - t0) * 1000;
+                UnloadImage(img);
+                best = std::min(best, dt);
+                mean += dt / 10;
+            }
+            canvas.unload();
+            std::printf("[weather] W6 timing 1080p, %s, %s: best %.1f ms, mean %.1f ms\n", clouds == 1 ? "600 trees and Film clouds" : clouds == 2 ? "40 draws, no clouds" : "600 trees (1200 draws), no clouds", row.name, best, mean);
+        }
+}
+
+static void waterReflections() {
+    offMeansOffWater();
+    poleUpsideDown();
+    wavesBreakIt();
+    noLeak();
+    refraction();
+    cloudsReflect();
+    calmIsAMirror();
+    refractionHasNoEdge();
+    noLattice();
+    noRings();
+    waterPurity();
+    noShimmer();
+}
+
 static void cloudImages(const char* dir) {
     fs::create_directories(dir);
     constexpr int W = 1920, H = 1080;
@@ -2023,6 +2765,20 @@ int main() try {
     if (!IsWindowReady()) return 77;
     if (const char* dir = std::getenv("RMTN_CLOUD_IMAGES")) { cloudImages(dir); shutdownGraphics(); CloseWindow(); return 0; }
     if (std::getenv("RMTN_CLOUD_TIMING")) { cloudTiming(); shutdownGraphics(); CloseWindow(); return 0; }
+    if (std::getenv("RMTN_W6_GOLDEN")) {
+        Image g = look(w6Golden(), 320, 180, 7);
+        dump("w6-golden.png", g);
+        for (float v : gridMeans(g, 6, 4)) std::printf("%.2ff, ", v);
+        std::printf("\n");
+        shutdownGraphics(); CloseWindow(); return 0;
+    }
+    if (std::getenv("RMTN_W6_TIMING")) { waterTiming(); shutdownGraphics(); CloseWindow(); return 0; }
+    if (std::getenv("RMTN_W6_ONLY")) {
+        waterReflections();
+        shutdownGraphics(); CloseWindow();
+        std::printf(failures ? "[weather] %d failures\n" : "[weather] all passed\n", failures);
+        return failures ? 1 : 0;
+    }
     cpuRules();
     mixContinuous();
     oneWind();
@@ -2048,6 +2804,7 @@ int main() try {
     hazeAtHorizon();
     nearDetail();
     noBandsInHeight();
+    waterReflections();
     shutdownGraphics();
     CloseWindow();
     std::printf(failures ? "[weather] %d failures\n" : "[weather] all passed\n", failures);
