@@ -3335,6 +3335,539 @@ static void waterBodies() {
     poolFloorShows();
 }
 
+// ---------------------------------------------------------------- W8: wakes, ripples and floating objects
+// A boat on a straight line along +x at speed U (deep water, no waves of its own to hide the V).
+static g3d::Wake straightBoat(float U, float life = 40) {
+    g3d::Wake w;
+    w.path = { { -400, 0 }, { 400, 0 } };
+    w.speed = U; w.start = 0; w.life = life;
+    return w;
+}
+// The half angle of a wake's V, in degrees, `behind` metres behind the boat (a CPU field): the outer edge of the
+// envelope of the slope, where it has fallen to `edge` of its peak, found along the lateral line.
+static float vEdge(const g3d::WakeField& f, float boatX, float behind, float edge, float* peakAt = nullptr, float* peakSlope = nullptr) {
+    std::vector<float> env;
+    const float dz = 0.1f, zMax = 0.9f * behind;
+    for (float z = 0; z < zMax; z += dz) {
+        float m = 0;
+        for (float x = boatX - behind - 3; x <= boatX - behind + 3; x += 0.25f) {
+            const Vector2 g = f.slope(x, z);
+            m = std::max(m, std::hypot(g.x, g.y));
+        }
+        env.push_back(m);
+    }
+    size_t pk = 0;
+    for (size_t i = 0; i < env.size(); i++) if (env[i] > env[pk]) pk = i;
+    // the cusp is the outermost strong maximum of the envelope across the wake (the transverse crests are nearer the track)
+    const float top = env[pk];
+    for (size_t i = 3; i + 3 < env.size(); i++)
+        if (env[i] > 0.3f * top && env[i] >= env[i - 3] && env[i] >= env[i + 3] && i > pk) pk = i;
+    size_t o = pk;
+    while (o + 1 < env.size() && env[o] > edge * env[pk]) o++;
+    if (peakAt) *peakAt = std::atan2((float)pk * dz, behind) * RAD2DEG;
+    if (peakSlope) *peakSlope = env[pk];
+    return std::atan2((float)o * dz, behind) * RAD2DEG;
+}
+// A big flat pool seen from straight above (orthographic, +x right, +z down), drawing the surface's slope as colour
+// (ground.debug 2: pixel = 0.5 + 2 slope on red and green) when `slopeView`, or the lit water otherwise.
+static g3d::ScenePtr wakeWorld(const g3d::Camera& cam, bool slopeView) {
+    auto s = bodyWorld(cam);
+    g3d::WaterBody b = g3d::WaterBody::lake({ { -500, -500 }, { 500, -500 }, { 500, 500 }, { -500, 500 } }, 0);
+    b.look.waves.clear();
+    b.look.reflections = g3d::Water::Reflections::Off;
+    b.look.foam = 0;
+    b.shoreFoam = 0;
+    s->waterBodies.push_back(b);
+    if (slopeView) s->ground.debug = 2;
+    return s;
+}
+static Vector2 slopeOfPixel(const Image& img, int x, int y) {
+    const Color c = GetImageColor(img, x, y);
+    return { (c.r / 255.f - 0.5f) / 2.f, (c.g / 255.f - 0.5f) / 2.f };
+}
+// A boat on the x axis that is at x = `at` at second 0.
+static g3d::Wake boatAt(float U, float at, float life = 40) {
+    g3d::Wake w = straightBoat(U, life);
+    w.start = -(at + 400.f) / U;
+    return w;
+}
+
+// A lit oblique view for counting feathers: orthographic, 45 degrees down, looking towards -z, the sun a little off the
+// mirror direction so the crests' faces glint. World (x, z) to pixel for it: x = W/2 + (x - cx) perM, y = H/2 + (z - cz) sin(el) perM.
+struct FeatherView { g3d::ScenePtr scene; float cx, cz, perM, sinEl; int w, h; };
+static FeatherView featherView(const g3d::Wake* wake, float cx, float cz, float height, int w, int h) {
+    const float el = 20 * DEG2RAD;
+    g3d::Camera c;
+    c.target = { cx, 0, cz };
+    c.position = { cx, 60 * std::sin(el), cz + 60 * std::cos(el) };
+    c.orthographic = true; c.orthoHeight = height; c.nearPlane = 1; c.farPlane = 300;
+    auto s = wakeWorld(c, false);
+    s->sky.enabled = true; s->sky.show = true; s->sky.sunDirection = { 0.5f, 0.35f, -0.7f };
+    if (wake) s->wakes.push_back(*wake);
+    return { s, cx, cz, h / height, std::sin(el), w, h };
+}
+// Crests crossed along the line from the bow back along the V's arm, `inside` metres towards the track: the line
+// runs 3 boat lengths (21 m), its luma minus a 3 m running mean crossing up through +thr after dipping under -thr.
+static int armCrests(const FeatherView& v, const Image& img, float bowX, float side, float length, float inside, float thr, float* spread = nullptr) {
+    const float ang = 19.5f * DEG2RAD, step = 0.1f;
+    std::vector<float> L;
+    for (float s = 2; s < 2 + 3 * length; s += step) {
+        const float x = bowX - s * std::cos(ang) + 0, z = side * (s * std::sin(ang) - inside);
+        const int px = (int)(v.w * 0.5f + (x - v.cx) * v.perM), py = (int)(v.h * 0.5f + (z - v.cz) * v.sinEl * v.perM);
+        if (px < 1 || py < 1 || px >= v.w - 1 || py >= v.h - 1) { L.push_back(NAN); continue; }
+        L.push_back(luma(GetImageColor(img, px, py)));
+    }
+    const int half = (int)(1.5f / step);
+    int crests = 0; bool low = false;
+    float lo = 1e9f, hi = -1e9f;
+    for (size_t i = 0; i < L.size(); i++) {
+        if (std::isnan(L[i])) continue;
+        float m = 0; int n = 0;
+        for (int j = (int)i - half; j <= (int)i + half; j++) if (j >= 0 && j < (int)L.size() && !std::isnan(L[j])) { m += L[j]; n++; }
+        const float d = L[i] - m / n;
+        lo = std::min(lo, d); hi = std::max(hi, d);
+        if (d < -thr) low = true;
+        else if (d > thr && low) { crests++; low = false; }
+    }
+    if (spread) *spread = hi - lo;
+    return crests;
+}
+static void w8Images() {
+    constexpr int W = 960, H = 540;
+    for (float U : { 3.f, 4.f, 6.5f }) {                           // crests in the CPU field along the arm
+        g3d::Wake w = boatAt(U, 20); w.length = 7; w.beam = 2.2f;
+        const g3d::WakeField f(w, 0);
+        for (float in : { 1.5f, 3.f, 4.f, 5.f }) {
+            std::vector<float> h;
+            for (float s = 2; s < 23; s += 0.1f) h.push_back(f.height(23.5f - s * std::cos(19.5f * DEG2RAD), (s * std::sin(19.5f * DEG2RAD) - in)));
+            int c = 0; float mx = 0;
+            for (size_t i = 1; i + 1 < h.size(); i++) { if (h[i] > h[i - 1] && h[i] >= h[i + 1] && h[i] > 0.01f) c++; mx = std::max(mx, std::fabs(h[i])); }
+            std::printf("[probe] CPU height crests U %.1f inside %.1f: %d maxima over 0.01 m, peak %.3f\n", U, in, c, mx);
+        }
+    }
+    for (float U : { 2.f, 2.5f, 3.f }) {                           // feathers along the arms (lit oblique, ortho)
+        g3d::Wake w = boatAt(U, 20); w.length = 7; w.beam = 2.2f; w.foam = 0;
+        FeatherView fv = featherView(&w, 8, 0, 18, 960, 540);
+        Image im = look(fv.scene, 960, 540, 0);
+        char name[64]; std::snprintf(name, sizeof name, "w8-feathers-%.1f.png", U);
+        dump(name, im);
+        for (float in : { 1.5f, 3.f, 4.f, 5.f }) {
+            float sp; const int n1 = armCrests(fv, im, 20 + 3.5f, 1, 7, in, 3.f, &sp), n2 = armCrests(fv, im, 20 + 3.5f, -1, 7, in, 3.f);
+            std::printf("[probe] feathers U %.1f inside %.1f m: %d and %d crests over 21 m (luma spread %.1f)\n", U, in, n1, n2, sp);
+        }
+        UnloadImage(im);
+    }
+    {                                                             // the example's wake, near the jetty (frame 300)
+    {                                                             // lit top-down: sky reflection, sun to the side, with foam
+        auto sc = wakeWorld(topDown(-30, 0, 60), false);
+        sc->sky.enabled = true; sc->sky.show = true; sc->sky.sunDirection = { 0.5f, 0.35f, -0.7f };
+        g3d::Wake w = boatAt(6.5f, 20); w.length = 7; w.beam = 2.2f;
+        sc->wakes.push_back(w);
+        Image im = look(sc, W, H, 0);
+        dump("w8-lit-topdown.png", im);
+        UnloadImage(im);
+    }
+    {                                                             // lit look: sky reflection, sun off to one side, no foam
+        for (int on = 0; on < 2; on++) {
+            g3d::Camera oc; oc.position = { -8, 7, 26 }; oc.target = { -8, 0, -2 }; oc.fov = 45;
+            auto sc = wakeWorld(oc, false);
+            sc->sky.enabled = true; sc->sky.show = true; sc->sky.sunDirection = { 0.5f, 0.35f, -0.7f }; sc->sky.sunLight = -1;
+            if (on) { g3d::Wake w = boatAt(6.5f, 20); w.length = 7; w.beam = 2.2f; w.foam = 0; sc->wakes.push_back(w); }
+            Image im = look(sc, W, H, 0);
+            dump(on ? "w8-lit-on.png" : "w8-lit-off.png", im);
+            UnloadImage(im);
+        }
+    }
+        g3d::Wake w; w.path = { { 46, -1.5f }, { 26, -5 }, { 4, -9 }, { -16, -10.5f }, { -30, -7.5f }, { -46, -3 } };
+        w.speed = 6.5f; w.start = 0.4f; w.length = 7; w.beam = 2.2f; w.strength = 1; w.life = 34; w.trail = 10;
+        for (int v = 0; v < 2; v++) {
+            auto sc = wakeWorld(topDown(-4, -11, 14), v == 1);
+            sc->wakes.push_back(w);
+            Image im = look(sc, W, H, 300);
+            dump(v ? "w8-ex-slope.png" : "w8-ex-lit.png", im);
+            UnloadImage(im);
+        }
+        const g3d::WakeField f(w, 10.0);
+        float mx = 0, mh = 0;
+        for (float x = -30; x < 10; x += 0.2f) for (float z = -25; z < 5; z += 0.2f) { const Vector2 g = f.slope(x, z); mx = std::max(mx, std::hypot(g.x, g.y)); mh = std::max(mh, std::fabs(f.height(x, z))); }
+        std::printf("[probe] example wake at 10 s, strength 1: peak slope %.3f, peak height %.3f m, amplitude %.3f\n", mx, mh, w.amplitude());
+    }
+    const float U = 4;
+    auto cam = topDown(-40, 0, 80);
+    auto s = wakeWorld(cam, true);
+    s->wakes.push_back(boatAt(U, 20));
+    Image img = look(s, W, H, 0);
+    dump("w8-slope.png", img);
+    const float perM = H / cam.orthoHeight, foot = 1.f / perM;
+    const g3d::WakeField f(s->wakes[0], 0);
+    double sum = 0, ref = 0;
+    int n = 0;
+    for (int y = 0; y < H; y += 3)
+        for (int x = 0; x < W; x += 3) {
+            const float wx = cam.target.x + (x + 0.5f - W * 0.5f) / perM, wz = cam.target.z + (y + 0.5f - H * 0.5f) / perM;
+            const Vector2 g = f.slope(wx, wz, foot), p = slopeOfPixel(img, x, y);
+            sum += std::fabs(g.x - p.x) + std::fabs(g.y - p.y);
+            ref += std::fabs(g.x) + std::fabs(g.y);
+            n++;
+        }
+    std::printf("[probe] GPU vs CPU slope: mean abs diff %.5f against mean abs slope %.5f\n", sum / n, ref / n);
+    UnloadImage(img);
+    // The beauty view.
+    auto lit = wakeWorld(cam, false);
+    lit->wakes.push_back(boatAt(U, 20));
+    Image b = look(lit, W, H, 0);
+    dump("w8-wake-top.png", b);
+    UnloadImage(b);
+    for (int zoomed = 0; zoomed < 2; zoomed++) {                 // the CPU field as a grey height map, for a look at the waves
+        const float cx = zoomed ? 6.f : -20.f, hgt = zoomed ? 18.f : 50.f;
+        const g3d::Wake w = boatAt(U, 20);
+        const g3d::WakeField fc(w, 0);
+        Image h = GenImageColor(W, H, BLACK);
+        const float pm = H / hgt;
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) {
+                const float v = fc.height(cx + (x + 0.5f - W * 0.5f) / pm, (y + 0.5f - H * 0.5f) / pm, 1.f / pm);
+                const unsigned char g = (unsigned char)std::clamp(128.f + v * 500.f, 0.f, 255.f);
+                ImageDrawPixel(&h, x, y, Color{ g, g, g, 255 });
+            }
+        dump(zoomed ? "w8-cpu-height-close.png" : "w8-cpu-height.png", h);
+        UnloadImage(h);
+    }
+    {                                                             // an oblique view
+        g3d::Camera oc;
+        oc.position = { 8, 2.4f, 14 }; oc.target = { -6, 0.2f, 0 }; oc.fov = 50;
+        auto os = wakeWorld(oc, false);
+        os->wakes.push_back(boatAt(U, 6));
+        Image oi = look(os, W, H, 0);
+        dump("w8-wake-oblique.png", oi);
+        UnloadImage(oi);
+    }
+    for (int v = 0; v < 2; v++) {
+        auto c2 = wakeWorld(topDown(6, 0, 18), v == 1);
+        c2->wakes.push_back(boatAt(U, 20));
+        Image cl = look(c2, W, H, 0);
+        dump(v ? "w8-wake-close-slope.png" : "w8-wake-close.png", cl);
+        UnloadImage(cl);
+    }
+    // Ripple radius against time (CPU).
+    g3d::Ripple r;
+    for (float T : { 1.f, 2.f, 3.f, 5.f, 8.f }) {
+        float best = 0, bestR = 0;
+        for (float rad = 0.02f; rad < 3; rad += 0.005f) {
+            const float v = std::fabs(r.slope(rad, T));
+            if (v > best) { best = v; bestR = rad; }
+        }
+        std::printf("[probe] ripple T %.0f: peak slope %.4f at r %.3f (%.3f m/s), group speed of the peak wave %.3f\n", T, best, bestR, bestR / T, g3d::Ripple::groupSpeed(r.peakWave()));
+    }
+    // Euler read-back.
+    const Vector3 want = Vector3Normalize({ 1, 0.3f, 0.2f });
+    const Vector3 rot = g3d::lookRotation(want, { 0, 1, 0 });
+    const Vector3 got = Vector3Transform({ 0, 0, 1 }, MatrixRotateXYZ(Vector3Scale(rot, DEG2RAD)));
+    std::printf("[probe] lookRotation: want %.3f %.3f %.3f, MatrixRotateXYZ gives %.3f %.3f %.3f\n", want.x, want.y, want.z, got.x, got.y, got.z);
+}
+// The cusp's half angle (degrees) of a wake at `U` m/s from the CPU twin: the slope of the V's outer edge (the outer
+// 66% of the envelope's peak: the Airy edge) against the distance behind the boat, between 30 and 60 m, which drops the
+// apex's offset.
+static float cuspAngle(float U, float* near30 = nullptr, float* far60 = nullptr) {
+    const g3d::Wake w = boatAt(U, 20, 70);
+    const g3d::WakeField f(w, 0);
+    const float a30 = vEdge(f, 20, 40, 0.66f), a60 = vEdge(f, 20, 80, 0.66f);
+    if (near30) *near30 = a30;
+    if (far60) *far60 = a60;
+    const float z30 = 40 * std::tan(a30 * DEG2RAD), z60 = 80 * std::tan(a60 * DEG2RAD);
+    (void)z30; (void)z60;
+    return a60;                                   // the edge line's slope is too noisy at one decimetre of resolution; far enough behind, the apex offset is a degree or less
+}
+// The radius (m) of the strongest ring along each of `n` directions in a slope-view image of a ripple at the centre of
+// an orthographic top view `height` metres high, searched in [lo, hi] m.
+static std::vector<float> ringRadii(const Image& img, float height, int n, float lo, float hi) {
+    const float perM = img.height / height;
+    std::vector<float> out;
+    for (int d = 0; d < n; d++) {
+        const float a = 2 * PI * (d + 0.5f) / n;
+        float best = -1, at = 0;
+        for (float r = lo; r < hi; r += 0.5f / perM) {
+            const Vector2 g = slopeOfPixel(img, (int)(img.width * 0.5f + std::cos(a) * r * perM), (int)(img.height * 0.5f + std::sin(a) * r * perM));
+            const float m = std::hypot(g.x, g.y);
+            if (m > best) { best = m; at = r; }
+        }
+        out.push_back(at);
+    }
+    return out;
+}
+static void waterWakes() {
+    // (a) and (b): the V is 19.5 degrees (Kelvin) at any speed.
+    for (float U : { 4.f, 7.f }) {
+        float n30, n60;
+        const float ang = cuspAngle(U, &n30, &n60);
+        std::printf("[weather] Kelvin wake at %.0f m/s: outer edge %.1f deg at 40 m and %.1f deg at 80 m behind, V half angle %.2f deg at 80 m (want 19.5 +- 2)\n", U, n30, n60, ang);
+        CHECK(std::fabs(ang - 19.5f) < 2.0f);
+    }
+    {
+        const float a4 = cuspAngle(4), a7 = cuspAngle(7);
+        std::printf("[weather] the V at 4 and 7 m/s differs by %.2f deg (speed independent: under 1.5)\n", std::fabs(a4 - a7));
+        CHECK(std::fabs(a4 - a7) < 1.5f);
+    }
+    // The GPU draws what the CPU twin says (slope view, top down), and nothing lies ahead of the bow.
+    {
+        constexpr int W = 960, H = 540;
+        auto cam = topDown(-40, 0, 80);
+        auto s = wakeWorld(cam, true);
+        s->wakes.push_back(boatAt(4, 20));
+        Image img = look(s, W, H, 0);
+        const float perM = H / cam.orthoHeight, foot = 1.f / perM;
+        const g3d::WakeField f(s->wakes[0], 0);
+        double sum = 0, ref = 0, ahead = 0;
+        const Vector2 bias = slopeOfPixel(img, W - 1, 0);          // the 8-bit zero: 128 is not quite one half
+        int n = 0;
+        for (int y = 0; y < H; y += 3)
+            for (int x = 0; x < W; x += 3) {
+                const float wx = cam.target.x + (x + 0.5f - W * 0.5f) / perM, wz = cam.target.z + (y + 0.5f - H * 0.5f) / perM;
+                const Vector2 g = f.slope(wx, wz, foot), p = slopeOfPixel(img, x, y);
+                sum += std::fabs(g.x - p.x) + std::fabs(g.y - p.y);
+                ref += std::fabs(g.x) + std::fabs(g.y);
+                if (wx > 24.f) ahead += std::fabs(p.x - bias.x) + std::fabs(p.y - bias.y);
+                n++;
+            }
+        UnloadImage(img);
+        std::printf("[weather] wake on the GPU vs the CPU twin: mean abs slope difference %.5f against mean abs slope %.5f; ahead of the bow %.6f\n", sum / n, ref / n, ahead);
+        CHECK(sum < 0.3 * ref);
+        CHECK(ahead < 0.01 * ref * n);
+    }
+    // The propwash is a trail about the beam wide with translucent, streaky foam that fades (GPU, top down, foam on against off).
+    {
+        constexpr int W = 960, H = 540;
+        const float U = 6.5f, beam = 2.2f;
+        auto cam = topDown(-10, 0, 60);
+        const float perM = H / cam.orthoHeight;
+        Image img[2];
+        for (int on = 0; on < 2; on++) {
+            auto s = wakeWorld(cam, false);
+            g3d::Wake w = boatAt(U, 20); w.length = 7; w.beam = beam; w.life = 34; w.trail = 10; w.foam = (float)on;
+            s->wakes.push_back(w);
+            img[on] = look(s, W, H, 0);
+        }
+        float top = 0;
+        for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) top = std::max(top, luma(GetImageColor(img[1], x, y)));
+        auto alphaAt = [&](float wx, float wz) {
+            const int px = (int)(W * 0.5f + (wx - cam.target.x) * perM), py = (int)(H * 0.5f + wz * perM);
+            const float lo = luma(GetImageColor(img[0], px, py)), hi = luma(GetImageColor(img[1], px, py));
+            return std::clamp((hi - lo) / std::max(top - lo, 1.f), 0.f, 1.f);
+        };
+        float a30 = 0;                                     // strongest foam 28..32 m behind the bow (x = -8..-12), across the track
+        for (float x = -12; x <= -8; x += 0.25f) for (float z = -6; z <= 6; z += 0.1f) a30 = std::max(a30, alphaAt(x, z));
+        float a3 = 0;                                       // 3 m behind the stern, for scale
+        for (float x = 7; x <= 12; x += 0.25f) for (float z = -1; z <= 1; z += 0.1f) a3 = std::max(a3, alphaAt(x, z));
+        float width = 0;                                    // widest extent over 0.1 alpha, 9..11 m behind the bow
+        for (float x = 9; x <= 11; x += 0.5f) {
+            float lo = 1e9f, hi = -1e9f;
+            for (float z = -12; z <= 12; z += 0.05f) if (alphaAt(x, z) > 0.1f) { lo = std::min(lo, z); hi = std::max(hi, z); }
+            if (hi > lo) width = std::max(width, hi - lo);
+        }
+        dump("w8-trail.png", img[1]);
+        std::printf("[weather] propwash: foam alpha %.2f near the stern, %.2f at 30 m behind (want under 0.25); width over 0.1 alpha at 10 m behind %.2f m = %.1f beams (want under 2.5)\n", a3, a30, width, width / beam);
+        CHECK(a3 > 0.2f);
+        CHECK(a30 < 0.25f);
+        CHECK(width < 2.5f * beam);
+        UnloadImage(img[0]); UnloadImage(img[1]);
+    }
+    // The V shows in a lit view: sky reflection, the sun off to the side, no foam. The change the wake makes along columns across the arms.
+    {
+        constexpr int W = 960, H = 540;
+        auto lit = [&](float strength) {
+            g3d::Camera oc; oc.position = { -8, 7, 26 }; oc.target = { -8, 0, -2 }; oc.fov = 45;
+            auto sc = wakeWorld(oc, false);
+            sc->sky.enabled = true; sc->sky.show = true; sc->sky.sunDirection = { 0.5f, 0.35f, -0.7f };
+            if (strength > 0) { g3d::Wake w = boatAt(6.5f, 20); w.length = 7; w.beam = 2.2f; w.foam = 0; w.strength = strength; sc->wakes.push_back(w); }
+            return look(sc, W, H, 0);
+        };
+        Image off = lit(0), on = lit(1), weak = lit(0.05f), none = lit(0);
+        auto contrast = [&](const Image& a) {                 // mean over columns of the biggest change from the plain water
+            double sum = 0; int n = 0;
+            for (int x = 100; x < 700; x += 4) {
+                float m = 0;
+                for (int y = 160; y < 480; y++) m = std::max(m, std::fabs(luma(GetImageColor(a, x, y)) - luma(GetImageColor(off, x, y))));
+                sum += m; n++;
+            }
+            return (float)(sum / n);
+        };
+        const float cOn = contrast(on), cWeak = contrast(weak), cNone = contrast(none);
+        std::printf("[weather] lit V: biggest luma change from the plain water along columns, mean %.2f levels with the wake, %.2f with a wake a twentieth as strong, %.2f without (want over 8)\n", cOn, cWeak, cNone);
+        CHECK(cOn > 8.f);
+        CHECK(cNone == 0.f);
+        UnloadImage(off); UnloadImage(on); UnloadImage(weak); UnloadImage(none);
+    }
+    // Feathers: several short crests stacked along each arm of the V of a boat at displacement speed (2 m/s, 7 m long), counted
+    // in the luma of a lit oblique view along a line 2 m inside the arm, over 3 boat lengths, on both sides.
+    {
+        g3d::Wake w = boatAt(2.f, 20); w.length = 7; w.beam = 2.2f; w.foam = 0;
+        FeatherView fv = featherView(&w, 8, 0, 18, 960, 540);
+        Image im = look(fv.scene, 960, 540, 0);
+        float spread = 0;
+        const int left = armCrests(fv, im, 23.5f, 1, 7, 2.f, 3.f, &spread), right = armCrests(fv, im, 23.5f, -1, 7, 2.f, 3.f);
+        dump("w8-feathers-test.png", im);
+        UnloadImage(im);
+        std::printf("[weather] feathers: %d and %d crests along the two arms over 21 m, 2 m inside the arm (want at least 5 each); luma swing %.1f levels\n", left, right, spread);
+        CHECK(left >= 5 && right >= 5);
+    }
+    // (c) ripple radius grows at the group speed and the rings are round (GPU, slope view, top down).
+    {
+        constexpr int W = 960, H = 540;
+        const float hgt = 4;
+        float radius[2] = { 0, 0 };
+        const int frames[2] = { 60, 135 };            // 2.0 s and 4.5 s
+        for (int i = 0; i < 2; i++) {
+            auto s = wakeWorld(topDown(0, 0, hgt), true);
+            g3d::Ripple r; r.x = 0; r.z = 0; r.time = 0; r.strength = 0.4f;
+            s->ripples.push_back(r);
+            Image img = look(s, W, H, frames[i]);
+            const float T = frames[i] / 30.f, c = g3d::Ripple::groupSpeed(r.peakWave());
+            const auto rad = ringRadii(img, hgt, 16, 0.5f * c * T, 1.3f * c * T);
+            dump(i == 0 ? "w8-rings-2s.png" : "w8-rings-4s.png", img);
+            UnloadImage(img);
+            float mean = 0, lo = 1e9f, hi = 0;
+            for (float v : rad) { mean += v / rad.size(); lo = std::min(lo, v); hi = std::max(hi, v); }
+            radius[i] = mean;
+            const float spread = (hi - lo) / mean;
+            std::printf("[weather] ripple at %.1f s: ring radius %.3f m (%.3f m/s; group speed of the peak wave %.3f m/s), spread over 16 directions %.1f%%\n", T, mean, mean / T, c, 100 * spread);
+            CHECK(mean / T > 0.8f * c && mean / T < 1.2f * c);
+            CHECK(spread < 0.12f);
+        }
+        std::printf("[weather] ripple radius grew %.2fx from 2.0 s to 4.5 s (time ratio 2.25: a constant radius gives 1)\n", radius[1] / radius[0]);
+        CHECK(radius[1] / radius[0] > 1.7f && radius[1] / radius[0] < 2.8f);
+    }
+    // (d) a floating box on a rough sea: it follows the surface, its pitch follows the slope, the footprint calms it.
+    {
+        auto s = std::make_shared<g3d::Scene>();
+        s->water = g3d::Water::choppy();
+        g3d::Object3D box;
+        box.position = { 5, 0, 3 };
+        g3d::Ride how; how.length = 6; how.beam = 2.4f; how.heading = 0; how.along = 7; how.across = 5;
+        g3d::Ride tiny = how; tiny.length = 0.05f; tiny.beam = 0.05f;
+        std::vector<double> pitchBig, pitchTiny;
+        double errMean = 0, signOk = 0, signN = 0, corrNum = 0, corrA = 0, corrB = 0;
+        const int N = 240;
+        for (int i = 0; i < N; i++) {
+            const double t = i / 30.0;
+            g3d::ride(box, *s, t, how);
+            double mean = 0;
+            for (int a = 0; a < 7; a++)
+                for (int c = 0; c < 5; c++) mean += g3d::surfaceHeight(*s, 5 + ((a + 0.5f) / 7 - 0.5f) * 6, 3 + ((c + 0.5f) / 5 - 0.5f) * 2.4f, t) / 35.0;
+            errMean = std::max(errMean, std::fabs(box.position.y - mean));
+            const Vector3 bow = Vector3Transform({ 0, 0, 1 }, MatrixRotateXYZ(Vector3Scale(box.rotation, DEG2RAD)));
+            pitchBig.push_back(bow.y);
+            double slope = 0;
+            for (int a = 0; a < 7; a++) slope += g3d::surfaceSlope(*s, 5 + ((a + 0.5f) / 7 - 0.5f) * 6, 3, t).x / 7.0;
+            if (std::fabs(slope) > 0.01) { signN++; if ((slope > 0) == (bow.y > 0)) signOk++; }
+            corrNum += slope * bow.y; corrA += slope * slope; corrB += bow.y * bow.y;
+            g3d::Object3D t2; t2.position = { 5, 0, 3 };
+            g3d::ride(t2, *s, t, tiny);
+            pitchTiny.push_back(Vector3Transform({ 0, 0, 1 }, MatrixRotateXYZ(Vector3Scale(t2.rotation, DEG2RAD))).y);
+        }
+        auto jitter = [](const std::vector<double>& v) {
+            double s2 = 0; int n = 0;
+            for (size_t i = 1; i + 1 < v.size(); i++) { const double d = v[i + 1] - 2 * v[i] + v[i - 1]; s2 += d * d; n++; }
+            return std::sqrt(s2 / n);
+        };
+        const double jb = jitter(pitchBig), jt = jitter(pitchTiny);
+        const double corr = corrNum / std::sqrt(corrA * corrB + 1e-12);
+        std::printf("[weather] floating box: height off the footprint mean at most %.4f m; pitch has the slope's sign in %.0f%% of %.0f frames, correlation %.2f; pitch jitter %.5f with a 6 m footprint against %.5f centre only (%.1fx)\n",
+                    errMean, 100 * signOk / std::max(signN, 1.0), signN, corr, jb, jt, jt / std::max(jb, 1e-9));
+        CHECK(errMean < 0.01);
+        CHECK(signN > 20 && signOk / signN > 0.85);
+        CHECK(corr > 0.7);
+        CHECK(jb < 0.6 * jt);
+        // its draft sinks it, and on a lake body a wake lifts it the same way
+        g3d::Object3D dr; dr.position = { 5, 0, 3 };
+        g3d::Ride deep = how; deep.draft = 0.3f;
+        g3d::ride(dr, *s, 1.0, deep);
+        g3d::ride(box, *s, 1.0, how);
+        std::printf("[weather] draft 0.3 m: %.3f m lower\n", box.position.y - dr.position.y);
+        CHECK(std::fabs(box.position.y - dr.position.y - 0.3f) < 1e-4f);
+        auto lake = std::make_shared<g3d::Scene>();
+        lake->waterBodies.push_back(g3d::WaterBody::lake({ { -300, -300 }, { 300, -300 }, { 300, 300 }, { -300, 300 } }, 0.5f));
+        lake->waterBodies.back().look.waves.clear();
+        g3d::Wake w = boatAt(5, 0, 30); w.length = 8; w.beam = 2.5f; w.strength = 2;
+        lake->wakes.push_back(w);
+        float lo = 1e9f, hi = -1e9f;
+        g3d::Object3D lb; lb.position = { -12, 0, 6 };
+        g3d::Ride lr; lr.length = 3; lr.beam = 1.5f; lr.heading = 0;
+        g3d::ride(lb, *lake, -10.0, lr);
+        const float still = lb.position.y;
+        for (double t = 0; t < 40; t += 0.1) { g3d::ride(lb, *lake, t, lr); lo = std::min(lo, lb.position.y); hi = std::max(hi, lb.position.y); }
+        std::printf("[weather] a box on a lake at 0.5 m before the boat: %.4f m; when the wake passes it ranges %.4f..%.4f m\n", still, lo, hi);
+        CHECK(std::fabs(still - 0.5f) < 1e-4f);
+        CHECK(hi - lo > 0.02f);
+    }
+    // (e) a dinghy beside the course starts to move no earlier than the waves can reach it (group speed U/2 at most).
+    {
+        auto s = std::make_shared<g3d::Scene>();
+        s->waterBodies.push_back(g3d::WaterBody::lake({ { -500, -500 }, { 500, -500 }, { 500, 500 }, { -500, 500 } }, 0));
+        s->waterBodies.back().look.waves.clear();
+        g3d::Wake w; w.path = { { -100, 0 }, { 100, 0 } }; w.speed = 5; w.start = 0; w.life = 40; w.length = 6; w.beam = 2;
+        s->wakes.push_back(w);
+        const Vector2 dinghy{ 0, 10 };
+        float bound = 1e9f;
+        for (float tau = 0; tau < 40; tau += 0.02f) {
+            Vector2 p, h; w.at(tau, &p, &h);
+            bound = std::min(bound, tau + std::hypot(p.x - dinghy.x, p.y - dinghy.y) / (0.5f * w.speed));
+        }
+        g3d::Object3D d; d.position = { dinghy.x, 0, dinghy.y };
+        g3d::Ride r; r.length = 3.2f; r.beam = 1.5f; r.heading = -90;
+        float onset = -1, biggest = 0;
+        for (float t = 0; t < 60; t += 0.05f) {
+            g3d::ride(d, *s, t, r);
+            const float m = std::fabs(d.position.y);
+            biggest = std::max(biggest, m);
+            if (onset < 0 && m > 0.002f) onset = t;
+        }
+        std::printf("[weather] dinghy 10 m off the course: first motion (over 2 mm) at %.2f s, the earliest a wave can arrive is %.2f s; it rises %.3f m at most\n", onset, bound, biggest);
+        CHECK(onset > bound - 1.5f);
+        CHECK(biggest > 0.02f);
+    }
+    // (f) pure functions of the time, on the CPU and on the GPU.
+    {
+        const g3d::Wake w = boatAt(4, 20);
+        const float h1 = w.height(10, 3, 5), h2 = w.height(10, 3, 5);
+        const float other = w.height(-30, -8, 11);
+        const float h3 = w.height(10, 3, 5);
+        std::printf("[weather] wake height at one point: %.6f %.6f, and %.6f after another time and place (%.6f)\n", h1, h2, h3, other);
+        CHECK(h1 == h2 && h1 == h3);
+        auto make = [] {
+            auto s = wakeWorld(topDown(0, 0, 8), false);
+            s->wakes.push_back(boatAt(4, 0));
+            g3d::Ripple r; r.x = 2; r.time = 0.5f; r.strength = 0.3f;
+            s->ripples.push_back(r);
+            return s;
+        };
+        Image a = look(make(), 320, 180, 40);
+        Image warm = look(make(), 320, 180, 10);
+        Image b = look(make(), 320, 180, 40);
+        const long long d = diffImages(a, b);
+        std::printf("[weather] frame 40 alone against frame 40 after another frame: diff %lld\n", d);
+        CHECK(d == 0);
+        UnloadImage(a); UnloadImage(warm); UnloadImage(b);
+    }
+    // (g) off means off: a boat that has not started and a stone that has not fallen change nothing.
+    {
+        auto base = [] { return wakeWorld(topDown(0, 0, 8), false); };
+        auto early = base();
+        g3d::Wake w = boatAt(4, 0); w.start = 1000;
+        early->wakes.push_back(w);
+        g3d::Ripple r; r.time = 900;
+        early->ripples.push_back(r);
+        Image a = look(base(), 320, 180, 40), b = look(early, 320, 180, 40);
+        const long long d = diffImages(a, b);
+        auto live = base();
+        live->wakes.push_back(boatAt(4, 0));
+        Image c = look(live, 320, 180, 40);
+        const long long on = diffImages(a, c);
+        std::printf("[weather] a boat and a stone that come later: diff %lld against none; the boat under way: diff %lld\n", d, on);
+        CHECK(d == 0);
+        CHECK(on > 0);
+        UnloadImage(a); UnloadImage(b); UnloadImage(c);
+    }
+}
 static void cloudImages(const char* dir) {
     fs::create_directories(dir);
     constexpr int W = 1920, H = 1080;
@@ -4840,6 +5373,7 @@ int main() try {
         std::printf("\n");
         shutdownGraphics(); CloseWindow(); return 0;
     }
+    if (std::getenv("RMTN_W8_IMAGES")) { w8Images(); shutdownGraphics(); CloseWindow(); return 0; }
     if (std::getenv("RMTN_W6_TIMING")) { waterTiming(); shutdownGraphics(); CloseWindow(); return 0; }
     if (std::getenv("RMTN_W4_TIMING")) { groundTiming(); shutdownGraphics(); CloseWindow(); return 0; }
     if (std::getenv("RMTN_W3_TIMING")) { precipitationTiming(); shutdownGraphics(); CloseWindow(); return 0; }
@@ -4851,6 +5385,12 @@ int main() try {
     }
     if (std::getenv("RMTN_W4_ONLY")) {
         wetAndSnow();
+        shutdownGraphics(); CloseWindow();
+        std::printf(failures ? "[weather] %d failures\n" : "[weather] all passed\n", failures);
+        return failures ? 1 : 0;
+    }
+    if (std::getenv("RMTN_W8_ONLY")) {
+        waterWakes();
         shutdownGraphics(); CloseWindow();
         std::printf(failures ? "[weather] %d failures\n" : "[weather] all passed\n", failures);
         return failures ? 1 : 0;
@@ -4896,6 +5436,7 @@ int main() try {
     precipitation();
     wetAndSnow();
     waterBodies();
+    waterWakes();
     shutdownGraphics();
     CloseWindow();
     std::printf(failures ? "[weather] %d failures\n" : "[weather] all passed\n", failures);

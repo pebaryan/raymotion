@@ -17,6 +17,8 @@
 // absolute values from t so any frame renders the same on its own.
 #pragma once
 #include <raylib.h>
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -778,6 +780,96 @@ WaterBodyMesh waterBodyMesh(const WaterBody& body);
 // A fingerprint of everything the mesh depends on (to cache it).
 uint64_t waterBodyKey(const WaterBody& body);
 
+// ------------------------------------------------------------------ wakes and ripples
+// A boat's Kelvin wake, in Scene::wakes. The boat goes along `path` at `speed`; the wake is worked out from
+// that path and the time alone (no simulation, so a frame is a pure function of t). It is drawn on the sea
+// and on every water body, as a perturbation of the shading normal and as foam:
+//   - Waves. The disturbance the hull made at each earlier moment spreads out as a ring with deep-water
+//     dispersion (a wave of number k travels at half its phase speed, and the ring's phase is g T^2 / 4 D
+//     at age T and distance D). The rings of the last `life` seconds are summed, 64 emission points spaced
+//     closer the more recent they are, and only the parts of the sum that add up coherently survive: they
+//     lie on the transverse and divergent crests of the Kelvin V, whose half angle is asin(1/3) = 19.47
+//     degrees at any speed (a steady boat in deep water). Amplitude falls as 1 / sqrt(distance) behind the hull and
+//     with age; the hull's size cuts the short waves (k beam over 2 and more).
+//   - Foam: a white fringe along the first crests next to the hull and a bow wave, and a turbulent trail (the
+//     propwash) of `trail` seconds that widens, breaks up and fades.
+//   - Bow spray: wakeSpray() below is a particle emitter for it.
+// The waves shift the shading only: the sea's mesh stays as it is (surfaceHeight() includes them, for riding).
+// Up to four wakes draw (the first ones). They do not alter the water's height under a hull.
+struct Wake {
+    std::vector<Vector2> path;      // (x, z) waypoints; a Catmull-Rom curve through them (two at least)
+    float speed = 4;                // metres a second along the path (constant)
+    float start = 0;                // second at which the boat is at path[0]; it stops at the last point
+    float length = 6, beam = 1.6f;  // the hull's size in metres
+    float strength = 1;             // times the wave height, which follows the beam and the Froude number U / sqrt(g length)
+    float life = 30;                // seconds the waves last (also how far back the sum reaches)
+    float foam = 1;                 // 0..1: the foam (0 turns it off)
+    float trail = 9;                // seconds the propwash stays white
+    float level = 0;                // the water's mean height (for the spray, which starts on it)
+
+    static constexpr int kSamples = 64;     // emission points in the sum
+
+    // Metres of the curve, and the seconds the boat is under way.
+    float arcLength() const;
+    float duration() const { return speed > 0 ? arcLength() / speed : 0; }
+    // The boat's place (x, z) and heading (a unit vector) at `seconds`; false before `start`. After the end it
+    // stays at the last point, heading as at the end.
+    bool at(double seconds, Vector2* position, Vector2* heading) const;
+    // The emission table the shader reads: sample j was made at age T_j = life (j / 63)^2 (so the last is `life`
+    // old), (x, z, heading x, heading z); a zero heading marks "no boat then". `out` has kSamples entries.
+    void emissions(double seconds, Vector4* out) const;
+    // The wave height (m) and slope (d height / dx, dz) at (x, z) at `seconds`: the CPU twin of the shader's sum.
+    // `foot` is the metres a pixel covers there (0: every wave). Each call builds the table: for many points use
+    // WakeField below.
+    float height(float x, float z, double seconds, float foot = 0) const;
+    Vector2 slope(float x, float z, double seconds, float foot = 0) const;
+    // The wave amplitude scale, metres (from the beam, the Froude number and `strength`).
+    float amplitude() const;
+};
+// A wake at one moment, with its table built: ask it many points.
+class WakeField {
+public:
+    WakeField(const Wake& wake, double seconds);
+    float height(float x, float z, float foot = 0) const { return sum(x, z, foot, nullptr); }
+    Vector2 slope(float x, float z, float foot = 0) const { Vector2 g; sum(x, z, foot, &g); return g; }
+    // The bow position and heading now (false before the start).
+    bool boat(Vector2* position, Vector2* heading) const { *position = pos_; *heading = dir_; return present_; }
+private:
+    float sum(float x, float z, float foot, Vector2* slope) const;
+    Vector4 table_[Wake::kSamples] = {};
+    float life_ = 30, speed_ = 4, beam_ = 1.6f, amp_ = 0.1f;
+    Vector2 pos_{ 0, 0 }, dir_{ 0, 0 };
+    bool present_ = false;
+};
+
+// A stone dropped into the water, in Scene::ripples: at `time` seconds a dip of `strength` metres and about
+// `size` metres across is made at (x, z), and a train of rings spreads out and fades. The rings are worked
+// out from the capillary-gravity dispersion of water, omega^2 = g k + 7.3e-5 k^3: each wave number k travels at its
+// own group speed (long waves faster, then a slowest 0.18 m/s near k = 210, then short waves faster again), so
+// the train is a few crests at a speed of about 0.25 m/s for a 4 cm stone, with the long waves running ahead and the
+// fine ones behind. The rings are round, and fade over `life` seconds. Up to 16 draw (the first ones).
+// The shading's normal carries them; surfaceHeight() includes them.
+struct Ripple {
+    float x = 0, z = 0;             // where it fell
+    float time = 0;                 // when (seconds)
+    float strength = 0.08f;         // depth of the dip, metres
+    float size = 0.04f;             // metres across (the stone)
+    float life = 10;                // seconds until the rings have faded (they are a seventh of their size at life)
+    float level = 0;                // the water's height there (for the splash)
+
+    // Radial wave: the CPU twin of the shader. `age` seconds after the drop, at distance r metres: height (m) and the
+    // slope along the radius. `foot` as in Wake::height.
+    float height(float r, double age, float foot = 0) const;
+    float slope(float r, double age, float foot = 0) const;
+    // The same, from a point (x, z) and the time: height and (dx, dz) slope.
+    float height(float px, float pz, double seconds, float foot) const;
+    Vector2 slope(float px, float pz, double seconds, float foot) const;
+    // The group speed (m/s) of waves of wave number k (rad/m): d omega / dk.
+    static float groupSpeed(float k);
+    // The wave number the train is made of most: where the dip's spectrum, weighted k^1.5, peaks (1.2 / size).
+    float peakWave() const { return 1.22f / std::max(size, 0.005f); }
+};
+
 // ------------------------------------------------------------------ volumetric clouds
 // A layer of real clouds, raymarched through a shell round a planet of Earth's size (centre 6 371 km
 // below the world origin, so the layer curves away to the horizon and is seen from orbit as well as
@@ -1045,6 +1137,8 @@ struct Scene {
     Sky sky;                        // a procedural sky (sky.enabled); replaces `environment`
     Water water;                    // a water surface (water.enabled)
     std::vector<WaterBody> waterBodies;     // lakes, pools and rivers, drawn with the same shader (see WaterBody)
+    std::vector<Wake> wakes;                // boats' Kelvin wakes on the sea and the bodies (see Wake)
+    std::vector<Ripple> ripples;            // stones dropped in: rings on the sea and the bodies (see Ripple)
     Weather weather;               // one wind, clouds, haze... for everything above (weather.enabled)
     Clouds clouds;                  // volumetric clouds (clouds.enabled), drawn after the opaque objects
     Downfall precipitation;         // GPU rain, snow or sleet round the camera (precipitation.enabled)
@@ -1121,6 +1215,38 @@ Water waterOf(const Scene& scene);
 // The look of a water body as drawn: body.look at body.level with the fetch (its own size when 0), and the
 // weather worked in if it is enabled. Its height() and slope() are the waves the shader draws on the body.
 Water waterOf(const Scene& scene, const WaterBody& body);
+// The surface a boat floats on at (x, z) at `seconds`, as drawn: the first water body that contains the point,
+// else the sea (else a flat sheet at y = 0), with the waves, every wake and every ripple added. (The shader's
+// mesh does not carry the wakes and ripples, only its shading does; this is the height a floating thing should
+// follow.) `seconds` is on the water's clock: frameTime(t) / water.fps.
+float surfaceHeight(const Scene& scene, float x, float z, double seconds);
+// Its slope (d height / dx, dz).
+Vector2 surfaceSlope(const Scene& scene, float x, float z, double seconds);
+
+// How a floating object sits on the waves, for ride().
+struct Ride {
+    float length = 4, beam = 1.5f;      // the hull's footprint in metres (along its heading, across it)
+    float draft = 0;                    // metres the object's origin lies below the mean surface under it
+    float heading = NAN;                // degrees about +y (0 = +x, 90 = +z) the hull points to; NaN: from the
+                                        // object's rotation.y as set before (a yaw: its +z shows to (sin y, cos y))
+    float tilt = 1;                     // 0..1: how much of the surface's pitch and roll the hull takes
+    int along = 5, across = 3;          // sample grid over the footprint (2..9 each)
+    int skipWake = -1;                  // >= 0: leave Scene::wakes[skipWake] out of the surface (a boat does not ride its own bow wave)
+};
+// Sets `object`'s height, pitch and roll (and keeps its x, z) from the surface under its footprint: the height is the
+// mean of an along x across grid of samples, and the tilt is the plane fitted through them, so a long hull does
+// not jitter on waves shorter than itself. It works for the sea, a water body, and the wakes and ripples on them
+// (surfaceHeight). The object's +z is its bow; call it from an `up` callback with
+// `seconds = frameTime(t) / fps`. Returns the heading (a unit vector in x, z) it used.
+Vector2 ride(Object3D& object, const Scene& scene, double seconds, const Ride& how = {});
+
+// Bow spray for wake `w`: a fx::Emitter3D in world space (add it at the origin: scene.add(g3d::wakeSpray(w, fps))).
+// Droplets leave the bow for as long as the boat is under way, more of them and higher the faster it goes, and
+// fall back on the water. `fps` is the film's.
+fx::Emitter3D wakeSpray(const Wake& w, float fps = 30);
+// A small splash for ripple `r` (a burst of droplets thrown up where the stone fell).
+fx::Emitter3D splash(const Ripple& r, float fps = 30);
+
 // The clouds as drawn this moment: `c` with the weather's cover and type worked in (unless
 // c.ownWeather or the weather is off). Their drift is c.travel(w, seconds).
 Clouds inWeather(const Clouds& c, const Weather& w);

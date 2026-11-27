@@ -22,6 +22,7 @@ extern "C" void UpdateModelAnimationBones(Model model, ModelAnimation anim, floa
 #include "clouds_glsl.hpp"
 #include "precip_glsl.hpp"
 #include "wet_glsl.hpp"
+#include "wake_glsl.hpp"
 
 namespace rmtn {
 namespace g3d {
@@ -260,7 +261,7 @@ const float WATER_IOR = 1.333;
 // Water::reflections and Water::refraction. reflVP is the viewing camera's view-projection: it finds the pixel of
 // a world point. The reflection image was drawn with the scene mirrored about the water level, in the same
 // view, so a point's mirror image lands on the pixel that shows the point's reflection.
-uniform int reflMode; uniform sampler2D reflTex; uniform mat4 reflVP; uniform vec2 reflSize; uniform float reflDistort;
+uniform int reflMode; uniform sampler2D reflTex; uniform mat4 reflVP; uniform vec2 reflSize; uniform float reflDistort; uniform float reflDistortFull;   // reflDistortFull: Water::reflectionDistort before the sea's height scales it (wakes and ripples bend a calm mirror at once)
 uniform int refrMode; uniform sampler2D refrColor; uniform sampler2D refrDepth; uniform vec4 refrMap; uniform mat4 refrInvVP;
 uniform int reflClip;                      // 1 while the mirrored scene is drawn: what lies under the water is cut away
 
@@ -523,6 +524,14 @@ vec4 waterSurface() {
     float lost = waveLost;
     float dist = length(viewPos - fragPos);
     if (rippleRate > 0.0) g += rippleSlope(fragPos.xz, max(length(dFdx(fragPos.xz)), length(dFdy(fragPos.xz))));    // rain rings
+    float wakeFoam = 0.0, wakeMag = 0.0;
+    if (wakeCount > 0 || rippleCount > 0) {                    // boats' wakes and dropped stones (Scene::wakes, Scene::ripples)
+        float fp = max(length(dFdx(fragPos.xz)), length(dFdy(fragPos.xz)));
+        vec2 g0 = g;
+        if (wakeCount > 0) wakeField(fragPos.xz, fp, g, wakeFoam);
+        if (rippleCount > 0) g += rippleField(fragPos.xz, fp);
+        wakeMag = length(g - g0);
+    }
     bool isBody = waterMode == 2;
     if (isBody && bodyFlow.w > 0.5) g += riverSlope(max(length(dFdx(fragPos.xz)), length(dFdy(fragPos.xz))), lost);
     // A body reads the opaque scene behind its surface: how deep the water is above what lies under it (the
@@ -544,7 +553,7 @@ vec4 waterSurface() {
         edgeFade = smoothstep(0.0, max(bodyShore.x, 1e-3), bedDepth);
         if (bodyFlow.w > 0.5) edgeFade *= smoothstep(0.0, 0.06, min(fragTexCoord.x, 1.0 - fragTexCoord.x));
     }
-    if (isBody && bodyDebug == 2) return vec4(pow(clamp(vec3(0.5 + 2.0 * g.x, 0.5 + 2.0 * g.y, 0.5), 0.0, 1.0), vec3(2.2)), 1.0);
+    if (bodyDebug == 2) return vec4(pow(clamp(vec3(0.5 + 2.0 * g.x, 0.5 + 2.0 * g.y, 0.5), 0.0, 1.0), vec3(2.2)), 1.0);
     vec3 n = normalize(vec3(-g.x, 1.0, -g.y));
     vec3 v = normalize(viewPos - fragPos);
     if (viewPos.y < waterEye) {                      // from below: a window onto the sky, ringed by mirror
@@ -575,7 +584,7 @@ vec4 waterSurface() {
     float reflLod = 0.0;
     if (reflMode == 1) {
         vec3 base = vec3(fragPos.x, waterLevel, fragPos.z);
-        float reach = max(30.0, 1.5 * dist), k = reflDistort / (1.0 + dist / 250.0);
+        float reach = max(30.0, 1.5 * dist), k = mix(reflDistort, reflDistortFull, smoothstep(0.01, 0.04, wakeMag)) / (1.0 + dist / 250.0);
         vec3 rf = reflect(-v, vec3(0.0, 1.0, 0.0));
         vec2 own = camUV(base), flatUV = camUV(mirrorY(base + rf * reach));
         for (int q = 0; q < 3; q++) {
@@ -629,6 +638,7 @@ vec4 waterSurface() {
     }
     float fn = vnoise(fragPos.xz * 2.2 + waterTime * 0.15) * 0.6 + vnoise(fragPos.xz * 7.0) * 0.4;
     float foamA = waterFoam * smoothstep(0.55, 0.85, crest + (fn - 0.5) * 0.5);
+    foamA = max(foamA, wakeFoam);
     vec3 premul = skyRefl + (1.0 - F) * bodyA * body + glint;
     float a = clamp(F + (1.0 - F) * bodyA + dot(glint, vec3(0.3333)), 0.0, 1.0);
     if (refrMode == 1 || isBody) {                          // looks through: an opaque surface that shows what is under it itself
@@ -1039,6 +1049,7 @@ float lightAt(int i, vec3 n, out vec3 l, out float ndl) {
 //@RIPPLE_FS@
 //@WATER_FS@
 //@WATER_BODY_FS@
+//@WAKE_FS@
 //@WATER_SURFACE_FS@
 //@WET_FS@
 // ---- stylised shading
@@ -1677,7 +1688,7 @@ void ensureGpu() {
     const std::string head = std::string(SKIN_VS_HEAD) + FIELD_VS;
     auto splice = [](std::string src) {
         for (const auto& [marker, text] : { std::pair<const char*, const char*>{ "//@WATER_COMMON@", WATER_COMMON },
-                                            { "//@RIPPLE_FS@", RIPPLE_FS }, { "//@WATER_FS@", WATER_FS }, { "//@WATER_BODY_FS@", WATER_BODY_FS }, { "//@WATER_SURFACE_FS@", WATER_SURFACE_FS }, { "//@WET_FS@", WET_FS }, { "//@CUTOUT_FS@", CUTOUT_FS } }) {
+                                            { "//@RIPPLE_FS@", RIPPLE_FS }, { "//@WATER_FS@", WATER_FS }, { "//@WATER_BODY_FS@", WATER_BODY_FS }, { "//@WAKE_FS@", WAKE_FS }, { "//@WATER_SURFACE_FS@", WATER_SURFACE_FS }, { "//@WET_FS@", WET_FS }, { "//@CUTOUT_FS@", CUTOUT_FS } }) {
             const size_t at = src.find(marker);
             if (at != std::string::npos) src.replace(at, std::strlen(marker), text);
         }
@@ -3097,6 +3108,7 @@ PackedWaves packWaves(const Water& w) {
 }
 
 void setWaterLook(const Scene& s, const Camera& cam, const Water& w, float eye, double seconds);
+void setWakeUniforms(const Scene& s, double seconds);
 
 // Everything the lit shader needs of the sea: the waves, the water's fog and the light
 // that reaches under it.
@@ -3153,6 +3165,49 @@ void setWaterLook(const Scene& s, const Camera& cam, const Water& w, float eye, 
     SetShaderValue(lit, K.band, &band, SHADER_UNIFORM_FLOAT);
     const float filterOn = w.filter ? 1.f : 0.f;
     SetShaderValue(lit, K.filter, &filterOn, SHADER_UNIFORM_FLOAT);
+    { const int dbg = s.ground.debug; SetShaderValue(lit, GetShaderLocation(lit, "bodyDebug"), &dbg, SHADER_UNIFORM_INT); }
+    setWakeUniforms(s, seconds);
+}
+
+// Scene::wakes and Scene::ripples as the shader reads them (wake_glsl.hpp): the emission tables of the first four
+// wakes and the first sixteen ripples, at `seconds`. With none, only the counts are set (0).
+void setWakeUniforms(const Scene& s, double seconds) {
+    const Shader& lit = gpu.lit;
+    static const int kWakeMax = 4, kRippleMax = 16;
+    int wakes = 0, ripples = 0;
+    Vector4 a[4] = {}, b[4] = {}, boat[4] = {};
+    static std::vector<Vector4> table;
+    table.assign((size_t)kWakeMax * Wake::kSamples, Vector4{ 0, 0, 0, 0 });
+    for (const Wake& w : s.wakes) {
+        if (wakes >= kWakeMax) break;
+        if (w.path.size() < 2 || w.speed <= 0) continue;
+        w.emissions(seconds, &table[(size_t)wakes * Wake::kSamples]);
+        a[wakes] = { w.length, std::max(w.beam, 0.05f), w.speed, w.amplitude() };
+        b[wakes] = { std::max(w.life, 1.f), std::clamp(w.foam, 0.f, 1.f), std::max(w.trail, 0.f), 0.f };
+        Vector2 p, h;
+        boat[wakes] = w.at(seconds, &p, &h) ? Vector4{ p.x, p.y, h.x, h.y } : Vector4{ 0, 0, 0, 0 };
+        wakes++;
+    }
+    Vector4 ra[16] = {}, rb[16] = {};
+    for (const Ripple& r : s.ripples) {
+        if (ripples >= kRippleMax) break;
+        ra[ripples] = { r.x, r.z, (float)(seconds - r.time), r.strength };
+        rb[ripples] = { r.size, r.life, 0.f, 0.f };
+        ripples++;
+    }
+    auto at = [&](const char* name) { return GetShaderLocation(lit, name); };
+    SetShaderValue(lit, at("wakeCount"), &wakes, SHADER_UNIFORM_INT);
+    SetShaderValue(lit, at("rippleCount"), &ripples, SHADER_UNIFORM_INT);
+    if (wakes) {
+        SetShaderValueV(lit, at("wakeA"), a, SHADER_UNIFORM_VEC4, 4);
+        SetShaderValueV(lit, at("wakeB"), b, SHADER_UNIFORM_VEC4, 4);
+        SetShaderValueV(lit, at("wakeBoat"), boat, SHADER_UNIFORM_VEC4, 4);
+        SetShaderValueV(lit, at("wakeE"), table.data(), SHADER_UNIFORM_VEC4, kWakeMax * Wake::kSamples);
+    }
+    if (ripples) {
+        SetShaderValueV(lit, at("rippleA"), ra, SHADER_UNIFORM_VEC4, 16);
+        SetShaderValueV(lit, at("rippleB"), rb, SHADER_UNIFORM_VEC4, 16);
+    }
 }
 
 // The sea's surface: rings that thicken with distance round a point (the camera, which the
@@ -5087,6 +5142,7 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
                 SetShaderValue(gpu.lit, gpu.W.reflMode, &on, SHADER_UNIFORM_INT);
                 SetShaderValue(gpu.lit, gpu.W.reflSize, &size, SHADER_UNIFORM_VEC2);
                 SetShaderValue(gpu.lit, gpu.W.reflDistort, &distort, SHADER_UNIFORM_FLOAT);
+                { const float full = std::max(bd.look.reflectionDistort, 0.f); SetShaderValue(gpu.lit, GetShaderLocation(gpu.lit, "reflDistortFull"), &full, SHADER_UNIFORM_FLOAT); }
                 bindUnit(REFL_SLOT, rt.color);
             }
             drawItem(it, Pass::Lit);
@@ -5109,6 +5165,7 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
                     SetShaderValue(gpu.lit, gpu.W.reflMode, &on, SHADER_UNIFORM_INT);
                     SetShaderValue(gpu.lit, gpu.W.reflSize, &size, SHADER_UNIFORM_VEC2);
                     SetShaderValue(gpu.lit, gpu.W.reflDistort, &distort, SHADER_UNIFORM_FLOAT);
+                    { const float full = std::max(wview.water.reflectionDistort, 0.f); SetShaderValue(gpu.lit, GetShaderLocation(gpu.lit, "reflDistortFull"), &full, SHADER_UNIFORM_FLOAT); }
                     bindUnit(REFL_SLOT, rt.color);
                 }
                 if (refractOn) {

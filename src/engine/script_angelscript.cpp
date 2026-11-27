@@ -5208,6 +5208,65 @@ g3d::GeometryPtr jsonTerrain(const Json& object) {
     return cache.emplace(key, flora::terrain(jsonArea(object["area"]), resX, resZ)).first->second;
 }
 
+// "wakes": boats' Kelvin wakes and "ripples": stones dropped in, see docs/weather.md. Each wake or ripple may bring its own
+// spray or splash ("spray": true, "splash": true: a particle emitter added to the scene). The water level they sit on
+// (for the spray) defaults to the sea's, else the first water body's.
+void jsonWakesRipples(g3d::Scene& scene,const Json& j,int fps) {
+    const auto& wakes=j["wakes"]; const auto& ripples=j["ripples"];
+    float level=0; if(scene.water.enabled) level=scene.water.level; else if(!scene.waterBodies.empty()) level=scene.waterBodies.front().level;
+    const auto finite=[](double v,double lo,double hi){ return std::isfinite(v)&&v>=lo&&v<=hi; };
+    if(wakes.isArray()) {
+        if(wakes.size()>4) throw std::runtime_error("3D wakes supports at most 4 wakes");
+        for(const auto& d:wakes.asArray()) {
+            if(!d.isObject()) throw std::runtime_error("each wakes entry must be an object");
+            g3d::Wake w; const auto& path=d["path"]; if(!path.isArray()||path.size()<2||path.size()>256) throw std::runtime_error("a wake needs a path of 2..256 [x, z] points");
+            for(const auto& p:path.asArray()) { if(!p.isArray()||p.size()<2) throw std::runtime_error("wakes path points are [x, z]"); w.path.push_back(Vector2{(float)p[0].asNumber(),(float)p[1].asNumber()}); }
+            w.speed=(float)d.num("speed",w.speed); w.start=(float)d.num("start",w.start); w.length=(float)d.num("length",w.length); w.beam=(float)d.num("beam",w.beam);
+            w.strength=(float)d.num("strength",w.strength); w.life=(float)d.num("life",w.life); w.foam=(float)d.num("foam",w.foam); w.trail=(float)d.num("trail",w.trail); w.level=(float)d.num("level",level);
+            if(!finite(w.speed,0.01,60)||!finite(w.start,-1e5,1e5)||!finite(w.length,0.1,400)||!finite(w.beam,0.05,100)||!finite(w.strength,0,20)||!finite(w.life,1,300)||!finite(w.foam,0,1)||!finite(w.trail,0,300)||!std::isfinite(w.level))
+                throw std::runtime_error("wakes speed must be 0.01..60 m/s, length 0.1..400, beam 0.05..100, strength 0..20, life 1..300, foam 0..1, trail 0..300");
+            for(const auto& p:w.path) if(!std::isfinite(p.x)||!std::isfinite(p.y)) throw std::runtime_error("wakes path points must be finite");
+            if(d.flag("spray",false)) scene.add(g3d::wakeSpray(w,(float)fps));
+            scene.wakes.push_back(std::move(w));
+        }
+    }
+    if(ripples.isArray()) {
+        if(ripples.size()>16) throw std::runtime_error("3D ripples supports at most 16 ripples");
+        for(const auto& d:ripples.asArray()) {
+            if(!d.isObject()) throw std::runtime_error("each ripples entry must be an object");
+            g3d::Ripple r; r.x=(float)d.num("x",r.x); r.z=(float)d.num("z",r.z); r.time=(float)d.num("time",r.time); r.strength=(float)d.num("strength",r.strength); r.size=(float)d.num("size",r.size);
+            r.life=(float)d.num("life",r.life); r.level=(float)d.num("level",level);
+            if(!finite(r.x,-1e6,1e6)||!finite(r.z,-1e6,1e6)||!finite(r.time,-1e5,1e5)||!finite(r.strength,0,2)||!finite(r.size,0.005,2)||!finite(r.life,0.5,300)||!std::isfinite(r.level))
+                throw std::runtime_error("ripples strength must be 0..2 m, size 0.005..2 m, life 0.5..300 s");
+            if(d.flag("splash",false)) scene.add(g3d::splash(r,(float)fps));
+            scene.ripples.push_back(r);
+        }
+    }
+}
+// "ride": makes a top-level object float: its height, pitch and roll follow the surface under its footprint every frame
+// (g3d::ride). Keys: length, beam, draft, heading (degrees about +y, 0 = +x), tilt, along, across, and "wake": the index of a
+// wake to follow (the object takes its place and heading from the boat). The object's +z is its bow.
+void jsonRide(g3d::Object3D& object,const Json& d,int fps) {
+    if(!d.isObject()) throw std::runtime_error("ride must be an object");
+    g3d::Ride how; how.length=(float)d.num("length",how.length); how.beam=(float)d.num("beam",how.beam); how.draft=(float)d.num("draft",how.draft); how.tilt=(float)d.num("tilt",how.tilt);
+    if(d.has("heading")) how.heading=(float)d.num("heading",0); how.along=d.integer("along",how.along); how.across=d.integer("across",how.across);
+    const int follow=d.integer("wake",-1);
+    if(!std::isfinite(how.length)||how.length<0||how.length>400||!std::isfinite(how.beam)||how.beam<0||how.beam>400||!std::isfinite(how.draft)||!std::isfinite(how.tilt)||how.along<2||how.along>9||how.across<2||how.across>9||follow<-1||follow>3)
+        throw std::runtime_error("ride length and beam must be 0..400 m, along and across 2..9, wake 0..3");
+    const auto before=object.up;
+    object.up=[before,how,follow,fps](int t,g3d::Object3D& self){
+        if(before) before(t,self);
+        const g3d::Scene* scene=g3d::drawingScene(); if(!scene) return;
+        const float waterFps=scene->water.enabled?scene->water.fps:(!scene->waterBodies.empty()?scene->waterBodies.front().look.fps:(float)fps);
+        const double seconds=rmtn::frameTime(t)/std::max(waterFps,1.f);
+        g3d::Ride r=how;
+        if(follow>=0&&(size_t)follow<scene->wakes.size()) {
+            const g3d::Wake& w=scene->wakes[(size_t)follow]; Vector2 p,h;
+            if(w.at(std::max(seconds,(double)w.start),&p,&h)) { self.position.x=p.x; self.position.z=p.y; r.heading=std::atan2(h.y,h.x)*RAD2DEG; }
+        }
+        r.skipWake=follow; g3d::ride(self,*scene,seconds,r);
+    };
+}
 void addJsonObject(g3d::Scene& scene,g3d::Object3D* parent,const Json& source,int depth,int& count,int fps) {
     if(depth>12 || ++count>512) throw std::runtime_error("3D scene exceeds 512 objects or nesting depth 12"); auto material=jsonMaterial(source["material"]); g3d::Object3D* object=nullptr; int specialized=0; const auto particles=source.str("particles",""); if(!particles.empty()) {
         ++specialized; const auto seed=scriptUnsigned64(source["seed"],1,"particle seed"); fx::Emitter3D emitter; if(particles=="burst") emitter=fx::burst3d(source.integer("count",150)); else if(particles=="sparks") emitter=fx::sparks3d(); else if(particles=="fountain") emitter=fx::fountain3d(); else if(particles=="confetti") emitter=fx::confetti3d((float)source.num("width",6),(float)source.num("depth",6)); else if(particles=="snow") emitter=fx::snow3d((float)source.num("width",10),(float)source.num("depth",10),(float)source.num("height",5)); else if(particles=="rain") emitter=fx::rain3d((float)source.num("width",10),(float)source.num("depth",10),(float)source.num("height",5)); else if(particles=="fire") emitter=fx::fire3d((float)source.num("radius",0.25)); else if(particles=="smoke") emitter=fx::smoke3d((float)source.num("radius",0.2)); else if(particles=="embers") emitter=fx::embers3d((float)source.num("radius",0.4)); else if(particles=="debris") emitter=fx::debris3d(source.integer("count",40)); else throw std::runtime_error("unknown 3D particle preset: "+particles); emitter.seed=seed; emitter.ownWind=source.flag("ownWind",false); if(source.has("particleConfig")) emitter=particleEmitter3D(source["particleConfig"],std::move(emitter)); object=parent?parent->add(emitter):scene.add(emitter); }
@@ -5337,7 +5396,7 @@ return std::string(lab3d::name(k)); }
         auto geometry=jsonGeometry(source); object=parent?parent->add(geometry,material):scene.add(geometry,material); }
  else if(!object) object=parent?parent->add():scene.add(); object->name=source.str("name",""); object->position=jsonV3(source["position"]); object->rotation=jsonV3(source["rotation"]); object->scale=jsonV3(source["scale"],{
 1,1,1}
-); object->visible=source.flag("visible",true); object->modelMaterials=source.flag("modelMaterials",true); object->animation=source.integer("animation",-1); object->animationFrame=(float)source.num("animationFrame",0); object->cullRadius=(float)source.num("cullRadius",object->cullRadius); object->cullCentre=jsonV3(source["cullCentre"],object->cullCentre); if(!std::isfinite(object->cullRadius)||!std::isfinite(object->cullCentre.x)||!std::isfinite(object->cullCentre.y)||!std::isfinite(object->cullCentre.z))        throw std::runtime_error("3D object culling sphere must be finite"); if(!instancesDesc.isNull())object->instances=jsonInstances(object->geometry,instancesDesc); const auto& children=source["children"]; if(children.isArray()) for(const auto& child:children.asArray()) addJsonObject(scene,object,child,depth+1,count,fps); }
+); object->visible=source.flag("visible",true); object->modelMaterials=source.flag("modelMaterials",true); object->animation=source.integer("animation",-1); object->animationFrame=(float)source.num("animationFrame",0); object->cullRadius=(float)source.num("cullRadius",object->cullRadius); object->cullCentre=jsonV3(source["cullCentre"],object->cullCentre); if(!std::isfinite(object->cullRadius)||!std::isfinite(object->cullCentre.x)||!std::isfinite(object->cullCentre.y)||!std::isfinite(object->cullCentre.z))        throw std::runtime_error("3D object culling sphere must be finite"); if(!instancesDesc.isNull())object->instances=jsonInstances(object->geometry,instancesDesc); if(source.has("ride")) { if(parent) throw std::runtime_error("ride works on top-level objects only (put the parts in children of one)"); jsonRide(*object,source["ride"],fps); } const auto& children=source["children"]; if(children.isArray()) for(const auto& child:children.asArray()) addJsonObject(scene,object,child,depth+1,count,fps); }
 // "environment": an image path, {"faces":[+x,-x,+y,-y,+z,-z files]} or {"cross":"cross.png"}.
 void jsonSceneEnvironment(g3d::Scene& scene,const Json& e) {
     if(e.isNull()){scene.environment.clear();return;}
@@ -5480,6 +5539,7 @@ std::shared_ptr<g3d::Scene> buildJsonScene(const Json& j) {
             scene->waterBodies.push_back(std::move(body));
         }
     }
+    jsonWakesRipples(*scene,j,std::clamp(j.integer("fps",30),1,240));
     const auto& lines=j["lines"]; if(lines.isObject()) {
  scene->lines.enabled=lines.flag("enabled",true); scene->lines.color=lines.color("color",scene->lines.color); scene->lines.width=(float)lines.num("width",scene->lines.width); scene->lines.creaseAngle=(float)lines.num("creaseAngle",scene->lines.creaseAngle); scene->lines.depthThreshold=(float)lines.num("depthThreshold",scene->lines.depthThreshold); scene->lines.wobble=(float)lines.num("wobble",scene->lines.wobble); scene->lines.wobbleScale=(float)lines.num("wobbleScale",scene->lines.wobbleScale); scene->lines.boilEvery=lines.integer("boilEvery",scene->lines.boilEvery); }
     const auto& studio=j["studioEnvironment"]; if(studio.isObject()) scene->environmentGenerator=g3d::studioEnvironment(studio.color("top",Color{

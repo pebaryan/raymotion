@@ -370,12 +370,50 @@ flow speed within 15 %, no reset seam over 10 s, a city lake at its level, foam 
 spectral stripes on a lake, the hill mirrored in it, a sea at level 2 equal to level 0 lifted, no change without
 bodies, purity, and the lake reflecting a pole.
 
+## Wakes, ripples and floating objects
+
+Everything here is worked out from the time alone: the wake is not simulated, so a frame is a pure function
+of `t` and a scrubbed or sampled frame equals a played one.
+
+**Wakes** (`Scene::wakes`, `g3d::Wake`): a boat follows `path` (a Catmull-Rom curve through the points) at `speed`
+from second `start`, `length` and `beam` metres. Each earlier moment of the boat shed a ring of deep-water waves
+(omega^2 = g k) that has spread for as long as it has been since. The shader adds up 64 of these rings, with a
+phase window that keeps only the ones that add coherently, so the arms of the Kelvin V lie 19.5 degrees off the
+track at any speed (measured 19.7 and 20.5 degrees at 80 m behind at 4 and 7 m/s), the crests are feathered, the height follows the beam and the Froude number (U / sqrt(g L): little below 0.4, most near hull speed, saturating when planing) times `strength`, the amplitude falls with
+1/sqrt(distance) and with age, and nothing lies ahead of the bow. Waves longer than the transverse ones (2 pi U^2 / g) are
+not made. White foam follows the first crests and the bow's lines (broken into dashes), and a propwash trail follows the stern for
+`trail` seconds: about a beam wide, translucent (alpha at most 0.5), torn into streaks along the track and fading over a few tens of metres. The sum uses twice the 64 emission points (the middle of each pair) so the crests stay smooth, and the hull only cuts waves shorter than about a beam (exp(-(k beam / 12)^2)), so the short divergent crests ("feathers") show along the arms of a boat at displacement speed; a boat at planing speed makes long waves and few of them. The waves change the shading normal only; the mesh is not displaced.
+`g3d::wakeSpray(wake, fps)` is the bow spray, an `fx::Emitter3D` (more droplets and higher the faster the boat goes).
+
+**Ripples** (`Scene::ripples`, `g3d::Ripple`): a stone of `size` metres makes a dip of `strength` metres at `time`.
+The rings are the capillary-gravity dispersion (omega^2 = g k + 7.3e-5 k^3) of that dip: the long waves run ahead, the
+fine ones trail, so the train is a few round crests about 0.25 m/s outward for a 4 cm stone, that fade over `life`
+seconds. `g3d::splash(ripple, fps)` is the splash.
+
+**Floating objects:** `g3d::ride(object, scene, seconds, how)` sets an object's height, pitch and roll from the water
+under it: the mean of a grid of samples over the hull's footprint (`Ride::length`, `beam`, `along`, `across`) for the height and a
+least-squares plane through them for the tilt, less `draft`. A long hull therefore does not jitter on waves shorter than
+itself. It reads the sea, any water body, and the wakes and ripples on them (`surfaceHeight`, `surfaceSlope`).
+Set `Ride::skipWake` so a boat does not ride its own bow wave.
+
+**Limits.** At most 4 wakes and 16 ripples are drawn (the first ones). They shade the surface; they do not move its
+mesh, so a grazing view of a tall wake shows a flat silhouette. The wake is a deep-water theory (no shallow-water
+shoaling). The foam is procedural noise, not a simulation. `ride` reads the surface at a time you give it; a
+script's `ride` does this from the water's `fps`.
+
+Tests (weather ctest, `waterWakes`): the V half angle from the CPU twin at 4 and 7 m/s (19.5 +- 2) and the two
+agreeing within 1.5 degrees; the GPU slope against the CPU twin and nothing ahead of the bow; a ripple's ring radius at the group
+speed (+-20 %), growing, and round (spread under 12 % over 16 directions); a floating box following the footprint mean, its pitch
+taking the slope's sign, and the footprint calming the jitter; the dinghy not moving before a wave can reach it;
+the propwash under 0.25 alpha at 30 m behind and under 2.5 beams wide at 10 m; a lit view (sky reflection, sun to the side, no foam) where the V changes the luma of columns by over 8 levels; at least 5 crests along each arm over 3 boat lengths in a lit oblique view of a 2 m/s boat; purity; and a boat and stone that have not come yet changing nothing (difference 0).
+
 ## Script
 
 The scene descriptor's `clouds` object (docs/scripting.md) takes the `Clouds` fields by name. Its `weather` object takes a `preset`, optionally `to` and
 `amount` to mix towards a second preset, and per-field overrides; `ownWind`, `ownClouds`, `ownLight`
 and `ownFog` are keys on the objects above. `examples/scripts/weather_mix.as` is a meadow with
-grass, trees, a pond and rain, mixed from clear into a storm across the clip.
+grass, trees, a pond and rain, mixed from clear into a storm across the clip. The `wakes` and `ripples` arrays and an
+object's `ride` key are in docs/scripting.md; `examples/scripts/harbour_wake.as` is a launch, a dinghy and a stone in a harbour.
 
 ## Tests
 

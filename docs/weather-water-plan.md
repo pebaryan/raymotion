@@ -295,6 +295,8 @@ billboard particles and splats are not reflected.
 
 ## W8. Wakes, ripples and floating objects
 
+**Done 2026-11-27.** `Scene::wakes` (`g3d::Wake`, the Kelvin V from a windowed sum of deep-water rings, foam, propwash, `wakeSpray`), `Scene::ripples` (`g3d::Ripple`, capillary-gravity rings, `splash`), `g3d::ride` and script `wakes`, `ripples`, `ride`; see "Wakes, ripples and floating objects" in docs/weather.md. Shading only (no mesh displacement), 4 wakes and 16 ripples.
+
 - **Wakes:** a Kelvin wake (a 19.5° V) behind any object moving along a path on the water,
   computed from the path and `t`, not from a simulation. Plus bow spray.
 - **Ripples:** from impacts at given times and places: a stone, a splash, a raindrop field.

@@ -358,6 +358,10 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   a soft shore with lace foam read from the depth behind it, and a two-phase flow map so rivers
   run at their flow speed without a seam. `city::Look::realWater` turns CityJSON water into bodies.
   `examples/scripts/river_valley.as`.
+* Wakes, ripples and floating objects (`Scene::wakes`, `Scene::ripples`, `g3d::ride`; `docs/weather.md`): a Kelvin
+  wake (the 19.5 degree V, feathered crests, foam and a propwash trail, bow spray) worked out from a boat's path and the
+  time alone, round capillary-gravity rings from a dropped stone, and objects that ride the waves on a
+  footprint grid with a draft. `examples/scripts/harbour_wake.as`.
 * GPU rain, snow and sleet at scale (`Scene::precipitation`, `docs/weather.md`): drops from a hash
   in fixed world tiles, streaks as long as the shutter and slanted by the wind, lit by the scene's
   lights, stopped by roofs and trees through a top-down depth map, with splashes where rain lands.
