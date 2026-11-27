@@ -995,6 +995,10 @@ struct Clouds {
     // dense field of sheared towers, kept for comparison.
     // towerVariety 1: every cell has its own seed-driven shape (radius, the anvil's length and width, its turn off the
     // wind, the lumps, its place in the shape noise), so neighbours are not clones. 0: all alike.
+    // Rain shafts (Cumulonimbus with anvil 1): 0..1, the veil of rain that hangs under each storm cell from its base to the ground, slanted
+    // downwind and streaky; 0: none (the default). With a Weather it follows the weather's rain intensity (at least this). The shell then
+    // reaches down to the ground under the cells, which costs a few extra empty march steps.
+    float shafts = 0;
     float anvil = 1;
     float towerVariety = 1;
     struct Storm {

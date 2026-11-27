@@ -127,6 +127,20 @@ by up to 75 per cent as `cover` goes from 0.7 to 1, because the deck blocks it i
 lobes under a heavy cover do not shine white. A thick deck seen from below with the sun high on its far side has a base at
 0.44 of the clear horizon's luminance and nothing brighter than 1.16 of it (before: 0.94 and 1.42; `weather_prefabs` test).
 
+Cumulus bases (W2 base look): the base of a cumulus was a plane (the profile's toe started exactly at `base`) lit by one grey. Now
+`baseLift` (clouds_glsl.hpp) starts the height gradient 100-370 m above `base`, by a noise field (Schneider's noise-modulated height
+gradient), so the base is a field of low lumps and high bays; the detail erosion is up to 2.1 times stronger in the lowest 450 m
+(ragged edge, wisps), and `baseShade` mottles the light under the base (lumps in shade, bays lit, a finer pattern on top). The
+ambient term is `0.07 + 0.83 exp(-0.9 tau) + 0.14 exp(-0.14 tau)` of the optical depth above, so a thin edge is much lighter than a thick
+middle. Cumulus and the cumulus fill only; the Cb tower and anvil are unchanged. Side view lower silhouette rms from a line 1.28 px -> about 3.9 px,
+from-below mottle 0.041 -> 0.069 (`cumulusBases` in weather_tests; `RMTN_BASE_ONLY=1` runs it alone, `RMTN_BASE_TIMING=1` times the presets).
+Storm bases and rain shafts: a storm cell's base is lifted by lumps of 120-610 m (`cbLift`) with scud and fractus (wisps of the detail
+noise, hanging by varied amounts) in the gap under the lifted base. `Clouds::shafts` (0..1, default 0; with a Weather it is at least the
+weather's rain intensity, `rainAt`) hangs one or two streaky, downwind-slanted rain shafts under each cell, from its base to the ground
+(`rainShaft`); the cloud shell then reaches the ground, a few more empty march steps. Test numbers: storm underside mottle 0.087 (flat
+plate) -> 0.212; with shafts on 4 668 px under a cell are darker (luminance 125 against 168), none differ with them off. The cumulus lift
+also carries an undulation a kilometre across (`baseLift`), so bases at range stay wavy.
+
 How it is drawn:
 
 * The noise is baked on the first cloud frame (a few tens of ms, once per process; nothing at prepare
@@ -830,3 +844,7 @@ density has a no-slope toe, `d * d * (2.5 - 1.5 d)`, so edges fade over metres i
 step samples at its own offset, so the step lattice does not ring; the coverage map is read through an eased
 bilinear fetch and at no coarser than level 2.
 
+
+### Deck, stratus and scud (round 3)
+
+Stratus and deck-like layers now have soft cells and rolls (long along the wind), a relieved base and pannus under it; Cb scud uses 3D noise stretched along the wind with gaps, and the Cb body is eroded near its lifted base. Tests: `storm base band` (edge-energy ratio, bound 1.3; note it does not fail on the earlier shader) and `stratus deck from below` (luminance cv after the planar trend is removed, at least 0.08; the earlier sheet gave 0.026, now 0.147).

@@ -131,6 +131,12 @@ time by a seed. A quality setting trades steps for speed, and preview runs at lo
 - **Weather and shadows:** cover, type and drift follow the weather. Ground shadows come from a
   per-frame transmittance map.
 - **Cost:** Film about 13-15 ms at 1080p.
+- **Base look (2026-11-27):** cumulus bases are ragged and mottled, not a lit plane: noise-lifted height gradient (`baseLift`), stronger
+  base erosion, mottled base light (`baseShade`) and a two-rate ambient term; see "Cumulus bases" in docs/weather.md. Test `cumulusBases`.
+  Storm cells get a lumpy lifted base with scud (`cbLift`, `scudBelow`) and rain shafts (`Clouds::shafts`, or the weather's rain);
+  the stratus deck gets wind-long cells and rolls, a relieved base and pannus. Open: the Cb base band is grainy with some bright
+  pendant shapes; the overcast deck may read too mammatus-like; the storm-base anisotropy check does not fail on the old streaks,
+  so it is a guard, not a proof.
 
 Tests (weather_tests, about 4 s):
 - cover from below within 0.08;

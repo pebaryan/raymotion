@@ -87,6 +87,7 @@ uniform vec2 seedOffset;            // where in the tiling maps this seed looks
 uniform int extruded;               // 1: the old density (2D coverage extruded by a height profile), for comparison
 uniform vec2 shearDir;              // the way towers lean (downwind)
 uniform float anvilOn; uniform float towerVariety;     // Clouds::anvil (1: storm cells with an anvil), Clouds::towerVariety
+uniform float shafts; uniform float shellBase;                                          // rain shafts under the storm cells (0: none) and the altitude the shell starts at
 uniform int stormN; uniform vec4 stormD[12]; uniform float stormT[12];     // the storm cells in the pattern frame: x, z, radius, key; and their tops (fraction of the layer)
 uniform float shapeSize; uniform float detailSize; uniform float weatherSize;
 const float SIGMA = 0.045;          // extinction a metre at density 1
@@ -152,7 +153,7 @@ void cloudSegments(vec3 o, vec3 d, out vec2 sa, out vec2 sb) {
     float t0 = max(a0, 0.0), t1 = min(a1, MAXD);
     if (t1 <= t0) return;
     float b0, b1;
-    if (shell(o, d, cloudBase, b0, b1) && b1 > 0.0) {
+    if (shell(o, d, shellBase, b0, b1) && b1 > 0.0) {
         sa = vec2(t0, min(t1, b0));
         float g0, g1;
         bool ground = shell(o, d, 0.0, g0, g1) && g1 > 1.0;
@@ -265,7 +266,7 @@ float profileOf(float hf, float depthv, float wg) {
 }
 // The shape noise, remapped by a gate, a height profile and the cloud's own coverage, then eroded; shared by the
 // cumulonimbus storm cells and the cumulus between them.
-float cloudBody(vec3 pos, float hf, float covL, float prof, float plate, float core, float gainK, bool fine) {
+float cloudBody(vec3 pos, float hf, float covL, float prof, float plate, float core, float gainK, bool fine, float rag) {
     vec3 pq = pos + slide;
     if (fine && detailAmt > 0.0) {                                                                             // curl: billows
         vec3 cv = atlasTap(detailTex, (pos + slide * 2.5) / (detailSize * 4.0) + vec3(0.21, 0.64, 0.05), 32.0, 34.0, 8.0, vec2(272.0, 136.0)).rgb - 0.5;
@@ -282,16 +283,74 @@ float cloudBody(vec3 pos, float hf, float covL, float prof, float plate, float c
         vec3 d2 = atlasTap(detailTex, (pos + slide * 2.5) / (detailSize * 0.3) + vec3(0.61, 0.83, 0.29), 32.0, 34.0, 8.0, vec2(272.0, 136.0)).rgb;   // a finer octave: billows close up
         float df = mix(ds.r * 0.625 + ds.g * 0.25 + ds.b * 0.125, d2.r * 0.6 + d2.g * 0.4, 0.4);
         df = clamp(0.55 + (df - 0.55) * mix(1.0, 5.0, gNear), 0.0, 1.0);                                       // close up the erosion needs contrast: the sum of Worley octaves is a flat grey, and a cloud 1.5 km away would show none of it
-        float e = mix(df, 1.0 - df, clamp(hf * 4.0, 0.0, 1.0)) * detailAmt * 0.85 * (1.0 - 0.6 * plate);       // wispy bottoms: inverted near the base
+        float e = mix(df, 1.0 - df, clamp(hf * 4.0, 0.0, 1.0)) * detailAmt * 0.85 * (1.0 - 0.6 * plate) * (1.0 + (rag > 0.0 ? 1.1 * (1.0 - smoothstep(0.0, 450.0, hf * rag)) : 0.0));       // wispy bottoms: inverted near the base, and strongest there (the base is eaten into shreds and lumps)
+        e = min(e, 0.92);
         d = clamp((d - e) / (1.0 - e), 0.0, 1.0);
     }
     d = d * d * (2.5 - 1.5 * d);                                                                              // a toe with no slope at the boundary: the edge fades over metres, not a pixel
     return d * densityScale * gainK;
 }
+)" R"(
+// How far the base of a cumulus is lifted at this place, in metres (Schneider's height gradient, modulated by noise): the
+// condensation level is level, but the cloud above it is eroded unevenly, so the base is a field of low lumps and high bays, not a plane. The
+// height gradient then starts at the lift rather than at 0, and the profile's soft toe makes the edge of the base a ramp over tens of metres.
+float baseBay(vec3 pos, float scale) {
+    vec4 s = atlasTap(shapeTex, vec3(pos.x + slide.x, 0.0, pos.z + slide.z) / (shapeSize * scale) + vec3(0.13, 0.5, 0.71), 128.0, 130.0, 16.0, vec2(2080.0, 1040.0));
+    float lump = s.r * 0.45 + s.g * 0.35 + s.b * 0.2;                                                          // 0..1, mean about 0.5
+    return smoothstep(0.47, 0.75, lump);                                                                       // 0 in the pendant lumps, 1 in the bays
+}
+float baseLift(vec3 pos, float h) {
+    if (h > 700.0) return 0.0;
+    float bay = baseBay(pos, 0.55);
+    return 100.0 + 200.0 * bay + 70.0 * baseBay(pos, 0.22);                                                   // lumps, and an undulation a kilometre across that still shows at range
+}
+// The light of a cumulus underside, mottled: the pendant lumps hang in their own shade, the bays between them catch the light of the sky,
+// and a finer pattern breaks up each. 1 above 700 m over the base.
+float baseShade(vec3 pos, float h) {
+    if (h > 700.0) return 1.0;
+    float m = mix(0.45, 1.2, baseBay(pos, 0.55)) * mix(0.75, 1.1, baseBay(pos, 0.22)) * mix(0.74, 1.1, baseBay(pos + vec3(311.0, 0.0, 97.0), 0.13));
+    return mix(m, 1.0, smoothstep(150.0, 700.0, h));
+}
+// The base of a storm cell is lowered and lumpy: lumps of hundreds of metres, in metres above the layer's base.
+float cbLift(vec3 pos) {
+    return 120.0 + 330.0 * baseBay(pos, 0.30) + 70.0 * baseBay(pos + vec3(57.0, 0.0, 301.0), 0.17);
+}
+float hash1(float n) { return fract(sin(n * 12.9898) * 43758.5453); }
+// Rain shafts: below a storm cell's base, one or two columns of fine rain, slanted downwind, streaky, thinning to the ground. `q` is in the
+// pattern's frame. Extinction is small (a veil, not a wall), and the sun and the sky dim it by the cloud above.
+float rainShaft(vec2 q, float alt) {
+    float v = cloudBase - alt, sum = 0.0;
+    for (int i = 0; i < 12; i++) {
+        if (i >= stormN) break;
+        vec4 S = stormD[i];
+        for (int k = 0; k < 2; k++) {
+            float a = 6.2831853 * hash1(S.w + 7.31 * float(k)), rr = S.z * (0.15 + 0.35 * hash1(S.w * 1.7 + 3.0 * float(k)));
+            vec2 c = S.xy + vec2(cos(a), sin(a)) * rr + shearDir * (v * 0.35);
+            float rs = S.z * (0.22 + 0.12 * hash1(S.w * 2.3 + float(k)));
+            float w = 1.0 - smoothstep(0.25 * rs, rs, length(q - c));
+            sum += w * (0.45 + 0.9 * baseBay(vec3(q.x, 0.0, q.y), 0.045));
+        }
+    }
+    return sum * shafts * 0.03 * mix(1.0, 0.45, smoothstep(0.0, 900.0, v)) * smoothstep(0.0, 40.0, alt);
+}
+// Scud, fractus and pannus: torn puffs in the gap under a lifted base, from 3D noise sampled near-isotropically (the height is stretched
+// so a puff is flat) and long along the wind, at varied heights, with gaps through which the darker base shows. `gate` is the cloud above.
+float scudBelow(vec3 pb, float hm, float lift, float gate, float strength) {
+    if (hm > lift + 120.0 || gate <= 0.0) return 0.0;
+    vec2 wd = shearDir, pd = vec2(-wd.y, wd.x);
+    vec3 pq = vec3(dot(pb.xz, wd) * 0.5, pb.y * 1.6, dot(pb.xz, pd) * 0.8);
+    vec3 dq = atlasTap(detailTex, (pq + slide * 2.5) / (detailSize * 1.7) + vec3(0.2, 0.7, 0.4), 32.0, 34.0, 8.0, vec2(272.0, 136.0)).rgb;
+    float gap = baseBay(pb, 0.2), thr = 0.50 + 0.14 * (1.0 - gap);
+    float wisp = smoothstep(thr, thr + 0.2, dq.r * 0.6 + dq.g * 0.4);
+    float env = smoothstep(0.0, 40.0, hm) * (1.0 - smoothstep(0.25 * lift, lift + 120.0, hm));
+    return gate * env * wisp * strength;
+}
 // Density 0..1 (times densityScale) at p, altitude alt. `fine` adds the curl and the detail erosion.
 float cloudDensity(vec3 p, float alt, bool fine) {
+    float thickM = cloudTop - cloudBase;
     if (extruded == 1) return cloudDensityOld(p, alt, fine);
     float hf = (alt - cloudBase) / (cloudTop - cloudBase);
+    if (hf <= 0.0 && shafts > 0.0 && cloudType == 2 && anvilOn > 0.5 && alt > 0.0) return rainShaft(p.xz - windOffset, alt);
     if (hf <= 0.0 || hf >= 1.0) return 0.0;
     bool storms = cloudType == 2 && anvilOn > 0.5;
     vec2 lean = cloudType == 2 ? shearDir * (hf * hf * (storms ? 0.0 : 0.25) * (cloudTop - cloudBase)) : vec2(0.0);   // towers lean downwind
@@ -310,11 +369,15 @@ float cloudDensity(vec3 p, float alt, bool fine) {
         float gs = cbShape(q2 - windOffset, hf, noff, axis, ctr, plate, topHf);
         float dS = 0.0;
         if (gs > 0.02) {
-            float prof = smoothstep(0.0, 0.05, hf) * (1.0 - smoothstep(topHf - 0.05 - 0.10 * (1.0 - plate) * clamp(length(q2 - windOffset - ctr) / 7000.0, 0.0, 1.0), topHf, hf));   // a domed top
+            vec3 pb = vec3(q2.x - windOffset.x, alt, q2.y - windOffset.y);
+            float lift = hf * thickM < 1500.0 ? cbLift(pb) * (1.0 - 0.25 * gFar) : 0.0;
+            float prof = smoothstep(0.0, 0.05, hf - lift / thickM) * (1.0 - smoothstep(topHf - 0.05 - 0.10 * (1.0 - plate) * clamp(length(q2 - windOffset - ctr) / 7000.0, 0.0, 1.0), topHf, hf));   // a domed top
             vec3 pos = vec3(q2.x - windOffset.x, alt, q2.y - windOffset.y) + noff * shapeSize;
             vec2 rel = pos.xz - ctr;
             pos.xz -= axis * dot(rel, axis) * (0.62 * plate);                                                  // the anvil's texture is stretched downwind: fibres
-            dS = cloudBody(pos, hf, gs, prof, plate, (1.0 - plate) * smoothstep(0.55, 1.0, gs) * 0.8, 1.5, fine);
+            dS = cloudBody(pos, hf, gs, prof, plate, (1.0 - plate) * smoothstep(0.55, 1.0, gs) * 0.8, 1.5, fine, plate < 0.5 ? thickM * 0.12 : 0.0);
+            float hm = hf * thickM;
+            if (plate < 0.5) dS = max(dS, scudBelow(pb, hm, lift, gs, 0.4 * densityScale));      // scud and fractus under the lifted base
         }
         float hfc = hf / 0.22, dF = 0.0;                                                                       // the cumulus fill: the lowest fifth of the layer
         if (hfc < 1.0) {
@@ -322,21 +385,37 @@ float cloudDensity(vec3 p, float alt, bool fine) {
             float gF = clamp((fcov * 1.55 - wv.r) / 0.55, 0.0, 1.0);
             float dpF = clamp((fcov - wv.r) / max(fcov, 0.05), 0.0, 1.0);
             float ht = 0.3 + 0.7 * dpF * (0.7 + 0.3 * wv.g), r = clamp(1.0 - hfc / ht, 0.0, 1.0);
-            float profF = smoothstep(0.0, 0.12, hfc) * r * (2.0 - r);
+            float hfl = hfc;
+            float profF = smoothstep(0.0, 0.12, hfl) * r * (2.0 - r);
             float covF = gF * (1.0 - 0.45 * smoothstep(0.15, 1.0, hfc));
-            if (covF > 0.02 && profF > 0.0) dF = cloudBody(vec3(q2.x - windOffset.x, alt, q2.y - windOffset.y), hfc, covF, profF, 0.0, 0.0, 0.8, fine);
+            if (covF > 0.02 && profF > 0.0) dF = cloudBody(vec3(q2.x - windOffset.x, alt, q2.y - windOffset.y), hfc, covF, profF, 0.0, 0.0, 0.8, fine, thickM * 0.22);
         }
         return max(dS, dF);
     }
-    float prof = profileOf(hf, depthv, wv.g);
+    float hfp = hf;
+    if (cloudType == 0) hfp = hf - baseLift(vec3(q2.x - windOffset.x, alt, q2.y - windOffset.y), hf * thickM) * (1.0 - 0.25 * gFar) / thickM;   // a ragged base (far away the lumps are sub-pixel)
+    float stratLift = 0.0, scud = 0.0;
+    vec3 pw = vec3(q2.x - windOffset.x, alt, q2.y - windOffset.y);
+    if (cloudType == 1) {
+        // A stratus or nimbostratus sheet is not even: soft cells and rolls (long along the wind), so the thickness and the light under it vary
+        // and show in perspective; the base is relieved; pannus (scud) hangs under it.
+        vec2 wd = shearDir, pd = vec2(-wd.y, wd.x);
+        float cells = baseBay(vec3(dot(pw.xz, wd) * 0.3, 0.0, dot(pw.xz, pd)), 0.45);
+        float finer = baseBay(pw + vec3(713.0, 0.0, 211.0), 0.12);
+        gain *= mix(0.45, 1.3, cells) * mix(0.8, 1.12, finer);
+        stratLift = (30.0 + 170.0 * baseBay(pw, 0.3)) * (1.0 - 0.25 * gFar);
+        hfp = hf - stratLift / thickM;
+        scud = scudBelow(pw, hf * thickM, stratLift, g, 0.5 * densityScale);
+    }
+    float prof = profileOf(hfp, depthv, wv.g);
     float covL = g * (1.0 - narrow * smoothstep(0.15, 1.0, hf)) * (cloudType == 3 ? 0.92 : 1.0);              // the higher, the narrower: rounded tops
     if (cloudType == 2) {
         gain = 1.5; narrow = 0.0;
         float rn = cbRn(q2 - windOffset);
         covL = clamp((cbRadius(hf) - rn) / 0.9, 0.0, 1.0);
     }
-    if (covL <= 0.02 || prof <= 0.0) return 0.0;
-    return cloudBody(vec3(q2.x - windOffset.x, alt, q2.y - windOffset.y), hf, covL, prof, 0.0, 0.0, gain, fine);
+    if (covL <= 0.02 || prof <= 0.0) return scud;
+    return max(scud, cloudBody(pw, hf, covL, prof, 0.0, 0.0, gain, fine, cloudType == 0 ? thickM : 0.0));
 }
 float ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
 )";
@@ -440,9 +519,10 @@ void march(vec3 o, vec3 d, vec2 seg, float jit, float cosT, inout vec3 L, inout 
         float powder = 1.0 - exp(-rho * 7.0);
         sunSum *= mix(1.0, powder, 0.55 * (1.0 - max(cosT, 0.0)));
         float tauU = upDepth(p, alt);
-        vec3 amb = mix(ambBot, ambTop, smoothstep(0.0, 1.0, pow(hf, 0.7))) * (0.10 + 0.90 * exp(-tauU * 0.9));
+        vec3 amb = mix(ambBot, ambTop, smoothstep(0.0, 1.0, pow(hf, 0.7))) * (0.07 + 0.83 * exp(-tauU * 0.9) + 0.14 * exp(-tauU * 0.14));   // dark under the thick middle (much cloud above), light where it thins: two rates, so a base is not one grey
         amb *= 1.0 + 0.9 * exp(-rho * 3.0);                                              // thin spots let the sky light through: a lumpy base is lighter where it thins
         vec3 S = sunE * sunSum + amb;
+        if (cloudType == 0) S *= baseShade(vec3(p.x - windOffset.x, 0.0, p.z - windOffset.y), alt - cloudBase);
         if (flashCol.r + flashCol.g + flashCol.b > 0.0) {
             vec3 dp = p - flashPos;
             S += flashCol / (1.0 + dot(dp, dp) / (flashRadius * flashRadius));

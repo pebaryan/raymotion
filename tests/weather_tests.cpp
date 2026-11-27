@@ -7703,11 +7703,436 @@ static void cameraWeather() {
     lensTiming();
 }
 
+// ---------------------------------------------------------------- the base of a cumulus (W2, base look)
+// Real cumulus bases are level but ragged (small lumps, pendant bulges) and unevenly lit (dark under the thick middle, light at the thin
+// edge). A flat cut with one grey shade failed both. (a) From the side at the height of the base, the lowest cloud pixel of each column is
+// a line only if the base is a plane: the rms of its residual from a straight line, over the middle 70% of a cloud's width. (b) From below,
+// the luminance over the base, after a planar trend is removed, varies (stddev/mean), and the centre of a thick cloud is darker than its rim.
+static void fitLine(const std::vector<float>& ys, const std::vector<int>& xs, float* a, float* b) {
+    double sx = 0, sy = 0, sxx = 0, sxy = 0; const double n = (double)xs.size();
+    for (size_t i = 0; i < xs.size(); i++) { sx += xs[i]; sy += ys[i]; sxx += (double)xs[i] * xs[i]; sxy += (double)xs[i] * ys[i]; }
+    const double den = n * sxx - sx * sx;
+    *a = den != 0 ? (float)((n * sxy - sx * sy) / den) : 0.f;
+    *b = (float)((sy - *a * sx) / n);
+}
+static float baseRagged(const char* tag, int* clouds = nullptr) {
+    constexpr int W = 960, H = 540;
+    std::vector<float> r;
+    for (int cam = 0; cam < 8; cam++) {
+        const float x = (cam - 3.5f) * 2500.f;
+        auto mk = [&](bool on) {
+            auto s = filmClouds({ x, 1500, 0 }, { x, 1500, -400 }, 0.3f, g3d::CloudType::Cumulus, on, 1500, 3500, 40, false);
+            return look(s, W, H, 0);
+        };
+        Image on = mk(true), off = mk(false);
+        if (cam == 3) dump((std::string("cloud-base-side-") + tag + ".png").c_str(), on);
+        const std::vector<Blob> bl = blobsOf(cloudMask(on, off), W, H);
+        for (const Blob& b : bl) {
+            if (b.x1 - b.x0 < 150 || b.area < 4000) continue;
+            std::vector<int> low((size_t)W, -1);
+            for (int j : b.px) low[(size_t)(j % W)] = std::max(low[(size_t)(j % W)], j / W);
+            const int w = b.x1 - b.x0 + 1, x0 = b.x0 + (int)(0.15f * w), x1 = b.x1 - (int)(0.15f * w);
+            std::vector<int> xs; std::vector<float> ys;
+            for (int c = x0; c <= x1; c++) if (low[(size_t)c] >= 0) { xs.push_back(c); ys.push_back((float)low[(size_t)c]); }
+            if (xs.size() < 100) continue;
+            float a, bb; fitLine(ys, xs, &a, &bb);
+            double ss = 0;
+            for (size_t i = 0; i < xs.size(); i++) { const double e = ys[i] - (a * xs[i] + bb); ss += e * e; }
+            r.push_back((float)std::sqrt(ss / (double)xs.size()));
+        }
+        UnloadImage(on); UnloadImage(off);
+    }
+    if (clouds) *clouds = (int)r.size();
+    if (r.empty()) return 0.f;
+    std::sort(r.begin(), r.end());
+    return r[r.size() / 2];
+}
+struct BaseShade { float cv = 0, mottle = 0, centreOverRim = 99; int clouds = 0; };
+static BaseShade baseShade(const char* tag) {
+    constexpr int W = 640, H = 360;
+    std::vector<float> cvs, ratios, mott;
+    for (int cam = 0; cam < 10; cam++) {
+        const float x = (cam - 4.5f) * 2200.f;
+        auto mk = [&](bool on) { return look(filmClouds({ x, 2, 0 }, { x, 2000, -100 }, 0.55f, g3d::CloudType::Cumulus, on, 1500, 3500, 100, false), W, H, 0); };
+        Image on = mk(true), off = mk(false);
+        if (cam == 4) dump((std::string("cloud-base-below-") + tag + ".png").c_str(), on);
+        const std::vector<char> mask = cloudMask(on, off, 60);
+        const std::vector<float> L = lumaOf(on);
+        for (const Blob& b : blobsOf(mask, W, H)) {
+            if (b.area < 6000) continue;
+            // distance to the rim by repeated erosion
+            std::vector<int> dist((size_t)W * H, 0);
+            std::vector<char> cur = mask;
+            for (int it = 1; it <= 60; it++) {
+                std::vector<char> nxt = cur; bool any = false;
+                for (int j : b.px) {
+                    if (!cur[(size_t)j]) continue;
+                    const int jx = j % W, jy = j / W;
+                    const bool edge = (jx > 0 && !cur[(size_t)j - 1]) || (jx < W - 1 && !cur[(size_t)j + 1]) || (jy > 0 && !cur[(size_t)j - W]) || (jy < H - 1 && !cur[(size_t)j + W]);   // the frame's edge is not a rim
+                    if (edge) nxt[(size_t)j] = 0; else { dist[(size_t)j] = it; any = true; }
+                }
+                cur = nxt;
+                if (!any) break;
+            }
+            int dmax = 0;
+            for (int j : b.px) dmax = std::max(dmax, dist[(size_t)j]);
+            if (dmax < 16) continue;
+            // planar trend by least squares on (1, x, y)
+            double A[3][3] = {}, rhs[3] = {};
+            for (int j : b.px) { const double v[3] = { 1.0, (double)(j % W) / W, (double)(j / W) / H }; for (int p = 0; p < 3; p++) { rhs[p] += v[p] * L[(size_t)j]; for (int q = 0; q < 3; q++) A[p][q] += v[p] * v[q]; } }
+            for (int p = 0; p < 3; p++) for (int q = p + 1; q < 3; q++) { const double f = A[q][p] / A[p][p]; for (int k = p; k < 3; k++) A[q][k] -= f * A[p][k]; rhs[q] -= f * rhs[p]; }
+            double co[3];
+            for (int p = 2; p >= 0; p--) { double s = rhs[p]; for (int k = p + 1; k < 3; k++) s -= A[p][k] * co[k]; co[p] = s / A[p][p]; }
+            double mean = 0, ss = 0;
+            for (int j : b.px) mean += L[(size_t)j];
+            mean /= b.area;
+            for (int j : b.px) { const double e = L[(size_t)j] - (co[0] + co[1] * (j % W) / W + co[2] * (j / W) / H); ss += e * e; }
+            cvs.push_back((float)(std::sqrt(ss / b.area) / std::max(mean, 1.0)));
+            double ci = 0, ri = 0; int nc = 0, nr = 0;
+            for (int j : b.px) {
+                if (dist[(size_t)j] >= (int)(0.6f * dmax)) { ci += L[(size_t)j]; nc++; }
+                else if (dist[(size_t)j] >= 2 && dist[(size_t)j] <= 8) { ri += L[(size_t)j]; nr++; }
+            }
+            if (nc > 50 && nr > 50) ratios.push_back((float)((ci / nc) / (ri / nr)));
+            // mottling: what is left of the luminance once a 19 px box average is taken out, inside the rim (the rim's own ramp is not texture)
+            double ms = 0, mm = 0; int nm = 0;
+            for (int j : b.px) {
+                if (dist[(size_t)j] < 10) continue;
+                const int jx = j % W, jy = j / W;
+                double s = 0; int n = 0;
+                for (int dy = -9; dy <= 9; dy++) for (int dx = -9; dx <= 9; dx++) {
+                    const int qx = jx + dx, qy = jy + dy;
+                    if (qx < 0 || qy < 0 || qx >= W || qy >= H || !mask[(size_t)qy * W + qx]) continue;
+                    s += L[(size_t)qy * W + qx]; n++;
+                }
+                const double e = L[(size_t)j] - s / n;
+                ms += e * e; mm += L[(size_t)j]; nm++;
+            }
+            if (nm > 200) mott.push_back((float)(std::sqrt(ms / nm) / std::max(mm / nm, 1.0)));
+        }
+        UnloadImage(on); UnloadImage(off);
+    }
+    BaseShade out;
+    out.clouds = (int)cvs.size();
+    std::sort(cvs.begin(), cvs.end()); std::sort(ratios.begin(), ratios.end()); std::sort(mott.begin(), mott.end());
+    if (!mott.empty()) out.mottle = mott[mott.size() / 2];
+    if (!cvs.empty()) out.cv = cvs[cvs.size() / 2];
+    if (!ratios.empty()) out.centreOverRim = ratios[ratios.size() / 2];
+    return out;
+}
+// The underside as the camera on the ground sees it (about 10 degrees up, clouds a few km away): the lowest third of each cloud's
+// silhouette. stddev/mean of its luminance after a planar trend, and the same after a 9 px box average (the fine mottle).
+struct BandShade { float cv = 0, mottle = 0; int clouds = 0; };
+static BandShade bandShade(const char* tag) {
+    constexpr int W = 960, H = 540;
+    std::vector<float> cvs, mott;
+    for (int cam = 0; cam < 8; cam++) {
+        const float x = (cam - 3.5f) * 2500.f;
+        auto mk = [&](bool on) { return look(filmClouds({ x, 2, 0 }, { x, 2 + 450, -2500 }, 0.4f, g3d::CloudType::Cumulus, on, 1500, 3500, 60, false), W, H, 0); };
+        Image on = mk(true), off = mk(false);
+        if (cam == 3) dump((std::string("cloud-base-band-") + tag + ".png").c_str(), on);
+        const std::vector<char> mask = cloudMask(on, off, 60);
+        const std::vector<float> L = lumaOf(on);
+        for (const Blob& b : blobsOf(mask, W, H)) {
+            if (b.area < 8000 || b.y1 - b.y0 < 60) continue;
+            const int yCut = b.y1 - (int)(0.35f * (b.y1 - b.y0));
+            std::vector<int> px;
+            for (int j : b.px) if (j / W >= yCut && j / W < H - 1) px.push_back(j);
+            if (px.size() < 3000) continue;
+            double A[3][3] = {}, rhs[3] = {}, mean = 0;
+            for (int j : px) { const double v[3] = { 1.0, (double)(j % W) / W, (double)(j / W) / H }; mean += L[(size_t)j]; for (int p = 0; p < 3; p++) { rhs[p] += v[p] * L[(size_t)j]; for (int q = 0; q < 3; q++) A[p][q] += v[p] * v[q]; } }
+            mean /= (double)px.size();
+            for (int p = 0; p < 3; p++) for (int q = p + 1; q < 3; q++) { const double f = A[q][p] / A[p][p]; for (int k = p; k < 3; k++) A[q][k] -= f * A[p][k]; rhs[q] -= f * rhs[p]; }
+            double co[3];
+            for (int p = 2; p >= 0; p--) { double s = rhs[p]; for (int k = p + 1; k < 3; k++) s -= A[p][k] * co[k]; co[p] = s / A[p][p]; }
+            double ss = 0, ms = 0;
+            for (int j : px) {
+                const int jx = j % W, jy = j / W;
+                const double e = L[(size_t)j] - (co[0] + co[1] * jx / W + co[2] * jy / H);
+                ss += e * e;
+                double s = 0; int n = 0;
+                for (int dy = -4; dy <= 4; dy++) for (int dx = -4; dx <= 4; dx++) {
+                    const int qx = jx + dx, qy = jy + dy;
+                    if (qx < 0 || qy < 0 || qx >= W || qy >= H || !mask[(size_t)qy * W + qx]) continue;
+                    s += L[(size_t)qy * W + qx]; n++;
+                }
+                const double m = L[(size_t)j] - s / n;
+                ms += m * m;
+            }
+            cvs.push_back((float)(std::sqrt(ss / (double)px.size()) / std::max(mean, 1.0)));
+            mott.push_back((float)(std::sqrt(ms / (double)px.size()) / std::max(mean, 1.0)));
+        }
+        UnloadImage(on); UnloadImage(off);
+    }
+    BandShade out;
+    out.clouds = (int)cvs.size();
+    std::sort(cvs.begin(), cvs.end()); std::sort(mott.begin(), mott.end());
+    if (!cvs.empty()) { out.cv = cvs[cvs.size() / 2]; out.mottle = mott[mott.size() / 2]; }
+    return out;
+}
+// The lowest cloud pixel of each column over the middle 70% of every wide blob, and the rms of its residual from a straight line (px), the
+// median over the blobs. `mk(view, on)` renders one view; `clouds` gets the number of blobs measured.
+static float lowerLineRms(const std::function<Image(int, bool)>& mk, int views, int W, int H, int thresh, int minWidth, const char* dumpAs, int* clouds, int mode = 0) {
+    std::vector<float> r;
+    for (int v = 0; v < views; v++) {
+        Image on = mk(v, true), off = mk(v, false);
+        if (v == 0 && dumpAs) dump(dumpAs, on);
+        for (const Blob& b : blobsOf(cloudMask(on, off, thresh), W, H)) {
+            if (b.x1 - b.x0 < minWidth || b.area < 3000) continue;
+            std::vector<int> low((size_t)W, -1);
+            for (int j : b.px) low[(size_t)(j % W)] = std::max(low[(size_t)(j % W)], j / W);
+            const int w = b.x1 - b.x0 + 1, x0 = b.x0 + (int)(0.15f * w), x1 = b.x1 - (int)(0.15f * w);
+            std::vector<int> xs; std::vector<float> ys;
+            for (int c = x0; c <= x1; c++) if (low[(size_t)c] >= 0) { xs.push_back(c); ys.push_back((float)low[(size_t)c]); }
+            if (xs.size() < 80) continue;
+            double ss = 0; size_t cnt = 0;
+            if (mode == 2) {                                               // the columns at the level of the base only (a tower is much taller than its base, an anvil is higher): their spread
+                int mx = 0;
+                for (size_t i = 0; i < ys.size(); i++) mx = std::max(mx, (int)ys[i]);
+                int flat = 0;                                              // the share of base columns NOT on the plateau (within 2 px of the lowest row): a plate has none
+                for (size_t i = 0; i < ys.size(); i++) if (ys[i] >= mx - 30) { cnt++; if (ys[i] >= mx - 2) flat++; }
+                if (cnt >= 100) { ss = (double)(cnt - (size_t)flat) / (double)cnt; ss = ss * ss * (double)cnt; } else cnt = 0;      // so that the sqrt of ss / cnt is that share
+            } else if (mode == 1) {                                        // what is left once a 31 px running mean is taken out: the small lumps
+                for (size_t i = 15; i + 15 < xs.size(); i++) {
+                    double m = 0;
+                    for (size_t k = i - 15; k <= i + 15; k++) m += ys[k];
+                    const double e = ys[i] - m / 31.0; ss += e * e; cnt++;
+                }
+            } else {
+                float a, bb; fitLine(ys, xs, &a, &bb);
+                for (size_t i = 0; i < xs.size(); i++) { const double e = ys[i] - (a * xs[i] + bb); ss += e * e; cnt++; }
+            }
+            if (cnt) r.push_back((float)std::sqrt(ss / (double)cnt));
+        }
+        UnloadImage(on); UnloadImage(off);
+    }
+    if (clouds) *clouds = (int)r.size();
+    if (r.empty()) return 0.f;
+    std::sort(r.begin(), r.end());
+    return r[r.size() / 2];
+}
+// Cumulus at range: from the ground, a few km away, the lumps are under a pixel; the base must still be a wavy, uneven line, not a ruler.
+static float midRangeRms(int* n) {
+    return lowerLineRms([](int v, bool on) {
+        const float x = (v - 3.5f) * 2500.f;
+        return look(filmClouds({ x, 2, 0 }, { x, 2 + 450, -2500 }, 0.4f, g3d::CloudType::Cumulus, on, 1500, 3500, 60, false), 960, 540, 0);
+    }, 8, 960, 540, 60, 100, "cloud-base-mid.png", n, 1);
+}
+// A storm cell seen from the side at the height of its base, 38 km away: its lower silhouette (shreds included) is not a plate.
+static g3d::ScenePtr cbScene(float cx, float x, unsigned seed, bool on, float camY, float camZ, Vector3 target, float fov, float shafts) {
+    auto s = filmClouds({ cx, camY, camZ }, target, 0.f, g3d::CloudType::Cumulonimbus, on, 1200, 11000, fov, false);
+    s->clouds.storms = { g3d::Clouds::Storm{ x + 977.f * (float)seed, 0.f, 5500.f, 10500.f } };
+    s->clouds.haze = 0;
+    s->clouds.seed = seed;
+    s->clouds.shafts = shafts;
+    return s;
+}
+static float cbBaseRms(int* n) {
+    return lowerLineRms([](int v, bool on) {
+        const unsigned seed = (unsigned)(v % 3) + 1;
+        const float x = (float)(v / 3 - 1) * 3000.f, cx = x + 977.f * (float)seed + 4000.f;       // the cell stands left of centre; its base is the lowest, widest part
+        auto s = cbScene(cx, x, seed, on, 1200, 30000, { cx, 1200, 0 }, 40, 0);
+        s->sky.enabled = false; s->skyColor = BLACK;                       // clouds on black
+        g3d::Material wm; wm.unlit = true; wm.color = BLACK;
+        s->add(g3d::Geometry::box(300000, 90000, 10), wm)->position = { cx, 30000, -12000 };
+        return look(s, 960, 540, 0);
+    }, 9, 960, 540, 40, 150, "cloud-cb-base-side.png", n, 2);
+}
+// The underside of a storm cell seen from the ground, 9 km away: the lower half of the cloud's silhouette is a flat grey plate or it is lumpy
+// and mottled. The luminance left over once a 15 px box average is taken out, over its mean.
+static float cbUndersideMottle(int* n) {
+    constexpr int W = 960, H = 540;
+    std::vector<float> r;
+    for (int v = 0; v < 6; v++) {
+        const unsigned seed = (unsigned)(v % 3) + 1;
+        const float x = (float)(v / 3) * 3000.f, cx = x + 977.f * (float)seed;
+        auto mk = [&](bool on) {
+            auto s = cbScene(cx, x, seed, on, 2, 9000, { cx, 1500, 0 }, 70, 0);
+            s->sky.enabled = false; s->skyColor = BLACK;
+            return look(s, W, H, 0);
+        };
+        Image on = mk(true), off = mk(false);
+        if (v == 0) dump("cloud-cb-underside.png", on);
+        const std::vector<char> mask = cloudMask(on, off, 8);
+        const std::vector<float> L = lumaOf(on);
+        for (const Blob& b : blobsOf(mask, W, H)) {
+            if (b.area < 20000) continue;
+            const int yMid = (b.y0 + b.y1) / 2;
+            double ms = 0, mm = 0; int nm = 0;
+            for (int j : b.px) {
+                const int jx = j % W, jy = j / W;
+                if (jy < yMid || jx < 8 || jy < 8 || jx >= W - 8 || jy >= H - 8) continue;
+                double s = 0; int k = 0;
+                for (int dy = -7; dy <= 7; dy += 2) for (int dx = -7; dx <= 7; dx += 2) { const int q = (jy + dy) * W + jx + dx; if (mask[(size_t)q]) { s += L[(size_t)q]; k++; } }
+                if (k < 40) continue;                                       // not near the rim
+                const double e = L[(size_t)j] - s / k;
+                ms += e * e; mm += L[(size_t)j]; nm++;
+            }
+            if (nm > 2000) r.push_back((float)(std::sqrt(ms / nm) / std::max(mm / nm, 1.0)));
+        }
+        UnloadImage(on); UnloadImage(off);
+    }
+    if (n) *n = (int)r.size();
+    if (r.empty()) return 0.f;
+    std::sort(r.begin(), r.end());
+    return r[r.size() / 2];
+}
+// The ratio of vertical-edge energy (horizontal gradient) to horizontal-edge energy (vertical gradient) over the lower third of a storm cell's
+// silhouette seen from the ground (the base band): torn puffs are about 1; a texture stretched down in columns (flames, drips) is well above.
+static float cbBaseAnisotropy(int* n) {
+    constexpr int W = 960, H = 540;
+    std::vector<float> r;
+    for (int v = 0; v < 3; v++) {
+        const unsigned seed = (unsigned)(v % 3) + 1;
+        const float x = 0, cx = 0;
+        auto mk = [&](bool on) {
+            auto s = cbScene(0, 0, seed, on, 9, 0, { 400, 2300, -9000 }, 54, 0);                    // the film's view: 11 km from the cell, base 6 degrees up
+            s->clouds.storms = { g3d::Clouds::Storm{ -1000.f, -11000.f, 6500.f, 10500.f } };
+            s->clouds.cover = 0.16f; s->sky.enabled = false; s->skyColor = BLACK;
+            return look(s, W, H, 0);
+        };
+        Image on = mk(true), off = mk(false);
+        const std::vector<char> mask = cloudMask(on, off, 8);
+        std::vector<float> L = lumaOf(on);
+        for (const Blob& b : blobsOf(mask, W, H)) {
+            if (b.area < 20000) continue;
+            const int yCut = b.y1 - (int)(0.33f * (b.y1 - b.y0)) ;
+            double gx = 0, gy = 0; int cnt = 0;
+            for (int j : b.px) {
+                const int jx = j % W, jy = j / W;
+                if (jy < yCut || jx < 6 || jy < 6 || jx >= W - 6 || jy >= H - 6) continue;
+                bool inner = true;
+                for (int dy = -5; dy <= 5 && inner; dy += 5) for (int dx = -5; dx <= 5; dx += 5) if (!mask[(size_t)(jy + dy) * W + jx + dx]) { inner = false; break; }
+                if (!inner) continue;                                       // the silhouette's own edge is not texture
+                const double ex = L[(size_t)j + 2] - L[(size_t)j - 2], ey = L[(size_t)j + 2 * W] - L[(size_t)j - 2 * W];
+                gx += ex * ex; gy += ey * ey; cnt++;
+            }
+            if (cnt > 1500 && gy > 0) r.push_back((float)(gx / gy));
+        }
+        if (v == 0) dump("cloud-cb-base-band.png", on);
+        UnloadImage(on); UnloadImage(off);
+    }
+    if (n) *n = (int)r.size();
+    if (r.empty()) return 0.f;
+    std::sort(r.begin(), r.end());
+    return r[r.size() / 2];
+}
+// A squall's stratus deck seen from the ground at 20-40 degrees: stddev/mean of the luminance after the planar trend is taken out. A flat
+// sheet is near 0; soft cells, rolls and pannus show.
+static float deckMottle() {
+    constexpr int W = 640, H = 360;
+    std::vector<float> r;
+    for (int v = 0; v < 4; v++) {
+        const float yaw = (float)v * 1.3f;
+        auto s = filmClouds({ 0, 2, 0 }, { std::cos(yaw) * 1000.f, 2 + 577.f, std::sin(yaw) * 1000.f }, 0.98f, g3d::CloudType::Stratus, true, 450, 1800, 30, false);
+        s->clouds.density = 1.6f;
+        Image on = look(s, W, H, 0);
+        if (v == 0) dump("cloud-deck-below.png", on);
+        std::vector<float> L = lumaOf(on);
+        double A[3][3] = {}, rhs[3] = {}, mean = 0;
+        for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) { const double p[3] = { 1.0, (double)x / W, (double)y / H }; const double l = L[(size_t)y * W + x]; mean += l; for (int a = 0; a < 3; a++) { rhs[a] += p[a] * l; for (int b = 0; b < 3; b++) A[a][b] += p[a] * p[b]; } }
+        mean /= (double)(W * H);
+        for (int a = 0; a < 3; a++) for (int b = a + 1; b < 3; b++) { const double f = A[b][a] / A[a][a]; for (int k = a; k < 3; k++) A[b][k] -= f * A[a][k]; rhs[b] -= f * rhs[a]; }
+        double co[3];
+        for (int a = 2; a >= 0; a--) { double q = rhs[a]; for (int k = a + 1; k < 3; k++) q -= A[a][k] * co[k]; co[a] = q / A[a][a]; }
+        double ss = 0;
+        for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) { const double e = L[(size_t)y * W + x] - (co[0] + co[1] * x / W + co[2] * y / H); ss += e * e; }
+        r.push_back((float)(std::sqrt(ss / (double)(W * H)) / std::max(mean, 1.0)));
+        UnloadImage(on);
+    }
+    std::sort(r.begin(), r.end());
+    return r[r.size() / 2];
+}
+// Rain shafts: with the rain on, a column under the cell's base is darker and greyer than the same pixels without it; rain off is the plain picture.
+static void rainShafts() {
+    constexpr int W = 960, H = 540;
+    auto mk = [&](float shafts) {
+        auto s = cbScene(0, 0, 1, true, 2, 20000, { 0, 700, 0 }, 60, shafts);
+        return look(s, W, H, 0);
+    };
+    Image off = mk(0), neg = mk(-1), on = mk(1);
+    dump("cloud-shafts-off.png", off); dump("cloud-shafts-on.png", on);
+    CHECK(diffImages(off, neg) == 0);                                         // no rain: the plain picture
+    double lOn = 0, lOff = 0, sOn = 0, sOff = 0; int n = 0;
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            const Color a = GetImageColor(on, x, y), b = GetImageColor(off, x, y);
+            if (pixelDelta(a, b) < 30) continue;
+            lOn += luma(a); lOff += luma(b); sOn += saturation(a); sOff += saturation(b); n++;
+        }
+    std::printf("[weather] rain shafts: %d px differ; luminance there %.1f with, %.1f without; saturation %.2f with, %.2f without\n", n, n ? lOn / n : 0, n ? lOff / n : 0, n ? sOn / n : 0, n ? sOff / n : 0);
+    CHECK(n >= 1500);
+    CHECK(n && lOn < 0.88 * lOff);
+    UnloadImage(off); UnloadImage(neg); UnloadImage(on);
+}
+static void cumulusBases() {
+    int n = 0;
+    const float rms = baseRagged("now", &n);
+    const BandShade band = bandShade("now");
+    std::printf("[weather] cumulus underside seen from the ground (lowest third of %d clouds): luminance cv %.3f, 9 px mottle %.3f\n", band.clouds, band.cv, band.mottle);
+    CHECK(band.clouds >= 3);
+    const BaseShade sh = baseShade("now");
+    std::printf("[weather] cumulus base: lower silhouette rms from a line %.2f px (%d clouds); from below luminance cv %.3f (planar trend out), mottle %.3f (19 px average out), centre/rim %.2f (%d clouds)\n", rms, n, sh.cv, sh.mottle, sh.centreOverRim, sh.clouds);
+    CHECK(n >= 3 && sh.clouds >= 3);
+    CHECK(rms >= 3.0f);                                             // the ruler-flat base measures 1.28
+    CHECK(sh.cv >= 0.10f);
+    CHECK(sh.mottle >= 0.060f);                                    // the flat slab measures 0.041
+    CHECK(sh.centreOverRim <= 0.85f);
+    int nm = 0, nc = 0;
+    int ncm = 0;
+    const float mid = midRangeRms(&nm), cb = cbBaseRms(&nc), cbm = cbUndersideMottle(&ncm);
+    std::printf("[weather] base line: cumulus at range rough %.2f px (%d clouds); storm cell side-on non-plateau share %.2f (%d cells); storm underside mottle %.3f (%d cells)\n", mid, nm, cb, nc, cbm, ncm);
+    CHECK(ncm >= 3);
+    CHECK(cbm >= 0.15f);                                           // the flat plate measures 0.087
+    int nan = 0;
+    const float aniso = cbBaseAnisotropy(&nan), deck = deckMottle();
+    std::printf("[weather] storm base band: vertical/horizontal edge energy %.2f (%d cells); stratus deck from below: luminance cv %.3f (planar trend out)\n", aniso, nan, deck);
+    CHECK(nan >= 3);
+    CHECK(aniso <= 1.3f);
+    CHECK(deck >= 0.08f);
+    rainShafts();
+}
+
+// Cloud cost of two presets at 1080p (RMTN_BASE_TIMING): frame time with the clouds minus without, best of 12.
+static void presetCloudTiming() {
+    constexpr int W = 1920, H = 1080;
+    for (const char* name : { "cumulus day", "thunderstorm" }) {
+        double best[2] = { 1e9, 1e9 };
+        for (int on = 0; on < 2; on++) {
+            auto s = cloudScene({ 0, 2, 0 }, { 0, 2 + 300, -2000 }, 0.5f);
+            wx::applyPreset(*s, name);
+            s->clouds.enabled = on == 1;
+            s->clouds.shadows = true;
+            s->clouds.quality = g3d::Clouds::Quality::Film;
+            Comp c = comp(s, W, H);
+            Canvas canvas;
+            canvas.load(W, H, 1);
+            presentFrame(c, 0, canvas);
+            for (int i = 0; i < 12; i++) {
+                const double t0 = GetTime();
+                presentFrame(c, i, canvas);
+                Image img = LoadImageFromTexture(canvas.output().texture);
+                best[on] = std::min(best[on], (GetTime() - t0) * 1000);
+                UnloadImage(img);
+            }
+            canvas.unload();
+        }
+        std::printf("[weather] preset %s at 1080p: clouds cost %.1f ms (frame %.1f with, %.1f without)\n", name, best[1] - best[0], best[1], best[0]);
+    }
+}
+
 int main() try {
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
     InitWindow(320, 180, "raymotion weather");
     if (!IsWindowReady()) return 77;
+    if (std::getenv("RMTN_BASE_TIMING")) { presetCloudTiming(); shutdownGraphics(); CloseWindow(); return 0; }
+    if (std::getenv("RMTN_BASE_ONLY")) {
+        cumulusBases();
+        shutdownGraphics(); CloseWindow();
+        std::printf(failures ? "[weather] %d failures\n" : "[weather] all passed\n", failures);
+        return failures ? 1 : 0;
+    }
     if (const char* dir = std::getenv("RMTN_CLOUD_IMAGES")) { cloudImages(dir); shutdownGraphics(); CloseWindow(); return 0; }
     if (std::getenv("RMTN_CLOUD_TIMING")) { cloudTiming(); shutdownGraphics(); CloseWindow(); return 0; }
     if (std::getenv("RMTN_W6_GOLDEN")) {
@@ -7796,6 +8221,7 @@ int main() try {
     cloudsOffMeansOff();
     curvature();
     notExtruded();
+    cumulusBases();
     softEdges();
     stipple();
     noSeam();

@@ -4532,6 +4532,7 @@ CloudFrame cloudFrame(const Scene& s, double frame) {
     const double fps = s.weather.enabled && !s.clouds.ownWeather ? s.weather.fps : s.clouds.fps;
     f.seconds = frame / std::max(1.0, fps);
     f.travel = s.clouds.travel(s.weather, f.seconds);
+    if (s.weather.enabled) f.c.shafts = std::max(s.clouds.shafts, s.weather.rainAt(f.seconds));   // the rain that falls (the history or the state) hangs under the cells
     { const Vector2 w = (s.weather.enabled && !s.clouds.ownWeather) ? Vector2{ std::cos(s.weather.wind.direction * DEG2RAD), std::sin(s.weather.wind.direction * DEG2RAD) } : Vector2{ s.clouds.drift.x, s.clouds.drift.y };
       const float l = std::sqrt(w.x * w.x + w.y * w.y); if (l > 1e-4f) f.shear = { w.x / l, w.y / l }; }
     struct Q { int steps, light, shadowSteps, shadowRes; float res; };
@@ -4569,6 +4570,8 @@ void setCloudCommon(const Shader& sh, const CloudFrame& f, Vector2 focus) {
     const Clouds& c = f.c;
     shF(sh, "planetR", Clouds::kPlanetRadius);
     shF(sh, "cloudBase", c.base);
+    shF(sh, "shafts", c.type == CloudType::Cumulonimbus && c.anvil > 0.5f ? std::clamp(c.shafts, 0.f, 1.f) : 0.f);
+    shF(sh, "shellBase", c.type == CloudType::Cumulonimbus && c.anvil > 0.5f && c.shafts > 0.f ? 0.f : c.base);
     shF(sh, "cloudTop", std::max(c.top, c.base + 50));
     shF(sh, "cover", std::clamp(c.cover, 0.f, 1.f));
     shF(sh, "densityScale", std::max(c.density, 0.f));
