@@ -25,6 +25,7 @@ extern "C" void UpdateModelAnimationBones(Model model, ModelAnimation anim, floa
 #include "wet_glsl.hpp"
 #include "wake_glsl.hpp"
 #include "ocean.hpp"
+#include "air_glsl.hpp"
 
 namespace rmtn {
 namespace g3d {
@@ -1704,9 +1705,18 @@ struct CloudGpu {
 };
 struct CloudLitLocs { int on = -1, light = -1, tex = -1, map = -1, sun = -1, floor = -1; };
 
+// Light in the air (Scene::volumetric, Scene::aerial): the march's shader and image, and the composite shader.
+struct AirGpu {
+    Shader march{}, comp{};
+    unsigned lowFbo = 0, lowTex = 0;
+    int lowW = 0, lowH = 0;
+    float lastMs = 0;
+};
+
 struct Gpu {
     bool ready = false;
     CloudGpu cl;
+    AirGpu air;
     CloudLitLocs cll;
     Shader lit{}, depth{}, dof{}, gbuf{}, line{}, particle{}, sky{}, bolt{}, rainbow{};
     LitLocs L{};
@@ -1795,6 +1805,9 @@ void releaseGpu() {
     if (gpu.sky.id) UnloadShader(gpu.sky);
     if (gpu.bolt.id) UnloadShader(gpu.bolt);
     if (gpu.rainbow.id) UnloadShader(gpu.rainbow);
+    if (gpu.air.march.id) UnloadShader(gpu.air.march);
+    if (gpu.air.comp.id) UnloadShader(gpu.air.comp);
+    if (gpu.air.lowFbo) rlUnloadFramebuffer(gpu.air.lowFbo);
     for (auto& [mesh, v] : gpu.vat)
         if (v.tex) rlUnloadTexture(v.tex);
     for (auto& [field, f] : gpu.fields)
@@ -4951,6 +4964,197 @@ void drawClouds(const Scene& s, const CloudFrame& f, const Camera& cam, const De
     rlViewport(0, 0, fbW, fbH);
 }
 
+// ---- light in the air (Scene::volumetric, Scene::aerial) ------------------------------------------------
+DepthTarget& copyScene(const DepthTarget& src);
+
+// Something for the march to go through: the scene's fog (own, the weather's, or the one Volumetric::density sets).
+bool airFogged(const Scene& s) { return s.fogMode == FogMode::Linear ? s.fogFar > s.fogNear : s.fogDensity > 0; }
+bool airEye(const Scene& s, const Camera& cam) {          // a perspective view from the air
+    return !cam.orthographic && !(s.water.enabled && cam.position.y < waterOf(s).level);
+}
+bool volumetricActive(const Scene& s, const Camera& cam) { return s.volumetric.enabled() && airEye(s, cam) && airFogged(s); }
+bool aerialActive(const Scene& s, const Camera& cam) { return s.aerial.enabled && s.aerial.strength > 0 && airEye(s, cam); }
+
+// The light that is the sun for the shafts: the sky's, else the directional light along the sky's sun, else the first.
+int airSunLight(const Scene& s) {
+    const int n = std::min((int)s.lights.size(), MAX_LIGHTS);
+    auto towards = [&](int i, Vector3& d) {
+        if (i < 0 || i >= n || s.lights[(size_t)i].type != Light::Type::Directional) return false;
+        d = Vector3Subtract(s.lights[(size_t)i].position, s.lights[(size_t)i].target);
+        if (Vector3Length(d) < 1e-6f) return false;
+        d = Vector3Normalize(d);
+        return true;
+    };
+    Vector3 d;
+    if (s.sky.enabled && towards(s.sky.sunLight, d)) return s.sky.sunLight;
+    if (s.sky.enabled)
+        for (int i = 0; i < n; i++)
+            if (towards(i, d) && Vector3DotProduct(d, sunOf(s)) > 0.97f) return i;
+    for (int i = 0; i < n; i++)
+        if (towards(i, d)) return i;
+    return -1;
+}
+
+// How far a ray is marched when nothing stops it: to where the fog is all but opaque, within the far plane.
+float airReach(const Scene& s, const Camera& cam) {
+    if (s.fogMode == FogMode::Linear) return std::clamp(s.fogFar, 1.f, cam.farPlane);
+    float sigma = s.fogDensity;
+    if (s.fogFalloff > 0) sigma *= std::exp(std::clamp(-s.fogFalloff * (cam.position.y - s.fogHeight), -30.f, 30.f));
+    return std::clamp((s.fogMode == FogMode::Exponential ? 3.9f : 1.98f) / std::max(sigma, 1e-7f), 10.f, cam.farPlane);
+}
+
+// The environment the lit shader reads, for the two air shaders.
+void setAirEnvironment(const Shader& sh, const Scene& s, Texture2D envTex) {
+    const int hasEnv = envTex.id ? 1 : 0, envLin = hasEnv && isFloatFormat(envTex.format) ? 1 : 0;
+    const float maxLod = hasEnv ? std::floor(std::log2((float)std::max(envTex.width, envTex.height))) : 0;
+    const float rot = s.sky.enabled ? 0.f : s.environmentRotation / 360.f;
+    const float intensity = s.sky.enabled ? s.sky.lighting : s.environmentIntensity;
+    const float backdrop = s.sky.enabled ? 1.f / std::max(intensity, 1e-4f) : 1.f;
+    const Vector3 zen = linear3(s.skyColor), fallback = Vector3Lerp(zen, { 1, 1, 1 }, 0.4f);
+    shI(sh, "hasEnv", hasEnv); shI(sh, "envLinear", envLin); shF(sh, "envMaxLod", maxLod);
+    shF(sh, "envIntensity", intensity); shF(sh, "envRotation", rot); shF(sh, "backdropScale", backdrop);
+    shV3(sh, "horizonFallback", fallback);
+    shI(sh, "envMap", ENV_SLOT);
+}
+
+// The picture's fog made into shafts, and the aerial perspective, over the finished opaque scene in `scene`
+// (colour and depth), inside the viewport (vx, vyGL, vw, vh). The march writes an image at a share of the size, the
+// composite brings it up with a depth-aware filter, adds it and applies the aerial perspective.
+void drawAir(const Scene& s, const Camera& cam, const Shadows& sh, Texture2D envTex, const DepthTarget& scene, int fbW, int fbH,
+             int vx, int vyGL, int vw, int vh, bool vol, bool aerial) {
+    AirGpu& g = gpu.air;
+    if (!g.comp.id) {
+        g.march = LoadShaderFromMemory(nullptr, AIR_MARCH_FS);
+        g.comp = LoadShaderFromMemory(nullptr, AIR_COMPOSITE_FS);
+        if (!IsShaderValid(g.march) || !IsShaderValid(g.comp)) throw std::runtime_error("g3d: volumetric light shader compilation failed");
+    }
+    const Volumetric& v = s.volumetric;
+    const Vector3 look = Vector3Subtract(cam.target, cam.position);
+    const Vector3 fwd = Vector3Normalize(look);
+    const Vector3 right = Vector3Normalize(Vector3CrossProduct(fwd, safeUp(look, cam.upVector))), up = Vector3CrossProduct(right, fwd);
+    const float tanY = std::tan(cam.fov * 0.5f * DEG2RAD), aspect = (float)vw / (float)vh;
+    auto camera = [&](const Shader& sh2, Vector2 lowSize) {
+        shV3(sh2, "camPos", cam.position); shV3(sh2, "camFwd", fwd); shV3(sh2, "camRight", right); shV3(sh2, "camUp", up);
+        shV2(sh2, "tanHalf", { tanY * aspect, tanY });
+        shV2(sh2, "vpOrigin", { (float)vx, (float)vyGL });
+        shV2(sh2, "vpSize", { (float)vw, (float)vh });
+        shV2(sh2, "zNF", { cam.nearPlane, cam.farPlane });
+        shV2(sh2, "lowSize", lowSize);
+    };
+    const DepthTarget& copy = copyScene(scene);                  // colour and depth, to read while the picture is written
+    int lw = 1, lh = 1;
+    if (vol) {
+        struct Q { int steps; float res; };
+        static const Q table[3] = { { 16, 0.35f }, { 32, 0.5f }, { 48, 0.75f } };
+        const Q& q = table[std::clamp((int)v.quality - 1, 0, 2)];
+        lw = std::max(8, (int)std::ceil(vw * q.res)); lh = std::max(8, (int)std::ceil(vh * q.res));
+        colorTarget(g.lowFbo, g.lowTex, g.lowW, g.lowH, lw, lh);
+        const Shader& m = g.march;
+        camera(m, { (float)lw, (float)lh });
+        setAirEnvironment(m, s, envTex);
+        const Vector3 fogCol = linear(s.fogColor);
+        shV3(m, "fogColor", fogCol); shF(m, "fogNear", s.fogNear); shF(m, "fogFar", s.fogFar);
+        shI(m, "fogMode", (int)s.fogMode); shF(m, "fogDensity", s.fogDensity); shF(m, "fogHeight", s.fogHeight); shF(m, "fogFalloff", s.fogFalloff);
+        shI(m, "fogSky", s.fogFromSky ? 1 : 0);
+        shI(m, "seaSky", s.water.enabled && s.water.spectrum.enabled ? 1 : 0);
+        shI(m, "steps", q.steps); shF(m, "reach", airReach(s, cam));
+        shF(m, "waterLevel", s.water.enabled ? waterOf(s).level : 0.f); shI(m, "waterOn", s.water.enabled ? 1 : 0);
+        const int sun = airSunLight(s);
+        float gain = 0;
+        Vector3 toSun{ 0, 1, 0 };
+        if (sun >= 0) {
+            const Light& l = s.lights[(size_t)sun];
+            toSun = Vector3Normalize(Vector3Subtract(l.position, l.target));
+            const float k = std::clamp((toSun.y + 0.02f) / 0.08f, 0.f, 1.f);
+            gain = l.intensity > 0 ? k * k * (3 - 2 * k) : 0.f;
+            if (s.weather.enabled && !s.sky.ownLight) gain *= std::clamp(s.weather.sunScale(), 0.f, 1.f);
+        }
+        shI(m, "sun", sun); shV3(m, "sunDir", toSun); shF(m, "sunGain", gain);
+        shF(m, "aniso", std::clamp(v.anisotropy, 0.f, 0.95f)); shF(m, "ambientK", std::clamp(v.ambient, 0.f, 1.f));
+        const CloudGpu& cg = gpu.cl;
+        shI(m, "cloudShadowOn", cg.shadowOn ? 1 : 0); shI(m, "cloudShadowLight", cg.shadowLight);
+        shV3(m, "cloudShadowSun", cg.shadowSun); shF(m, "cloudShadowFloor", cg.shadowFloor);
+        { const Vector4 map = cg.shadowMap; SetShaderValue(m, GetShaderLocation(m, "cloudShadowMap"), &map, SHADER_UNIFORM_VEC4); }
+        shI(m, "cloudShadowTex", CLOUD_SLOT);
+        // The lights, as the lit shader gets them.
+        const int count = std::min((int)s.lights.size(), MAX_LIGHTS);
+        int type[MAX_LIGHTS] = {};
+        Vector3 pos[MAX_LIGHTS] = {}, dir[MAX_LIGHTS] = {}, col[MAX_LIGHTS] = {};
+        float range[MAX_LIGHTS] = {}, cin[MAX_LIGHTS] = {}, cosOut[MAX_LIGHTS] = {}, bias[MAX_LIGHTS] = {};
+        for (int i = 0; i < count; i++) {
+            const Light& l = s.lights[(size_t)i];
+            type[i] = (int)l.type; pos[i] = l.position;
+            const Vector3 d = Vector3Subtract(l.target, l.position);
+            dir[i] = Vector3Length(d) > 1e-6f ? Vector3Normalize(d) : Vector3{ 0, -1, 0 };
+            col[i] = linear(l.color, l.intensity); range[i] = l.range;
+            const float outer = std::clamp(l.outerAngle, 0.1f, 89.9f), inner = std::clamp(l.innerAngle, 0.f, outer - 0.05f);
+            cin[i] = std::cos(inner * DEG2RAD); cosOut[i] = std::cos(outer * DEG2RAD); bias[i] = l.shadowBias;
+        }
+        shI(m, "scatterLights", v.scatterLights ? 1 : 0); shI(m, "lightCount", count);
+        SetShaderValueV(m, GetShaderLocation(m, "lightType"), type, SHADER_UNIFORM_INT, MAX_LIGHTS);
+        SetShaderValueV(m, GetShaderLocation(m, "lightPos"), pos, SHADER_UNIFORM_VEC3, MAX_LIGHTS);
+        SetShaderValueV(m, GetShaderLocation(m, "lightDir"), dir, SHADER_UNIFORM_VEC3, MAX_LIGHTS);
+        SetShaderValueV(m, GetShaderLocation(m, "lightColor"), col, SHADER_UNIFORM_VEC3, MAX_LIGHTS);
+        SetShaderValueV(m, GetShaderLocation(m, "lightRange"), range, SHADER_UNIFORM_FLOAT, MAX_LIGHTS);
+        SetShaderValueV(m, GetShaderLocation(m, "lightCosInner"), cin, SHADER_UNIFORM_FLOAT, MAX_LIGHTS);
+        SetShaderValueV(m, GetShaderLocation(m, "lightCosOuter"), cosOut, SHADER_UNIFORM_FLOAT, MAX_LIGHTS);
+        SetShaderValueV(m, GetShaderLocation(m, "lightShadow"), sh.lightTile, SHADER_UNIFORM_INT, MAX_LIGHTS);
+        SetShaderValueV(m, GetShaderLocation(m, "lightBias"), bias, SHADER_UNIFORM_FLOAT, MAX_LIGHTS);
+        if (!sh.tiles.empty()) {
+            Matrix vps[MAX_TILES];
+            Vector4 rects[MAX_TILES], params[MAX_TILES];
+            for (size_t i = 0; i < sh.tiles.size(); i++) { vps[i] = sh.tiles[i].vp; rects[i] = sh.tiles[i].rect; params[i] = sh.tiles[i].params; }
+            rlEnableShader(m.id);
+            rlSetUniformMatrices(GetShaderLocation(m, "shadowVP"), vps, (int)sh.tiles.size());
+            SetShaderValueV(m, GetShaderLocation(m, "shadowRect"), rects, SHADER_UNIFORM_VEC4, (int)sh.tiles.size());
+            SetShaderValueV(m, GetShaderLocation(m, "shadowParams"), params, SHADER_UNIFORM_VEC4, (int)sh.tiles.size());
+            shF(m, "atlasTexel", 1.f / (float)gpu.atlasSize);
+        }
+        shI(m, "shadowAtlas", SHADOW_SLOT);
+        shI(m, "depthTex", DEPTH_SLOT);
+        bindUnit(DEPTH_SLOT, copy.depth);
+        bindUnit(SHADOW_SLOT, sh.tiles.empty() ? 0 : gpu.atlasTex);
+        bindUnit(ENV_SLOT, envTex.id);
+        if (cg.shadowOn) bindUnit(CLOUD_SLOT, cg.shadowRT.texture.id);
+        cloudPass(m, g.lowFbo, 0, 0, lw, lh);
+        for (int slot : { SHADOW_SLOT, CLOUD_SLOT }) bindUnit(slot, 0);
+    }
+    const Shader& c = g.comp;
+    camera(c, { (float)lw, (float)lh });
+    setAirEnvironment(c, s, envTex);
+    shI(c, "volOn", vol ? 1 : 0); shI(c, "filterOn", 1);
+    shI(c, "aerialOn", aerial ? 1 : 0);
+    const AerialPerspective& a = s.aerial;
+    shF(c, "aerialK", std::max(a.strength, 0.f) / 30000.f); shF(c, "aerialH", std::max(a.scaleHeight, 10.f));
+    shV3(c, "aerialRGB", { 0.77f, 1.f, 1.7f });
+    shF(c, "waterLevel", s.water.enabled ? waterOf(s).level : 0.f); shI(c, "waterOn", s.water.enabled ? 1 : 0);
+    shI(c, "sceneTex", REFR_COLOR_SLOT); shI(c, "depthTex", DEPTH_SLOT); shI(c, "lowTex", CLOUD_LOW_SLOT);
+    bindUnit(REFR_COLOR_SLOT, copy.color);
+    bindUnit(DEPTH_SLOT, copy.depth);
+    bindUnit(CLOUD_LOW_SLOT, g.lowTex);
+    bindUnit(ENV_SLOT, envTex.id);
+    cloudPass(c, scene.fbo, vx, vyGL, vw, vh);
+    for (int slot : { REFR_COLOR_SLOT, DEPTH_SLOT, CLOUD_LOW_SLOT, ENV_SLOT }) bindUnit(slot, 0);
+    rlEnableFramebuffer(scene.fbo);
+    rlViewport(0, 0, fbW, fbH);
+}
+
+// While the volumetric march has the fog, the scene is drawn without it (the march fogs the finished picture); released
+// before the march reads the scene's fog.
+struct FogHold {
+    Scene& s;
+    FogMode mode;
+    float density;
+    bool held;
+    FogHold(Scene& sc, bool hold) : s(sc), mode(sc.fogMode), density(sc.fogDensity), held(hold) {
+        if (held) { s.fogMode = FogMode::Exponential; s.fogDensity = 0; }
+    }
+    void release() { if (held) { s.fogMode = mode; s.fogDensity = density; held = false; } }
+    ~FogHold() { release(); }
+    FogHold(const FogHold&) = delete;
+    FogHold& operator=(const FogHold&) = delete;
+};
+
 // ---- the water's planar reflection and refraction (Water::reflections, Water::refraction)
 // How the camera sees the water this frame: above the surface, and with water somewhere in the picture
 // (some corner of the view frustum lies under the surface plane).
@@ -5614,7 +5818,8 @@ void renderBody(Scene& s, Camera& camIn, Rectangle vp, const RenderTexture& targ
         const float off = std::acos(std::clamp(Vector3DotProduct(fwd0, bow.antiSolar), -1.f, 1.f)) * RAD2DEG;
         if (off > std::atan(std::sqrt(tx * tx + ty * ty)) * RAD2DEG + 56.f) bow.strength = 0;     // the bow's whole ring lies behind the view
     }
-    if (dof || cloudsOn || refractOn || wet.ssr || !bodies.empty() || !bolts.empty() || bow.strength > 0.002f) {         // clouds and the water need the opaque depth as a texture: draw into the depth target
+    const bool volOn = volumetricActive(s, cam), aerialOn = aerialActive(s, cam);       // light in the air: both read the opaque depth
+    if (dof || cloudsOn || refractOn || wet.ssr || !bodies.empty() || !bolts.empty() || bow.strength > 0.002f || volOn || aerialOn) {         // clouds and the water need the opaque depth as a texture: draw into the depth target
         dofTarget = &sceneTarget(fbW, fbH);
         rlEnableFramebuffer(dofTarget->fbo);
         rlViewport(0, 0, fbW, fbH);
@@ -5644,6 +5849,7 @@ void renderBody(Scene& s, Camera& camIn, Rectangle vp, const RenderTexture& targ
     rlEnableDepthTest();
     rlEnableDepthMask();
 
+    FogHold fogHold(s, volOn);                         // the march fogs the picture (drawAir): the surfaces carry none
     setSceneUniforms(s, cam, shadows, envTex, scale);
     if (refractOn && s.water.enabled) { const int skipTint = 2; SetShaderValue(gpu.lit, gpu.W.refrMode, &skipTint, SHADER_UNIFORM_INT); }    // what is under the water is absorbed once, by the surface that looks through it
     bindUnit(SHADOW_SLOT, shadows.tiles.empty() ? 0 : gpu.atlasTex);
@@ -5762,6 +5968,8 @@ void renderBody(Scene& s, Camera& camIn, Rectangle vp, const RenderTexture& targ
     rlMatrixMode(RL_MODELVIEW);
     rlLoadIdentity();
     rlViewport(0, 0, fbW, fbH);
+    fogHold.release();
+    if (dofTarget && (volOn || aerialOn)) drawAir(s, cam, shadows, envTex, *dofTarget, fbW, fbH, vx, fbH - vy - vh, vw, vh, volOn, aerialOn);
     if (cloudsOn) drawClouds(s, cloudNow, cam, *dofTarget, fbW, fbH, vx, fbH - vy - vh, vw, vh);
     if (dofTarget && bow.strength > 0.002f) drawRainbow(s, bow, cam, *dofTarget, fbW, fbH, vx, fbH - vy - vh, vw, vh);
     if (dofTarget && !bolts.empty()) drawBolts(s, cam, bolts, *dofTarget, fbW, fbH, vx, fbH - vy - vh, vw, vh);
@@ -6650,6 +6858,32 @@ struct WeatherScope {
     WeatherScope(const WeatherScope&) = delete;
     WeatherScope& operator=(const WeatherScope&) = delete;
 };
+
+// While a frame is drawn with Volumetric::density or heightFalloff set: the scene's fog is that exponential fog (so the
+// surfaces and the march share one medium). The fog takes the sky's colour unless the scene gave one.
+struct VolumetricScope {
+    Scene& s;
+    FogMode mode;
+    float density, height, falloff;
+    bool fromSky, on = false;
+    explicit VolumetricScope(Scene& sc) : s(sc), mode(sc.fogMode), density(sc.fogDensity), height(sc.fogHeight), falloff(sc.fogFalloff), fromSky(sc.fogFromSky) {
+        const Volumetric& v = s.volumetric;
+        if (!v.enabled() || (v.density <= 0 && v.heightFalloff <= 0)) return;
+        on = true;
+        if (v.density > 0) {
+            s.fogMode = FogMode::Exponential;
+            s.fogDensity = v.density;
+            if (s.fogColor.r == 0 && s.fogColor.g == 0 && s.fogColor.b == 0 && (s.sky.enabled || !s.environment.empty())) s.fogFromSky = true;
+        }
+        if (v.heightFalloff > 0) { s.fogFalloff = v.heightFalloff; s.fogHeight = v.heightBase; }
+    }
+    ~VolumetricScope() {
+        if (!on) return;
+        s.fogMode = mode; s.fogDensity = density; s.fogHeight = height; s.fogFalloff = falloff; s.fogFromSky = fromSky;
+    }
+    VolumetricScope(const VolumetricScope&) = delete;
+    VolumetricScope& operator=(const VolumetricScope&) = delete;
+};
 } // namespace
 
 void render(Scene& s, int t, const Ctx& c, Rectangle viewport, Camera* camera) {
@@ -6704,7 +6938,8 @@ void render(Scene& s, int t, const Ctx& c, Rectangle viewport, Camera* camera) {
     }
     animate(s.objects, t, MatrixIdentity(), cull);
     const WeatherScope weatherNow(s);
-    const FlashScope flashNow(s, t);                      // a strike's light, for this frame's lights
+    const VolumetricScope volumetricNow(s);
+    const FlashScope flashNow(s, t);                     // a strike's light, for this frame's lights
     if (canvasSize().x > 0) {
         sizeSurfaces(s.objects, MatrixIdentity(), cam, cull.screenH * cull.aspect, cull.screenH);
         drawCanvases(s.objects, t);

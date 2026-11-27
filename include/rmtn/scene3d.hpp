@@ -1267,6 +1267,47 @@ std::vector<LightningActive> lightningAt(const Scene& scene, double seconds);
 // media::audio(node, "thunder.wav", { .volume = ... }) (see docs/weather.md, "Thunder on the soundtrack").
 std::vector<Thunder> thunderCues(Scene& scene, int frames, float fps);
 
+// ------------------------------------------------------------------ light in the air
+// Sun shafts in the scene's fog (Scene::volumetric). Off by default: with quality Off nothing is drawn and the
+// picture is the analytic fog's, bit for bit.
+//
+// The fog is the scene's own (fogMode, fogDensity, fogHeight, fogFalloff, or the weather's haze), so the
+// medium is the one the surfaces are already fogged by; nothing is fogged twice. Each view ray is marched, at
+// reduced resolution, from the eye to the opaque surface under the pixel (or to where the fog is thick), and at
+// every step the fog's in-scatter is lit by the sun: the fog colour (what fully lit fog looks like) times
+//   ambient + (1 - ambient) * sunlit * phase,
+// where `sunlit` is the sun's shadow map (the directional light's tile) times the clouds' ground shadow, and
+// `phase` is a Henyey-Greenstein lobe, compressed so that the shaft toward the sun is bright and the one away
+// from it dimmer, but the mean over all directions is the plain fog colour. With anisotropy 0 and no
+// shadow the sum is exactly the analytic fog (the march only replaces it by its shaded version). The picture
+// is a pure function of the frame: no temporal accumulation; the march's per-pixel jitter (interleaved gradient
+// noise on the low-resolution pixel grid, the same every frame) is removed by a depth-aware spatial filter.
+// What the opaque depth buffer does not hold (transparent surfaces, the sea) is marched as if it were not there,
+// to the sea's plane for the sea.
+struct Volumetric {
+    enum class Quality { Off, Low, Medium, High };
+    Quality quality = Quality::Off;     // Off draws nothing. The march's steps and size (a share of the picture's width and height): Low 16, 0.35; Medium 32, 0.5; High 48, 0.75
+    float density = 0;                  // > 0: this exponential fog (per metre) replaces the scene's and the weather's; 0 keeps them
+    float heightFalloff = 0;            // > 0 replaces the fog's height falloff: density * exp(-falloff * (y - heightBase)) (per metre)
+    float heightBase = 0;               // the height at which the density is `density` (used with heightFalloff)
+    float anisotropy = 0.7f;            // Henyey-Greenstein g, 0..0.95: 0 scatters evenly, 0.7 favours the way to the sun
+    float ambient = 0.35f;              // the share of the fog's brightness that does not need the sun (fog in shadow)
+    bool scatterLights = false;         // spot and point lights light the fog as well (cones in the mist); their shadows count
+    bool enabled() const { return quality != Quality::Off; }
+};
+
+// Distant things fade toward the sky's horizon colour and blue-shift with distance: Rayleigh-like extinction
+// (blue goes first) with the haze's density falling off exponentially with altitude (scaleHeight), so a ridge
+// 30 km off is paler and bluer, and from high up the same distance is hazier less. The colour it fades to is the sky's horizon
+// colour in that direction (the one the sea's haze and the fog use), so there is no seam where land meets sky.
+// Applies to everything in the opaque depth buffer (terrain, buildings, trees); the clouds keep their own haze
+// (Clouds::haze) and the spectrum sea its own (it uses the same colour). Off by default.
+struct AerialPerspective {
+    bool enabled = false;
+    float scaleHeight = 2500;           // metres: the haze's density falls as exp(-altitude / scaleHeight)
+    float strength = 1;                 // 1: the green light is cut to 1/e (37%) over 30 km of sea-level air (red 1.3 times further, blue 1.7 times less); 0 none
+};
+
 // ------------------------------------------------------------------ scenes
 struct Scene {
     Camera camera;
@@ -1318,6 +1359,8 @@ struct Scene {
     Downfall precipitation;         // GPU rain, snow or sleet round the camera (precipitation.enabled)
     Ground ground;                  // wet ground, puddles, ripples and snow cover (needs weather.enabled, or a pin here)
     Lightning lightning;            // bolts, the flash they make, and the clouds lit from inside (lightning.enabled)
+    Volumetric volumetric;          // sun shafts in the fog (volumetric.quality, Off by default)
+    AerialPerspective aerial;       // distant land fades blue (aerial.enabled, off by default)
     // With weather enabled the haze sets the fog: exponential, density from the haze, taking the
     // sky's colour (fogMode, fogDensity and fogFromSky are replaced; fogHeight and fogFalloff stay).
     // true keeps the scene's own fog.

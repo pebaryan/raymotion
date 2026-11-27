@@ -350,6 +350,17 @@ It stays a pure function of `t`.
     along the sun's direction, and the fog off that line stays darker.
   - Off by default, so old scenes are unchanged.
 
+**Done 2026-11-27.** `Scene::volumetric` (`g3d::Volumetric`: quality, density, heightFalloff, heightBase, anisotropy, ambient,
+scatterLights) and `Scene::aerial` (`g3d::AerialPerspective`), `src/engine/air_glsl.hpp`, script keys `volumetric` and
+`aerialPerspective`; see "Light in the air" in docs/weather.md. The fog is marched (equal shares of its opacity, sun shadow tile and
+cloud shadow read at every step, a compressed Henyey-Greenstein phase, IGN jitter, a depth-aware 5 x 5 filter) and replaces the
+analytic fog while on. Examples `forest_light.as`, `barn_shafts.as`, `blue_ridges.as`. Left out or open: transparent surfaces and
+the sea are fogged by the opaque depth behind them; the water's reflection has the analytic fog without shafts; the sea has no
+aerial pass of its own (W9's haze, same colour); the shaft's brightness is the fog colour's (an artist's value), not a computed
+radiance, so `ambient` and `anisotropy` are looks, not physics. The sea writes no depth, so with aerial
+perspective on, land seen through shallow water near a shore gets no haze and shows as a 1 px dark hairline at the waterline
+(`sunset_sea.as`); the fix is a sea that writes depth.
+
 ## W11. Camera weather
 
 - Filters for what weather does to a lens:

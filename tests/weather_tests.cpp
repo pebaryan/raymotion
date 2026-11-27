@@ -3298,7 +3298,7 @@ static void poolFloorShows() {
         double aa = 0, tt = 0, at = 0;
         for (size_t i = 0; i < la.size(); i++) { aa += (la[i] - ma) * (la[i] - ma); tt += (lt[i] - mt) * (lt[i] - mt); at += (la[i] - ma) * (lt[i] - mt); }
         corr[k] = (float)(at / std::sqrt(std::max(aa * tt, 1e-9)));
-        if (k == 0) {
+        {
             const double slope = at / std::max(tt, 1e-9);
             std::map<int, std::pair<double, int>> rows, cols;
             for (size_t i = 0; i < la.size(); i++) {
@@ -6457,6 +6457,557 @@ static void lightningStorm() {
     w5Purity();
 }
 
+// ---------------------------------------------------------------- W10: light in the air (volumetric shafts, aerial perspective)
+static g3d::Material airBlack() {
+    g3d::Material m;
+    m.color = BLACK;
+    m.roughness = 1;                   // lit, so that it casts a shadow (an unlit surface casts none); black, so that it adds nothing but its depth
+    return m;
+}
+static float meanLuma(const Image& img, int cx, int cy, int r) {
+    double s = 0;
+    int n = 0;
+    for (int y = std::max(cy - r, 0); y <= std::min(cy + r, img.height - 1); y++)
+        for (int x = std::max(cx - r, 0); x <= std::min(cx + r, img.width - 1); x++) { s += luma(GetImageColor(img, x, y)); n++; }
+    return n ? (float)(s / n) : 0.f;
+}
+// The mean light in a patch, in linear units times 1000 (levels are gamma-encoded: a ratio of light needs the linear number).
+static float meanLin(const Image& img, int cx, int cy, int r) {
+    double s = 0;
+    int n = 0;
+    for (int y = std::max(cy - r, 0); y <= std::min(cy + r, img.height - 1); y++)
+        for (int x = std::max(cx - r, 0); x <= std::min(cx + r, img.width - 1); x++) { s += 1000.0 * std::pow(luma(GetImageColor(img, x, y)) / 255.0, 2.2); n++; }
+    return n ? (float)(s / n) : 0.f;
+}
+static Vector3 meanRGB(const Image& img, int cx, int cy, int r) {
+    double s[3] = { 0, 0, 0 };
+    int n = 0;
+    for (int y = cy - r; y <= cy + r; y++)
+        for (int x = cx - r; x <= cx + r; x++) {
+            if (x < 0 || y < 0 || x >= img.width || y >= img.height) continue;
+            const Color c = GetImageColor(img, x, y);
+            s[0] += c.r; s[1] += c.g; s[2] += c.b; n++;
+        }
+    return n ? Vector3{ (float)(s[0] / n), (float)(s[1] / n), (float)(s[2] / n) } : Vector3{ 0, 0, 0 };
+}
+static const char* qualityName(g3d::Volumetric::Quality q) {
+    return q == g3d::Volumetric::Quality::Off ? "off" : q == g3d::Volumetric::Quality::Low ? "low" : q == g3d::Volumetric::Quality::Medium ? "medium" : "high";
+}
+
+// A roof with a long slot in it (3 m wide in x, 12 m long in z), the sun above and to +x: a sheet of light falls
+// through the slot into fog. Everything is unlit black but the fog, so the picture is the fog's light alone.
+constexpr float SLIT_SX = 0.53f, SLIT_SY = 0.85f;      // the way to the sun
+static g3d::ScenePtr slitScene(g3d::Volumetric::Quality q, float aniso = 0.7f, bool shadow = true, float ambient = 0.05f, bool roof = true, bool wall = true) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = { -2.5f, 2, 30 };
+    s->camera.target = { -2.5f, 4, 0 };
+    s->camera.fov = 38;
+    s->camera.farPlane = 400;
+    s->ambient = 0;
+    s->fogMode = g3d::FogMode::Exponential;
+    s->fogDensity = 0.03f;
+    s->fogColor = { 120, 120, 120, 255 };
+    s->shadowMapSize = 2048;
+    const g3d::Material black = airBlack();
+    if (roof) {
+        s->add(g3d::Geometry::box(98.5f, 0.4f, 120), black)->position = { -50.75f, 8, 0 };
+        s->add(g3d::Geometry::box(98.5f, 0.4f, 120), black)->position = { 50.75f, 8, 0 };
+        s->add(g3d::Geometry::box(3.0f, 0.4f, 54), black)->position = { 0, 8, 33 };
+        s->add(g3d::Geometry::box(3.0f, 0.4f, 54), black)->position = { 0, 8, -33 };
+        if (wall) s->add(g3d::Geometry::box(400, 120, 1), black)->position = { 0, 20, -70 };
+    }
+    g3d::Light sun = g3d::Light::directional({ SLIT_SX * 60, SLIT_SY * 60, 0 }, WHITE, 2, shadow);
+    sun.shadowExtent = 40;
+    s->lights.push_back(sun);
+    s->volumetric.quality = q;
+    s->volumetric.anisotropy = aniso;
+    s->volumetric.ambient = ambient;
+    return s;
+}
+// The image position of the shaft's centre line at height y (it crosses the roof at x = 0 and leans towards -x).
+static Vector2 slitPoint(const g3d::Camera& cam, float y, float dx, int w, int h) {
+    return project(cam, { (y - 8) * SLIT_SX / SLIT_SY + dx, y, 0 }, w, h);
+}
+static float slitFactor(const Image& img, const g3d::Camera& cam, int w, int h, float* onOut = nullptr, float* offOut = nullptr) {
+    double on = 0, off = 0;
+    int n = 0;
+    for (float y : { 2.5f, 3.5f, 4.5f, 5.5f, 6.5f }) {
+        const Vector2 a = slitPoint(cam, y, 0, w, h), b = slitPoint(cam, y, -6, w, h), c = slitPoint(cam, y, 6, w, h);
+        on += meanLin(img, (int)a.x, (int)a.y, 2);
+        off += 0.5 * (meanLin(img, (int)b.x, (int)b.y, 2) + meanLin(img, (int)c.x, (int)c.y, 2));
+        n++;
+    }
+    if (onOut) *onOut = (float)(on / n);
+    if (offOut) *offOut = (float)(off / n);
+    return (float)((on / n) / std::max(off / n, 1.0));
+}
+
+// (a) The shaft is where the sun gets through the slot, found by the shadow map: on its line the fog is much brighter than beside it.
+static void slitShaft() {
+    constexpr int W = 480, H = 270;
+    for (auto q : { g3d::Volumetric::Quality::Low, g3d::Volumetric::Quality::Medium, g3d::Volumetric::Quality::High }) {
+        auto sc = slitScene(q);
+        Image img = look(sc, W, H, 3);
+        float on = 0, off = 0;
+        const float f = slitFactor(img, sc->camera, W, H, &on, &off);
+        std::printf("[weather] W10 slit shaft (%s): on the line %.1f, beside it %.1f (linear light x 1000), factor %.2f (want over 2)\n", qualityName(q), on, off, f);
+        CHECK(f > 2.f);
+        if (q == g3d::Volumetric::Quality::Medium) dump("w10-slit.png", img);
+        UnloadImage(img);
+    }
+    // No shadow on the sun (it lights all the fog alike, the negative control): no shaft.
+    auto sc = slitScene(g3d::Volumetric::Quality::Medium, 0.7f, false);
+    Image flat = look(sc, W, H, 3);
+    float on = 0, off = 0;
+    const float f = slitFactor(flat, sc->camera, W, H, &on, &off);
+    std::printf("[weather] W10 slit, no shadow map on the sun (uniform light, the negative control): factor %.2f (want under 1.15)\n", f);
+    CHECK(f < 1.15f);
+    UnloadImage(flat);
+}
+
+// (b) Off means off: the fields set but quality Off, aerial perspective with enabled false: the same pixels as a scene that never set them.
+static g3d::ScenePtr airStreet(bool setFields) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = { 0, 3, 0 };
+    s->camera.target = { 0, 2, -30 };
+    s->camera.fov = 50;
+    s->ambient = 0.5f;
+    s->fogMode = g3d::FogMode::Exponential;
+    s->fogDensity = 0.03f;
+    s->fogColor = { 184, 200, 216, 255 };
+    s->shadowMapSize = 1024;
+    g3d::Material ground;
+    ground.color = { 80, 120, 60, 255 };
+    ground.roughness = 1;
+    s->add(g3d::Geometry::plane(400, 400), ground);
+    const Color cols[3] = { { 200, 60, 50, 255 }, { 60, 90, 210, 255 }, { 220, 200, 70, 255 } };
+    const float zs[3] = { -8, -20, -45 };
+    for (int i = 0; i < 3; i++) {
+        g3d::Material m;
+        m.color = cols[i];
+        m.roughness = 0.8f;
+        s->add(g3d::Geometry::box(4, 6, 3), m)->position = { -6.f + 6.f * i, 3, zs[i] };
+    }
+    s->lights.push_back(g3d::Light::directional({ 20, 30, 14 }, WHITE, 2));
+    if (setFields) {
+        s->volumetric.quality = g3d::Volumetric::Quality::Off;
+        s->volumetric.density = 0.2f;
+        s->volumetric.heightFalloff = 0.3f;
+        s->volumetric.anisotropy = 0.9f;
+        s->volumetric.scatterLights = true;
+        s->aerial.enabled = false;
+        s->aerial.strength = 9;
+        s->aerial.scaleHeight = 100;
+    }
+    return s;
+}
+static void airOffMeansOff() {
+    Image a = look(airStreet(false), 320, 180, 4), b = look(airStreet(true), 320, 180, 4);
+    const long long d = diffImages(a, b);
+    std::printf("[weather] W10 off means off: volumetric Off and aerial disabled, with every other field set, differ from a scene that never set them by %lld (want 0)\n", d);
+    CHECK(d == 0);
+    UnloadImage(a); UnloadImage(b);
+}
+
+// (c) Looking toward the sun the fog is brighter than looking away (forward scattering).
+static g3d::ScenePtr phaseScene(bool toward, float aniso) {
+    auto s = std::make_shared<g3d::Scene>();
+    const Vector3 sun = Vector3Normalize({ 0.94f, 0.34f, 0 });
+    s->camera.position = { 0, 0, 0 };
+    s->camera.target = { toward ? 10.f : -10.f, 0, 0 };
+    s->camera.fov = 30;
+    s->camera.farPlane = 300;
+    s->ambient = 0;
+    s->fogMode = g3d::FogMode::Exponential;
+    s->fogDensity = 0.02f;
+    s->fogColor = { 90, 90, 90, 255 };
+    g3d::Material black = airBlack();
+    black.unlit = true;                // nothing here needs to cast a shadow
+    s->add(g3d::Geometry::box(1, 200, 300), black)->position = { 60, 0, 0 };
+    s->add(g3d::Geometry::box(1, 200, 300), black)->position = { -60, 0, 0 };
+    s->lights.push_back(g3d::Light::directional(Vector3Scale(sun, 50), WHITE, 2));
+    s->volumetric.quality = g3d::Volumetric::Quality::Medium;
+    s->volumetric.anisotropy = aniso;
+    s->volumetric.ambient = 0.1f;
+    return s;
+}
+static void phaseForward() {
+    Image to = look(phaseScene(true, 0.7f), 160, 90, 2), away = look(phaseScene(false, 0.7f), 160, 90, 2);
+    Image to0 = look(phaseScene(true, 0), 160, 90, 2), away0 = look(phaseScene(false, 0), 160, 90, 2);
+    const float t = meanLin(to, 80, 45, 20), a = meanLin(away, 80, 45, 20), t0 = meanLin(to0, 80, 45, 20), a0 = meanLin(away0, 80, 45, 20);
+    std::printf("[weather] W10 phase: toward the sun %.1f, away %.1f (linear light x 1000; ratio %.2f, want over 2); with anisotropy 0 toward %.1f, away %.1f (ratio %.2f, want 1.0 +- 0.05)\n",
+                t, a, t / std::max(a, 0.5f), t0, a0, t0 / std::max(a0, 0.5f));
+    CHECK(t > 2.f * a);
+    CHECK(std::fabs(t0 / std::max(a0, 0.5f) - 1.f) < 0.05f);
+    UnloadImage(to); UnloadImage(away); UnloadImage(to0); UnloadImage(away0);
+}
+
+// (d) No double fog: with nothing to shade the march, and no phase, the volumetric fog is the analytic one.
+static void noDoubleFog() {
+    constexpr int W = 320, H = 180;
+    auto off = airStreet(false);
+    auto on = airStreet(false);
+    on->volumetric.quality = g3d::Volumetric::Quality::Medium;
+    on->volumetric.anisotropy = 0;
+    Image a = look(off, W, H, 4), b = look(on, W, H, 4);
+    std::vector<float> d;
+    double sum = 0;
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            const Color p = GetImageColor(a, x, y), q = GetImageColor(b, x, y);
+            const float v = (std::abs(p.r - q.r) + std::abs(p.g - q.g) + std::abs(p.b - q.b)) / 3.f;
+            d.push_back(v);
+            sum += v;
+        }
+    std::sort(d.begin(), d.end());
+    const float mean = (float)(sum / d.size()), p99 = d[(size_t)(d.size() * 0.99)];
+    // The same with the other kind of fog: one that thins with height.
+    auto offH = airStreet(false), onH = airStreet(false);
+    for (auto* sc : { offH.get(), onH.get() }) { sc->fogHeight = 0; sc->fogFalloff = 0.08f; sc->fogDensity = 0.05f; }
+    onH->volumetric.quality = g3d::Volumetric::Quality::Medium;
+    onH->volumetric.anisotropy = 0;
+    Image c = look(offH, W, H, 4), e = look(onH, W, H, 4);
+    double sumH = 0;
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            const Color p = GetImageColor(c, x, y), q = GetImageColor(e, x, y);
+            sumH += (std::abs(p.r - q.r) + std::abs(p.g - q.g) + std::abs(p.b - q.b)) / 3.0;
+        }
+    const float meanH = (float)(sumH / (W * H));
+    std::printf("[weather] W10 no double fog: exponential fog analytic vs marched: mean %.2f levels, 99th percentile %.1f (want mean under 1.5, p99 under 6); height fog mean %.2f (want under 1.5)\n", mean, p99, meanH);
+    CHECK(mean < 1.5f);
+    CHECK(p99 < 6.f);
+    CHECK(meanH < 1.5f);
+    dump("w10-fog-analytic.png", a); dump("w10-fog-marched.png", b);
+    UnloadImage(a); UnloadImage(b); UnloadImage(c); UnloadImage(e);
+}
+
+// (e) Aerial perspective: identical grey boxes at 1, 5, 15 and 40 km (each subtends the same angle, just above the horizon).
+static g3d::ScenePtr ridgeBoxes(bool boxes, bool aerial, float scaleHeight = 2500) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = { 0, 1.7f, 0 };
+    s->camera.target = { 0, 1.7f, -20000.f };
+    s->camera.fov = 30;
+    s->camera.nearPlane = 50;
+    s->camera.farPlane = 120000;
+    s->sky = g3d::Sky::day();
+    s->sky.hazeAmount = 0;
+    s->sky.clouds = 0;
+    s->sky.horizon = { 150, 185, 235, 255 };
+    s->aerial.enabled = aerial;
+    s->aerial.scaleHeight = scaleHeight;
+    if (boxes) {
+        g3d::Material m;
+        m.color = { 40, 40, 40, 255 };
+        m.unlit = true;
+        const float ds[4] = { 1000, 5000, 15000, 40000 }, az[4] = { -9, -3, 3, 9 };
+        for (int i = 0; i < 4; i++) {
+            const float sz = ds[i] * 0.04f;
+            s->add(g3d::Geometry::box(sz, sz, sz), m)->position = { ds[i] * std::tan(az[i] * DEG2RAD), ds[i] * 0.045f, -ds[i] };
+        }
+    }
+    return s;
+}
+static void aerialDistance() {
+    constexpr int W = 640, H = 360;
+    auto on = ridgeBoxes(true, true);
+    Image img = look(on, W, H, 2), plain = look(ridgeBoxes(true, false), W, H, 2), sky = look(ridgeBoxes(false, true), W, H, 2);
+    const float ds[4] = { 1000, 5000, 15000, 40000 }, az[4] = { -9, -3, 3, 9 };
+    float dist[4], br[4], brOff[4];
+    for (int i = 0; i < 4; i++) {
+        const Vector2 p = project(on->camera, { ds[i] * std::tan(az[i] * DEG2RAD), ds[i] * 0.045f, -ds[i] }, W, H);
+        const Vector3 c = meanRGB(img, (int)p.x, (int)p.y, 3), s = meanRGB(sky, (int)p.x, (int)p.y, 3), o = meanRGB(plain, (int)p.x, (int)p.y, 3);
+        dist[i] = (std::fabs(c.x - s.x) + std::fabs(c.y - s.y) + std::fabs(c.z - s.z)) / 3.f;
+        br[i] = c.z / std::max(c.x, 1.f);
+        brOff[i] = o.z / std::max(o.x, 1.f);
+        std::printf("[weather] W10 aerial %5.0f km: box (%.0f, %.0f, %.0f), the sky there (%.0f, %.0f, %.0f), distance to it %.1f, blue/red %.3f (off: %.3f)\n",
+                    ds[i] / 1000, c.x, c.y, c.z, s.x, s.y, s.z, dist[i], br[i], brOff[i]);
+    }
+    CHECK(dist[0] > dist[1] && dist[1] > dist[2] && dist[2] > dist[3]);
+    CHECK(dist[3] < 0.35f * dist[0]);
+    CHECK(br[0] < br[1] && br[1] < br[2] && br[2] < br[3]);
+    CHECK(brOff[3] < 1.05f);                                 // without it the grey box stays grey
+    dump("w10-aerial.png", img);
+    UnloadImage(img); UnloadImage(plain); UnloadImage(sky);
+
+    // From 3 km up the same box 15 km off is hazier less: the haze thins with altitude.
+    auto fade = [&](float eye, float scaleHeight) {
+        auto sc = ridgeBoxes(true, true, scaleHeight);
+        sc->camera.position.y = eye;
+        sc->camera.target.y = eye > 100 ? eye - 3000.f : eye;
+        Image a = look(sc, W, H, 2);
+        auto pl = ridgeBoxes(true, false, scaleHeight);
+        pl->camera = sc->camera;
+        Image c = look(pl, W, H, 2);
+        const Vector2 p = project(sc->camera, { 15000.f * std::tan(3 * DEG2RAD), 15000.f * 0.045f, -15000.f }, W, H);
+        const Vector3 col = meanRGB(a, (int)p.x, (int)p.y, 3), plainCol = meanRGB(c, (int)p.x, (int)p.y, 3);
+        UnloadImage(a); UnloadImage(c);
+        // The share of the way from the box's grey to the horizon colour (red 150) the red channel has gone.
+        return (col.x - plainCol.x) / (150.f - plainCol.x);
+    };
+    const float low = fade(1.7f, 2500), high = fade(3000, 2500), highFlat = fade(3000, 1e7f), lowFlat = fade(1.7f, 1e7f);
+    std::printf("[weather] W10 aerial altitude: red haze share of a box 15 km off: %.3f from the ground, %.3f from 3 km up (want under 0.8x); with no altitude dependence (scaleHeight 1e7) %.3f and %.3f (want equal)\n",
+                low, high, lowFlat, highFlat);
+    CHECK(low > 0.05f);
+    CHECK(high < 0.8f * low);
+    CHECK(std::fabs(highFlat - lowFlat) < 0.05f * std::max(lowFlat, 0.01f));
+}
+
+// (f) Purity and stability: a frame alone is the frame after others; a static scene does not change from frame to frame;
+// and the march's jitter is gone in a flat part of the shaft.
+static void airPurity() {
+    constexpr int W = 480, H = 270;
+    Image alone = look(slitScene(g3d::Volumetric::Quality::Medium), W, H, 5);
+    Comp c = comp(slitScene(g3d::Volumetric::Quality::Medium), W, H);
+    Image x1 = render(c, 11), x2 = render(c, 40), later = render(c, 5), twice = render(c, 5), next = render(c, 6);
+    const long long dAlone = diffImages(alone, later), dTwice = diffImages(later, twice), dNext = diffImages(later, next);
+    std::printf("[weather] W10 purity: frame alone vs after others %lld; two renders of one frame %lld; frame 5 vs 6 of a static scene %lld (all want 0)\n", dAlone, dTwice, dNext);
+    CHECK(dAlone == 0);
+    CHECK(dTwice == 0);
+    CHECK(dNext == 0);
+    // Noise: a 9 x 9 patch on the line, minus its own 5 x 5 mean (the shaft is smooth), at each quality.
+    for (auto q : { g3d::Volumetric::Quality::Low, g3d::Volumetric::Quality::Medium, g3d::Volumetric::Quality::High }) {
+        auto sc = slitScene(q);
+        Image img = look(sc, W, H, 5);
+        const Vector2 p = slitPoint(sc->camera, 4.5f, 0, W, H);
+        double sum = 0;
+        int n = 0;
+        for (int dy = -4; dy <= 4; dy++)
+            for (int dx = -4; dx <= 4; dx++) {
+                const int px = (int)p.x + dx, py = (int)p.y + dy;
+                sum += std::pow(luma(GetImageColor(img, px, py)) - meanLuma(img, px, py, 2), 2);
+                n++;
+            }
+        const float rms = (float)std::sqrt(sum / n);
+        std::printf("[weather] W10 shaft noise (%s): rms %.2f levels about the local mean, shaft %.1f levels (want rms under 1.0)\n", qualityName(q), rms, meanLuma(img, (int)p.x, (int)p.y, 4));
+        CHECK(rms < 1.0f);
+        UnloadImage(img);
+    }
+    UnloadImage(alone); UnloadImage(x1); UnloadImage(x2); UnloadImage(later); UnloadImage(twice); UnloadImage(next);
+}
+
+// (h) A spot light's cone shows in the fog when scatterLights is on, and does not when it is off.
+static g3d::ScenePtr coneScene(bool scatter) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = { 0, 2, 12 };
+    s->camera.target = { 0, 3, 0 };
+    s->camera.fov = 40;
+    s->ambient = 0;
+    s->fogMode = g3d::FogMode::Exponential;
+    s->fogDensity = 0.04f;
+    s->fogColor = { 20, 20, 20, 255 };
+    g3d::Material wall = airBlack();
+    wall.unlit = true;
+    s->add(g3d::Geometry::box(200, 100, 1), wall)->position = { 0, 20, -30 };
+    g3d::Light spot = g3d::Light::spot({ 0, 8, 0 }, { 0, 0, 0 }, { 255, 240, 220, 255 }, 6, 25);
+    spot.range = 20;
+    spot.innerAngle = 10;
+    s->lights.push_back(spot);
+    s->volumetric.quality = g3d::Volumetric::Quality::Medium;
+    s->volumetric.scatterLights = scatter;
+    return s;
+}
+static void spotCone() {
+    constexpr int W = 320, H = 180;
+    float ratio[2];
+    for (int k = 0; k < 2; k++) {
+        auto sc = coneScene(k == 0);
+        Image img = look(sc, W, H, 2);
+        const Vector2 a = project(sc->camera, { 0, 4, 0 }, W, H), b = project(sc->camera, { -5, 4, 0 }, W, H), c = project(sc->camera, { 5, 4, 0 }, W, H);
+        const float on = meanLin(img, (int)a.x, (int)a.y, 2), off = 0.5f * (meanLin(img, (int)b.x, (int)b.y, 2) + meanLin(img, (int)c.x, (int)c.y, 2));
+        ratio[k] = on / std::max(off, 1.f);
+        std::printf("[weather] W10 spot cone, scatterLights %s: on the axis %.1f, outside the cone %.1f (linear x 1000), ratio %.2f\n", k == 0 ? "on" : "off", on, off, ratio[k]);
+        if (k == 0) dump("w10-cone.png", img);
+        UnloadImage(img);
+    }
+    CHECK(ratio[0] > 3.f);
+    CHECK(ratio[1] < 1.15f);
+}
+
+// (i) Foliage silhouettes: a vertical card of 0.3 m clear and 0.3 m solid stripes (8 px each) over the left half of the shaft, the clear
+// stripes seen against the lit fog. The depth-aware filter drops the taps across every edge, and where few were left the
+// march's jitter showed as a dot screen. The fog seen through the stripes must be as clean as the same shaft seen free.
+static g3d::ScenePtr canopyScene(bool casts, bool wall);
+static float stripeNoise(g3d::Volumetric::Quality q, float* nearOut, float* farOut, Image* keep = nullptr) {
+    constexpr int W = 480, H = 270;
+    static std::string tex;
+    if (tex.empty()) {
+        Image img = GenImageColor(256, 4, WHITE);
+        for (int y = 0; y < 4; y++) for (int x = 0; x < 256; x++) if ((x / 2) % 2 == 0) ImageDrawPixel(&img, x, y, Color{ 255, 255, 255, 0 });
+        fs::create_directories("out/tmp-tests");
+        tex = (fs::path("out/tmp-tests") / "w10-stripes.png").string();
+        ExportImage(img, tex.c_str());
+        UnloadImage(img);
+    }
+    auto sc = slitScene(q);
+    g3d::Material leaf = airBlack();
+    leaf.map = tex;
+    leaf.alphaCutoff = 0.5f;
+    leaf.doubleSided = true;
+    auto* card = sc->add(g3d::Geometry::plane(38, 14), leaf);
+    card->position = { -21.5f, 3, 15 };
+    card->rotation = { 90, 0, 0 };
+    Image img = look(sc, W, H, 3);
+    const Vector2 lo = slitPoint(sc->camera, 6.5f, 0, W, H), hi = slitPoint(sc->camera, 2.5f, 0, W, H);
+    const Vector2 edge = project(sc->camera, { -2.5f, 4, 15 }, W, H);            // the card's right edge: the left of it is striped
+    auto hf = [&](int x, int y) {                                                   // the pixel against its 3 x 3 mean
+        double m = 0;
+        for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) m += luma(GetImageColor(img, x + i, y + j));
+        return luma(GetImageColor(img, x, y)) - m / 9.0;
+    };
+    double sn = 0, sf = 0;
+    int nn = 0, nf = 0;
+    // Striped side: the pixels in the clear stripes (the bright ones: a solid stripe is black) at least 2 px from a stripe's edge.
+    for (int y = (int)lo.y; y <= (int)hi.y; y++) {
+        float mn = 1e9f, mx = -1e9f;                                                // a clear stripe sees the fog to the far wall: brighter than a solid one
+        for (int x = (int)edge.x - 26; x < (int)edge.x - 2; x++) { const float l = luma(GetImageColor(img, x, y)); mn = std::min(mn, l); mx = std::max(mx, l); }
+        const float mid = 0.5f * (mn + mx);
+        for (int x = (int)edge.x - 22; x < (int)edge.x - 2; x++) {
+            bool clear = mx - mn > 3.f;
+            for (int i = -2; i <= 2; i++) if (luma(GetImageColor(img, x + i, y)) < mid) clear = false;
+            if (!clear) continue;
+            const double e = hf(x, y);
+            sn += e * e; nn++;
+        }
+    }
+    // Free side: the same number of columns of the shaft, to the right of the card.
+    for (int y = (int)lo.y; y <= (int)hi.y; y++)
+        for (int x = (int)edge.x + 3; x < (int)edge.x + 23; x++) { const double e = hf(x, y); sf += e * e; nf++; }
+    *nearOut = nn ? (float)std::sqrt(sn / nn) : -1.f;
+    *farOut = (float)std::sqrt(sf / std::max(nf, 1));
+    if (keep) *keep = img; else UnloadImage(img);
+    return *nearOut / std::max(*farOut, 0.4f);
+}
+static void edgeNoise() {
+    for (auto q : { g3d::Volumetric::Quality::Low, g3d::Volumetric::Quality::Medium, g3d::Volumetric::Quality::High }) {
+        float n = 0, f = 0;
+        Image img{};
+        const float ratio = stripeNoise(q, &n, &f, &img);
+        std::printf("[weather] W10 silhouette noise (%s): high-frequency rms in the fog between foliage edges %.2f levels, in the same shaft with no foliage %.2f (ratio %.2f, want at most 1.5)\n", qualityName(q), n, f, ratio);
+        CHECK(n >= 0 && ratio <= 1.5f);
+        if (q == g3d::Volumetric::Quality::Medium) dump("w10-stripes.png", img);
+        UnloadImage(img);
+    }
+}
+
+// (j) The shadow of cut-out foliage: a canopy of one alpha-tested card with a 3 m clear strip makes a shaft, like the slot of
+// the roof does. With the card casting no shadow there is none.
+static g3d::ScenePtr canopyScene(bool casts, bool wall) {
+    static std::string tex;
+    if (tex.empty()) {
+        Image img = GenImageColor(256, 4, WHITE);
+        for (int y = 0; y < 4; y++) for (int x = 124; x < 132; x++) ImageDrawPixel(&img, x, y, Color{ 255, 255, 255, 0 });
+        fs::create_directories("out/tmp-tests");
+        tex = (fs::path("out/tmp-tests") / "w10-canopy.png").string();
+        ExportImage(img, tex.c_str());
+        UnloadImage(img);
+    }
+    auto s = slitScene(g3d::Volumetric::Quality::Medium, 0.7f, true, 0.05f, false);
+    s->camera.position.y = 2; s->camera.target.y = 4;
+
+    g3d::Material leaf = airBlack();
+    leaf.map = tex;
+    leaf.alphaCutoff = 0.5f;
+    leaf.doubleSided = true;
+    leaf.castShadow = casts;
+    s->add(g3d::Geometry::plane(100, 120), leaf)->position = { 0, 8, 0 };
+    if (wall) s->add(g3d::Geometry::box(400, 120, 1), airBlack())->position = { 0, 20, -70 };
+    return s;
+}
+static void canopyShaft() {
+    constexpr int W = 480, H = 270;
+    float f[2];
+    for (int k = 0; k < 2; k++) {
+        auto sc = canopyScene(k == 0, true);
+        Image img = look(sc, W, H, 3);
+        float on = 0, off = 0;
+        f[k] = slitFactor(img, sc->camera, W, H, &on, &off);
+        std::printf("[weather] W10 canopy of cut-out cards, cards %s: on the gap's line %.1f, beside it %.1f (linear x 1000), contrast %.2f (want over 2 casting, under 1.15 not)\n", k == 0 ? "cast" : "do not cast", on, off, f[k]);
+        if (k == 0) dump("w10-canopy.png", img);
+        UnloadImage(img);
+    }
+    CHECK(f[0] > 2.f);
+    CHECK(f[1] < 1.15f);
+}
+
+// (k) The sea is not in the depth buffer, so land under the water must not be hazed through it: over a submerged shelf the sea pixels
+// are the same with the aerial perspective on and off (it belongs to what is in front of the sea; W9's haze is the sea's own).
+static void aerialOverSea() {
+    constexpr int W = 320, H = 180;
+    Image img[2];
+    for (int k = 0; k < 2; k++) {
+        auto s = ridgeBoxes(false, true);
+        s->camera.position = { 0, 6, 0 };
+        s->camera.target = { 0, 4, -20000.f };
+        s->water = g3d::Water::calm();
+        s->water.level = 0;
+        s->aerial.strength = 4;
+        s->aerial.enabled = k == 0;
+        {
+            g3d::Material m;
+            m.color = { 40, 60, 30, 255 };
+            m.unlit = true;
+            s->add(g3d::Geometry::box(40000, 20, 20000), m)->position = { 0, -30, -16000 };
+        }
+        img[k] = look(s, W, H, 3);
+    }
+    float worst = 0;
+    for (int y = H / 2 + 6; y < H / 2 + 40; y += 6) {
+        const Vector3 a = meanRGB(img[0], W / 2, y, 6), b = meanRGB(img[1], W / 2, y, 6);
+        worst = std::max(worst, std::max({ std::fabs(a.x - b.x), std::fabs(a.y - b.y), std::fabs(a.z - b.z) }));
+    }
+    std::printf("[weather] W10 aerial over the sea: sea pixels over a submerged shelf differ with aerial perspective on and off by %.1f levels at worst (want under 3)\n", worst);
+    CHECK(worst < 3.f);
+    dump("w10-sea-shelf.png", img[0]);
+    UnloadImage(img[0]); UnloadImage(img[1]);
+}
+
+static void lightInAir() {
+    slitShaft();
+    spotCone();
+    airOffMeansOff();
+    phaseForward();
+    noDoubleFog();
+    aerialDistance();
+    airPurity();
+    edgeNoise();
+    canopyShaft();
+    aerialOverSea();
+}
+
+// (g) The cost at 1080p: the fog with shafts off, and each quality, over a street of 400 boxes (the march does not depend on the geometry).
+static void airTiming() {
+    constexpr int W = 1920, H = 1080;
+    for (int row = 0; row < 5; row++) {
+        auto s = slitScene(g3d::Volumetric::Quality::Off);
+        for (int i = 0; i < 400; i++) {
+            g3d::Material m;
+            m.color = { 120, 110, 100, 255 };
+            s->add(g3d::Geometry::box(1, 2, 1), m)->position = { -30.f + 3.f * (float)(i % 20), 1, -60.f + 6.f * (float)(i / 20) };
+        }
+        s->volumetric.quality = (g3d::Volumetric::Quality)(row == 4 ? 3 : row);
+        if (row == 4) s->aerial.enabled = true;
+        Comp c = comp(s, W, H);
+        Canvas canvas;
+        canvas.load(W, H, 1);
+        presentFrame(c, 5, canvas);
+        UnloadImage(LoadImageFromTexture(canvas.output().texture));
+        double best = 1e9, mean = 0;
+        for (int i = 0; i < 12; i++) {
+            const double t0 = GetTime();
+            presentFrame(c, 5 + i, canvas);
+            Image img = LoadImageFromTexture(canvas.output().texture);
+            const double dt = (GetTime() - t0) * 1000;
+            UnloadImage(img);
+            best = std::min(best, dt);
+            mean += dt / 12;
+        }
+        canvas.unload();
+        std::printf("[weather] W10 timing 1080p, %s: best %.1f ms, mean %.1f ms\n",
+                    row == 0 ? "analytic fog (off)" : row == 1 ? "low" : row == 2 ? "medium" : row == 3 ? "high" : "high + aerial perspective", best, mean);
+    }
+}
+
 int main() try {
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
@@ -6472,6 +7023,13 @@ int main() try {
         shutdownGraphics(); CloseWindow(); return 0;
     }
     if (std::getenv("RMTN_W9_IMAGES")) { w9Images(); shutdownGraphics(); CloseWindow(); return 0; }
+    if (std::getenv("RMTN_W10_TIMING")) { airTiming(); shutdownGraphics(); CloseWindow(); return 0; }
+    if (std::getenv("RMTN_W10_ONLY")) {
+        lightInAir();
+        shutdownGraphics(); CloseWindow();
+        std::printf(failures ? "[weather] %d failures\n" : "[weather] all passed\n", failures);
+        return failures ? 1 : 0;
+    }
     if (std::getenv("RMTN_W9_TIMING")) { w9Timing(); shutdownGraphics(); CloseWindow(); return 0; }
     if (std::getenv("RMTN_W5_ONLY")) {
         lightningStorm();
@@ -6551,6 +7109,7 @@ int main() try {
     waterWakes();
     ocean();
     lightningStorm();
+    lightInAir();
     shutdownGraphics();
     CloseWindow();
     std::printf(failures ? "[weather] %d failures\n" : "[weather] all passed\n", failures);

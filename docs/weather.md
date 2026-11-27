@@ -539,6 +539,54 @@ horizon haze 45 % sooner. At 18 m/s it is `storm` 0.84.
 `examples/scripts/thunderstorm.as` is a whole storm: towers with anvils over a stormy sea, flashes in the cloud and bolts to
 the water, rain that moves off, the sun behind the camera and the rainbow.
 
+## Light in the air
+
+Two post passes over the finished opaque picture, both off by default (with them off the picture is the old one, bit for bit).
+
+**Sun shafts** (`Scene::volumetric`, quality Off / Low / Medium / High). The fog is the scene's own: `fogMode`,
+`fogDensity`, `fogHeight`/`fogFalloff`, or the weather's haze, or the exponential fog `Volumetric::density` (with
+`heightFalloff` and `heightBase`) sets for the frame. Each view ray is marched, at a share of the picture's size, from the eye
+to the opaque surface under the pixel, or to where the fog is all but opaque. Every step takes an equal share of the ray's fog
+opacity (where the fog has a closed form) and asks how lit that bit of air is:
+
+    fog colour x (ambient + (1 - ambient) x mix(1, sunlit x phase, sun))
+
+* `sunlit` is the directional light's shadow-map tile read at that point in the air (four taps) times the clouds' ground
+  shadow (W2), so shafts form through gaps in canopies, windows and clouds. The sun is the sky's `sunLight`, else the
+  directional light along the sky's sun, else the first directional light. A light that casts no shadow lights all the fog alike.
+* `phase` is 4 pi times a Henyey-Greenstein lobe of `anisotropy` (default 0.7), compressed to a third of its swing and capped at 8
+  so the glow round the sun does not blow out. It is 1 everywhere for `anisotropy` 0, and its mean over all directions is 1, so
+  the fog is brightest toward the sun, dimmest away from it, and the same on average.
+* `sun` is the sun's elevation (the shafts fade out as it sets) times the weather's `sunScale`.
+* `ambient` (0.35) is the share of the fog's brightness that does not come from the sun: fog in shade. Low in a dark barn.
+* With `scatterLights` spot and point lights light the fog too: their cones show, with the shadows they cast (a point light's
+  six tiles included). Radiance is half the light's colour x intensity x its falloff x the phase function.
+
+The march writes what the fog adds to the eye and how much of the scene behind it gets through; the composite brings that up with a
+depth-aware 5 x 5 filter (the march's jitter, interleaved gradient noise on the low-resolution pixel grid, is the same in every
+frame, and the filter averages it away; there is no temporal accumulation) and gives the sum `scene x through + added`.
+While it is on the lit shader draws no fog (the analytic fog is replaced, never added to it: an 8-bit picture could not take a
+bright fog off again). In the unshadowed, isotropic limit the sum is exactly the analytic fog (checked: mean 0.23 levels of
+difference). Costs at 1080p, over a 400-box street: Low 0.3 ms, Medium 0.5, High 1.2 (16 steps at 0.35 of the width and
+height, 32 at 0.5, 48 at 0.75), copy of the scene included; aerial perspective adds about 0.3 ms.
+
+What it does not do: transparent surfaces and particles are fogged as if at the opaque depth behind them (the sea, which has no
+depth, as if at its plane); the water's mirrored reflection carries the analytic fog, with no shafts; a ground-hugging fog
+(`fogFalloff`) is stepped evenly in distance, not in opacity, so a camera high above a thin layer wants High; a camera under the
+sea draws no shafts.
+
+**Aerial perspective** (`Scene::aerial`). Distant opaque things lose their own light, blue first, and the air in between adds the
+sky's horizon colour in that direction (the colour the fog takes with `fogFromSky` and that the spectrum sea fades to, so land,
+sea and sky meet without a seam). The optical depth is `strength / 30 km` of sea-level air (green; red 0.77 times that, blue 1.7
+times) along the ray, weighted by exp(-altitude / `scaleHeight`) (2500 m): a ridge 30 km off is paler and bluer, and from 3 km up
+the same distance is hazier less. A grey box (40) at 1, 5, 15 and 40 km goes (48, 52, 60), (66, 79, 99), (90, 110, 142) and (112,
+139, 182) toward the sky's (133, 169, 225) with the blue/red ratio rising 1.26, 1.49, 1.58, 1.62 (off: 1.00); the red haze share of
+a box 15 km off is 0.45 from the ground and 0.33 from 3 km up. It touches what is in the depth buffer: not the sky, not the
+sea (W9's haze does that), not the clouds (`Clouds::haze` does). Land under the water (the sea writes no depth) is not hazed through the sea: where the sea plane is in front of the depth the pixel is sea. The haze never goes past the horizon colour.
+
+`examples/scripts/forest_light.as` (morning mist, the sun low behind the trees; its `ambient` is 0.05, because a high one lifts the shade and the shafts die), `sunset_sea.as` (the seam case: a headland hazed into a sunset sea), `barn_shafts.as` (dust in a dark barn with a
+high window) and `blue_ridges.as` (six ridges to 35 km).
+
 ## Script
 
 The water's `spectrum` object and `examples/scripts/open_ocean.as` are in docs/scripting.md. The scene descriptor's `clouds` object (docs/scripting.md) takes the `Clouds` fields by name. Its `weather` object takes a `preset`, optionally `to` and
@@ -548,6 +596,16 @@ grass, trees, a pond and rain, mixed from clear into a storm across the clip. Th
 object's `ride` key are in docs/scripting.md; `examples/scripts/harbour_wake.as` is a launch, a dinghy and a stone in a harbour.
 
 ## Tests
+
+W10 (`RMTN_W10_ONLY=1`, timing `RMTN_W10_TIMING=1`): a roof with a 3 m slot over fog, the sun above it and a shadow map on the sun: the
+fog on the line of the shaft is 2.7 times brighter (linear light) than 6 m to either side at Low, Medium and High, and 0.99 times
+when the sun has no shadow (and when the march ignores the shadow map); a spot's cone is 45 times brighter than the fog beside it with
+`scatterLights` and 0.98 without; looking 20 degrees from the sun the fog is 3.3 times brighter than looking away, and 1.00 with
+`anisotropy` 0; volumetric Off and aerial disabled with every other field set are pixel-identical (0) with a scene that never set them; the marched fog
+differs from the analytic one by 0.23 levels on average (p99 1.3; 0.23 for height fog), and 11 levels with the analytic fog left on (double
+fog); aerial perspective (above); a frame alone, after others and twice is identical, and so are two frames of a static scene; the noise
+in a flat part of the shaft is 0.5-0.6 levels about its local mean (2.3 at Low with the filter off). A card of 0.3 m clear and solid stripes over half the shaft: the fog between its edges is as clean as the free half (high-frequency rms 0.67 / 0.66 / 0.50 levels against 0.78 / 0.83 / 0.64 at Low / Medium / High, ratio under 1); a canopy of one alpha-tested card with a 3 m clear strip makes a shaft 3.7 times brighter than the fog beside it (1.10 when the card casts no shadow); sea pixels over a submerged shelf are identical (0.0 levels) with the aerial perspective on and off (14.8 with the sea clip removed). Each was broken to see it fail:
+the shadow map ignored, the phase made 1, the fog drawn twice, no altitude dependence, no filter, the cards not casting, the sea clip removed.
 
 W5 (`RMTN_W5_ONLY=1`): same seed same bolt (768 segments, same-seed pixel diff 0), another seed another; the frame is
 brighter only inside the strike's window and equal to the dark scene before the leader and after the last restrike, with at

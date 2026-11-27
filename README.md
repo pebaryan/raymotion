@@ -371,6 +371,11 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   with no tile to see, a distance-filtered normal that goes to mean roughness, the planet's curvature (the horizon dips
   atan(sqrt(2h/R))), haze to the sky colour, whitecaps that follow the wind and decay, and spray at 15 m/s and up. Height, slope and
   `ride` agree with the picture. Off by default; about 16 ms at 1080p. `examples/scripts/open_ocean.as`.
+* Light in the air (`Scene::volumetric`, `Scene::aerial`, `docs/weather.md`): the scene's fog marched at reduced size and lit by
+  the sun's shadow map and the clouds' shadow, so shafts form through canopies, windows and cloud gaps (Henyey-Greenstein phase,
+  a depth-aware filter, no temporal accumulation; spot and point cones with `scatterLights`), and aerial perspective that
+  fades distant land to the sky's horizon colour, bluer, thinning with altitude. Off by default; 0.3 to 1.2 ms at 1080p.
+  `examples/scripts/forest_light.as`, `barn_shafts.as`, `blue_ridges.as`, `sunset_sea.as`.
 * GPU rain, snow and sleet at scale (`Scene::precipitation`, `docs/weather.md`): drops from a hash
   in fixed world tiles, streaks as long as the shutter and slanted by the wind, lit by the scene's
   lights, stopped by roofs and trees through a top-down depth map, with splashes where rain lands.
