@@ -557,9 +557,11 @@ integral of the wind speed when the speed changes over the shot, or leave it out
 `cover` (0..1), `cloudType` (`cumulus`, `stratus`, `cumulonimbus`, `deck`), `precipitation` (`none`,
 `rain`, `snow`, `sleet`), `intensity`, `wetness`, `snowCover` (pins on the ground's state), `temperature`,
 `accumulationScale`, `history` (keys `{seconds, kind, intensity}`), `haze` (0..1; sets the fog) and
-`lightningRate`; `enabled` (default true) and `fps` (default the scene's `fps`) too. The cloud type and
-lightning are data for later releases and draw nothing yet; wetness and snow are drawn through the scene `ground` (below); the cloud
-type and cover are drawn by a `clouds` object (below).
+`lightningRate` (the rate of strikes a `lightning` object draws when it lists none); `rainbow` (`"auto"`, `"on"`, `"off"`, or
+`{"mode", "distantRain": 0..1 (rain out of sight that makes a bow), "rainDistance": metres (2500), "strength": 0..2}`; see
+docs/weather.md, "Lightning, storm light and rainbows"); `enabled` (default true) and `fps` (default the scene's `fps`) too.
+Wetness and snow are drawn through the scene `ground` (below); the cloud type and cover are drawn by a `clouds` object
+(below), strikes by a `lightning` object (below), the bow by the weather itself.
 Everything that takes the weather's wind has an opt-out that keeps its own: `"ownWind": true` (and, on `water`, `"fetch"`: metres of open water upwind, default 50000, `calm` 2000, `choppy` 10000, `storm` 200000, which limits how high the wind raises the waves) on a
 `grass`, `forest` or `water` descriptor and on a `particles` object (whose `particleConfig` also takes
 `windFollow`, 0..2, the share of the wind's speed a particle takes up sideways, and `drift`, a constant
@@ -570,6 +572,19 @@ cover"): `wetness` and `snowCover` (0..1 pins that win over the weather's accumu
 (0..2), `puddleSize` (m), `rippleRate` (rain rings a m2 a second), `reflections` (screen-space reflection
 on wet ground), `snowOnGrass`, `ownWeather` (keep these pins against a `weather` object), `seed`, `debug`.
 A material takes `"weathering": false` to stay dry and bare (a lit window).
+The scene's `lightning` object draws strikes (docs/weather.md, "Lightning, storm light and rainbows";
+`examples/scripts/thunderstorm.as`) and switches them on (`"enabled": false` keeps the values and switches them off). `strikes`
+is a list (up to 512) of `{"time" (s), "start" [x,y,z], "end" [x,y,z], "seed", "intensity"}`: an `end` within 50 m of
+`groundY` is a bolt to the ground, a higher one a flash in the cloud. `rate` (strikes a minute; -1, the default, takes the
+weather's `lightningRate`) adds strikes from time slots in the disc `area` [x, z] and `radius` (3000 m), under `cloudBase`
+(-1: the clouds' base), `groundShare` (0.45) reaching `groundY`; `seed`; `followClouds` (true) carries them with the
+clouds' drift. Look: `color` (the glow and the light), `intensity`, `width` (m, the core's), `minPixels` (1.4), `glow`,
+`light` (the point light's strength, 0 none) and `lightRange` (m), `cloudLight` (the cloud's inner glow, 0 none),
+`leaderTime` and `minVisible` (s), `branchChance` (0..1) and `jag` (0..1). The picture before a strike's first frame and
+after its last (0.75 s at most) is the picture without lightning. For 2D, `fx::draw("{\"lightning\": {...}}", frame)` takes
+`from` [x,y], `to` [x,y], `seed`, `start` (a frame), `width` (px), `glow`, `color`, `intensity`, `flash` (0..1: how much the
+whole picture lights), `leaderTime`, `minVisible` and `branchChance` (`examples/scripts/lightning_2d.as`). The water's
+`spectrum` takes `"storm"` (0..1; -1, the default, from the wind: a gale's darker, sharper, streaked sea).
 `water` takes `"reflections"` (`off` the default, `scene`, `half`, `quarter`: a planar reflection pass at that share of the frame, drawn only when water is on screen), `"reflectionDistort"` (1; how far the waves bend it, 0 a flat mirror) and `"refraction"` (false; the bed seen through the surface, refracted and absorbed over the real path). With the defaults no pixel changes. See `docs/weather.md` and `examples/scripts/lake_reflections.as`.
 `waterBodies` (array, at most 32) puts lakes, pools and rivers beside the sea: `"type"` is `lake` (or `pool`) with `"outline"` (`[[x, z], ...]`), optional `"holes"` (array of outlines) and `"level"`; or `river` with `"path"` (`[[x, z], ...]`), `"width"` (a number or one per point), `"level"` or `"fall"` (metres lost along the path), `"flowSpeed"` (m/s), `"narrowFaster"` and `"flowPeriod"`. Look keys are those of `water` (`preset`, `reflections`, `refraction`, `foam`, `caustics`, `sunGlint`, `ripple`, `rippleLength`, `fetch`, `ownWind`), plus `"edgeSoft"` (metres of fade at the shore, 0.3), `"foamWidth"` (0.4) and `"shoreFoam"` (0 to 1). The `city` look takes `"realWater": true` to make CityJSON water polygons real bodies. See `docs/weather.md` and `examples/scripts/river_valley.as`.
 `wakes` (array, at most 4) draws Kelvin wakes: `"path"` (`[[x, z], ...]`, 2 to 256 points), `"speed"` (m/s, 4), `"start"` (s, 0), `"length"` (6) and `"beam"` (1.6) of the hull in metres, `"strength"` (1), `"life"` (s the waves last, 30), `"foam"` (0 to 1, 1), `"trail"` (s the propwash stays, 9), `"level"` (the water's height; defaults to the sea's or the first body's) and `"spray": true` to add the bow spray emitter. `ripples` (array, at most 16) drops stones: `"x"`, `"z"`, `"time"` (s), `"strength"` (m, 0.08), `"size"` (m, 0.04), `"life"` (s, 10), `"level"` and `"splash": true`. Both shade the surface of the sea and of water bodies (no mesh displacement). A top-level object takes `"ride": {...}` to float on the water: `"length"` and `"beam"` (the footprint, m), `"draft"` (m), `"heading"` (degrees about +y, 0 = +x; the object's +z is its bow), `"tilt"` (0 to 1), `"along"` and `"across"` (the sample grid, 2 to 9) and `"wake": n` to take its place and heading from wake `n` (it does not ride its own bow wave). Its `up` callback chains after any other. See `docs/weather.md` and `examples/scripts/harbour_wake.as`.
@@ -582,8 +597,9 @@ the sky under cloud looking up), `cloudType` (`cumulus`, `stratus`, `cumulonimbu
 `film` the default, `high`), `resolution` (the fraction of the frame the march runs at, 0: by quality),
 `haze` (aerial perspective, 1; 0 none), `shadows` (a ground shadow map, default true) with `shadowExtent`
 (metres, 8000), `drift` `[x, z]` (m/s, `[3, 1]`) and `fps`. With a `weather` object the cover, type and
-drift come from it; `"ownWeather": true` keeps the clouds' own. `flash` (`position`, `color`,
-`intensity`, `radius`) is the hook for lightning and draws nothing at intensity 0. `jitter: false` turns
+drift come from it; `"ownWeather": true` keeps the clouds' own. `anvil` (1: a few storm cells with an anvil; 0 restores the dense field of sheared towers), `storms` (`[{"x","z","radius","top"}]`, explicit storm cells in the pattern frame; empty: from the seed) and `towerVariety`
+(1; 0 makes every storm cell alike) shape the cumulonimbus (docs/weather.md). `flash` (`position`, `color`,
+`intensity`, `radius`) is a hand-set point light in the cloud and draws nothing at intensity 0. `jitter: false` turns
 the per-pixel jitter and entry refinement off (it exists to show the banding they hide). `denoise: false` swaps the blue noise and bilateral filter for white noise and a point sample, and `extruded: true` restores the old 2D-coverage extrusion (both exist to show what they fix). The Sky's flat
 cloud layer is not drawn while these are on, and the image-based lighting stays free of clouds. Without a
 `clouds` object, or with `"enabled": false`, no pixel changes. See `docs/weather.md`.

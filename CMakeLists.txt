@@ -76,6 +76,7 @@ add_library(rmtn_engine STATIC
   src/engine/waterbody.cpp
   src/engine/wake.cpp
   src/engine/ocean.cpp
+  src/engine/lightning.cpp
   src/engine/devices.cpp
   src/engine/media.cpp
   src/engine/prefab.cpp

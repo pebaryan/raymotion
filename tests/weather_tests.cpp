@@ -1504,7 +1504,9 @@ static float cbAnvil(bool extruded, int* heightPx = nullptr, int* views = nullpt
         for (int cam = 0; cam < 8; cam++) {
             const float x = (cam - 3.5f) * 3000.f;
             auto mk = [&](bool on) {
-                auto s = filmClouds({ x, 2, 20000 }, { x, 5600, 0 }, 0.1f, g3d::CloudType::Cumulonimbus, on, 1200, 11000, 75, false);
+                const float cx = x - 12000.f;                                  // the cell (explicit, one a view) stands left of the centre so its anvil is in the frame
+                auto s = filmClouds({ cx, 2, 38000 }, { cx, 5600, 0 }, 0.f, g3d::CloudType::Cumulonimbus, on, 1200, 11000, 75, false);
+                s->clouds.storms = { g3d::Clouds::Storm{ x + 977.f * (float)seed, 0.f, 5500.f, 10500.f } };
                 s->clouds.extruded = extruded;
                 s->clouds.haze = 0;
                 s->clouds.seed = seed;
@@ -1514,8 +1516,8 @@ static float cbAnvil(bool extruded, int* heightPx = nullptr, int* views = nullpt
                     g3d::Material wm;
                     wm.unlit = true;
                     wm.color = BLACK;
-                    g3d::Object3D* wall = s->add(g3d::Geometry::box(200000, 60000, 10), wm);
-                    wall->position = { x, 20000, -12000 };
+                    g3d::Object3D* wall = s->add(g3d::Geometry::box(300000, 90000, 10), wm);
+                    wall->position = { cx, 30000, -12000 };
                 }
                 return look(s, W, H, 0);
             };
@@ -1525,11 +1527,11 @@ static float cbAnvil(bool extruded, int* heightPx = nullptr, int* views = nullpt
             const std::vector<Blob> bl = blobsOf(mask, W, H);
             const Blob* tall = nullptr;
             for (const Blob& b : bl) {
-                if (b.border || b.y1 - b.y0 < 40 || b.area <= 1000 || (b.x1 - b.x0) > 1.3f * (b.y1 - b.y0)) continue;       // a tower, not a belt of merged ones
+                if (b.border || b.y1 - b.y0 < 40 || b.area <= 1000 || (b.x1 - b.x0) > 4.f * (b.y1 - b.y0)) continue;       // a tower with its anvil, not a belt of merged ones
                 if (!tall || b.y1 - b.y0 > tall->y1 - tall->y0) tall = &b;
             }
             if (tall) {
-                const int w50 = widthAt(*tall, W, 0.5f), w90 = widthAt(*tall, W, 0.9f);
+                const int w50 = widthAt(*tall, W, 0.5f), w90 = std::max({ widthAt(*tall, W, 0.7f), widthAt(*tall, W, 0.76f), widthAt(*tall, W, 0.82f), widthAt(*tall, W, 0.88f) });   // the anvil spreads over the top third
                 if (w50 > 0) { q.push_back((float)w90 / (float)w50); hMax = std::max(hMax, tall->y1 - tall->y0 + 1); }
             }
             UnloadImage(on); UnloadImage(off);
@@ -1544,7 +1546,7 @@ static void notExtruded() {
     int n = 0, h = 0, nv = 0;
     const float taper = cumulusTaper(false, &n), taperOld = cumulusTaper(true);
     const float anvil = cbAnvil(false, &h, &nv), anvilOld = cbAnvil(true);
-    std::printf("[weather] shape: cumulus width at 80%% of the height over 30%%: %.2f (median of %d isolated clouds; the extruded old shape %.2f); cumulonimbus width at 90%% over 50%%: %.2f (median of %d isolated towers, tallest %d px; extruded %.2f)\n",
+    std::printf("[weather] shape: cumulus width at 80%% of the height over 30%%: %.2f (median of %d isolated clouds; the extruded old shape %.2f); cumulonimbus widest of 70-88%% of the height over 50%%: %.2f (one storm cell a view) (median of %d isolated towers, tallest %d px; extruded %.2f)\n",
                 taper, n, taperOld, anvil, nv, h, anvilOld);
     CHECK(n >= 3 && taper < 0.8f);
     CHECK(taperOld >= 0.8f);
@@ -5887,6 +5889,574 @@ static void w9Timing() {
     std::printf("[weather] W9 CPU frame build (3 cascades, FFTs + foam): %.1f ms per new time\n", (GetTime() - t0) * 1000 / 20);
 }
 
+// ---------------------------------------------------------------- W5: lightning, storm light, rainbow
+// A dark ground under a camera, a strike from a cloud base 1.5 km up to the ground 900 m away at second 1 (frame 30).
+static g3d::ScenePtr boltScene(uint32_t seed, bool enabled = true, float minVisible = 0.07f) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = { 0, 6, 0 };
+    s->camera.target = { 0, 150, -1000 };
+    s->camera.fov = 60;
+    s->camera.nearPlane = 1;
+    s->camera.farPlane = 100000;
+    s->ambient = 0.2f;
+    g3d::Material m;
+    m.color = { 120, 120, 120, 255 };
+    m.roughness = 1;
+    s->add(g3d::Geometry::plane(20000, 20000), m);
+    s->lightning.enabled = enabled;
+    s->lightning.minVisible = minVisible;
+    g3d::Lightning::Strike st;
+    st.time = 1.f;
+    st.start = { 0, 1500, -900 };
+    st.end = { 15, 0, -905 };
+    st.seed = seed;
+    s->lightning.strikes.push_back(st);
+    return s;
+}
+static float meanLuma(const Image& img) {
+    double sum = 0;
+    for (int y = 0; y < img.height; y++)
+        for (int x = 0; x < img.width; x++) sum += luma(GetImageColor(img, x, y));
+    return (float)(sum / ((double)img.width * img.height));
+}
+
+// (a) the same seed makes the same bolt and another seed another: the geometry, and the pixels.
+static void boltSeeds() {
+    const bolt::Bolt a = bolt::make({ 0, 1500, -900 }, { 15, 0, -905 }, 5), b = bolt::make({ 0, 1500, -900 }, { 15, 0, -905 }, 5),
+                     c = bolt::make({ 0, 1500, -900 }, { 15, 0, -905 }, 6);
+    auto same = [](const bolt::Bolt& p, const bolt::Bolt& q) {
+        if (p.segments.size() != q.segments.size()) return false;
+        for (size_t i = 0; i < p.segments.size(); i++)
+            if (Vector3Distance(p.segments[i].a, q.segments[i].a) > 1e-4f || Vector3Distance(p.segments[i].b, q.segments[i].b) > 1e-4f) return false;
+        return true;
+    };
+    CHECK(same(a, b));
+    CHECK(!same(a, c));
+    CHECK(a.segments.size() > 100);
+    int branches = 0;
+    for (const bolt::Segment& sg : a.segments) branches += sg.level > 0 ? 1 : 0;
+    CHECK(branches > 4);
+    constexpr int W = 320, H = 180, F = 32;                                 // 67 ms into the strike: the return stroke
+    Image i5 = look(boltScene(5), W, H, F), i5b = look(boltScene(5), W, H, F), i6 = look(boltScene(6), W, H, F), base = look(boltScene(5, false), W, H, F);
+    const long long dSame = diffImages(i5, i5b), dOther = diffImages(i5, i6), dBolt = diffImages(i5, base);
+    std::printf("[weather] W5 seeds: geometry %zu segments (%d on branches), same seed pixel diff %lld, another seed %lld, bolt vs none %lld\n",
+                a.segments.size(), branches, dSame, dOther, dBolt);
+    dump("w5-bolt-seed5.png", i5);
+    dump("w5-bolt-seed6.png", i6);
+    CHECK(dSame == 0);
+    CHECK(dOther > 2000);
+    CHECK(dBolt > 20000);
+    UnloadImage(i5); UnloadImage(i5b); UnloadImage(i6); UnloadImage(base);
+}
+
+// Frames of a strike at second 1 (frame 30): how many differ from the frame without lightning, and in which way.
+struct Window { int bright = 0, brightRun = 0, outsideDiff = 0, lower = 0; float peak = 0; };
+static Window strikeWindow(uint32_t seed, bool enabled, float minVisible, bool dumpOne) {
+    constexpr int W = 320, H = 180;
+    Window w;
+    Image none = look(boltScene(seed, false), W, H, 0);
+    const float base = meanLuma(none);
+    auto scene = boltScene(seed, enabled, minVisible);
+    Comp c = comp(scene, W, H);
+    const float dur = bolt::duration(seed, scene->lightning.leaderTime, minVisible);
+    int run = 0;
+    for (int f = 24; f <= 54; f++) {
+        Image img = render(c, f);
+        const float tau = f / 30.f - 1.f, m = meanLuma(img);
+        const bool inside = tau >= 0 && tau < dur;
+        if (!inside) { if (diffImages(img, none) != 0) w.outsideDiff++; }
+        else {
+            if (m > base + 0.05f) { w.bright++; run++; w.brightRun = std::max(w.brightRun, run); } else run = 0;
+            if (m < base - 0.01f) w.lower++;
+            w.peak = std::max(w.peak, m - base);
+        }
+        if (dumpOne && f == 32) dump("w5-bolt-frame32.png", img);
+        UnloadImage(img);
+    }
+    UnloadImage(none);
+    return w;
+}
+// (b) the picture brightens during the strike and only then: no change before the leader or after the last restrike, and the
+// bolt is on at least two frames of a 30 fps film whatever its seed.
+// Frames (at 30 fps, any phase) on which the first return stroke is at full brightness: at least two with the minimum
+// visible time, whatever the seed.
+static int strokeFrames(uint32_t seed, float phase, float minVisible) {
+    int run = 0;
+    for (int k = 0; k < 40; k++) {
+        const bolt::Profile p = bolt::profile(seed, phase + k / 30.f, 0.035f, minVisible);
+        if (p.flash > 0.9f) run++;
+        else if (run > 0) break;
+    }
+    return run;
+}
+static void boltWindow() {
+    int minBright = 99, minRun = 99, outside = 0, lower = 0;
+    float peak = 0;
+    for (uint32_t seed = 1; seed <= 2; seed++) {
+        const Window w = strikeWindow(seed, true, 0.07f, seed == 1);
+        minBright = std::min(minBright, w.bright); minRun = std::min(minRun, w.brightRun);
+        outside += w.outsideDiff; lower += w.lower; peak = std::max(peak, w.peak);
+    }
+    const Window off = strikeWindow(1, false, 0.07f, false);               // control: lightning off
+    int fewest = 99, fewestBroken = 99;
+    for (uint32_t seed = 1; seed <= 300; seed++)
+        for (int ph = 0; ph < 4; ph++) {
+            fewest = std::min(fewest, strokeFrames(seed, ph / 4.f / 30.f, 0.07f));
+            fewestBroken = std::min(fewestBroken, strokeFrames(seed, ph / 4.f / 30.f, 0.004f));      // control: no minimum visible time
+        }
+    std::printf("[weather] W5 window: frames brighter than the dark scene, per strike over 2 seeds at least %d, longest run at least %d; outside the strike %d changed frames, %d darker, peak +%.1f luma; lightning off %d; return stroke frames over 300 seeds x 4 phases at least %d (with no minimum visible time %d)\n",
+                minBright, minRun, outside, lower, peak, off.bright, fewest, fewestBroken);
+    CHECK(minBright >= 2 && minRun >= 2);
+    CHECK(outside == 0);
+    CHECK(lower == 0);
+    CHECK(peak > 1.0f);
+    CHECK(off.bright == 0);
+    CHECK(fewest >= 2);
+    CHECK(fewestBroken < 2);
+}
+// (f) strikes from a rate: deterministic, about `rate` a minute over a long window, another seed other times.
+static void strikeRate() {
+    auto s = std::make_shared<g3d::Scene>();
+    s->lightning.enabled = true;
+    s->lightning.rate = 12;
+    s->lightning.area = { 200, -300 };
+    s->lightning.radius = 2500;
+    const auto a = g3d::lightningStrikes(*s, 0, 600), b = g3d::lightningStrikes(*s, 0, 600);
+    s->lightning.seed = 9;
+    const auto c = g3d::lightningStrikes(*s, 0, 600);
+    bool same = a.size() == b.size();
+    for (size_t i = 0; same && i < a.size(); i++) same = a[i].time == b[i].time && a[i].seed == b[i].seed && a[i].start.x == b[i].start.x && a[i].end.z == b[i].end.z;
+    bool inArea = true, ground = false, cloud = false, sorted = true;
+    for (size_t i = 0; i < a.size(); i++) {
+        inArea = inArea && std::hypot(a[i].start.x - 200, a[i].start.z + 300) <= 2500.f * 1.01f;
+        (a[i].end.y <= 50 ? ground : cloud) = true;
+        if (i && a[i].time < a[i - 1].time) sorted = false;
+    }
+    bool differs = a.size() != c.size();
+    for (size_t i = 0; !differs && i < a.size(); i++) differs = a[i].time != c[i].time;
+    const double expect = 12.0 * 10.0;
+    std::printf("[weather] W5 rate: 12 a minute over 600 s: %zu strikes (expected %.0f, within 20%% is %.0f..%.0f), identical on a second call %d, another seed differs %d, all in the area %d, ground and in-cloud both %d\n",
+                a.size(), expect, expect * 0.8, expect * 1.2, same ? 1 : 0, differs ? 1 : 0, inArea ? 1 : 0, ground && cloud ? 1 : 0);
+    CHECK(same);
+    CHECK(differs);
+    CHECK(inArea && sorted);
+    CHECK(ground && cloud);
+    CHECK(a.size() >= (size_t)(expect * 0.8) && a.size() <= (size_t)(expect * 1.2));
+    s->lightning.rate = 0;
+    CHECK(g3d::lightningStrikes(*s, 0, 600).empty());                // control: a rate of nothing
+    // thunder: the delay is distance / 343, and the cue list agrees
+    CHECK(std::fabs(bolt::thunderDelay(3430.f) - 10.f) < 1e-4f);
+    auto t = boltScene(1);
+    const std::vector<g3d::Thunder> cues = g3d::thunderCues(*t, 300, 30);
+    CHECK(cues.size() == 1);
+    if (!cues.empty()) {
+        const double want = 1.0 + cues[0].distance / 343.0;
+        std::printf("[weather] W5 thunder: strike at %.2f s, %.0f m away, thunder at %.2f s (expected %.2f)\n", cues[0].strikeTime, cues[0].distance, cues[0].arrives, want);
+        CHECK(std::fabs(cues[0].arrives - want) < 1e-3);
+        CHECK(cues[0].distance > 800 && cues[0].distance < 1000);
+    }
+}
+
+// (e) a strike inside a cloud lights the cloud round it: the rise in the pixels near the channel against the pixels far from it.
+static g3d::ScenePtr cloudBoltScene(bool withBolt, float cloudLight = 1) {
+    auto s = testClouds({ 0, 500, 0 }, { 0, 2400, -1500 }, 0.9f, g3d::CloudType::Cumulus, true, 1500, 3500, 70);
+    s->clouds.shadows = false;
+    s->lights.clear();
+    s->ambient = 0.3f;
+    s->lightning.enabled = withBolt;
+    s->lightning.cloudLight = cloudLight;
+    s->lightning.light = 0;                                           // the cloud's own glow, not the point light on the ground
+    g3d::Lightning::Strike st;
+    st.time = 1.f;
+    st.start = { 0, 2900, -1700 };
+    st.end = { 120, 2300, -1650 };
+    st.seed = 3;
+    s->lightning.strikes.push_back(st);
+    return s;
+}
+static void cloudGlow() {
+    constexpr int W = 320, H = 180, F = 32;
+    auto probe = cloudBoltScene(true);
+    const Vector2 p = project(probe->camera, { 60, 2600, -1675 }, W, H);
+    Image on = look(cloudBoltScene(true), W, H, F), off = look(cloudBoltScene(false), W, H, F), dark = look(cloudBoltScene(true), W, H, 0), off0 = look(cloudBoltScene(false), W, H, 0),
+          dim = look(cloudBoltScene(true, 0), W, H, F);
+    double near = 0, far = 0, nearDim = 0;
+    int nn = 0, nf = 0;
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            const float d = std::hypot((float)x - p.x, (float)y - p.y);
+            const float gain = luma(GetImageColor(on, x, y)) - luma(GetImageColor(off, x, y)), gainDim = luma(GetImageColor(dim, x, y)) - luma(GetImageColor(off, x, y));
+            if (d < 40) { near += gain; nearDim += gainDim; nn++; }
+            else if (d > 110) { far += gain; nf++; }
+        }
+    near /= std::max(nn, 1); far /= std::max(nf, 1); nearDim /= std::max(nn, 1);
+    const long long before = diffImages(dark, off0);
+    std::printf("[weather] W5 cloud glow: mean luma rise within 40 px of the channel %.2f (%d px), beyond 110 px %.2f (%d px); cloudLight 0: %.2f; before the strike the picture differs by %lld\n",
+                near, nn, far, nf, nearDim, before);
+    dump("w5-cloud-flash.png", on);
+    CHECK(nn > 100 && nf > 100);
+    CHECK(near > 6.0 && near > 3.0 * std::max(far, 0.5));
+    CHECK(nearDim < 0.5 * near);                                     // control: the glow switched off takes the rise away
+    CHECK(before == 0);
+    UnloadImage(on); UnloadImage(off); UnloadImage(dark); UnloadImage(dim); UnloadImage(off0);
+}
+
+// The rainbow: a rain-wet sky with the sun 30 degrees round and `elev` high; the camera looks at the point opposite it
+// (or, with `towardsSun`, at the sun itself), with a wide field of view.
+static g3d::ScenePtr bowScene(float elev, bool towardsSun, g3d::Weather::Rainbow::Mode mode, float rain = 0.8f, Vector3* antiOut = nullptr) {
+    auto s = std::make_shared<g3d::Scene>();
+    const float el = elev * DEG2RAD, az = 30 * DEG2RAD;
+    const Vector3 sun{ std::cos(el) * std::cos(az), std::sin(el), std::cos(el) * std::sin(az) };
+    s->sky = g3d::Sky::day();
+    s->sky.sunLight = -1;
+    s->sky.sunDirection = sun;
+    s->sky.clouds = 0;
+    s->sky.sunGlow = 0;
+    s->sky.resolution = 1024;
+    s->camera.position = { 0, 2, 0 };
+    const Vector3 dir = towardsSun ? sun : Vector3Negate(sun);
+    s->camera.target = Vector3Add(s->camera.position, Vector3Scale(dir, 100));
+    s->camera.fov = 112;
+    s->camera.nearPlane = 1;
+    s->camera.farPlane = 100000;
+    s->weather = g3d::Weather::rain();
+    s->weather.enabled = true;
+    s->weather.clouds.cover = 0.1f;
+    s->weather.precipitation.intensity = rain;
+    s->weather.rainbow.mode = mode;
+    if (antiOut) *antiOut = Vector3Negate(sun);
+    return s;
+}
+// The picture's pixels as directions: the angle from `centre`, the azimuth round it, and the change the bow made.
+struct Ring { std::vector<float> th, phi, dl, dr, db; };
+static Ring ringOf(const Image& on, const Image& off, const g3d::Camera& cam, Vector3 centre, int W, int H) {
+    Ring r;
+    const Vector3 fwd = Vector3Normalize(Vector3Subtract(cam.target, cam.position)), right = Vector3Normalize(Vector3CrossProduct(fwd, { 0, 1, 0 })), up = Vector3CrossProduct(right, fwd);
+    const float ty = std::tan(cam.fov * 0.5f * DEG2RAD), tx = ty * (float)W / H;
+    const Vector3 e1 = Vector3Normalize(Vector3CrossProduct({ 0, 1, 0 }, centre)), e2 = Vector3CrossProduct(centre, e1);
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            const float nx = ((x + 0.5f) / W) * 2 - 1, ny = 1 - ((y + 0.5f) / H) * 2;
+            const Vector3 d = Vector3Normalize(Vector3Add(fwd, Vector3Add(Vector3Scale(right, nx * tx), Vector3Scale(up, ny * ty))));
+            const float th = std::acos(std::clamp(Vector3DotProduct(d, centre), -1.f, 1.f)) * RAD2DEG;
+            const Color a = GetImageColor(on, x, y), b = GetImageColor(off, x, y);
+            r.th.push_back(th);
+            r.phi.push_back(std::atan2(Vector3DotProduct(d, e2), Vector3DotProduct(d, e1)));
+            r.dl.push_back(luma(a) - luma(b));
+            r.dr.push_back((float)(a.r - b.r));
+            r.db.push_back((float)(a.b - b.b));
+        }
+    return r;
+}
+// Kasa's circle fit to points (x, y): centre and radius.
+static void fitCircle(const std::vector<Vector2>& p, Vector2& c, float& radius) {
+    double sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, sz = 0, sxz = 0, syz = 0;
+    for (const Vector2& q : p) {
+        const double x = q.x, y = q.y, z = x * x + y * y;
+        sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y; sz += z; sxz += x * z; syz += y * z;
+    }
+    const double n = (double)p.size();
+    // [sxx sxy sx; sxy syy sy; sx sy n] * [A B C] = [sxz syz sz], the circle x2 + y2 = A x + B y + C
+    double a[3][4] = { { sxx, sxy, sx, sxz }, { sxy, syy, sy, syz }, { sx, sy, n, sz } };
+    for (int i = 0; i < 3; i++) {
+        int piv = i;
+        for (int j = i + 1; j < 3; j++) if (std::fabs(a[j][i]) > std::fabs(a[piv][i])) piv = j;
+        for (int k = 0; k < 4; k++) std::swap(a[i][k], a[piv][k]);
+        for (int j = 0; j < 3; j++)
+            if (j != i) { const double f = a[j][i] / a[i][i]; for (int k = 0; k < 4; k++) a[j][k] -= f * a[i][k]; }
+    }
+    const double A = a[0][3] / a[0][0], B = a[1][3] / a[1][1], C = a[2][3] / a[2][2];
+    c = { (float)(A / 2), (float)(B / 2) };
+    radius = (float)std::sqrt(std::max(C + (A * A + B * B) / 4, 0.0));
+}
+static float binPeak(const Ring& r, float lo, float hi, float step = 0.25f) {
+    const int n = (int)std::ceil((hi - lo) / step);
+    std::vector<double> sum((size_t)n, 0.0);
+    for (size_t i = 0; i < r.th.size(); i++) {
+        const int b = (int)((r.th[i] - lo) / step);
+        if (b >= 0 && b < n && r.dl[i] > 0) sum[(size_t)b] += r.dl[i];
+    }
+    int best = 0;
+    for (int i = 1; i < n; i++) if (sum[(size_t)i] > sum[(size_t)best]) best = i;
+    return lo + (best + 0.5f) * step;
+}
+static float meanRB(const Ring& r, float lo, float hi) {
+    double s = 0; int n = 0;
+    for (size_t i = 0; i < r.th.size(); i++)
+        if (r.th[i] >= lo && r.th[i] < hi) { s += r.dr[i] - r.db[i]; n++; }
+    return n ? (float)(s / n) : 0.f;
+}
+// (c) the rainbow's geometry: a ring centred on the point opposite the sun, the primary at 42 degrees (red outside), the
+// secondary at 51 (red inside).
+static void rainbowGeometry() {
+    constexpr int W = 480, H = 270;
+    Vector3 anti;
+    auto on = bowScene(25, false, g3d::Weather::Rainbow::Mode::Auto, 0.8f, &anti);
+    auto off = bowScene(25, false, g3d::Weather::Rainbow::Mode::Off);
+    Image a = look(on, W, H, 0), b = look(off, W, H, 0);
+    const Ring r = ringOf(a, b, on->camera, anti, W, H);
+    const float p1 = binPeak(r, 36, 46), p2 = binPeak(r, 47.5f, 56);
+    std::vector<Vector2> pts;
+    for (size_t i = 0; i < r.th.size(); i++)
+        if (std::fabs(r.th[i] - p1) < 0.6f && r.dl[i] > 1.f) pts.push_back({ r.th[i] * std::cos(r.phi[i]), r.th[i] * std::sin(r.phi[i]) });
+    Vector2 c{ 0, 0 };
+    float radius = 0;
+    if (pts.size() > 20) fitCircle(pts, c, radius);
+    const float prOut = meanRB(r, p1 + 0.4f, p1 + 1.2f), prIn = meanRB(r, p1 - 1.2f, p1 - 0.4f), seIn = meanRB(r, p2 - 1.2f, p2 - 0.3f), seOut = meanRB(r, p2 + 0.3f, p2 + 1.5f);
+    std::printf("[weather] W5 rainbow: primary peak %.2f deg (circle fit of %zu px: centre (%.2f, %.2f) deg from the anti-solar point, radius %.2f deg), secondary peak %.2f deg; red minus blue: primary outside %.1f inside %.1f, secondary inside %.1f outside %.1f\n",
+                p1, pts.size(), c.x, c.y, radius, p2, prOut, prIn, seIn, seOut);
+    dump("w5-rainbow-wide.png", a);
+    CHECK(pts.size() > 200);
+    CHECK(std::fabs(radius - 42.f) <= 1.f);
+    CHECK(std::hypot(c.x, c.y) < 0.5f);
+    CHECK(std::fabs(p2 - 51.f) <= 1.5f);
+    CHECK(prOut > 3.f && prOut > prIn + 8.f);                      // red outside; inside the colours pile up towards white
+    CHECK(seIn > 0.5f && seOut < -0.5f);
+    UnloadImage(a); UnloadImage(b);
+}
+// (d) no rainbow where there should be none: the sun in front of the camera, no rain, the sun too high - the picture equals
+// the one with the bow Off; and the controls (behind, rain, 25 degrees; forced On; distant rain) differ.
+static void rainbowAbsent() {
+    constexpr int W = 240, H = 135;
+    using M = g3d::Weather::Rainbow::Mode;
+    auto diff = [&](g3d::ScenePtr s) {
+        Image a = look(s, W, H, 0);
+        s->weather.rainbow.mode = M::Off;
+        Image b = look(s, W, H, 0);
+        const long long d = diffImages(a, b);
+        UnloadImage(a); UnloadImage(b);
+        return d;
+    };
+    const long long front = diff(bowScene(25, true, M::Auto)), dry = diff(bowScene(25, false, M::Auto, 0.f)), high = diff(bowScene(60, false, M::Auto)),
+                    ctl = diff(bowScene(25, false, M::Auto)), forced = diff(bowScene(60, false, M::On));
+    auto d = bowScene(25, false, M::Auto, 0.f);
+    d->weather.rainbow.distantRain = 0.8f;
+    const long long distant = diff(d);
+    std::printf("[weather] W5 rainbow absent: sun in front diff %lld, no rain %lld, sun at 60 deg %lld; control (behind, rain, 25 deg) %lld; forced On at 60 deg %lld; distant rain only %lld\n", front, dry, high, ctl, forced, distant);
+    CHECK(front == 0 && dry == 0 && high == 0);
+    CHECK(ctl > 30000);
+    CHECK(forced > 30000);
+    CHECK(distant > 30000);
+}
+
+// ---- the cumulonimbus: a storm cell with an anvil growing out of its top, downwind
+struct Tower { bool valid = false; float ratio = 0, shift = 0, top = 0, aspect = 0, cont = 0; std::vector<char> shape; };
+// The silhouette measures of one cell (a blob in a view with the wind to the right). ratio: width at 90% of the height over
+// width at 50%. shift: the top centroid minus the base centroid, in heights. aspect: the width of the core (at 30% of the
+// height) over the height. cont: the share of the rows from 8% to 90% of the height that are cloud in the column of the
+// base centroid (+-4% of the height): 1 is a tower with no gap up to its anvil.
+static Tower statsOf(const Blob& tall, int W, int H) {
+    Tower t;
+    const int h = tall.y1 - tall.y0 + 1, w50 = widthAt(tall, W, 0.5f), w90 = widthAt(tall, W, 0.9f), w30 = widthAt(tall, W, 0.3f);
+    if (w50 <= 0) return t;
+    t.valid = true;
+    t.ratio = (float)w90 / (float)w50;
+    t.top = (float)w90 / (float)h;
+    t.aspect = (float)w30 / (float)h;
+    double top = 0, base = 0; int nt = 0, nb = 0;
+    std::vector<char> occ((size_t)W * H, 0);
+    for (int j : tall.px) {
+        occ[(size_t)j] = 1;
+        const int rowFromBottom = tall.y1 - j / W;
+        if (rowFromBottom >= 0.86f * h) { top += j % W; nt++; }
+        if (rowFromBottom <= 0.25f * h) { base += j % W; nb++; }
+    }
+    t.shift = nt && nb ? (float)((top / nt - base / nb) / h) : 0.f;
+    if (nb) {
+        const int cx = (int)std::lround(base / nb), half = std::max(1, (int)std::lround(0.04f * h));
+        int rows = 0, full = 0;
+        for (int r = (int)std::ceil(0.08f * h); r <= (int)(0.90f * h); r++) {
+            const int y = tall.y1 - r;
+            bool any = false;
+            for (int x = cx - half; x <= cx + half && !any; x++) any = x >= 0 && x < W && occ[(size_t)y * W + x];
+            rows++; full += any;
+        }
+        t.cont = rows ? (float)full / (float)rows : 0.f;
+    }
+    t.shape.assign((size_t)64 * 48, 0);
+    const float cxm = 0.5f * (tall.x0 + tall.x1);
+    for (int j : tall.px) {
+        const int gx = (int)std::lround(32 + ((j % W) - cxm) / (h * 0.8f) * 32), gy = (int)((float)(tall.y1 - j / W) / h * 47);
+        if (gx >= 0 && gx < 64 && gy >= 0 && gy < 48) t.shape[(size_t)gy * 64 + gx] = 1;
+    }
+    return t;
+}
+constexpr float kAnvilViewX = 12000.f;          // the cell sits this far to the upwind side of the view centre, so its anvil is in the frame
+static g3d::ScenePtr anvilView(float x, float driftX, bool on) {
+    const float cx = x - (driftX >= 0 ? 1.f : -1.f) * kAnvilViewX;
+    auto s = filmClouds({ cx, 2, 38000 }, { cx, 5600, 0 }, 0.f, g3d::CloudType::Cumulonimbus, on, 1200, 11000, 75, false);
+    s->sky.enabled = false;
+    s->skyColor = BLACK;
+    g3d::Material wm;
+    wm.unlit = true;
+    wm.color = BLACK;
+    g3d::Object3D* wall = s->add(g3d::Geometry::box(300000, 90000, 10), wm);
+    wall->position = { cx, 30000, -12000 };
+    return s;
+}
+static std::vector<Tower> towers(float anvil, float variety, float driftX, const std::vector<Image>& offs, unsigned seed = 1) {
+    constexpr int W = 480, H = 270;
+    std::vector<Tower> out;
+    for (int cam = 0; cam < (int)offs.size(); cam++) {
+        const float x = (cam - 2.5f) * 3500.f + 4321.f * (float)(seed - 1);
+        auto s = anvilView(x, driftX, true);
+        s->clouds.haze = 0;
+        s->clouds.seed = seed;
+        s->clouds.anvil = anvil;
+        s->clouds.towerVariety = variety;
+        s->clouds.drift = { driftX, 0 };
+        s->clouds.storms = { g3d::Clouds::Storm{ x, 0.f, 5500.f, 10500.f } };
+        Image on = look(s, W, H, 0);
+        const std::vector<Blob> bl = blobsOf(cloudMask(on, offs[(size_t)cam], 8), W, H);
+        UnloadImage(on);
+        const Blob* tall = nullptr;
+        for (const Blob& b : bl) {
+            if (b.border || b.y1 - b.y0 < 40 || b.area <= 1000) continue;
+            if (!tall || b.area > tall->area) tall = &b;
+        }
+        out.push_back(tall ? statsOf(*tall, W, H) : Tower{});
+    }
+    return out;
+}
+// The median over the views where both have a tower of the share of the pixels they have in common, in a silhouette
+// normalised by the tower height (so a bigger tower is not a different one).
+static float iouBetween(const std::vector<Tower>& a, const std::vector<Tower>& b, int* pairs = nullptr) {
+    std::vector<float> v;
+    for (size_t i = 0; i < a.size() && i < b.size(); i++) {
+        if (!a[i].valid || !b[i].valid) continue;
+        int in = 0, un = 0;
+        for (size_t k = 0; k < a[i].shape.size(); k++) { in += a[i].shape[k] && b[i].shape[k]; un += a[i].shape[k] || b[i].shape[k]; }
+        if (un) v.push_back((float)in / un);
+    }
+    if (pairs) *pairs = (int)v.size();
+    if (v.empty()) return 1.f;
+    std::sort(v.begin(), v.end());
+    return v[v.size() / 2];
+}
+static float medianOf(std::vector<float> v) {
+    if (v.empty()) return 0.f;
+    std::sort(v.begin(), v.end());
+    return v[v.size() / 2];
+}
+// A synthetic silhouette in the manner of the removed layout: a pillar a quarter as wide as it is tall, and a flat plate
+// floating over it with a gap between. The measures above must flag it (it is the control of the continuity and aspect checks).
+static Tower pillarAndPlate() {
+    constexpr int W = 480, H = 270, h = 200, y1 = 240;
+    Blob b{ W, y1 - (h - 1), 0, y1, 0, {}, false };
+    auto add = [&](int x0, int x1, int r0, int r1) {
+        for (int r = r0; r <= r1; r++)
+            for (int x = x0; x <= x1; x++) { b.px.push_back((y1 - r) * W + x); b.x0 = std::min(b.x0, x); b.x1 = std::max(b.x1, x); b.area++; }
+    };
+    add(200, 250, 0, (int)(0.62f * h));                 // the pillar: 50 px wide in 200 tall
+    add(120, 380, (int)(0.80f * h), h - 1);             // the plate, with a gap under it
+    return statsOf(b, W, H);
+}
+// A synthetic plain column, as wide at the top as in the middle (the control of the anvil width ratio).
+static Tower columnOnly() {
+    constexpr int W = 480, H = 270, h = 200, y1 = 240;
+    Blob b{ 150, y1 - (h - 1), 330, y1, 0, {}, false };
+    for (int r = 0; r < h; r++)
+        for (int x = 150; x <= 330; x++) { b.px.push_back((y1 - r) * W + x); b.area++; }
+    return statsOf(b, W, H);
+}
+static void anvilShape() {
+    constexpr int W = 480, H = 270, CAMS = 6;
+    auto offsFor = [&](unsigned seed, float driftX) {
+        std::vector<Image> offs;
+        for (int cam = 0; cam < CAMS; cam++) offs.push_back(look(anvilView((cam - 2.5f) * 3500.f + 4321.f * (float)(seed - 1), driftX, false), W, H, 0));
+        return offs;
+    };
+    std::vector<Image> offs = offsFor(1, 10), offsUp = offsFor(1, -10), offs2 = offsFor(2, 10);
+    const std::vector<Tower> on = towers(1, 1, 10, offs), upwind = towers(1, 1, -10, offsUp), clones = towers(1, 0, 10, offs),
+                             other = towers(1, 1, 10, offs2, 2), again = towers(1, 1, 10, offs);
+    auto med = [](const std::vector<Tower>& t, float Tower::* m, int* n = nullptr) {
+        std::vector<float> v;
+        for (const Tower& x : t) if (x.valid) v.push_back(x.*m);
+        if (n) *n = (int)v.size();
+        return medianOf(v);
+    };
+    int nOn = 0, pSeed = 0, pVar = 0;
+    const float rOn = med(on, &Tower::ratio, &nOn), colRatio = columnOnly().ratio, sOn = med(on, &Tower::shift), sUp = med(upwind, &Tower::shift);
+    const float aspOn = med(on, &Tower::aspect), contOn = med(on, &Tower::cont);
+    const float iouSeed = iouBetween(on, other, &pSeed), iouSame = iouBetween(on, again), iouVar = iouBetween(on, clones, &pVar);
+    const Tower pp = pillarAndPlate();
+    // The count of cells in 60 x 60 km at the example settings, over seeds and places; and what the removed layout (one
+    // possible centre in each 9 km square, present with probability min(1, 3.5 cover)) would put there on average.
+    g3d::Clouds cl;
+    cl.cover = 0.16f;
+    int maxCells = 0, boxes = 0;
+    double sumCells = 0;
+    for (unsigned sd = 1; sd <= 20; sd++)
+        for (int k = 0; k < 4; k++) {
+            cl.seed = sd;
+            const float ox = (float)(k % 2) * 60000.f - 80000.f, oz = (float)(k / 2) * 60000.f - 70000.f;
+            const int n = (int)g3d::stormCells(cl, ox, oz, ox + 60000.f, oz + 60000.f).size();
+            maxCells = std::max(maxCells, n); sumCells += n; boxes++;
+        }
+    const double oldCells = (60.0 / 9.0) * (60.0 / 9.0) * std::min(1.0, 3.5 * 0.16);
+    std::printf("[weather] W5 anvil (%d cells): width at 90%% over 50%% %.2f (a plain column %.2f); top centroid minus base centroid, in heights: downwind %.2f, wind reversed %.2f; core width over height %.2f, column cloud up to the anvil %.2f; silhouette IoU for seed 1 and seed 2 %.2f (median of %d), the same again %.2f, with towerVariety 0 %.2f (%d)\n",
+                nOn, rOn, colRatio, sOn, sUp, aspOn, contOn, iouSeed, pSeed, iouSame, iouVar, pVar);
+    std::printf("[weather] W5 storm cells: in 60 x 60 km at cover 0.16 over %d boxes: at most %d, mean %.2f; the removed dense layout would put %.1f; synthetic pillar and plate: core width over height %.2f, column cloud %.2f\n",
+                boxes, maxCells, sumCells / boxes, oldCells, pp.aspect, pp.cont);
+    CHECK(nOn >= 4);
+    CHECK(rOn > 1.2f);
+    CHECK(colRatio < 1.2f);                                          // control: a plain column (synthetic) has no wider top
+    CHECK(sOn > 0.05f);
+    CHECK(sUp < sOn - 0.1f);                                         // control: the other way when the wind is
+    CHECK(aspOn >= 0.5f);                                            // a storm cell is as wide as it is tall, not a pillar
+    CHECK(pp.valid && pp.aspect < 0.5f);                             // control: the pillar-and-plate silhouette fails it
+    CHECK(contOn >= 0.95f);                                          // no gap between the tower and the anvil
+    CHECK(pp.valid && pp.cont < 0.9f);                               // control: a floating plate fails it
+    CHECK(maxCells <= 4 && sumCells / boxes > 0.3);                  // few cells (and not none)
+    CHECK(oldCells > 4);                                             // control: the dense layout had far more
+    CHECK(pSeed >= 3 && iouSeed < 0.85f);
+    CHECK(iouSame > 0.999f);                                         // control: the same seed is the same tower
+    CHECK(pVar >= 3 && iouVar < 0.9f);                               // towerVariety changes the towers
+    for (Image& i : offs) UnloadImage(i);
+    for (Image& i : offsUp) UnloadImage(i);
+    for (Image& i : offs2) UnloadImage(i);
+}
+
+// (h) pure and off means off.
+static void w5Purity() {
+    constexpr int W = 320, H = 180;
+    // a frame alone equals the frame after others
+    Image alone = look(boltScene(5), W, H, 33);
+    Comp c = comp(boltScene(5), W, H);
+    for (int f : { 60, 31, 41, 32 }) { Image x = render(c, f); UnloadImage(x); }
+    Image later = render(c, 33);
+    // lightning set but disabled, or far in the future: the plain picture
+    Image p = look(boltScene(5, false), W, H, 33), q = look(boltScene(5, false), W, H, 33);
+    auto future = boltScene(5);
+    future->lightning.strikes[0].time = 100;
+    Image f0 = look(future, W, H, 33), nofl = look(boltScene(5, false), W, H, 33);
+    // a sky of cumulus: anvil on or off is the same picture (no towers)
+    auto sky = [&](float anvil) {
+        auto s = testClouds({ 0, 500, 0 }, { 0, 1500, -2000 }, 0.5f, g3d::CloudType::Cumulus, true, 1500, 3500, 60);
+        s->clouds.anvil = anvil;
+        return s;
+    };
+    Image s1 = look(sky(1), W, H, 0), s0 = look(sky(0), W, H, 0);
+    const long long dAlone = diffImages(alone, later), dOff = diffImages(p, q), dFuture = diffImages(f0, nofl), dSky = diffImages(s1, s0);
+    std::printf("[weather] W5 purity: frame alone vs after others %lld; disabled twice %lld; strike at 100 s vs none %lld; cumulus sky anvil 1 vs 0 %lld\n", dAlone, dOff, dFuture, dSky);
+    CHECK(dAlone == 0);
+    CHECK(dOff == 0);
+    CHECK(dFuture == 0);
+    CHECK(dSky == 0);
+    UnloadImage(alone); UnloadImage(later); UnloadImage(p); UnloadImage(q); UnloadImage(f0); UnloadImage(nofl); UnloadImage(s1); UnloadImage(s0);
+}
+
+static void lightningStorm() {
+    boltSeeds();
+    boltWindow();
+    strikeRate();
+    cloudGlow();
+    rainbowGeometry();
+    rainbowAbsent();
+    anvilShape();
+    w5Purity();
+}
+
 int main() try {
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
@@ -5903,6 +6473,12 @@ int main() try {
     }
     if (std::getenv("RMTN_W9_IMAGES")) { w9Images(); shutdownGraphics(); CloseWindow(); return 0; }
     if (std::getenv("RMTN_W9_TIMING")) { w9Timing(); shutdownGraphics(); CloseWindow(); return 0; }
+    if (std::getenv("RMTN_W5_ONLY")) {
+        lightningStorm();
+        shutdownGraphics(); CloseWindow();
+        std::printf(failures ? "[weather] %d failures\n" : "[weather] all passed\n", failures);
+        return failures ? 1 : 0;
+    }
     if (std::getenv("RMTN_W9_ONLY")) {
         ocean();
         shutdownGraphics(); CloseWindow();
@@ -5974,6 +6550,7 @@ int main() try {
     waterBodies();
     waterWakes();
     ocean();
+    lightningStorm();
     shutdownGraphics();
     CloseWindow();
     std::printf(failures ? "[weather] %d failures\n" : "[weather] all passed\n", failures);

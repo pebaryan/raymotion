@@ -27,6 +27,7 @@
 #include "timeline.hpp"
 #include "particles.hpp"
 #include "weather.hpp"
+#include "lightning.hpp"
 
 namespace rmtn {
 namespace splat { struct Cloud; }
@@ -717,6 +718,11 @@ struct Water {
         bool curvature = true;          // the sea follows the planet's curvature (R = 6 371 km about the world origin)
         bool decorrelate = true;        // bend each cascade's lookup so tiles are not exact repeats (false: for comparison)
         unsigned seed = 1;              // the realisation
+        // How much the sea looks like a gale (W5), 0..1; -1: from the wind, smoothstep(12, 20 m/s). At 1 the sea is darker and
+        // greyer (it scatters back the grey sky's light, and the foam and spray are white on it), the crests are sharper
+        // (choppiness x 1.5, only under a Weather: a sea that was set up by hand keeps its choppiness), foam lies in streaks
+        // along the wind down the troughs as well as in whitecaps, and a haze of spray hangs over the surface.
+        float storm = -1;
     } spectrum;
 
     Color deep{ 6, 62, 84, 255 };       // what the water scatters back
@@ -977,9 +983,26 @@ struct Clouds {
     // (Weather::cloudTravel, so a changing wind does not make them swim). true keeps these. This is
     // its own flag, not Sky::ownClouds, because the volumetric layer needs no Sky.
     bool ownWeather = false;
-    // Hook for lightning (a later release): a flash inside the cloud lights it from within, as a point
-    // light of this position, colour and strength (0: none). It is read by the march and does nothing else.
+    // A point light inside the cloud: it lights the cloud from within, with this position, colour and strength
+    // (0: none, the default). It is read by the march and does nothing else; Scene::lightning lights the
+    // clouds by itself, from each strike's channel.
     struct Flash { Vector3 position{ 0, 0, 0 }; Color color{ 200, 210, 255, 255 }; float intensity = 0, radius = 1500; } flash;
+    // Cumulonimbus (W5), with anvil 1: a few storm cells, each a broad lumpy column about as wide as it is tall that goes
+    // up to the tropopause and flattens there into an anvil growing out of its top: a wedge thick against the tower, thinner
+    // and higher downwind (the wind's direction under a Weather, else `drift`), fraying out along the wind and at its edges,
+    // with a smooth fibrous face. Between the cells is ordinary cumulus (more of it with more `cover`). The cells are sparse
+    // (about one in 40 x 40 km, at most 4 in 60 x 60 km) and come from the seed, or from `storms`. anvil 0: the older
+    // dense field of sheared towers, kept for comparison.
+    // towerVariety 1: every cell has its own seed-driven shape (radius, the anvil's length and width, its turn off the
+    // wind, the lumps, its place in the shape noise), so neighbours are not clones. 0: all alike.
+    float anvil = 1;
+    float towerVariety = 1;
+    struct Storm {
+        float x = 0, z = 0;             // centre in the pattern's frame (it drifts with the clouds: world = this + Clouds::travel)
+        float radius = 5500;            // metres; the core is twice this wide
+        float top = 0;                  // metres above the ground the tower reaches (<= 0: 0.93 of the way up the layer)
+    };
+    std::vector<Storm> storms;          // explicit cells; empty: from the seed and `cover`
     // Test and comparison switch. false: every ray starts at the same place in its step and the entry
     // into the cloud is not refined, so the steps show as rings (it exists to prove the jitter and the
     // refinement hide them).
@@ -1148,6 +1171,102 @@ struct Ground {
 // weather is enabled), else dry and bare.
 Weather::GroundState groundOf(const struct Scene& scene, double seconds);
 
+// ------------------------------------------------------------------ lightning
+// Strikes of lightning (Scene::lightning), drawn in 3D: a bolt from rmtn/lightning.hpp (midpoint displacement,
+// branches that thin and shorten with depth), as camera-facing ribbons with a thin hot core and a wide soft glow,
+// added over the picture after the clouds, hidden by what stands in front of them.
+//
+//     scene->lightning.enabled = true;
+//     scene->lightning.strikes.push_back({ 4.2f, { 300, 1800, -900 }, { 340, 0, -880 }, 7 });   // time (s), start, end, seed
+//     scene->lightning.rate = 8;                    // and random strikes: 8 a minute over `area`
+//
+// A strike's time profile (bolt::profile): the leader grows the channel in `leaderTime` seconds, the return stroke
+// holds full brightness for `minVisible` seconds (so a 24 or 30 fps film always catches it), then 2 to 4
+// restrikes flicker over 0.2 to 0.5 s with the channel glowing between them, then the strike is gone. Every part
+// is a pure function of the film time, so it holds under motion blur (sub-frame times are asked for).
+//
+// What a strike lights, while it is bright (`flash` of its profile, times `intensity`):
+//   * the scene: a point light at the channel (blue-white, `light` strong, reaching `lightRange` metres, no shadows),
+//     added to the scene's own lights for the frame (so the lit shader, the rain, the water and the wet ground all
+//     take it; the last of 8 lights is replaced when the scene has 8). The strongest strike lights the scene,
+//   * the clouds from inside (Clouds enabled, `cloudLight`): a glow round the channel's length in the cloud, lighting
+//     each sample of the march by the optical depth between it and the channel, so a cloud shines from within
+//     and its edges glow. The strongest strike lights the clouds.
+// A strike that stays in the cloud (its end above groundY + 50 m) is drawn as a faint wide glow only: its channel is
+// inside the cloud and the cloud's own glow is the picture.
+//
+// Where strikes come from. `strikes` are explicit: times in seconds, with the start (in the cloud) and end
+// (the ground, or inside the cloud). Strikes from the rate: time is cut in half-second slots; slot k holds one
+// strike with probability rate x 0.5 / 60, at a time and place hashed from (seed, k), so the same time always
+// gives the same strikes and the long-run count follows the rate. A strike picked from the rate starts
+// inside the cloud base layer over `area` (a disc), and `groundShare` of them reach the ground. The rate is
+// Lightning::rate, or Weather::lightningRate when that is negative.
+//
+// With Clouds enabled and `followClouds`, a strike's authored position is where it lies in the cloud's own frame: the
+// position drifts with the clouds' wind run at the strike's time (Clouds::travel), so a strike keeps under its
+// tower as it moves across the sky.
+struct Lightning {
+    bool enabled = false;
+    struct Strike {
+        float time = 0;                         // seconds of film time at which the leader starts
+        Vector3 start{ 0, 1800, 0 }, end{ 0, 0, 0 };
+        uint32_t seed = 1;                      // the bolt's shape and timing
+        float intensity = 1;                    // times Lightning::intensity
+    };
+    std::vector<Strike> strikes;                // explicit strikes
+    float rate = -1;                            // strikes a minute from `area`; < 0 takes Weather::lightningRate (0 without a weather)
+    Vector2 area{ 0, 0 };                       // centre (x, z) and
+    float radius = 3000;                        // radius of the disc the rate's strikes fall in
+    float cloudBase = -1;                       // y of the cloud base the rate's strikes start under or in; < 0: Clouds::base if enabled, else 1500
+    float groundY = 0;                          // y of the ground the rate's strikes end on
+    float groundShare = 0.45f;                  // share of the rate's strikes that reach the ground
+    uint32_t seed = 1;                          // another seed, other times and places for the rate's strikes
+    bool followClouds = true;
+    Color color{ 188, 204, 255, 255 };          // the glow's and the light's colour (the core is whiter)
+    float intensity = 1;                        // brightness of the channel
+    float width = 0.8f;                         // metres across the main channel's hot core
+    float minPixels = 1.4f;                     // never thinner than this on screen (px at 1080 lines)
+    float glow = 1;                             // the glow's width and strength, times
+    float light = 1;                            // strength of the point light (0: none)
+    float lightRange = 3500;                    // metres: where it fades to nothing
+    float cloudLight = 1;                       // strength of the clouds' inner glow (0: none)
+    float leaderTime = 0.035f;                  // seconds
+    float minVisible = 0.07f;                   // seconds the return stroke holds full brightness
+    bolt::Shape shape;
+    float fps = 30;                             // the film's frames per second (the weather's when it sets the clouds)
+};
+
+// One strike alive at a moment: its profile there.
+struct LightningActive {
+    Lightning::Strike strike;                   // positions after followClouds
+    float tau = 0;                              // seconds since it began
+    bolt::Profile profile;
+    bool toGround = false;
+};
+
+// A strike's place for thunder: where it lies, how far from the camera, and when the sound arrives.
+struct Thunder {
+    double strikeTime = 0;                      // seconds
+    double arrives = 0;                         // strikeTime + distance / 343
+    float distance = 0;                         // metres from the camera (to the nearest of the channel's ends and middle)
+    Vector3 position{ 0, 0, 0 };                // that nearest point
+    bool toGround = false;
+    uint32_t seed = 1;
+};
+struct Scene;
+// The strikes that begin in [from, to) seconds of film time (explicit and from the rate), with the weather and the
+// clouds of the scene as they are now. Sorted by time. The weather's lightning rate is the scene's current one:
+// a rate that changes over the film needs this called at each frame (thunderCues does).
+std::vector<Lightning::Strike> lightningStrikes(const Scene& scene, double from, double to);
+// The strikes alive at `seconds` with their time profiles (what render() draws).
+std::vector<LightningActive> lightningAt(const Scene& scene, double seconds);
+// The thunder of a film: every strike of `frames` frames at `fps`, with its distance from the camera and the time
+// its sound arrives (thunderDelay), sorted by arrival. It steps the scene's `up` and camera `up` frame by frame, as
+// a render would, so a weather animated in `up` sets the rate where it is; it leaves the scene at its last frame.
+// Place the clips with the audio track: for each cue add a node starting at round(arrives * fps) with
+// media::audio(node, "thunder.wav", { .volume = ... }) (see docs/weather.md, "Thunder on the soundtrack").
+std::vector<Thunder> thunderCues(Scene& scene, int frames, float fps);
+
 // ------------------------------------------------------------------ scenes
 struct Scene {
     Camera camera;
@@ -1198,6 +1317,7 @@ struct Scene {
     Clouds clouds;                  // volumetric clouds (clouds.enabled), drawn after the opaque objects
     Downfall precipitation;         // GPU rain, snow or sleet round the camera (precipitation.enabled)
     Ground ground;                  // wet ground, puddles, ripples and snow cover (needs weather.enabled, or a pin here)
+    Lightning lightning;            // bolts, the flash they make, and the clouds lit from inside (lightning.enabled)
     // With weather enabled the haze sets the fog: exponential, density from the haze, taking the
     // sky's colour (fogMode, fogDensity and fogFromSky are replaced; fogHeight and fogFalloff stay).
     // true keeps the scene's own fog.
@@ -1301,6 +1421,29 @@ Vector2 ride(Object3D& object, const Scene& scene, double seconds, const Ride& h
 fx::Emitter3D wakeSpray(const Wake& w, float fps = 30);
 // A small splash for ripple `r` (a burst of droplets thrown up where the stone fell).
 fx::Emitter3D splash(const Ripple& r, float fps = 30);
+
+// The rainbow (Weather::rainbow), as it is drawn at `seconds`. A pass over the picture after the clouds, in the
+// sky and over geometry farther than the rain's distance, hidden behind nearer things (the depth buffer; the sea's
+// own plane counts), not drawn in the water's reflection. `strength` is 0 when there is no bow: Mode::Off, no
+// rain (Auto), the sun behind cloud or down, or above 42 degrees (Auto). The bow's centre is the point opposite
+// the sun, `antiSolar`; its primary arc is at 42 degrees from it (red outside), the secondary at 51 (reversed,
+// a quarter as bright), a dark band between them (Alexander's) and a lighter sky inside the primary. Light of each
+// wavelength is spread over the bow by the geometry of a raindrop (Descartes' angle for water's index at that
+// wavelength, and a smooth falloff on the shadow side), then turned to colour; so the bow is a soft spectral arc.
+struct RainbowFrame {
+    float strength = 0;
+    Vector3 sun{ 0, 1, 0 }, antiSolar{ 0, -1, 0 };   // unit vectors: towards the sun, and the bow's centre
+    float elevation = 90;                             // the sun's height above the horizon, degrees
+};
+RainbowFrame rainbowOf(const Scene& scene, double seconds);
+// The angle (degrees) from the anti-solar point of the primary bow at wavelength `nm` (red 42.3, violet 40.6) and of
+// the secondary (red 50.4, violet 53.7), from the drop's index of refraction at that wavelength (Descartes).
+float rainbowAngle(float nm, int order);
+
+// The storm cells of `c` whose centres lie in the box [x0, x1] x [z0, z1] of the pattern's frame (world minus
+// Clouds::travel): `c.storms` if it lists any, else one possible cell in each 40 km square of a jittered grid (present
+// with a probability that grows with the cover, 0.3 to 0.8), each with its own radius of 4.5 to 7 km. Pure in the seed.
+std::vector<Clouds::Storm> stormCells(const Clouds& c, float x0, float z0, float x1, float z1);
 
 // The clouds as drawn this moment: `c` with the weather's cover and type worked in (unless
 // c.ownWeather or the weather is off). Their drift is c.travel(w, seconds).

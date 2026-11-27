@@ -71,7 +71,24 @@ Weather Weather::mix(const Weather& a, const Weather& b, float t) {
     if (w.history.empty()) w.history = t < 0.5f ? b.history : a.history;          // the history is the film's, not a state to mix
     w.haze = lerp(a.haze, b.haze, t);
     w.lightningRate = lerp(a.lightningRate, b.lightningRate, t);
+    w.rainbow.distantRain = lerp(a.rainbow.distantRain, b.rainbow.distantRain, t);
+    w.rainbow.rainDistance = lerp(a.rainbow.rainDistance, b.rainbow.rainDistance, t);
+    w.rainbow.strength = lerp(a.rainbow.strength, b.rainbow.strength, t);
     return w;
+}
+
+float Weather::rainbowRain() const {
+    const bool drops = precipitation.kind == Precipitation::Rain || precipitation.kind == Precipitation::Sleet;
+    const float here = drops ? std::clamp(precipitation.intensity, 0.f, 1.f) * (precipitation.kind == Precipitation::Sleet ? 0.6f : 1.f) : 0.f;
+    const float r = std::max(here, std::clamp(rainbow.distantRain, 0.f, 1.f));
+    return r < 0.02f ? 0.f : std::pow(r, 0.6f);
+}
+
+float Weather::rainbowSun(float elevation) const {
+    const float cloud = std::clamp((sunScale() - 0.45f) / 0.4f, 0.f, 1.f);       // cover 1: 0.25, none gets through; cover 0.5: 0.7; a bow wants a sun that casts shadows
+    const float horizon = smoothstepF(0.f, 4.f, elevation);
+    const float high = rainbow.mode == Rainbow::Mode::Auto ? 1.f - smoothstepF(40.f, 46.f, elevation) : 1.f;
+    return cloud * horizon * high;
 }
 
 // ---- the rules
@@ -196,6 +213,9 @@ Water inWeather(const Water& water, const Weather& w) {
     if (w.enabled && !water.ownWind && water.spectrum.enabled) {       // the spectrum sea takes the wind itself (W9)
         out.spectrum.windSpeed = w.wind.speed;
         out.spectrum.windDirection = w.wind.direction;
+        const float U = w.wind.speed, t = std::clamp((U - 12.f) / 8.f, 0.f, 1.f);
+        const float storm = water.spectrum.storm >= 0 ? std::min(water.spectrum.storm, 1.f) : t * t * (3 - 2 * t);
+        out.spectrum.choppiness *= 1.f + 0.5f * storm;                   // a gale's crests are sharper (W5)
         return out;
     }
     if (!w.enabled || water.ownWind || water.waves.empty()) return out;
@@ -261,6 +281,30 @@ fx::Emitter3D inWeather(const fx::Emitter3D& e, const Weather& w, const Matrix& 
 
 Water waterOf(const Scene& scene) { return inWeather(scene.water, scene.weather); }
 
+
+std::vector<Clouds::Storm> stormCells(const Clouds& c, float x0, float z0, float x1, float z1) {
+    std::vector<Clouds::Storm> out;
+    if (!c.storms.empty()) {
+        for (const Clouds::Storm& s : c.storms)
+            if (s.x >= x0 && s.x <= x1 && s.z >= z0 && s.z <= z1) out.push_back(s);
+        return out;
+    }
+    constexpr float GS = 40000.f;
+    const float pr = std::clamp(0.3f + 3.f * c.cover, 0.3f, 0.8f);
+    const uint64_t key = 0x9E3779B97F4A7C15ull * (uint64_t)(c.seed + 11u);
+    for (int j = (int)std::floor(z0 / GS) - 1; j <= (int)std::floor(z1 / GS) + 1; j++)
+        for (int i = (int)std::floor(x0 / GS) - 1; i <= (int)std::floor(x1 / GS) + 1; i++) {
+            const uint64_t cell = ((uint64_t)(uint32_t)(i + 100000) << 32) | (uint32_t)(j + 100000);
+            auto r = [&](int k) { return (float)rnd01(key ^ (cell * 0xD6E8FEB86659FD93ull), (uint64_t)k); };
+            if (r(0) > pr) continue;
+            Clouds::Storm s;
+            s.x = ((float)i + 0.2f + 0.6f * r(1)) * GS;
+            s.z = ((float)j + 0.2f + 0.6f * r(2)) * GS;
+            s.radius = 4500.f + 2500.f * r(3);
+            if (s.x >= x0 && s.x <= x1 && s.z >= z0 && s.z <= z1) out.push_back(s);
+        }
+    return out;
+}
 Clouds inWeather(const Clouds& c, const Weather& w) {
     Clouds k = c;
     if (!w.enabled || c.ownWeather) return k;

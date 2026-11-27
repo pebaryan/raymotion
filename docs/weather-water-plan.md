@@ -220,6 +220,17 @@ by the CPU mirror, not read back.
   - The rainbow's ring is centred on the anti-solar point, at 42° ± 1°.
   - There is no rainbow when the sun is in front of the camera.
 
+**Done (W5).** `rmtn/lightning.hpp` + `src/engine/lightning.cpp` (bolt, profile, strike list, rate, thunder cues, rainbow
+frame), `g3d::Lightning` and the `Weather::Rainbow` on the scene, ribbons and the rainbow pass in
+`src/engine/lightning_glsl.hpp`, the cloud's inner glow in the march, `fx::lightning`, the Cb as a few storm cells with a continuous anvil and per-cell variety
+(`Clouds::anvil`, `storms`, `towerVariety`) and the storm sea (`Water::Spectrum::storm`); script keys `lightning`, `weather.rainbow`,
+`clouds.anvil`, `clouds.storms`, `water.spectrum.storm` and the 2D `{"lightning"}` emitter; docs/weather.md; `thunderstorm.as` and
+`lightning_2d.as`; checks in tests/weather_tests.cpp (`RMTN_W5_ONLY=1`). Left out: the supernumerary bows, bolts and the
+rainbow in the water's mirrored reflection, a strike's light in shadows (the flash light casts none), thunder audio itself
+(the cues are listed; the clip is the film's). Open: the 18 m/s storm sea still shows a few large
+flat foam sheets (the foam map's patch scale), and the W9 artefact checks pass with thin margins
+(Laplacian 3.97 of 4.0, foam-edge steps at the limit); storm towers read somewhat soft and grainy.
+
 ## W6. Water that reflects the scene
 
 - A planar reflection pass mirrors the scene about the water level. The wave normals distort

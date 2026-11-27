@@ -135,6 +135,31 @@ Emitter smoke(float width = 60);
 // Slow glowing motes rising over an area `width` x `height` centred on the origin.
 Emitter embers(float width = 1920, float height = 1080);
 
+// ---- lightning (2D)
+// A strike of lightning: the same bolt as g3d::Lightning's (rmtn/lightning.hpp), made in the plane, with a glow and a
+// flash over the whole picture. A pure function of the frame: the leader grows from `from` towards `to` over
+// `leaderTime`, the return stroke holds `minVisible`, then 2 to 4 restrikes flicker and it is gone.
+//
+//     fx::LightningBolt b; b.from = { 900, -20 }; b.to = { 1000, 760 }; b.start = 30; b.seed = 4;
+//     node->fn = fx::lightning(b);
+struct LightningBolt {
+    Vector2 from{ 960, -20 }, to{ 960, 1000 };      // node px: where the channel starts and ends
+    unsigned seed = 1;                              // its shape and timing
+    float start = 0;                                // frame the leader starts
+    float fps = 30;
+    float width = 3;                                // px across the hot core of the main channel
+    float glow = 1;                                 // the glow's width and strength, times
+    Color color{ 188, 204, 255, 255 };              // the glow; the core is whiter
+    float intensity = 1;
+    float flash = 0.3f;                             // 0..1: how much the whole picture lights up with the strike (0: none)
+    float leaderTime = 0.035f, minVisible = 0.07f;  // seconds
+    float branchChance = 0.07f;
+};
+// Draws the strike at (fractional) frame t through the node context, added over what is there.
+void lightning(const Ctx& c, const LightningBolt& b, double t);
+// A node fn that draws it at frameTime(t), so it follows motion blur.
+std::function<void(const Ctx& c, int t)> lightning(LightningBolt b);
+
 // ------------------------------------------------------------------ 3D
 // The same emitters in a g3d scene, in world units: attach one with Scene::add or
 // Object3D::add (rmtn/scene3d.hpp) and its particles live in that object's space, so they

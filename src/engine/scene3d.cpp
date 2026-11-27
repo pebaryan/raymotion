@@ -20,6 +20,7 @@
 extern "C" void UpdateModelAnimationBones(Model model, ModelAnimation anim, float frame);
 
 #include "clouds_glsl.hpp"
+#include "lightning_glsl.hpp"
 #include "precip_glsl.hpp"
 #include "wet_glsl.hpp"
 #include "wake_glsl.hpp"
@@ -309,7 +310,7 @@ void oceanFragment(vec2 p, float foot, out float h, out vec2 g, out float foam, 
 const char* WATER_FS = R"(
 uniform vec3 waterAbsorb; uniform vec3 waterScatter; uniform float waterCaustics; uniform float waterFoam;
 uniform float waterOpen; uniform float waterInvAmp; uniform float waterGlint; uniform float waterBand; uniform float waterFilter;
-uniform vec2 oceanWind; uniform float oceanSpray; uniform float oceanVis;       // Water::spectrum: wind heading (unit), spray 0..1, haze distance (0: none)
+uniform float oceanStorm; uniform vec2 oceanWind; uniform float oceanSpray; uniform float oceanVis;       // Water::spectrum: wind heading (unit), spray 0..1, haze distance (0: none)
 const float WATER_IOR = 1.333;
 
 // Water::reflections and Water::refraction. reflVP is the viewing camera's view-projection: it finds the pixel of
@@ -727,18 +728,30 @@ vec4 waterSurface() {
         // a sharp edge broken into lace: the map's share, pushed through a step whose position the noise moves
         // The map repeats every patch, and a patch holds only a few whitecaps, so a lattice of the same dash would show from
         // above: a slow mask (scales that are not whole patches) takes about half of them out, the rest are made up in the map.
-        float fm = oceanFoam * smoothstep(0.42, 0.58, vnoise(oceanP * 0.035) * 0.65 + vnoise(oceanP * 0.083 + 7.3) * 0.35);
+        float msc = 1.0;
+        float fm = oceanFoam * smoothstep(0.42, 0.58, vnoise(oceanP * 0.035 * msc) * 0.65 + vnoise(oceanP * 0.083 * msc + 7.3) * 0.35);
         float soft = clamp(foot * 1.2, 0.0, 0.7);                              // from afar the edge is a gradient, not a cut-out
         float fx = fm * (0.35 + 1.3 * n) + 0.35 * (fm - 0.5) * nf1, fw = fwidth(fx) * 1.5;   // edge width follows the pixel: anti-aliased
+        if (oceanStorm > 0.0) fx *= mix(1.0, 0.3 + 1.4 * (vnoise(oceanP * 1.3 + 3.7) * 0.6 + vnoise(oceanP * 3.1 + 1.1) * 0.4), oceanStorm * (1.0 - smoothstep(0.2, 1.0, foot)));   // a gale: the whitecaps break into small patches (the mean is kept)
         foamA = waterFoam * mix(0.9, 0.55, soft) * smoothstep(0.2 - 0.15 * soft - fw, 0.5 + 0.6 * soft + fw, fx);
-        if (oceanSpray > 0.0) {
+        if (oceanSpray > 0.0 || oceanStorm > 0.0) {
             vec2 wd = oceanWind, cw = vec2(-wd.y, wd.x);
             float along = dot(fragPos.xz, wd) - waterTime * 3.0, across = dot(fragPos.xz, cw);
+            across += (vnoise(vec2(along * 0.03, across * 0.02)) - 0.5) * 9.0 + (vnoise(vec2(along * 0.11 + 9.0, across * 0.05)) - 0.5) * 3.0;     // the streaks wander sideways, slowly: not ruled lines
             float sfade = 1.0 - smoothstep(0.35, 1.4, foot);
-            float st = vnoise(vec2(across * 0.8, along * 0.03)) * 0.65 + vnoise(vec2(across * 2.3, along * 0.09)) * 0.35;
-            float streak = smoothstep(0.5, 0.78, st) * smoothstep(-0.4, 0.5, crest);
+            float st = vnoise(vec2(across * 2.2, along * 0.05)) * 0.65 + vnoise(vec2(across * 5.5, along * 0.14)) * 0.35;
+            float streak = smoothstep(0.5, 0.9, st) * smoothstep(-0.4, 0.5, crest);
             streak = mix(0.18, streak, sfade);
             foamA = max(foamA, waterFoam * oceanSpray * 0.6 * streak);
+            if (oceanStorm > 0.0) {                                   // a gale: foam lies in long, narrow, wavering filaments along the wind, down the troughs
+                float ac = across;
+                float ts = vnoise(vec2(ac * 3.0, along * 0.18)) * 0.55 + vnoise(vec2(ac * 7.5, along * 0.45 + 3.1)) * 0.35 + vnoise(vec2(ac * 13.0, along * 0.6)) * 0.1;
+                float wid = 0.6 + 0.2 * (vnoise(vec2(along * 0.02, across * 0.011 + 5.0)) - 0.5);                  // their width varies
+                float gapn = vnoise(vec2(along * 0.06 + 2.0, ac * 0.3)) * 0.7 + vnoise(vec2(along * 0.2, ac * 0.9 + 4.0)) * 0.3;   // and they break
+                float ew = max(0.9, 3.0 * fwidth(ts)), gw = max(0.6, 3.0 * fwidth(gapn));   // soft edges, wider than a pixel
+                float tstreak = smoothstep(wid, wid + ew, ts) * smoothstep(0.34, 0.34 + gw, gapn) * (1.0 - smoothstep(-0.1, 0.45, crest));
+                foamA = max(foamA, waterFoam * oceanStorm * 0.4 * mix(0.2, tstreak, sfade * sfade));
+            }
         }
     } else {
         float fn = vnoise(fragPos.xz * 2.2 + waterTime * 0.15) * 0.6 + vnoise(fragPos.xz * 7.0) * 0.4;
@@ -1695,7 +1708,7 @@ struct Gpu {
     bool ready = false;
     CloudGpu cl;
     CloudLitLocs cll;
-    Shader lit{}, depth{}, dof{}, gbuf{}, line{}, particle{}, sky{};
+    Shader lit{}, depth{}, dof{}, gbuf{}, line{}, particle{}, sky{}, bolt{}, rainbow{};
     LitLocs L{};
     WaterLocs W{};
     ClipLocs C{};
@@ -1780,6 +1793,8 @@ void releaseGpu() {
     if (gpu.line.id) UnloadShader(gpu.line);
     if (gpu.particle.id) UnloadShader(gpu.particle);
     if (gpu.sky.id) UnloadShader(gpu.sky);
+    if (gpu.bolt.id) UnloadShader(gpu.bolt);
+    if (gpu.rainbow.id) UnloadShader(gpu.rainbow);
     for (auto& [mesh, v] : gpu.vat)
         if (v.tex) rlUnloadTexture(v.tex);
     for (auto& [field, f] : gpu.fields)
@@ -3286,6 +3301,13 @@ void uploadOcean(const ocean::Frame& f) {
     o.cascades = f.cascades;
 }
 
+// How much the sea looks like a gale: Water::Spectrum::storm, or from the wind (0 at 12 m/s, 1 at 20) when it is -1.
+float stormOf(const Water& w) {
+    if (w.spectrum.storm >= 0) return std::min(w.spectrum.storm, 1.f);
+    const float t = std::clamp((w.spectrum.windSpeed - 12.f) / 8.f, 0.f, 1.f);
+    return t * t * (3 - 2 * t);
+}
+
 void setOceanUniforms(const Water& w, const Camera& cam, double seconds) {
     const Shader& lit = gpu.lit;
     auto at = [&](const char* name) { return GetShaderLocation(lit, name); };
@@ -3313,8 +3335,9 @@ void setOceanUniforms(const Water& w, const Camera& cam, double seconds) {
     const float heading = w.spectrum.windDirection * DEG2RAD;
     const Vector2 wind{ std::cos(heading), std::sin(heading) };
     const float U = w.spectrum.windSpeed, t = std::clamp((U - 12.f) / 8.f, 0.f, 1.f);
-    const float spray = std::clamp(w.spectrum.spray, 0.f, 1.f) * t * t * (3 - 2 * t);
-    const float vis = std::max(w.spectrum.visibility, 0.f);
+    const float storm = stormOf(w);
+    const float spray = std::clamp(w.spectrum.spray, 0.f, 1.f) * std::max(t * t * (3 - 2 * t), storm);
+    const float vis = std::max(w.spectrum.visibility, 0.f) * (1.f - 0.45f * storm);      // spray hangs over a gale
     const int count = f.cascades, geo = f.geometry;
     SetShaderValue(lit, at("oceanCount"), &count, SHADER_UNIFORM_INT);
     SetShaderValue(lit, at("oceanGeo"), &geo, SHADER_UNIFORM_INT);
@@ -3329,6 +3352,7 @@ void setOceanUniforms(const Water& w, const Camera& cam, double seconds) {
     SetShaderValue(lit, at("oceanRing"), &ring, SHADER_UNIFORM_VEC3);
     SetShaderValue(lit, at("oceanWind"), &wind, SHADER_UNIFORM_VEC2);
     SetShaderValue(lit, at("oceanSpray"), &spray, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, at("oceanStorm"), &storm, SHADER_UNIFORM_FLOAT);
     SetShaderValue(lit, at("oceanVis"), &vis, SHADER_UNIFORM_FLOAT);
 }
 
@@ -3383,7 +3407,11 @@ void setWaterLook(const Scene& s, const Camera& cam, const Water& w, float eye, 
     }
     const float meanAbsorb = (w.absorb.x + w.absorb.y + w.absorb.z) / 3;
     const float fade = std::exp(-meanAbsorb * std::max(0.f, w.level - cam.position.y) * 0.5f);
-    const Vector3 scatter = Vector3Scale(linear(w.deep), std::clamp(daylight, 0.03f, 2.f) * fade);
+    Vector3 scatter = Vector3Scale(linear(w.deep), std::clamp(daylight, 0.03f, 2.f) * fade);
+    if (w.enabled && w.spectrum.enabled) {        // a gale scatters back the grey sky: darker and greyer
+        const float st = stormOf(w), lum = 0.2126f * scatter.x + 0.7152f * scatter.y + 0.0722f * scatter.z;
+        scatter = Vector3Scale(Vector3Lerp(scatter, { lum * 0.9f, lum, lum * 1.05f }, 0.55f * st), 1.f - 0.4f * st);
+    }
     SetShaderValue(lit, K.scatter, &scatter, SHADER_UNIFORM_VEC3);
     const float caustics = std::clamp(w.caustics, 0.f, 1.f), foam = std::clamp(w.foam, 0.f, 1.f);
     const float open = std::max(w.openDepth, 0.f), invAmp = 1.f / std::max(pk.amplitude, 1e-3f), band = pk.amplitude + 0.05f;
@@ -4522,7 +4550,7 @@ CloudFrame cloudFrame(const Scene& s, double frame) {
 }
 
 // The shared uniforms of the march and the shadow shaders, and the noise textures on their units.
-void setCloudCommon(const Shader& sh, const CloudFrame& f) {
+void setCloudCommon(const Shader& sh, const CloudFrame& f, Vector2 focus) {
     const Clouds& c = f.c;
     shF(sh, "planetR", Clouds::kPlanetRadius);
     shF(sh, "cloudBase", c.base);
@@ -4549,6 +4577,25 @@ void setCloudCommon(const Shader& sh, const CloudFrame& f) {
     shI(sh, "extruded", c.extruded ? 1 : 0);
     shF(sh, "nearestZ", c.nearestSlice ? 1.f : 0.f);
     shV2(sh, "shearDir", f.shear);
+    shF(sh, "anvilOn", c.anvil > 0.5f ? 1.f : 0.f);
+    shF(sh, "towerVariety", std::clamp(c.towerVariety, 0.f, 1.f));
+    {   // the storm cells near the view (the pattern's frame), nearest 12
+        const float cx = focus.x - f.travel.x, cz = focus.y - f.travel.y, reach = 150000.f;
+        std::vector<Clouds::Storm> st = stormCells(c, cx - reach, cz - reach, cx + reach, cz + reach);
+        std::sort(st.begin(), st.end(), [&](const Clouds::Storm& a, const Clouds::Storm& b) { return std::hypot(a.x - cx, a.z - cz) < std::hypot(b.x - cx, b.z - cz); });
+        if (st.size() > 12) st.resize(12);
+        float d[48] = {}, t[12] = {};
+        const float layer = std::max(c.top, c.base + 50) - c.base;
+        for (size_t i = 0; i < st.size(); i++) {
+            d[i * 4] = st[i].x; d[i * 4 + 1] = st[i].z; d[i * 4 + 2] = st[i].radius;
+            d[i * 4 + 3] = (float)(int)(std::fmod(std::fabs(st[i].x * 0.013f + st[i].z * 0.0071f), 4000.f) + 1.f);
+            t[i] = st[i].top > 0 ? std::clamp((st[i].top - c.base) / layer, 0.3f, 0.99f) : 0.93f;
+        }
+        const int n = (int)st.size();
+        shI(sh, "stormN", c.anvil > 0.5f ? n : 0);
+        SetShaderValueV(sh, GetShaderLocation(sh, "stormD"), d, SHADER_UNIFORM_VEC4, 12);
+        SetShaderValueV(sh, GetShaderLocation(sh, "stormT"), t, SHADER_UNIFORM_FLOAT, 12);
+    }
 }
 void unbindCloudUnits() {
     for (int slot : { CLOUD_SHAPE_SLOT, CLOUD_DETAIL_SLOT, CLOUD_WEATHER_SLOT, CLOUD_LOW_SLOT, CLOUD_BLUE_SLOT, DEPTH_SLOT }) bindUnit(slot, 0);
@@ -4584,7 +4631,7 @@ void renderCloudShadow(const Scene& s, const CloudFrame& f, const Camera& cam, u
     fwd = Vector3Length(fwd) > 1e-4f ? Vector3Normalize(fwd) : Vector3{ 0, 0, 0 };
     const Vector2 centre{ cam.position.x + fwd.x * extent * 0.2f, cam.position.z + fwd.z * extent * 0.2f };
     const Shader& sh = g.shadow;
-    setCloudCommon(sh, f);
+    setCloudCommon(sh, f, { cam.position.x, cam.position.z });
     shV2(sh, "shSize", { (float)res, (float)res });
     shV2(sh, "shCentre", centre);
     shF(sh, "shExtent", extent);
@@ -4600,6 +4647,204 @@ void renderCloudShadow(const Scene& s, const CloudFrame& f, const Camera& cam, u
     g.shadowSun = f.sun;
     g.shadowLight = light;
     g.shadowFloor = 0.1f;
+}
+
+// ---- lightning and the rainbow (Scene::lightning, Weather::rainbow) -------------------------------
+// The strike that is brightest now, and where its light and its glow in the cloud are.
+struct FlashFrame {
+    bool on = false;
+    float power = 0;                         // flash x strike intensity x Lightning::intensity
+    LightningActive strike;
+    Vector3 lightAt{ 0, 0, 0 };              // the point light's place on the channel
+    Vector3 segA{ 0, 0, 0 }, segB{ 0, 0, 0 };    // the part of the channel inside the cloud, for the cloud's glow
+};
+double lightningSeconds(const Scene& s, double frame) { return frame / std::max(1.f, s.weather.enabled ? s.weather.fps : s.lightning.fps); }
+
+FlashFrame flashFrame(const Scene& s, double frame) {
+    FlashFrame f;
+    if (!s.lightning.enabled) return f;
+    const Lightning& l = s.lightning;
+    for (const LightningActive& a : lightningAt(s, lightningSeconds(s, frame))) {
+        const float p = a.profile.flash * a.strike.intensity * l.intensity;
+        if (p > f.power) { f.power = p; f.strike = a; f.on = true; }
+    }
+    if (!f.on) return f;
+    const Lightning::Strike& st = f.strike.strike;
+    if (f.strike.toGround) {
+        f.lightAt = Vector3Lerp(st.end, st.start, 0.3f);
+        const float up = 700.f;                                                  // the channel's charge region: above where it leaves the cloud base
+        f.segA = st.start;
+        f.segB = { st.start.x, st.start.y + up, st.start.z };
+    } else {
+        f.lightAt = Vector3Scale(Vector3Add(st.start, st.end), 0.5f);
+        f.segA = st.start; f.segB = st.end;
+    }
+    return f;
+}
+
+// While a frame is drawn: the strongest strike's light, added to the scene's lights (the last is replaced when there are
+// 8). The user's lights come back when it ends.
+struct FlashScope {
+    Scene& s;
+    bool added = false, replaced = false;
+    Light saved;
+    FlashScope(Scene& sc, int t) : s(sc) {
+        if (!s.lightning.enabled || s.lightning.light <= 0) return;
+        const FlashFrame f = flashFrame(s, frameTime(t));
+        if (!f.on || f.power < 0.01f) return;
+        Light li = Light::point(f.lightAt, s.lightning.color, 2.5f * s.lightning.light * f.power, s.lightning.lightRange);
+        if ((int)s.lights.size() < MAX_LIGHTS) { s.lights.push_back(li); added = true; }
+        else { saved = s.lights.back(); s.lights.back() = li; replaced = true; }
+    }
+    ~FlashScope() {
+        if (added) s.lights.pop_back();
+        else if (replaced) s.lights.back() = saved;
+    }
+    FlashScope(const FlashScope&) = delete;
+    FlashScope& operator=(const FlashScope&) = delete;
+};
+
+// The bolts' ribbons, over the clouds, depth tested against the opaque scene. Into `scene`'s framebuffer, inside the
+// viewport (vx, vyGL, vw, vh); leaves the framebuffer bound and the matrices as they were.
+void drawBolts(const Scene& s, const Camera& cam, const std::vector<LightningActive>& act, const DepthTarget& scene, int fbW, int fbH,
+               int vx, int vyGL, int vw, int vh) {
+    if (act.empty() || cam.orthographic) return;
+    const Lightning& l = s.lightning;
+    if (!gpu.bolt.id) {
+        gpu.bolt = LoadShaderFromMemory(BOLT_VS, BOLT_FS);
+        if (!IsShaderValid(gpu.bolt)) throw std::runtime_error("g3d: lightning shader compilation failed");
+    }
+    rlDrawRenderBatchActive();
+    rlEnableFramebuffer(scene.fbo);
+    rlViewport(vx, vyGL, vw, vh);
+    const Matrix savedProj = rlGetMatrixProjection(), savedView = rlGetMatrixModelview();
+    const double aspect = (double)vw / vh, top = cam.nearPlane * std::tan(cam.fov * 0.5 * DEG2RAD);
+    rlSetMatrixProjection(MatrixFrustum(-top * aspect, top * aspect, -top, top, cam.nearPlane, cam.farPlane));
+    rlSetMatrixModelview(MatrixLookAt(cam.position, cam.target, safeUp(Vector3Subtract(cam.target, cam.position), cam.upVector)));
+    rlEnableDepthTest();
+    rlDisableDepthMask();
+    rlDisableBackfaceCulling();
+    rlSetBlendFactorsSeparate(RL_ONE, RL_ONE, RL_ZERO, RL_ONE, RL_MAX, RL_FUNC_ADD);
+    BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+    rlSetTexture(rlGetTextureIdDefault());
+    BeginShaderMode(gpu.bolt);
+    shV3(gpu.bolt, "glowCol", linear3(l.color));
+    shV3(gpu.bolt, "coreCol", { 1.f, 0.97f, 0.92f });
+    const float tanY = std::tan(cam.fov * 0.5f * DEG2RAD);
+    const float pixelAt1 = 2.f * tanY / 1080.f;                  // metres a 1080-line pixel spans at one metre
+    for (const LightningActive& a : act) {
+        const float lvl = std::min(a.profile.flash * a.strike.intensity * l.intensity, 1.f);
+        if (lvl <= 0.003f) continue;
+        const bolt::Bolt b = bolt::make(a.strike.start, a.strike.end, a.strike.seed, l.shape);
+        const float reach = b.reach * a.profile.visible;
+        const float bright = a.toGround ? lvl : 0.3f * lvl;        // a channel inside the cloud shows as a faint glow
+        for (const bolt::Segment& sg : b.segments) {
+            if (sg.reachA >= reach) continue;
+            Vector3 p0 = sg.a, p1 = sg.b;
+            if (sg.reachB > reach) p1 = Vector3Lerp(sg.a, sg.b, (reach - sg.reachA) / std::max(sg.reachB - sg.reachA, 1e-4f));
+            const Vector3 dir = Vector3Subtract(p1, p0), mid = Vector3Scale(Vector3Add(p0, p1), 0.5f);
+            const float len = Vector3Length(dir);
+            if (len < 1e-3f) continue;
+            const Vector3 u = Vector3Scale(dir, 1.f / len);
+            Vector3 side = Vector3CrossProduct(u, Vector3Subtract(cam.position, mid));
+            if (Vector3Length(side) < 1e-5f) continue;
+            side = Vector3Normalize(side);
+            const float dist = Vector3Distance(cam.position, mid), px = pixelAt1 * dist;
+            const float sw = std::max(sg.width, 0.12f);
+            const float hc = 0.5f * std::max(l.width * sw, l.minPixels * px * (0.5f + 0.5f * sw));          // the core's half width
+            const float hg = std::max(hc * 7.f, 9.f * px * l.glow * (0.4f + 0.6f * sw)) * (0.7f + 0.3f * lvl);   // the glow's
+            const float c = a.toGround ? std::clamp(hc / hg, 0.02f, 1.f) : 0.02f;
+            const float br = bright * (sg.level == 0 ? 1.f : 0.75f);
+            const float gs = std::clamp(l.glow, 0.f, 2.f) * 0.5f * (a.toGround ? 1.f : 1.5f);
+            const unsigned char cr = (unsigned char)std::lround(std::clamp(br, 0.f, 1.f) * 255.f), cg = (unsigned char)std::lround(c * 255.f),
+                                cb = (unsigned char)std::lround(std::clamp(gs, 0.f, 1.f) * 255.f);
+            const float ext = hg;                                                                  // how far the end pieces reach past the piece
+            const Vector3 sd = Vector3Scale(side, hg);
+            // Four slices along the piece: beyond the start, the start, the end, beyond the end (1 at the outer ones).
+            const Vector3 s0 = Vector3Subtract(p0, Vector3Scale(u, ext)), s3 = Vector3Add(p1, Vector3Scale(u, ext));
+            const Vector3 cen[4] = { s0, p0, p1, s3 };
+            const float beyond[4] = { 1.f, 0.f, 0.f, 1.f };
+            rlBegin(RL_QUADS);
+            rlColor4ub(cr, cg, cb, 255);
+            for (int k = 0; k < 3; k++) {
+                const Vector3 qa = cen[k], qb = cen[k + 1];
+                rlTexCoord2f(-1.f, beyond[k]);     rlVertex3f(qa.x - sd.x, qa.y - sd.y, qa.z - sd.z);
+                rlTexCoord2f(1.f, beyond[k]);      rlVertex3f(qa.x + sd.x, qa.y + sd.y, qa.z + sd.z);
+                rlTexCoord2f(1.f, beyond[k + 1]);  rlVertex3f(qb.x + sd.x, qb.y + sd.y, qb.z + sd.z);
+                rlTexCoord2f(-1.f, beyond[k + 1]); rlVertex3f(qb.x - sd.x, qb.y - sd.y, qb.z - sd.z);
+            }
+            rlEnd();
+        }
+    }
+    EndShaderMode();
+    rlDrawRenderBatchActive();
+    rlSetTexture(0);
+    EndBlendMode();
+    restoreBlend();
+    rlEnableDepthMask();
+    rlDisableDepthTest();
+    rlSetMatrixProjection(savedProj);
+    rlSetMatrixModelview(savedView);
+    rlViewport(0, 0, fbW, fbH);
+}
+
+// The rainbow over the picture (see RainbowFrame). Two passes of one full-screen shader into `scene`.
+void drawRainbow(const Scene& s, const RainbowFrame& rf, const Camera& cam, const DepthTarget& scene, int fbW, int fbH,
+                 int vx, int vyGL, int vw, int vh) {
+    if (rf.strength <= 0.002f || cam.orthographic) return;
+    if (!gpu.rainbow.id) {
+        gpu.rainbow = LoadShaderFromMemory(nullptr, RAINBOW_FS);
+        if (!IsShaderValid(gpu.rainbow)) throw std::runtime_error("g3d: rainbow shader compilation failed");
+    }
+    const Shader& sh = gpu.rainbow;
+    const Vector3 look = Vector3Subtract(cam.target, cam.position);
+    const Vector3 fwd = Vector3Normalize(look);
+    const Vector3 right = Vector3Normalize(Vector3CrossProduct(fwd, safeUp(look, cam.upVector))), up = Vector3CrossProduct(right, fwd);
+    const float tanY = std::tan(cam.fov * 0.5f * DEG2RAD), aspect = (float)vw / (float)vh;
+    rlDrawRenderBatchActive();
+    rlEnableFramebuffer(scene.fbo);
+    rlViewport(vx, vyGL, vw, vh);
+    rlMatrixMode(RL_PROJECTION);
+    rlPushMatrix();
+    rlLoadIdentity();
+    rlOrtho(0, vw, vh, 0, -1, 1);
+    rlMatrixMode(RL_MODELVIEW);
+    rlPushMatrix();
+    rlLoadIdentity();
+    rlDisableDepthTest();
+    rlDisableDepthMask();
+    shV3(sh, "camPos", cam.position); shV3(sh, "camFwd", fwd); shV3(sh, "camRight", right); shV3(sh, "camUp", up);
+    shV2(sh, "tanHalf", { tanY * aspect, tanY });
+    shV2(sh, "vpOrigin", { (float)vx, (float)vyGL });
+    shV2(sh, "vpSize", { (float)vw, (float)vh });
+    shV2(sh, "zNF", { cam.nearPlane, cam.farPlane });
+    shV3(sh, "antiSolar", rf.antiSolar);
+    shF(sh, "strength", rf.strength);
+    shF(sh, "rainDist", std::max(s.weather.rainbow.rainDistance, 10.f));
+    shF(sh, "waterLevel", s.water.enabled ? waterOf(s).level : 0.f);
+    shI(sh, "waterOn", s.water.enabled ? 1 : 0);
+    shF(sh, "gain", 0.75f);
+    shI(sh, "depthTex", DEPTH_SLOT);
+    bindUnit(DEPTH_SLOT, scene.depth);
+    for (int pass = 0; pass < 2; pass++) {
+        shI(sh, "pass", pass);
+        if (pass == 0) rlSetBlendFactorsSeparate(RL_ZERO, RL_ONE_MINUS_SRC_ALPHA, RL_ZERO, RL_ONE, RL_FUNC_ADD, RL_FUNC_ADD);          // Alexander band: the sky darkened
+        else rlSetBlendFactorsSeparate(RL_DST_COLOR, RL_ONE, RL_ZERO, RL_ONE, RL_FUNC_ADD, RL_FUNC_ADD);                                     // light added in proportion to the sky behind: dst x (1 + bow)
+        BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+        BeginShaderMode(sh);
+        DrawRectangle(0, 0, vw, vh, WHITE);
+        EndShaderMode();
+        rlDrawRenderBatchActive();
+        EndBlendMode();
+    }
+    bindUnit(DEPTH_SLOT, 0);
+    restoreBlend();
+    rlMatrixMode(RL_MODELVIEW);
+    rlPopMatrix();
+    rlMatrixMode(RL_PROJECTION);
+    rlPopMatrix();
+    rlMatrixMode(RL_MODELVIEW);
+    rlViewport(0, 0, fbW, fbH);
 }
 
 // The clouds over the finished opaque scene in `scene` (colour and depth), inside the viewport
@@ -4618,7 +4863,7 @@ void drawClouds(const Scene& s, const CloudFrame& f, const Camera& cam, const De
 
     // The march.
     const Shader& m = g.march;
-    setCloudCommon(m, f);
+    setCloudCommon(m, f, { cam.position.x, cam.position.z });
     const Vector3 look = Vector3Subtract(cam.target, cam.position);
     const Vector3 fwd = Vector3Normalize(look);
     Vector3 right = Vector3Normalize(Vector3CrossProduct(fwd, safeUp(look, cam.upVector)));
@@ -4658,6 +4903,14 @@ void drawClouds(const Scene& s, const CloudFrame& f, const Camera& cam, const De
     shV3(m, "flashPos", fl.position);
     shV3(m, "flashCol", Vector3Scale(linear3(fl.color), fi));
     shF(m, "flashRadius", std::max(fl.radius, 1.f));
+    {   // the strongest lightning strike's channel in the cloud
+        const FlashFrame ff = flashFrame(s, frameTime(gpu.frame));
+        const float k = ff.on ? 5.f * s.lightning.cloudLight * ff.power : 0.f;
+        shV3(m, "boltA", ff.segA);
+        shV3(m, "boltB", ff.segB);
+        shV3(m, "boltCol", Vector3Scale(linear3(s.lightning.color), k));
+        shF(m, "boltRadius", ff.on && !ff.strike.toGround ? 700.f : 450.f);
+    }
     bindUnit(DEPTH_SLOT, scene.depth);
     cloudPass(m, g.lowFbo, 0, 0, lw, lh);
 
@@ -5351,7 +5604,17 @@ void renderBody(Scene& s, Camera& camIn, Rectangle vp, const RenderTexture& targ
     // Main pass, into the target or (for depth of field) a target with a depth texture.
     const int fbW = target.texture.width, fbH = target.texture.height;
     const bool dof = cam.dof.aperture > 0 && cam.dof.maxBlur > 0;    const DepthTarget* dofTarget = nullptr;
-    if (dof || cloudsOn || refractOn || wet.ssr || !bodies.empty()) {         // clouds and the water need the opaque depth as a texture: draw into the depth target
+    // Lightning and the rainbow are drawn over the finished picture, against the opaque depth.
+    const std::vector<LightningActive> bolts = s.lightning.enabled && !cam.orthographic ? lightningAt(s, lightningSeconds(s, ft)) : std::vector<LightningActive>{};
+    RainbowFrame bow;
+    if (!cam.orthographic && s.weather.enabled) {
+        bow = rainbowOf(s, ft);
+        const float ty = std::tan(cam.fov * 0.5f * DEG2RAD), tx = ty * (float)vw0 / (float)vh0;
+        const Vector3 fwd0 = Vector3Normalize(Vector3Subtract(cam.target, cam.position));
+        const float off = std::acos(std::clamp(Vector3DotProduct(fwd0, bow.antiSolar), -1.f, 1.f)) * RAD2DEG;
+        if (off > std::atan(std::sqrt(tx * tx + ty * ty)) * RAD2DEG + 56.f) bow.strength = 0;     // the bow's whole ring lies behind the view
+    }
+    if (dof || cloudsOn || refractOn || wet.ssr || !bodies.empty() || !bolts.empty() || bow.strength > 0.002f) {         // clouds and the water need the opaque depth as a texture: draw into the depth target
         dofTarget = &sceneTarget(fbW, fbH);
         rlEnableFramebuffer(dofTarget->fbo);
         rlViewport(0, 0, fbW, fbH);
@@ -5500,6 +5763,8 @@ void renderBody(Scene& s, Camera& camIn, Rectangle vp, const RenderTexture& targ
     rlLoadIdentity();
     rlViewport(0, 0, fbW, fbH);
     if (cloudsOn) drawClouds(s, cloudNow, cam, *dofTarget, fbW, fbH, vx, fbH - vy - vh, vw, vh);
+    if (dofTarget && bow.strength > 0.002f) drawRainbow(s, bow, cam, *dofTarget, fbW, fbH, vx, fbH - vy - vh, vw, vh);
+    if (dofTarget && !bolts.empty()) drawBolts(s, cam, bolts, *dofTarget, fbW, fbH, vx, fbH - vy - vh, vw, vh);
     if (lt && styles.table.size() > 1) {
         rlEnableFramebuffer(dofTarget ? dofTarget->fbo : target.id);
         compositeLines(s, cam, *lt, styles, vh, scale, t);
@@ -6439,6 +6704,7 @@ void render(Scene& s, int t, const Ctx& c, Rectangle viewport, Camera* camera) {
     }
     animate(s.objects, t, MatrixIdentity(), cull);
     const WeatherScope weatherNow(s);
+    const FlashScope flashNow(s, t);                      // a strike's light, for this frame's lights
     if (canvasSize().x > 0) {
         sizeSurfaces(s.objects, MatrixIdentity(), cam, cull.screenH * cull.aspect, cull.screenH);
         drawCanvases(s.objects, t);

@@ -43,7 +43,7 @@ frame and puts them back when it ends.
 | `accumulationScale` | x | runs the ground's clock faster than the film's |
 | `snowCover` | 0..1 | pin on the settled snow (-1: accumulate) |
 | `haze` | 0..1 | 0 clear air, 1 thick fog; sets the fog |
-| `lightningRate` | strikes / minute | for lightning (not drawn yet) |
+| `lightningRate` | strikes / minute | strikes from the rate when `Scene::lightning` has none listed (see "Lightning, storm light and rainbows") |
 
 The wind direction is a heading (degrees) rather than an (x, z) vector, so that `mix` can turn it by
 angle. `Weather::windVector()` gives the unit vector.
@@ -152,8 +152,21 @@ How it is drawn:
 * **Weather.** With `Scene::weather` enabled the cover and type come from it and the drift from its wind
   (`Clouds::travel`, `Weather::cloudTravel`, so a changing wind does not make them swim); `ownWeather`
   keeps the clouds' own. This is not `Sky::ownClouds`: a layer of volumetric clouds needs no Sky.
-* **Lightning hook.** `Clouds::flash` (position, colour, intensity, radius) adds a point light inside the
-  march. Nothing drives it yet.
+* **Lightning.** `Scene::lightning` (below) lights the cloud from inside along the strike's channel, dimmed by the
+  cloud between; `Clouds::flash` (position, colour, intensity, radius) is the older hand-set point light inside the
+  march and still works.
+* **Cumulonimbus.** With `Clouds::anvil` (default 1) the layer holds a few storm cells, not a field of towers. A cell is a
+  broad lumpy column about as wide as it is tall (`radius` 4.5 to 7 km, so a core of 9 to 14 km) that narrows slowly into a
+  domed top, and an anvil that grows out of the column's top: a wedge, thick against the tower (its underside at 0.66 of the
+  layer, with soft mammatus-like bumps) and thinner and higher downwind (0.90), widening and fraying out along the wind
+  (`drift`, or the weather's wind) and at its edges, with a smooth fibrous texture stretched along the wind. The column fills
+  the height up to the anvil, so there is no stem and no gap. Cells come from the seed (one possible cell in each 40 km
+  square, present with probability 0.3 to 0.8 growing with `cover`: about 2 in 60 x 60 km, at most 4) or from the list
+  `Clouds::storms` (script `clouds.storms`: `[{"x","z","radius","top"}]` in the pattern's frame, which drifts with the
+  clouds; `top` in metres above the ground, 0: 0.93 of the layer). Between the cells the lowest fifth of the layer holds
+  ordinary cumulus, more of it with more `cover`. `g3d::stormCells` lists the cells in a box. `towerVariety` (0..1, default 1)
+  makes the cells differ: radius, the anvil's length, width and turn off the wind, the lumps, and where each looks into the
+  shape noise. `anvil = 0` restores the older dense field of sheared towers. Cumulus, stratus and deck are not touched.
 
 | Quality | march steps | light steps | shadow map | default resolution |
 | --- | --- | --- | --- | --- |
@@ -280,7 +293,7 @@ where the camera is: move the camera 0.37 m and every drop stays where it was.
   build/raymotion_weather_tests`. The drop count in view is what the CPU mirror
   (`Downfall::drop`) predicts for that camera; the GPU's own count was not read back.
 * **Limits.** Streaks are billboards, not refracting lenses, so drops do not distort the background.
-  Lightning does not light drops yet. Rain does not enter the water's reflection pass.
+  A lightning flash lights the drops (they take the flash's point light with the rest). Rain does not enter the water's reflection pass.
 
 `fx::rain3d` and `fx::snow3d` are unchanged and still fill a fixed box. Use `precipitation` for rain
 that has to fill a valley or follow a camera; `examples/scripts/porch_rain.as` is the reference.
@@ -462,6 +475,70 @@ against the dip (1.5 px; a flat sea misses it); foam about 0 at 3 m/s and rising
 grazing view changing little as the camera creeps (and far more with `filter` off); the CPU height within 2 cm of the
 height the mesh draws, `ride()` following the surface; the shading slope variance within 30 % of Cox and Munk at 5, 10 and 18 m/s; and foam patches at 12 m/s with a median aspect ratio of 2 or more, within 30 degrees of across the wind.
 
+## Lightning, storm light and rainbows
+
+`Scene::lightning` (`include/rmtn/lightning.hpp` for the bolt itself, `docs/scripting.md` for the keys) is off until
+`enabled`.
+
+* **The bolt.** `bolt::make(start, end, seed, shape)` is a main channel by recursive midpoint displacement (seven splits:
+  128 pieces) with branches: a vertex of the main channel branches with `branchChance`, a branch of level L with that times
+  `branchFall^L`, each shorter (`branchLength`, times 0.55 per level) and thinner, leaving by about 38 degrees and turning
+  towards the strike's end. The same seed, start and end always give the same bolt.
+* **The time profile** (`bolt::profile(seed, tau)`) is all from the seed: a leader that grows the channel over about
+  35 ms, a return stroke at full brightness held for at least `minVisible` (70 ms: two frames of a 30 fps film whatever the
+  phase), two to four restrikes over 0.2 to 0.5 s with the channel glowing faintly between them, then nothing (a strike is
+  over by 0.75 s at the latest). It is a pure function of the time, so motion blur samples it correctly.
+* **Drawing.** Camera-facing ribbons of emissive light, a hot core (white, `width` metres, never thinner than
+  `minPixels` at 1080 lines) inside a wide soft glow in `color`, thinner along branches, with rounded ends and a MAX blend
+  so joints and crossings do not beat. A bolt that ends at the ground is drawn whole; one that stays in cloud (`end.y` more
+  than 50 m above `groundY`) is a faint channel and its light is the cloud's glow. Bolts are drawn after the clouds, against
+  the opaque depth (a hill hides the foot of the channel) and are not in the water's mirrored pass.
+* **What a flash lights.** For the strongest strike of the frame: a blue-white point light (`light`, range `lightRange`) a
+  third of the way up the channel, which the lit objects, the sea and the rain streaks take with the rest of the lights
+  (the eighth light is replaced when all 8 are used); and the cloud's inner glow (`cloudLight`): in the march each sample
+  takes the light of the nearest point of the channel dimmed by four density taps towards it, so a cloud shines round the
+  bolt and thin edges glow while a thick cloud keeps its dark heart.
+* **Where strikes come from.** The list `strikes` ({time, start, end, seed, intensity}), plus, when `rate` (or, at -1, the
+  weather's `lightningRate`) is above 0, strikes from a hash of 0.5 s time slots: each slot holds a strike with probability
+  `rate * 0.5 / 60`, placed in the disc (`area`, `radius`) under the cloud base, a share (`groundShare`) reaching the ground.
+  `followClouds` carries both along with `Clouds::travel`. A rate that changes during a strike's 0.75 s can make it pop in
+  or out; keep the rate steady or give the strikes in a list.
+* **Thunder.** `bolt::thunderDelay(metres)` is distance / 343. `g3d::thunderCues(scene, frames, fps)` lists each strike
+  of the clip: `strikeTime`, `distance` from the camera to the nearest of the channel's ends and middle, `arrives`
+  (`strikeTime + distance / 343`), `position`, `toGround` and `seed`. Put a thunder clip on the soundtrack at each
+  `arrives` with the existing audio cues: in a script `media::audio(startFrame, durationFrames, file, startFrom, endAt,
+  rate, loop, volume)` during `configure` (start frame = `arrives * fps`; the volume can fall with `distance`), in C++ a
+  node with an `AudioClip` (`timeline.hpp`) starting at that frame. Nothing is added to the audio for you.
+* **2D.** `fx::lightning(ctx, bolt, frame)` and the node fn `fx::lightning(bolt)` draw the same generator in a 2D
+  composition (five additive layers from a wide glow to a white core, and a screen flash); from a script,
+  `fx::draw("{\"lightning\": {...}}", frame)`. `examples/scripts/lightning_2d.as`.
+
+**The rainbow** (`Weather::rainbow`, drawn as a pass over the picture after the clouds when the weather is on):
+
+* The bow is a circle round the point opposite the sun (the sky's sun, or the light `sunLight` names). Light of each of
+  12 wavelengths is put at Descartes' angle for water's index at that wavelength: the primary at 42.3 degrees (red) to
+  40.6 (violet), red outside; the secondary at 50.4 (red) to 53.7 (violet), reversed and 30% as bright, with its own
+  wider falloff. The result goes through the CIE colour matching functions to RGB, so the arc is a continuous
+  spectrum with a soft edge on the dark side and a long fade on the lit side (supernumerary bows are not drawn).
+* Alexander's dark band between the two is a darkening of the sky there; the sky inside the primary is a little lighter.
+* How much shows: the weather's rain (`precipitation.intensity` for rain and sleet, or `rainbow.distantRain`, rain out of
+  sight, whichever is more, through a soft curve) times how much sun gets through the cloud (`rainbowSun`: gone at cover
+  0.73 and above) times a fade as the sun sets, and in `Auto` a fade between 40 and 46 degrees (the bow sinks below the
+  horizon). `mode = On` shows it whatever the rain and the sun's height, `Off` never. With the sun in front of the camera
+  the ring is behind the view and nothing is drawn.
+* Geometry in front of the rain (nearer than a third of `rainDistance`, default 2.5 km) hides it; the sea plane counts;
+  things farther than `rainDistance` have it over them (a hill in the rain's distance is behind the bow).
+* Not drawn in the water's reflection. `strength` (0..2) scales it.
+
+**Storm look.** The cumulonimbus storm cells is under "Volumetric clouds". The sea has `Water::Spectrum::storm` (0..1; -1 takes it
+from the wind: 0 at 12 m/s, 1 at 20): the water scatters back the grey sky (darker and greyer, by up to 40 % and 55 %), crests
+are sharper (choppiness x 1.5 under a `Weather`; a hand-set sea keeps its choppiness), foam lies in long, narrow filaments along the wind that wander sideways, vary in width and break, down the troughs as well as in whitecaps (broken into smaller patches),
+spray streaks are on from `storm` rather than from 12 m/s, and the sea fades into the
+horizon haze 45 % sooner. At 18 m/s it is `storm` 0.84.
+
+`examples/scripts/thunderstorm.as` is a whole storm: towers with anvils over a stormy sea, flashes in the cloud and bolts to
+the water, rain that moves off, the sun behind the camera and the rainbow.
+
 ## Script
 
 The water's `spectrum` object and `examples/scripts/open_ocean.as` are in docs/scripting.md. The scene descriptor's `clouds` object (docs/scripting.md) takes the `Clouds` fields by name. Its `weather` object takes a `preset`, optionally `to` and
@@ -471,6 +548,15 @@ grass, trees, a pond and rain, mixed from clear into a storm across the clip. Th
 object's `ride` key are in docs/scripting.md; `examples/scripts/harbour_wake.as` is a launch, a dinghy and a stone in a harbour.
 
 ## Tests
+
+W5 (`RMTN_W5_ONLY=1`): same seed same bolt (768 segments, same-seed pixel diff 0), another seed another; the frame is
+brighter only inside the strike's window and equal to the dark scene before the leader and after the last restrike, with at
+least two bright frames per strike; rate-based strikes deterministic and within 20% of the rate over 600 s; thunder at
+distance / 343; an in-cloud strike brightens the cloud pixels near it several times more than far ones (and not with
+`cloudLight` 0); the rainbow's primary fitted as a circle round the anti-solar point (radius 42 +- 1 degrees, centre within
+0.5), the secondary at 51 +- 1.5, red outside then reversed (the bow is light added in proportion to the sky behind it, translucent, the secondary 0.4 of the primary and paler; the Alexander band darkens); no bow with the sun in front, no rain or the sun at 60 degrees
+(pixel-identical with it off); one storm cell: the top wider than the middle, shifted downwind (and the other way in the opposite
+wind), core width over height at least 0.5, cloud in the core column up to the anvil at least 95%, at most 4 cells in 60 x 60 km (each with a synthetic pillar-and-plate or the removed 9 km layout as the control that fails), cells of different seeds with different silhouettes; a frame alone equals the frame after others and off means off.
 
 `tests/weather_tests.cpp` (the `weather` ctest, label `gl`) measures, at 320 x 180:
 
@@ -529,8 +615,7 @@ remapped by coverage and a per-type height profile (rounded cumulus with a soft 
 an anvil for cumulonimbus, flat for stratus and deck), eroded by 3D detail noise that inverts near the base.
 
 Not solved yet, and printed by the weather test as KNOWN FAILURE or KNOWN WEAKNESS rather than asserted: the
-cumulonimbus anvil is a flat plate floating over a tower (the width ratio at 90% over 50% of the height is
-0.66, not over 1.2); the nearest overhead cloud carries no more detail than a cloud at 5 km (the Laplacian
+nearest overhead cloud carries no more detail than a cloud at 5 km (the Laplacian
 measure is 0.04 against 0.06 and the detail switch does not change it); and the row-over-column energy check
 for bands in height barely separates its jitter-off control. The extinction is 0.045 per metre at density 1; the
 density has a no-slope toe, `d * d * (2.5 - 1.5 d)`, so edges fade over metres instead of a pixel; each fine

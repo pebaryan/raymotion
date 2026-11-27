@@ -347,6 +347,11 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   silver lining, aerial perspective, a depth-aware upsample, and a ground shadow map that moves with the
   drift; cover, type and drift follow `Scene::weather`. Preview, Film and High quality (about 1, 2 and
   3.5 ms a 1080p frame). Off by default; `examples/scripts/cloud_flight.as`.
+* Lightning, storm light and rainbows (`Scene::lightning`, `Weather::rainbow`, `fx::lightning`, `docs/weather.md`): seeded
+  branching bolts as emissive ribbons with a leader, a return stroke and restrikes, a flash that lights the world, the rain
+  and the cloud from inside, strikes from a list or a rate, `thunderCues` for the soundtrack, a spectral rainbow (primary,
+  secondary, Alexander's band) opposite the sun when it rains, a few cumulonimbus storm cells that differ, each with an anvil growing out of its top
+  downwind, and a darker, streaked storm sea. `examples/scripts/thunderstorm.as`, `examples/scripts/lightning_2d.as`.
 * Water that reflects the scene (`Water::reflections` Off/Scene/Half/Quarter, `reflectionDistort`,
   `refraction`; `docs/weather.md`): a planar reflection pass mirrors the camera about the water
   level, bent by the band-limited waves, blended by Fresnel, blurred by roughness, with the clouds

@@ -15,8 +15,8 @@
 // `ownLight` on Sky; `ownFog` on Scene) that keeps its own settings. With `enabled` false (the
 // default) nothing is read and nothing changes. docs/weather.md has the rules and the table.
 //
-// Lightning is data for a system that comes later in this release: setting it changes no pixel yet.
-// The ground (wetness, settled snow) is drawn by the lit shader; see Weather::ground and Scene::ground.
+// Lightning is drawn by Scene::lightning (strikes from the rate here or from its own list), the rainbow by the
+// scene when Weather::rainbow allows it. The ground (wetness, settled snow) is drawn by the lit shader; see Weather::ground and Scene::ground.
 #pragma once
 #include <raylib.h>
 #include <vector>
@@ -61,7 +61,24 @@ struct Weather {
     float wetness = -1;                 // 0..1 pin: how wet the ground is (-1: soaks in and dries by itself)
     float snowCover = -1;               // 0..1 pin: settled snow as a share of kSnowFull (-1: builds and melts by itself)
     float haze = 0.05f;                 // 0..1: 0 clear air, 1 thick fog; sets the exponential fog
-    float lightningRate = 0;            // strikes a minute (not drawn yet)
+    float lightningRate = 0;            // strikes a minute: drawn by Scene::lightning (rmtn/scene3d.hpp) unless it has its own rate
+
+    // The rainbow (W5). Drawn by the scene when it is on: Auto shows it when rain falls (here, or out of sight:
+    // distantRain) with the sun out and under 42 degrees high, behind the camera; On shows it whatever the rain and the
+    // sun's height (the sun still has to be somewhere: the bow is centred on the point opposite it); Off never.
+    struct Rainbow {
+        enum class Mode { Auto, On, Off };
+        Mode mode = Mode::Auto;
+        float distantRain = 0;          // 0..1: rain falling out of sight, which makes a bow when none falls here
+        float rainDistance = 2500;      // metres to the rain: geometry nearer than a third of it hides the bow, it is full by this distance
+        float strength = 1;             // 0..2 times the bow's brightness
+    } rainbow;
+    // How much of the bow shows for the rain that falls (0..1): the weather's rain intensity (rain and sleet; a bow
+    // needs drops) or the distant rain, whichever is more, through a soft curve.
+    float rainbowRain() const;
+    // The sun's share of the bow's strength: it follows how much sun gets through cloud (sunScale) and fades out as the sun
+    // sets, and in Auto above 42 degrees (the bow is below the horizon then). `elevation` is the sun's height in degrees.
+    float rainbowSun(float elevation) const;
 
     // Air temperature in degrees Celsius: snow sticks and builds below about 0, melts above it. kAutoTemperature
     // (the default) takes it from the kind of precipitation: -3 for snow and sleet, 8 for rain, 10 otherwise.
