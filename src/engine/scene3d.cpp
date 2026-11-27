@@ -23,6 +23,7 @@ extern "C" void UpdateModelAnimationBones(Model model, ModelAnimation anim, floa
 #include "precip_glsl.hpp"
 #include "wet_glsl.hpp"
 #include "wake_glsl.hpp"
+#include "ocean.hpp"
 
 namespace rmtn {
 namespace g3d {
@@ -251,11 +252,64 @@ float waveHeightLod(vec2 p, float foot, out vec2 g) {
     return h;
 }
 float waveHeight(vec2 p, out vec2 g) { return waveHeightLod(p, 0.0, g); }
+
+// ---- Water::spectrum (W9): the FFT ocean, as up to four cascades of two textures each: A = (Dx, h, Dz, whitecap),
+// B = (slope x, slope z) with respect to the cascade's own lookup coordinate. Every cascade's lookup is bent by a slow
+// sine (oceanWarp: amplitude, two wavenumbers) so no patch repeats exactly. oceanLost[c * 8 + l] is the mean square
+// slope that mip level l has averaged away from level 0 (the shading puts it back into the glint's roughness).
+uniform int oceanOn; uniform int oceanCount; uniform int oceanGeo;
+uniform float oceanLambda; uniform float oceanCurve; uniform float oceanTail;
+uniform vec4 oceanPatch; uniform vec4 oceanWarp[4]; uniform float oceanLost[32];
+uniform vec3 oceanRing;                       // the mesh: inner radius, outer radius, radial spacing as a share of the radius
+uniform sampler2D oceanA0; uniform sampler2D oceanB0; uniform sampler2D oceanA1; uniform sampler2D oceanB1;
+uniform sampler2D oceanA2; uniform sampler2D oceanB2; uniform sampler2D oceanA3; uniform sampler2D oceanB3;
+const float OCEAN_N = 128.0;
+float oceanLostAt(int c, float lod) {
+    float f = clamp(lod, 0.0, 7.0);
+    int i = int(floor(f));
+    return mix(oceanLost[c * 8 + i], oceanLost[c * 8 + min(i + 1, 7)], f - float(i));
+}
+void oceanCascade(sampler2D A, sampler2D B, int c, vec2 p, float lod, bool shade, inout vec3 hd, inout vec2 g, inout float foam, inout float lost) {
+    vec4 wp = oceanWarp[c];
+    float s1 = wp.y * p.y + 1.7 + 2.3 * float(c), s2 = wp.z * p.x + 0.4 + 1.9 * float(c);
+    vec2 q = p + wp.x * vec2(sin(s1), sin(s2));
+    vec2 uv = q / oceanPatch[c] + 0.5 / OCEAN_N;
+    vec4 va = textureLod(A, uv, lod);
+    hd += va.xyz;
+    if (shade) {
+        vec2 s = textureLod(B, uv, lod).xy;
+        float al = wp.x * wp.y * cos(s1), be = wp.x * wp.z * cos(s2);
+        g += vec2(s.x + be * s.y, al * s.x + s.y);
+        foam = max(foam, va.w);
+        lost += oceanLostAt(c, lod);
+    }
+}
+// A mip level that matches a sample spacing of `size` metres in the lookup plane (0 = full detail).
+float oceanLod(int c, float size) { return size > 0.0 ? max(log2(2.0 * size * OCEAN_N / oceanPatch[c]), 0.0) : 0.0; }
+// The vertices: the cascades the mesh can show, each at the level its ring spacing allows.
+void oceanGeometry(vec2 p, float spacing, out float h, out vec2 d) {
+    vec3 hd = vec3(0.0); vec2 g = vec2(0.0); float foam = 0.0, lost = 0.0;
+    if (oceanGeo > 0) oceanCascade(oceanA0, oceanB0, 0, p, oceanLod(0, spacing), false, hd, g, foam, lost);
+    if (oceanGeo > 1 && oceanCount > 1) oceanCascade(oceanA1, oceanB1, 1, p, oceanLod(1, spacing), false, hd, g, foam, lost);
+    if (oceanGeo > 2 && oceanCount > 2) oceanCascade(oceanA2, oceanB2, 2, p, oceanLod(2, spacing), false, hd, g, foam, lost);
+    if (oceanGeo > 3 && oceanCount > 3) oceanCascade(oceanA3, oceanB3, 3, p, oceanLod(3, spacing), false, hd, g, foam, lost);
+    h = hd.y; d = hd.xz;
+}
+// The pixels: every cascade at the level of the pixel's footprint `foot` (metres of the lookup plane; 0 = no band limit).
+void oceanFragment(vec2 p, float foot, out float h, out vec2 g, out float foam, out float lost) {
+    vec3 hd = vec3(0.0); g = vec2(0.0); foam = 0.0; lost = 0.0;
+    oceanCascade(oceanA0, oceanB0, 0, p, oceanLod(0, foot), true, hd, g, foam, lost);
+    if (oceanCount > 1) oceanCascade(oceanA1, oceanB1, 1, p, oceanLod(1, foot), true, hd, g, foam, lost);
+    if (oceanCount > 2) oceanCascade(oceanA2, oceanB2, 2, p, oceanLod(2, foot), true, hd, g, foam, lost);
+    if (oceanCount > 3) oceanCascade(oceanA3, oceanB3, 3, p, oceanLod(3, foot), true, hd, g, foam, lost);
+    h = hd.y;
+}
 )";
 
 const char* WATER_FS = R"(
 uniform vec3 waterAbsorb; uniform vec3 waterScatter; uniform float waterCaustics; uniform float waterFoam;
 uniform float waterOpen; uniform float waterInvAmp; uniform float waterGlint; uniform float waterBand; uniform float waterFilter;
+uniform vec2 oceanWind; uniform float oceanSpray; uniform float oceanVis;       // Water::spectrum: wind heading (unit), spray 0..1, haze distance (0: none)
 const float WATER_IOR = 1.333;
 
 // Water::reflections and Water::refraction. reflVP is the viewing camera's view-projection: it finds the pixel of
@@ -270,6 +324,9 @@ vec2 camUV(vec3 p) {
     return c.xy / max(c.w, 1e-3) * 0.5 + 0.5;
 }
 vec3 mirrorY(vec3 p) { return vec3(p.x, 2.0 * waterLevel - p.y, p.z); }
+// A reflected ray that points into the water is folded up. The plain fold has a crease where it crosses the horizon, which
+// on a steep sea draws thin contour rings around every pit; this one is smooth.
+vec3 foldUp(vec3 r) { return normalize(vec3(r.x, sqrt(r.y * r.y + 0.0036), r.z)); }
 // The reflection image at uv as linear premultiplied rgb and its coverage (1 where something was drawn),
 // fading out towards the image's edge, where the sky takes over.
 vec4 planarAt(vec2 uv, float lod) {
@@ -410,8 +467,20 @@ float vnoise(vec2 p) {
     f = f * f * (3.0 - 2.0 * f);
     return mix(mix(hash21(i), hash21(i + vec2(1.0, 0.0)), f.x), mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x), f.y);
 }
+// A steep sea reflects a tiny patch of the sky image, magnified many times over, so the cloud noise in it shows up as nested
+// contour rings round every pit. A rough sea mirrors a blurred sky anyway (its slope variance spreads every reflection), so
+// for the sea the sky is read at a mip level that grows with that variance (oceanSkyLod, from Water::shadingSlopeVariance).
+uniform float oceanSkyLod;
 vec3 skyAt(vec3 d) {
-    if (hasEnv == 1) return env(d, 0.0) * backdropScale;
+    if (hasEnv == 1) {
+        if (oceanOn == 1) {
+            float u = atan(d.z, d.x) / (2.0 * PI) + 0.5 + envRotation;
+            float v = acos(clamp(d.y, -1.0, 1.0)) / PI;
+            vec3 c = textureLod(envMap, vec2(u, v), min(oceanSkyLod, envMaxLod)).rgb;
+            return (envLinear == 1 ? c : pow(max(c, vec3(0.0)), vec3(2.2))) * envIntensity * backdropScale;
+        }
+        return env(d, 0.0) * backdropScale;
+    }
     return mix(groundColor, skyColor, clamp(d.y * 0.5 + 0.5, 0.0, 1.0));
 }
 
@@ -520,8 +589,17 @@ vec4 waterSurface() {
     // Derivatives first (uniform flow). Waves a few pixels long or less fade out of the normal; the slope
     // variance they took away (waveLost) widens the glint below, so a far chop is a rough sheen, not a pattern.
     float foot = waterFilter > 0.5 ? max(length(dFdx(fragPos.xz)), length(dFdy(fragPos.xz))) : 0.0;
-    float h = waveHeightLod(fragPos.xz, foot, g);
-    float lost = waveLost;
+    bool ocean = oceanOn == 1 && waterMode == 1;
+    float h, lost, oceanFoam = 0.0;
+    if (ocean) {                                   // the spectrum: textures at the mip level of the footprint in the lookup plane
+        float footP = waterFilter > 0.5 ? max(length(dFdx(oceanP)), length(dFdy(oceanP))) : 0.0;
+        oceanFragment(oceanP, footP, h, g, oceanFoam, lost);
+        lost += oceanTail;                         // the spectrum above the finest grid: roughness the grids cannot hold
+        g -= 2.0 * oceanCurve * fragPos.xz;        // the planet's curvature tilts the surface: h = -d^2 / 2R
+    } else {
+        h = waveHeightLod(fragPos.xz, foot, g);
+        lost = waveLost;
+    }
     float dist = length(viewPos - fragPos);
     if (rippleRate > 0.0) g += rippleSlope(fragPos.xz, max(length(dFdx(fragPos.xz)), length(dFdy(fragPos.xz))));    // rain rings
     float wakeFoam = 0.0, wakeMag = 0.0;
@@ -591,7 +669,7 @@ vec4 waterSurface() {
             float z = q == 0 ? -1.2247 : (q == 1 ? 0.0 : 1.2247);
             vec3 nq = normalize(n + hv * (sig * z));
             vec3 rq = reflect(-v, nq);
-            rq.y = abs(rq.y);
+            rq = ocean ? foldUp(rq) : vec3(rq.x, abs(rq.y), rq.z);
             uvq[q] = own + (camUV(mirrorY(base + rq * reach)) - flatUV) * k;
         }
         vec2 spread = (uvq[2] - uvq[0]) * 0.5 * reflSize;
@@ -611,17 +689,19 @@ vec4 waterSurface() {
         vec3 nq = normalize(n + hv * (sig * z));
         float c = clamp(dot(nq, v), 1e-3, 1.0), Fq = 0.02 + 0.98 * pow(1.0 - c, 5.0);
         vec3 rq = reflect(-v, nq);
-        rq.y = abs(rq.y);
+        float ry = rq.y;
+        rq = ocean ? foldUp(rq) : vec3(rq.x, abs(rq.y), rq.z);
         F += wq * Fq;
         vec3 sq = skyAt(rq);
         if (reflMode == 1) {
             vec4 pq = planarAt(uvq[q], reflLod);
             sq = pq.rgb + (1.0 - pq.a) * sq;
         }
+        if (ocean) sq = mix(sq, waterScatter * 1.4, 0.7 * smoothstep(0.06, -0.12, ry));      // pointing into the next wave: its face, not the sky
         skyRefl += wq * Fq * sq;
     }
     vec3 r = reflect(-v, n);
-    r.y = abs(r.y);
+    r = ocean ? foldUp(r) : vec3(r.x, abs(r.y), r.z);
     float crest = clamp(h * waterInvAmp, -1.0, 1.0);
     vec3 body = waterScatter * (1.0 + 0.5 * max(crest, 0.0));
     float bodyA = waterOpen > 0.0 ? 1.0 - exp(-waterOpen * dot(waterAbsorb, vec3(0.3333)) / max(ndv, 0.25)) : 0.0;
@@ -636,9 +716,40 @@ vec4 waterSurface() {
         glint += lightColor[i] * (a * sp * F * 0.25 * waterGlint);
         foamLight += lightColor[i] * (a * ndl);
     }
-    float fn = vnoise(fragPos.xz * 2.2 + waterTime * 0.15) * 0.6 + vnoise(fragPos.xz * 7.0) * 0.4;
-    float foamA = waterFoam * smoothstep(0.55, 0.85, crest + (fn - 0.5) * 0.5);
+    float foamA;
+    if (ocean) {
+        // Whitecaps from the cascade's map (the share of foam, already band-limited by its mip level), broken up into lace
+        // by noise that fades to its mean as it gets finer than a pixel; then spray streaks along the wind.
+        float nf1 = 1.0 - smoothstep(0.1, 0.4, foot), nf2 = 1.0 - smoothstep(0.03, 0.12, foot);
+        float n = 0.5 + nf1 * (vnoise(fragPos.xz * 1.3 + waterTime * 0.07) - 0.5) * 0.9 + nf2 * (vnoise(fragPos.xz * 5.3 - waterTime * 0.11) - 0.5) * 0.7;
+        float nf3 = 1.0 - smoothstep(0.012, 0.05, foot);
+        n += nf3 * (vnoise(fragPos.xz * 15.0 + waterTime * 0.2) - 0.5) * 0.6;
+        // a sharp edge broken into lace: the map's share, pushed through a step whose position the noise moves
+        // The map repeats every patch, and a patch holds only a few whitecaps, so a lattice of the same dash would show from
+        // above: a slow mask (scales that are not whole patches) takes about half of them out, the rest are made up in the map.
+        float fm = oceanFoam * smoothstep(0.42, 0.58, vnoise(oceanP * 0.035) * 0.65 + vnoise(oceanP * 0.083 + 7.3) * 0.35);
+        float soft = clamp(foot * 1.2, 0.0, 0.7);                              // from afar the edge is a gradient, not a cut-out
+        float fx = fm * (0.35 + 1.3 * n) + 0.35 * (fm - 0.5) * nf1, fw = fwidth(fx) * 1.5;   // edge width follows the pixel: anti-aliased
+        foamA = waterFoam * mix(0.9, 0.55, soft) * smoothstep(0.2 - 0.15 * soft - fw, 0.5 + 0.6 * soft + fw, fx);
+        if (oceanSpray > 0.0) {
+            vec2 wd = oceanWind, cw = vec2(-wd.y, wd.x);
+            float along = dot(fragPos.xz, wd) - waterTime * 3.0, across = dot(fragPos.xz, cw);
+            float sfade = 1.0 - smoothstep(0.35, 1.4, foot);
+            float st = vnoise(vec2(across * 0.8, along * 0.03)) * 0.65 + vnoise(vec2(across * 2.3, along * 0.09)) * 0.35;
+            float streak = smoothstep(0.5, 0.78, st) * smoothstep(-0.4, 0.5, crest);
+            streak = mix(0.18, streak, sfade);
+            foamA = max(foamA, waterFoam * oceanSpray * 0.6 * streak);
+        }
+    } else {
+        float fn = vnoise(fragPos.xz * 2.2 + waterTime * 0.15) * 0.6 + vnoise(fragPos.xz * 7.0) * 0.4;
+        foamA = waterFoam * smoothstep(0.55, 0.85, crest + (fn - 0.5) * 0.5);
+    }
     foamA = max(foamA, wakeFoam);
+    if (bodyDebug == 3) return vec4(vec3(foamA), 1.0);                      // the foam alone (tests)
+    if (bodyDebug == 4) {                                                   // the surface height (m), in two bytes: coarse, and the metre's fraction
+        float a = (fragPos.y + 8.0) / 16.0;
+        return vec4(a, fract(a * 16.0), 0.0, 1.0);
+    }
     vec3 premul = skyRefl + (1.0 - F) * bodyA * body + glint;
     float a = clamp(F + (1.0 - F) * bodyA + dot(glint, vec3(0.3333)), 0.0, 1.0);
     if (refrMode == 1 || isBody) {                          // looks through: an opaque surface that shows what is under it itself
@@ -664,8 +775,14 @@ vec4 waterSurface() {
     premul = mix(premul, vec3(0.95) * foamLight, foamA);
     a = mix(a, 1.0, foamA);
     vec3 col = premul / max(a, 1e-3);
+    if (ocean && oceanVis > 0.0) {                         // aerial perspective: the far sea becomes the sky's own horizon colour
+        float k = 1.0 - exp(-dist / oceanVis);
+        col = mix(col, skyAt(normalize(vec3(-v.x, 0.0, -v.z) + vec3(1e-5, 0.0, 0.0))), k);
+        a = mix(a, 1.0, k);
+    }
     float f = fogAmount(fragPos);
     if (f > 0.0) { col = mix(col, fogTint(fragPos), f); a = mix(a, 1.0, f); }
+    if (ocean) col += (fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453) - 0.5) * (1.5 / 255.0);   // dither: smooth gradients of the dark sea must not show 8-bit contour lines
     return vec4(col, a);
 }
 )";
@@ -744,9 +861,25 @@ void main() {
 
 const char* LIT_VS_BODY = R"(
 out vec3 fragPos; out vec2 fragTexCoord; out vec3 fragNormal; out vec4 fragColor; flat out float fragFade;
+out vec2 oceanP;
 void main() {
     fragTexCoord = vertexTexCoord;
     fragFade = 1.0;
+    oceanP = vec2(0.0);
+    if (waterMode == 1 && oceanOn == 1) {     // the spectrum sea: rings out to the horizon (y = the ring's place 0..1), displaced by the cascades
+        float r = oceanRing.x * pow(oceanRing.y / oceanRing.x, vertexPosition.y);
+        vec2 p = vertexPosition.xz * r + waterCentre, d;
+        float h;
+        oceanGeometry(p, r * oceanRing.z, h, d);
+        vec2 xz = p + oceanLambda * d;
+        vec4 world = vec4(xz.x, waterLevel + h - oceanCurve * dot(xz, xz), xz.y, 1.0);
+        oceanP = p;
+        fragPos = world.xyz;
+        fragNormal = vec3(0.0, 1.0, 0.0);
+        fragColor = vec4(1.0);
+        gl_Position = mvp * world;
+        return;
+    }
     if (waterMode == 1) {                     // the sea's surface: a mesh round the camera, rolled by the waves
         vec2 p = vertexPosition.xz + waterCentre, g;
         vec4 world = vec4(p.x, waterLevel + waveHeight(p, g), p.y, 1.0);
@@ -868,6 +1001,7 @@ void main() {
 // uniforms, converted on the CPU); lighting is linear and the result is re-encoded.
 const char* LIT_FS = R"(#version 330
 in vec3 fragPos; in vec2 fragTexCoord; in vec3 fragNormal; in vec4 fragColor; flat in float fragFade;
+in vec2 oceanP;
 uniform sampler2D texture0; uniform vec4 colDiffuse;
 uniform vec3 viewPos;
 uniform vec3 skyColor; uniform vec3 groundColor;
@@ -994,8 +1128,14 @@ float fogAmount(vec3 p) {
     }
     return fogMode == 1 ? 1.0 - exp(-od) : 1.0 - exp(-od * od);
 }
+// With the spectrum sea the sky is filled in down to the sea horizon: a direction below the geometric horizon
+// (the sliver between it and the dipped sea horizon, and the sea's distance haze) looks at the sky's horizon.
+vec3 seaSkyDir(vec3 d) {
+    if (oceanOn == 1 && d.y < 0.0) return vec3(d.x, 0.0, d.z) / max(length(d.xz), 1e-4);
+    return d;
+}
 vec3 fogTint(vec3 p) {
-    if (fogSky == 1 && hasEnv == 1) return env(normalize(p - viewPos), max(envMaxLod - 7.0, 0.0)) * backdropScale;
+    if (fogSky == 1 && hasEnv == 1) return env(seaSkyDir(normalize(p - viewPos)), max(envMaxLod - 7.0, 0.0)) * backdropScale;
     return fogColor;
 }
 // Karis' analytic approximation of the split-sum environment BRDF.
@@ -1126,7 +1266,7 @@ void main() {
     if (hasNormalMap == 2) { texDx *= PICTURE_SHARPEN; texDy *= PICTURE_SHARPEN; }
     if (skybox == 1) {
         if (waterOn == 1 && viewPos.y < waterEye) { finalColor = encode(waterScatter, 1.0); return; }
-        finalColor = encode(env(normalize(fragPos - viewPos), 0.0) * backdropScale, 1.0);
+        finalColor = encode(env(seaSkyDir(normalize(fragPos - viewPos)), 0.0) * backdropScale, 1.0);
         return;
     }
     if (waterMode >= 1) { vec4 w = waterSurface(); finalColor = encode(w.rgb, w.a); return; }
@@ -1570,6 +1710,8 @@ struct Gpu {
     };
     std::map<const splat::Cloud*, SplatGpu> splats;
     std::unique_ptr<Object3D> waterObj;  // the sea's surface, drawn with the transparent objects
+    std::unique_ptr<Object3D> oceanObj;  // and the spectrum sea's (Water::spectrum): more rings, out to the horizon
+    struct OceanGpu { unsigned tex[4][2] = {}; uint64_t id = 0; int cascades = 0; } ocean;   // the cascades' textures, and the frame they hold
     struct BodyMesh { std::unique_ptr<Object3D> obj; int used = 0; };
     std::map<uint64_t, BodyMesh> bodyMeshes;    // the meshes of Scene::waterBodies, by shape (waterBodyKey)
     SkyLocs S{};
@@ -1674,6 +1816,7 @@ void releaseGpu() {
     unloadDepthTarget(gpu.reflTarget);
     unloadDepthTarget(gpu.refrTarget);
     if (gpu.skyCube.vertexCount) UnloadMesh(gpu.skyCube);
+    for (auto& pair : gpu.ocean.tex) for (unsigned id : pair) if (id) rlUnloadTexture(id);
     for (auto& [path, tex] : gpu.textures) UnloadTexture(tex);
     for (auto& [scene, tex] : gpu.generated) UnloadTexture(tex);
     for (auto& [src, d] : gpu.dynamic) {
@@ -3110,6 +3253,91 @@ PackedWaves packWaves(const Water& w) {
 void setWaterLook(const Scene& s, const Camera& cam, const Water& w, float eye, double seconds);
 void setWakeUniforms(const Scene& s, double seconds);
 
+// ---- the spectrum sea (Water::spectrum): the cascades as textures on units OCEAN_SLOT.., and the uniforms
+void bindUnit(int slot, unsigned int id);
+constexpr int OCEAN_SLOT = 16;                         // cascade c: A on 16 + 2c, B on 17 + 2c
+constexpr int OCEAN_RINGS = 160, OCEAN_SEGMENTS = 256;  // the mesh
+constexpr float OCEAN_R0 = 0.2f;                        // its inner ring (m)
+
+// The horizon's distance for an eye `above` metres over the sea (the tangent point of the sphere), and the sea mesh's
+// reach and the far plane that go with it.
+float seaHorizon(float above) { const double R = Water::kPlanetRadius, h = std::max(above, 0.5f); return (float)std::sqrt(2 * R * h + h * h); }
+float seaReach(const Water& w, float above) { return w.spectrum.curvature ? 1.4f * seaHorizon(above) + 2000.f : 12000.f; }
+
+void uploadOcean(const ocean::Frame& f) {
+    Gpu::OceanGpu& o = gpu.ocean;
+    if (o.id == f.id) return;
+    for (int c = 0; c < f.cascades; c++)
+        for (int k = 0; k < 2; k++) {
+            unsigned& id = o.tex[c][k];
+            const std::vector<float>& data = k == 0 ? f.a[c] : f.b[c];
+            if (!id) {
+                id = rlLoadTexture(nullptr, ocean::kN, ocean::kN, RL_PIXELFORMAT_UNCOMPRESSED_R32G32B32A32, 1);
+                rlTextureParameters(id, RL_TEXTURE_WRAP_S, RL_TEXTURE_WRAP_REPEAT);
+                rlTextureParameters(id, RL_TEXTURE_WRAP_T, RL_TEXTURE_WRAP_REPEAT);
+                rlTextureParameters(id, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_LINEAR);
+                rlTextureParameters(id, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_MIP_LINEAR);
+            }
+            rlUpdateTexture(id, 0, 0, ocean::kN, ocean::kN, RL_PIXELFORMAT_UNCOMPRESSED_R32G32B32A32, data.data());
+            int mips = 0;
+            rlGenTextureMipmaps(id, ocean::kN, ocean::kN, RL_PIXELFORMAT_UNCOMPRESSED_R32G32B32A32, &mips);
+        }
+    o.id = f.id;
+    o.cascades = f.cascades;
+}
+
+void setOceanUniforms(const Water& w, const Camera& cam, double seconds) {
+    const Shader& lit = gpu.lit;
+    auto at = [&](const char* name) { return GetShaderLocation(lit, name); };
+    const int on = w.enabled && w.spectrum.enabled ? 1 : 0;
+    SetShaderValue(lit, at("oceanOn"), &on, SHADER_UNIFORM_INT);
+    if (!on) return;
+    const std::shared_ptr<const ocean::Frame> fr = ocean::frameAt(w, seconds);
+    const ocean::Frame& f = *fr;
+    uploadOcean(f);
+    for (int c = 0; c < ocean::kMaxCascades; c++)
+        for (int k = 0; k < 2; k++) {
+            const int unit = OCEAN_SLOT + 2 * c + k;
+            SetShaderValue(lit, at(TextFormat("ocean%c%d", k == 0 ? 'A' : 'B', c)), &unit, SHADER_UNIFORM_INT);
+        }
+    Vector4 patch{ 1, 1, 1, 1 }, warp[4] = {};
+    float lost[32] = {};
+    for (int c = 0; c < f.cascades; c++) {
+        (&patch.x)[c] = f.patch[c];
+        warp[c] = { f.warp[c].amp, f.warp[c].a, f.warp[c].b, 0 };
+        for (int l = 0; l < ocean::kLevels; l++) lost[c * 8 + l] = f.lost[c][l];
+    }
+    const float curve = w.spectrum.curvature ? 0.5f / Water::kPlanetRadius : 0.f;
+    const float above = std::max(cam.position.y - w.level, 0.f), r1 = seaReach(w, above);
+    const Vector3 ring{ OCEAN_R0, r1, std::log(r1 / OCEAN_R0) / (OCEAN_RINGS - 1) };
+    const float heading = w.spectrum.windDirection * DEG2RAD;
+    const Vector2 wind{ std::cos(heading), std::sin(heading) };
+    const float U = w.spectrum.windSpeed, t = std::clamp((U - 12.f) / 8.f, 0.f, 1.f);
+    const float spray = std::clamp(w.spectrum.spray, 0.f, 1.f) * t * t * (3 - 2 * t);
+    const float vis = std::max(w.spectrum.visibility, 0.f);
+    const int count = f.cascades, geo = f.geometry;
+    SetShaderValue(lit, at("oceanCount"), &count, SHADER_UNIFORM_INT);
+    SetShaderValue(lit, at("oceanGeo"), &geo, SHADER_UNIFORM_INT);
+    SetShaderValue(lit, at("oceanLambda"), &f.lambda, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, at("oceanCurve"), &curve, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, at("oceanTail"), &f.tail, SHADER_UNIFORM_FLOAT);
+    const float skyLod = std::clamp(std::log2(1.f + 80.f * (f.resolved + f.tail)), 0.f, 5.f);
+    SetShaderValue(lit, at("oceanSkyLod"), &skyLod, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, at("oceanPatch"), &patch, SHADER_UNIFORM_VEC4);
+    SetShaderValueV(lit, at("oceanWarp"), warp, SHADER_UNIFORM_VEC4, 4);
+    SetShaderValueV(lit, at("oceanLost"), lost, SHADER_UNIFORM_FLOAT, 32);
+    SetShaderValue(lit, at("oceanRing"), &ring, SHADER_UNIFORM_VEC3);
+    SetShaderValue(lit, at("oceanWind"), &wind, SHADER_UNIFORM_VEC2);
+    SetShaderValue(lit, at("oceanSpray"), &spray, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, at("oceanVis"), &vis, SHADER_UNIFORM_FLOAT);
+}
+
+// Binds (or clears) the cascades' textures for the sea's draw.
+void bindOceanTextures(bool on) {
+    for (int c = 0; c < ocean::kMaxCascades; c++)
+        for (int k = 0; k < 2; k++) bindUnit(OCEAN_SLOT + 2 * c + k, on && c < gpu.ocean.cascades ? gpu.ocean.tex[c][k] : 0);
+}
+
 // Everything the lit shader needs of the sea: the waves, the water's fog and the light
 // that reaches under it.
 void setWaterUniforms(const Scene& s, const Camera& cam) {
@@ -3122,8 +3350,10 @@ void setWaterUniforms(const Scene& s, const Camera& cam) {
     SetShaderValue(lit, K.reflClip, &none, SHADER_UNIFORM_INT);         // the mirrored pass and the water draw switch these on
     SetShaderValue(lit, K.reflMode, &none, SHADER_UNIFORM_INT);
     SetShaderValue(lit, K.refrMode, &none, SHADER_UNIFORM_INT);
+    SetShaderValue(lit, GetShaderLocation(lit, "oceanOn"), &none, SHADER_UNIFORM_INT);
     if (!on) return;
     const double seconds = frameTime(gpu.frame) / std::max(w.fps, 1.f);   // frames to seconds
+    setOceanUniforms(w, cam, seconds);
     setWaterLook(s, cam, w, w.height(cam.position.x, cam.position.z, seconds), seconds);      // height() includes the level
 }
 
@@ -3249,6 +3479,54 @@ Mesh makeWaterMesh() {
         }
     UploadMesh(&m, false);
     return m;
+}
+// The spectrum sea's mesh: unit rings (cos a, w, sin a) whose radius the vertex shader sets from w (0 = the inner
+// ring, 1 = the outer, on a log scale), so the sea reaches as far as the horizon needs and no further.
+Mesh makeOceanMesh() {
+    constexpr int R = OCEAN_RINGS, S = OCEAN_SEGMENTS;
+    Mesh m = {};
+    m.vertexCount = 1 + R * S;
+    m.triangleCount = S + (R - 1) * S * 2;
+    m.vertices = (float*)MemAlloc((unsigned)m.vertexCount * 3 * sizeof(float));
+    m.normals = (float*)MemAlloc((unsigned)m.vertexCount * 3 * sizeof(float));
+    m.texcoords = (float*)MemAlloc((unsigned)m.vertexCount * 2 * sizeof(float));
+    m.indices = (unsigned short*)MemAlloc((unsigned)m.triangleCount * 3 * sizeof(unsigned short));
+    for (int v = 0; v < m.vertexCount; v++) {
+        m.normals[v * 3 + 1] = 1;
+        m.normals[v * 3] = m.normals[v * 3 + 2] = 0;
+    }
+    for (int i = 0; i < R; i++)
+        for (int j = 0; j < S; j++) {
+            const float a = 2 * PI * j / S;
+            const int v = 1 + i * S + j;
+            m.vertices[v * 3] = std::cos(a);
+            m.vertices[v * 3 + 1] = (float)i / (R - 1);
+            m.vertices[v * 3 + 2] = std::sin(a);
+        }
+    int k = 0;
+    auto tri = [&](int a, int b, int c) {
+        m.indices[k++] = (unsigned short)a; m.indices[k++] = (unsigned short)b; m.indices[k++] = (unsigned short)c;
+    };
+    for (int j = 0; j < S; j++) tri(0, 1 + (j + 1) % S, 1 + j);
+    for (int i = 0; i + 1 < R; i++)
+        for (int j = 0; j < S; j++) {
+            const int a = 1 + i * S + j, b = 1 + i * S + (j + 1) % S, c = a + S, d = b + S;
+            tri(a, b, c);
+            tri(b, d, c);
+        }
+    UploadMesh(&m, false);
+    return m;
+}
+Object3D& oceanObject() {
+    if (!gpu.oceanObj) {
+        gpu.oceanObj = std::make_unique<Object3D>();
+        gpu.oceanObj->name = "ocean";
+        gpu.oceanObj->geometry = std::make_shared<Geometry>([] { return makeOceanMesh(); });
+        Material& m = gpu.oceanObj->material;
+        m.doubleSided = true;
+        m.castShadow = false;
+    }
+    return *gpu.oceanObj;
 }
 Object3D& waterObject() {
     if (!gpu.waterObj) {
@@ -4437,10 +4715,12 @@ WaterView waterView(const Scene& s, const Camera& cam, float aspect, int t) {
     const Vector3 right = Vector3Normalize(Vector3CrossProduct(f, safeUp(look, cam.upVector)));
     const Vector3 up = Vector3CrossProduct(right, f);
     const float ty = std::tan(cam.fov * 0.5f * DEG2RAD), tx = ty * aspect;
-    const float band = packWaves(v.water).amplitude + 0.05f;
+    const bool spectrum = v.water.spectrum.enabled;
+    const float band = (spectrum ? 2 * v.water.spectrumHs() : packWaves(v.water).amplitude) + 0.05f;
+    const float far = spectrum ? std::max(cam.farPlane, 1.5f * seaHorizon(std::max(cam.position.y - v.level, 0.f)) + 500.f) : cam.farPlane;
     for (int sx = -1; sx <= 1; sx += 2)
         for (int sy = -1; sy <= 1; sy += 2) {
-            const float y = cam.position.y + (f.y + right.y * sx * tx + up.y * sy * ty) * cam.farPlane;
+            const float y = cam.position.y + (f.y + right.y * sx * tx + up.y * sy * ty) * far;
             if (y < v.level + band) v.visible = true;
         }
     return v;
@@ -4516,7 +4796,7 @@ WaterView reflectionView(const Scene& s, const Camera& cam, float aspect, int t)
 float reflectionBend(const Water& w) {
     float sumA2 = 0;
     for (const Water::Wave& wv : w.waves) sumA2 += wv.amplitude * wv.amplitude * 0.5f;
-    const float hs = 4 * std::sqrt(sumA2), tq = std::clamp((hs - 0.01f) / 0.09f, 0.f, 1.f);
+    const float hs = w.spectrum.enabled ? w.spectrumHs() : 4 * std::sqrt(sumA2), tq = std::clamp((hs - 0.01f) / 0.09f, 0.f, 1.f);
     return std::max(w.reflectionDistort, 0.f) * tq * tq * (3 - 2 * tq);
 }
 
@@ -4999,8 +5279,14 @@ void drawWetReflections(const std::vector<Item>& items, const DepthTarget& scene
     bindUnit(REFR_DEPTH_SLOT, 0);
 }
 
-void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target, float scale, int t, const Cull& cull) {
+void renderBody(Scene& s, Camera& camIn, Rectangle vp, const RenderTexture& target, float scale, int t, const Cull& cull) {
     ensureGpu();
+    Camera cam = camIn;
+    if (s.water.enabled && s.water.spectrum.enabled && !cam.orthographic) {
+        // The spectrum sea reaches the horizon: the far plane goes out to it (this frame's copy of the camera only).
+        const float above = std::max(cam.position.y - s.water.level, 0.f);
+        cam.farPlane = std::max(cam.farPlane, 1.5f * seaHorizon(above) + 500.f);
+    }
     std::vector<Item> items;
     std::vector<Emitting> emitters;
     const double ft = frameTime(t);              // particles follow motion-blur subframes
@@ -5112,7 +5398,8 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     if (wet.ssr && dofTarget)
         drawWetReflections(items, *dofTarget, { (float)vx / fbW, (float)(fbH - vy - vh) / fbH, (float)vw / fbW, (float)vh / fbH });
     // Stable: at equal depth keep scene order, so coplanar layers do not swap between frames.
-    if (s.water.enabled) clear.push_back({ &waterObject(), MatrixIdentity(), std::numeric_limits<float>::max() });
+    const bool spectrumSea = s.water.enabled && s.water.spectrum.enabled;
+    if (s.water.enabled) clear.push_back({ spectrumSea ? &oceanObject() : &waterObject(), MatrixIdentity(), std::numeric_limits<float>::max() });
     std::map<const Object3D*, size_t> bodyOf;                     // the water bodies, drawn among the transparent items
     for (size_t i = 0; i < bodies.size(); i++) {
         clear.push_back({ bodies[i].obj, MatrixIdentity(), bodies[i].depth });
@@ -5150,10 +5437,11 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
             setWaterUniforms(s, cam);                                 // the sea's uniforms again, for what is drawn after
             continue;
         }
-        const bool surface = it.obj == gpu.waterObj.get();       // the sea's surface is its own mode of the lit shader
+        const bool surface = it.obj == gpu.waterObj.get() || it.obj == gpu.oceanObj.get();       // the sea's surface is its own mode of the lit shader
         if (surface) {
             const int on = 1;
             SetShaderValue(gpu.lit, gpu.W.mode, &on, SHADER_UNIFORM_INT);
+            if (spectrumSea) bindOceanTextures(true);
             if (seaReflect || refractOn) {
                 const Matrix vpm = MatrixMultiply(rlGetMatrixModelview(), rlGetMatrixProjection());
                 SetShaderValueMatrix(gpu.lit, gpu.W.reflVP, vpm);
@@ -5184,6 +5472,7 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
             SetShaderValue(gpu.lit, gpu.W.reflMode, &off, SHADER_UNIFORM_INT);
             SetShaderValue(gpu.lit, gpu.W.refrMode, &off, SHADER_UNIFORM_INT);
             for (int slot : { REFL_SLOT, REFR_COLOR_SLOT, REFR_DEPTH_SLOT }) bindUnit(slot, 0);
+            if (spectrumSea) bindOceanTextures(false);
         }
     }
     rlEnableDepthMask();
@@ -5266,10 +5555,22 @@ float waveSum(const PackedWaves& p, float x, float z, double seconds, Vector2* s
 } // namespace
 
 float Water::height(float x, float z, double seconds) const {
+    if (spectrum.enabled) {
+        // The same grids the mesh reads, at full detail: the cascades with a patch of 8 m or more, and the curvature.
+        const auto f = ocean::frameAt(*this, seconds);
+        const float drop = spectrum.curvature ? (x * x + z * z) * 0.5f / kPlanetRadius : 0.f;
+        return level + ocean::heightAt(*f, x, z) - drop;
+    }
     return level + waveSum(packWaves(*this), x, z, seconds, nullptr);
 }
 Vector2 Water::slope(float x, float z, double seconds) const {
     Vector2 g;
+    if (spectrum.enabled) {
+        const auto f = ocean::frameAt(*this, seconds);
+        ocean::heightAt(*f, x, z, &g);
+        if (spectrum.curvature) { g.x -= x / kPlanetRadius; g.y -= z / kPlanetRadius; }
+        return g;
+    }
     waveSum(packWaves(*this), x, z, seconds, &g);
     return g;
 }

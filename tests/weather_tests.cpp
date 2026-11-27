@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <complex>
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
@@ -5359,6 +5360,533 @@ static void wetAndSnow() {
     farGroundBandLimited();
 }
 
+// ---------------------------------------------------------------- the spectrum sea (W9)
+// A sea of the spectrum under a plain sky: wind towards +x at U m/s over `fetch` metres, no lights, no sky image.
+static g3d::ScenePtr oceanScene(float U, float fetch, Vector3 pos, Vector3 target, float fov, int seed = 3) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = pos; s->camera.target = target; s->camera.fov = fov;
+    s->lights.clear();
+    g3d::Water w;
+    w.enabled = true; w.waves.clear(); w.fetch = fetch; w.openDepth = 40; w.foam = 1; w.sunGlint = 0;
+    w.spectrum.enabled = true; w.spectrum.windSpeed = U; w.spectrum.windDirection = 0; w.spectrum.seed = (unsigned)seed;
+    s->water = w;
+    return s;
+}
+// A top-down orthographic view of `span` metres (up is -z), the screen being a debug read-out of the water shader.
+static g3d::ScenePtr oceanFromAbove(float U, float fetch, float span, int debug, Vector2 at = { 0, 0 }, float height = 3000) {
+    auto s = oceanScene(U, fetch, { at.x, height, at.y }, { at.x, 0, at.y }, 30);
+    s->camera.orthographic = true; s->camera.orthoHeight = span; s->camera.upVector = { 0, 0, -1 };
+    s->camera.nearPlane = 1; s->camera.farPlane = height * 2;
+    s->ground.debug = debug;
+    return s;
+}
+static float linearOf(unsigned char v) { return std::pow(v / 255.f, 2.2f); }
+
+// ---- a 2D FFT of a square power-of-two image (radix 2), for the tiling check
+static void fft1d(std::vector<std::complex<double>>& a) {
+    const size_t n = a.size();
+    for (size_t i = 1, j = 0; i < n; i++) {
+        size_t bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) std::swap(a[i], a[j]);
+    }
+    for (size_t len = 2; len <= n; len <<= 1) {
+        const double ang = -2 * 3.14159265358979323846 / (double)len;
+        const std::complex<double> wl(std::cos(ang), std::sin(ang));
+        for (size_t i = 0; i < n; i += len) {
+            std::complex<double> w(1);
+            for (size_t j = 0; j < len / 2; j++, w *= wl) {
+                const std::complex<double> u = a[i + j], v = a[i + j + len / 2] * w;
+                a[i + j] = u + v; a[i + j + len / 2] = u - v;
+            }
+        }
+    }
+}
+// Power of the picture's channel (a Hann window, the mean removed), summed over the other axis: P[b] for b = 0 .. N/2 - 1
+// is the power at b cycles across the picture along x (alongX) or z, both signs.
+static std::vector<double> axisPower(const Image& img, int channel, bool alongX) {
+    const int N = img.width;
+    std::vector<std::vector<std::complex<double>>> m((size_t)N, std::vector<std::complex<double>>((size_t)N));
+    double mean = 0;
+    for (int y = 0; y < N; y++) for (int x = 0; x < N; x++) {
+        const Color c = GetImageColor(img, x, y);
+        mean += channel == 0 ? c.r : c.g;
+    }
+    mean /= (double)N * N;
+    for (int y = 0; y < N; y++) for (int x = 0; x < N; x++) {
+        const Color c = GetImageColor(img, x, y);
+        const double hann = 0.25 * (1 - std::cos(2 * 3.14159265358979323846 * (x + 0.5) / N)) * (1 - std::cos(2 * 3.14159265358979323846 * (y + 0.5) / N));
+        m[(size_t)y][(size_t)x] = ((channel == 0 ? c.r : c.g) - mean) * hann;
+    }
+    for (int y = 0; y < N; y++) fft1d(m[(size_t)y]);
+    std::vector<std::complex<double>> col((size_t)N);
+    for (int x = 0; x < N; x++) {
+        for (int y = 0; y < N; y++) col[(size_t)y] = m[(size_t)y][(size_t)x];
+        fft1d(col);
+        for (int y = 0; y < N; y++) m[(size_t)y][(size_t)x] = col[(size_t)y];
+    }
+    std::vector<double> P((size_t)N / 2, 0.0);
+    for (int y = 0; y < N; y++) for (int x = 0; x < N; x++) {
+        const int b = alongX ? (x <= N / 2 ? x : N - x) : (y <= N / 2 ? y : N - y);
+        if (b < N / 2) P[(size_t)b] += std::norm(m[(size_t)y][(size_t)x]);
+    }
+    return P;
+}
+// How much the power at the repeat frequencies of a patch of `L` metres (f_n = n span / L, in cycles across the picture)
+// stands above the power half a spacing either side of it (the smooth level there): the mean of log10 over the harmonics
+// n = 1 .. `upTo` whose neighbours are inside the spectrum (the largest ratio is reported too).
+struct Comb { double meanLog = 0, worst = 0; int n = 0; };
+static Comb combOf(const std::vector<double>& P, float span, float L, int upTo) {
+    Comb c;
+    const double s = span / L;
+    auto at = [&](double b) { const int i = std::clamp((int)std::lround(b), 1, (int)P.size() - 1); return std::max(P[(size_t)i], 1e-30); };
+    auto peak = [&](double b) { return std::max({ at(b - 1), at(b), at(b + 1) }); };
+    for (int n = 1; n <= upTo; n++) {
+        const double f = n * s;
+        if (f + s / 2 >= (double)P.size() - 2 || f - s / 2 < 2) break;
+        const double floorLevel = std::sqrt(at(f - s / 2) * at(f + s / 2)), r = peak(f) / floorLevel;
+        c.meanLog += std::log10(r); c.worst = std::max(c.worst, r); c.n++;
+    }
+    if (c.n) c.meanLog /= c.n;
+    return c;
+}
+
+// (a) no tiling: the slope picture of 2 km and of 400 m of sea has no comb at the patches' repeat frequencies.
+static double tilingScore(bool decorrelate, int cascades, const char* tag, double* worstOut = nullptr) {
+    double score = -1e9, worst = 0;
+    struct View { float span; int cascade; int harmonics; };
+    for (const View& v : { View{ 2000, 0, 12 }, View{ 400, 1, 12 } }) {
+        auto s = oceanFromAbove(10, 50000, v.span, 2);
+        s->water.spectrum.decorrelate = decorrelate;
+        s->water.spectrum.cascades = cascades;
+        const std::vector<float> patch = s->water.patchSizes();
+        if ((int)patch.size() <= v.cascade) continue;
+        Image img = look(s, 512, 512, 0);
+        dump((std::string("w9-slope-") + tag + "-" + std::to_string((int)v.span) + ".png").c_str(), img);
+        const Comb cx = combOf(axisPower(img, 0, true), v.span, patch[(size_t)v.cascade], v.harmonics),
+                   cz = combOf(axisPower(img, 1, false), v.span, patch[(size_t)v.cascade], v.harmonics);
+        std::printf("[weather]   %s, %.0f m view, patch %.1f m: comb along x mean log10 %.2f (worst %.1f), along z %.2f (worst %.1f), %d harmonics\n",
+                    tag, v.span, patch[(size_t)v.cascade], cx.meanLog, cx.worst, cz.meanLog, cz.worst, cx.n);
+        score = std::max(score, std::max(cx.meanLog, cz.meanLog));
+        worst = std::max(worst, std::max(cx.worst, cz.worst));
+        UnloadImage(img);
+    }
+    if (worstOut) *worstOut = worst;
+    return score;
+}
+static void oceanNoTiling() {
+    double worst = 0;
+    const double good = tilingScore(true, 3, "spectrum", &worst);
+    const double noWarp = tilingScore(false, 3, "no-decorrelation");
+    const double one = tilingScore(false, 1, "one-cascade-no-decorrelation");
+    std::printf("[weather] ocean tiling: comb of the slope picture's spectrum at the patch repeat frequencies, mean log10 of peak over smooth level: spectrum %.2f (worst ratio %.1f), lookups not bent %.2f, one cascade not bent %.2f\n",
+                good, worst, noWarp, one);
+    CHECK(good < 0.6 && worst < 12.0);
+    CHECK(noWarp > good + 1.5);
+    CHECK(one > good + 1.5);
+}
+
+// (b) the significant wave height follows the wind as the spectrum says: 4 sigma of the height over one big patch, at two times.
+static float measuredHs(const g3d::Water& w) {
+    const std::vector<float> patch = w.patchSizes();
+    const int N = 100;
+    double sum = 0, sum2 = 0, n = 0;
+    for (double t : { 0.0, 4.3 })
+        for (int j = 0; j < N; j++)
+            for (int i = 0; i < N; i++) {
+                const double h = w.height((i + 0.37f) * patch[0] / N, (j + 0.61f) * patch[0] / N, t) - w.level;
+                sum += h; sum2 += h * h; n++;
+            }
+    const double mean = sum / n, var = sum2 / n - mean * mean;
+    return (float)(4 * std::sqrt(std::max(var, 0.0)));
+}
+static void oceanHs() {
+    float hs[2][3];
+    const float winds[3] = { 5, 10, 15 };
+    for (int developed = 0; developed < 2; developed++)
+        for (int k = 0; k < 3; k++) {
+            auto s = oceanScene(winds[k], developed ? 1e7f : 50000.f, { 0, 5, 0 }, { 0, 0, -10 }, 40);
+            s->water.spectrum.curvature = false;
+            g3d::Weather wx; wx.wind.speed = winds[k];
+            const float expect = wx.waveHeight(s->water.fetch), got = measuredHs(s->water);
+            hs[developed][k] = got;
+            std::printf("[weather] ocean Hs, U %.0f m/s, %s: measured %.2f m, W1 formula %.2f m (%+.0f%%), spectrumHs() %.2f\n", winds[k],
+                        developed ? "fully developed" : "50 km fetch", got, expect, 100 * (got / expect - 1), s->water.spectrumHs());
+            CHECK(std::fabs(got / expect - 1) < 0.20f);
+        }
+    const float ratio = hs[1][2] / hs[1][0];
+    std::printf("[weather] ocean Hs, fully developed, 15 m/s over 5 m/s: %.1fx (U^2 gives 9)\n", ratio);
+    CHECK(ratio > 7.2f && ratio < 10.8f);
+}
+
+// (c) purity: a frame alone is the frame after others, and a rebuilt model gives the same heights; two runs agree.
+static void oceanPure() {
+    auto make = [] { auto s = oceanScene(10, 50000, { 0, 3, 0 }, { 0, 1.5f, -30 }, 50); s->lights.push_back(g3d::Light::directional({ 10, 9, -12 }, WHITE, 2)); s->water.sunGlint = 1; return s; };
+    auto s = make();
+    Comp c = comp(s, 160, 90);
+    Image a = render(c, 33);
+    for (int f : { 5, 90, 17, 61 }) { Image o = render(c, f); UnloadImage(o); }
+    Image b = render(c, 33);
+    Comp c2 = comp(make(), 160, 90);
+    Image d = render(c2, 33);
+    const long long ab = diffImages(a, b), ad = diffImages(a, d);
+    // The CPU surface: flush the frame cache by asking for many other times, then ask again.
+    const g3d::Water& w = s->water;
+    const float h0 = w.height(12.5f, -3.25f, 7.0), s0 = w.slope(12.5f, -3.25f, 7.0).x;
+    for (int i = 0; i < 10; i++) w.height(1, 1, 100.0 + i);
+    const float h1 = w.height(12.5f, -3.25f, 7.0), s1 = w.slope(12.5f, -3.25f, 7.0).x;
+    std::printf("[weather] ocean purity: frame alone vs after others %lld, two runs %lld, height after a flushed cache %g -> %g\n", ab, ad, h0, h1);
+    CHECK(ab == 0 && ad == 0 && h0 == h1 && s0 == s1);
+    // A frame at another time differs (the sea moves).
+    Image e = render(c, 34);
+    CHECK(diffImages(a, e) > 2000);
+    UnloadImage(a); UnloadImage(b); UnloadImage(d); UnloadImage(e);
+}
+
+// (d) off means off: with the spectrum disabled, nothing it holds changes a pixel; enabling it does.
+static void oceanOffMeansOff() {
+    auto make = [](bool perturb, bool on) {
+        auto s = std::make_shared<g3d::Scene>();
+        s->camera.position = { 0, 3, 8 }; s->camera.target = { 0, 0, -20 }; s->camera.fov = 50;
+        s->sky = g3d::Sky::day();
+        s->water = g3d::Water::choppy();
+        s->water.openDepth = 30;
+        s->lights.clear();
+        s->lights.push_back(g3d::Light::directional({ 10, 12, -8 }, WHITE, 1.5f));
+        if (perturb) { auto& sp = s->water.spectrum; sp.windSpeed = 22; sp.cascades = 4; sp.choppiness = 3; sp.curvature = false; sp.seed = 99; sp.visibility = 100; sp.spray = 0; sp.swell = 1; }
+        s->water.spectrum.enabled = on;
+        return s;
+    };
+    Image a = look(make(false, false), 320, 180, 12), b = look(make(true, false), 320, 180, 12), c = look(make(true, true), 320, 180, 12);
+    const long long off = diffImages(a, b), on = diffImages(a, c);
+    std::printf("[weather] ocean off means off: perturbed but disabled differs by %lld (must be 0); enabled differs by %lld\n", off, on);
+    CHECK(off == 0 && on > 20000);
+    UnloadImage(a); UnloadImage(b); UnloadImage(c);
+}
+
+// (e) the horizon sits at the dip below horizontal: sea against a white background, a column of rows.
+static float horizonRows(float h, float fov, bool curvature, int H = 720) {
+    auto s = oceanScene(8, 50000, { 0, h, 0 }, { 0, h, -100 }, fov);
+    s->background = { 0, 255, 0, 255 };
+    s->skyColor = { 40, 40, 40, 255 }; s->groundColor = { 40, 40, 40, 255 };
+    s->water.spectrum.curvature = curvature; s->water.spectrum.visibility = 1e9f;   // no haze: the edge is then the geometry, not the fade
+    Image img = look(s, 96, H, 0);
+    float at = -1;
+    std::vector<float> avg((size_t)H);
+    for (int y = 0; y < H; y++) { double l = 0; for (int x = 20; x < 76; x++) { const Color c = GetImageColor(img, x, y); l += 255 - std::max(c.r, c.b); } avg[(size_t)y] = (float)(l / 56); }
+    for (int y = 1; y < H; y++)
+        if (avg[(size_t)y] < 250 && avg[(size_t)y - 1] >= 250) { at = (y - 1) + (avg[(size_t)y - 1] - 250) / (avg[(size_t)y - 1] - avg[(size_t)y]) + 0.5f; break; }
+    UnloadImage(img);
+    return at;
+}
+static void oceanHorizon() {
+    struct Case { float h, fov; };
+    for (const Case& k : { Case{ 10, 4 }, Case{ 10000, 12 } }) {
+        const int H = 720;
+        const float expect = (H / 2.f) * std::tan(g3d::Water::horizonDip(k.h)) / std::tan(k.fov * 0.5f * DEG2RAD);
+        const float row = horizonRows(k.h, k.fov, true) - H / 2.f, flat = horizonRows(k.h, k.fov, false) - H / 2.f;
+        std::printf("[weather] ocean horizon from %.0f m: %.1f px below the centre, expected %.1f px (dip %.3f deg); without curvature %.1f px\n", k.h, row, expect,
+                    g3d::Water::horizonDip(k.h) * RAD2DEG, flat);
+        CHECK(row > 0 && std::fabs(row - expect) < 1.5f);
+        if (k.h > 1000) CHECK(flat < 0 || std::fabs(flat - expect) > 30.f);
+    }
+}
+
+// (f) whitecaps follow the wind: the mean foam of a 60 m top-down view (the foam as the shader draws it), over three times.
+static float foamAt(float U, float fetch, double* spread = nullptr) {
+    double mean = 0, m2 = 0;
+    const int frames[6] = { 0, 40, 80, 20, 60, 100 };
+    const Vector2 at[6] = { { 0, 0 }, { 530, 190 }, { -410, 770 }, { 880, -640 }, { -950, -300 }, { 260, 1210 } };      // the shader's slow mask thins foam by place: sample six
+    for (int fi = 0; fi < 6; fi++) {
+        const int f = frames[fi];
+        Image img = look(oceanFromAbove(U, fetch, 60, 3, at[fi], 300), 160, 160, f);
+        double s = 0;
+        for (int y = 0; y < img.height; y++) for (int x = 0; x < img.width; x++) s += linearOf(GetImageColor(img, x, y).r);
+        s /= (double)img.width * img.height;
+        mean += s / 6; m2 += s * s / 6;
+        UnloadImage(img);
+    }
+    if (spread) *spread = std::sqrt(std::max(m2 - mean * mean, 0.0));
+    return (float)mean;
+}
+static void oceanWhitecaps() {
+    float cover[4];
+    const float winds[4] = { 3, 8, 12, 18 };
+    for (int i = 0; i < 4; i++) {
+        double sd;
+        cover[i] = foamAt(winds[i], 200000, &sd);
+        std::printf("[weather] whitecaps at %.0f m/s (200 km fetch): mean foam %.4f (spread over 6 places %.4f), area law %.4f\n", winds[i], cover[i],
+                    sd, oceanScene(winds[i], 200000, { 0, 5, 0 }, { 0, 0, 1 }, 40)->water.whitecapCover());
+    }
+    CHECK(cover[0] < 0.006f);
+    CHECK(cover[1] > cover[0] * 3 && cover[2] > cover[1] * 1.4f && cover[3] > cover[2] * 1.4f);
+    CHECK(cover[3] > 0.04f);
+    // A short fetch holds the sea down: 18 m/s over 300 m of water breaks far less than over 200 km.
+    const float shortFetch = foamAt(18, 300);
+    std::printf("[weather] whitecaps at 18 m/s over 300 m of water: %.4f\n", shortFetch);
+    CHECK(shortFetch < 0.7f * cover[3]);          // (the foam map is a quantile of the tile, so a short fetch is held down less than the law says)
+}
+
+// (g) no far shimmer: the far third of a grazing view changes little from one frame to the next as the camera creeps.
+static float farChange(bool filter, const char* tag) {
+    auto make = [&](float x) {
+        auto s = oceanScene(10, 50000, { x, 1.5f, 0 }, { x, 1.2f, -10 }, 50);
+        s->lights.push_back(g3d::Light::directional({ 10, 9, -12 }, WHITE, 2));
+        s->water.sunGlint = 1; s->water.filter = filter;
+        s->sky = g3d::Sky::day(); s->sky.clouds = 0.3f;
+        return s;
+    };
+    Image a = look(make(0), 320, 180, 4), b = look(make(0.04f), 320, 180, 5);
+    dump((std::string("ocean-grazing-") + tag + ".png").c_str(), a);
+    double d = 0; int n = 0;
+    for (int y = 88; y < 118; y++) for (int x = 20; x < 300; x++) { d += std::fabs(luma(GetImageColor(a, x, y)) - luma(GetImageColor(b, x, y))); n++; }
+    UnloadImage(a); UnloadImage(b);
+    return (float)(d / n);
+}
+static void oceanNoShimmer() {
+    const float on = farChange(true, "filter"), off = farChange(false, "nofilter");
+    std::printf("[weather] ocean far third, mean luma change between frames with the camera creeping 4 cm: band limit on %.2f levels, off %.2f\n", on, off);
+    CHECK(on < 2.0f && off > 2.0f * on);
+}
+
+// (h) the CPU surface is the drawn one: a top-down read-out of the mesh's height against Water::height; and a box rides it.
+static void oceanCpuTwin() {
+    auto s = oceanFromAbove(10, 50000, 12, 4, { 0, 0 }, 50);
+    s->camera.farPlane = 200;
+    const double t = frameTime(0) / s->water.fps;
+    Image img = look(s, 180, 180, 0);
+    const g3d::Water w = g3d::waterOf(*s);
+    double worst = 0, lo = 1e9, hi = -1e9;
+    const int px[5][2] = { { 90, 90 }, { 60, 100 }, { 110, 70 }, { 80, 120 }, { 125, 105 } };
+    for (const auto& p : px) {
+        const Color c = GetImageColor(img, p[0], p[1]);
+        const float a = linearOf(c.r), g = linearOf(c.g);
+        const float coarse = a * 16.f - 8.f, fine = g;            // the metre's fraction: pick the whole metre that agrees with the coarse byte
+        const float y = std::round(coarse + 8.f - fine) + fine - 8.f;
+        const float x = (p[0] + 0.5f - 90) * (12.f / 180), z = (p[1] + 0.5f - 90) * (12.f / 180);
+        const float h = w.height(x, z, t);
+        worst = std::max(worst, (double)std::fabs(y - h));
+        lo = std::min(lo, (double)h); hi = std::max(hi, (double)h);
+        std::printf("[weather]   probe (%.2f, %.2f) m: drawn %.4f m, CPU %.4f m\n", x, z, y, h);
+    }
+    std::printf("[weather] ocean CPU twin: worst difference over 5 probes %.1f mm (heights span %.2f m)\n", worst * 1000, hi - lo);
+    CHECK(worst < 0.02 && hi - lo > 0.15);
+    UnloadImage(img);
+    // ride(): a small hull follows the surface and its slope.
+    auto sea = oceanScene(10, 50000, { 0, 5, 0 }, { 0, 0, -10 }, 40);
+    g3d::Object3D box;
+    box.position = { 40, 0, 25 };
+    g3d::Ride how; how.length = 1; how.beam = 1; how.heading = 0;
+    double err = 0, lo2 = 1e9, hi2 = -1e9;
+    for (int i = 0; i < 90; i++) {
+        const double ts = i / 15.0;
+        g3d::ride(box, *sea, ts, how);
+        err = std::max(err, (double)std::fabs(box.position.y - g3d::surfaceHeight(*sea, 40, 25, ts)));
+        lo2 = std::min(lo2, (double)box.position.y); hi2 = std::max(hi2, (double)box.position.y);
+    }
+    std::printf("[weather] ocean ride(): a 1 m hull stays within %.1f cm of the surface over 6 s, rising and falling over %.2f m\n", err * 100, hi2 - lo2);
+    CHECK(err < 0.06 && hi2 - lo2 > 0.2);
+}
+
+// (i) the shading's slope variance is the sea's: the grids' mean square slope plus the unresolved tail, near Cox and Munk's 0.003 + 0.00512 U.
+static void oceanSlopeVariance() {
+    for (float U : { 5.f, 10.f, 18.f }) {
+        auto s = oceanScene(U, 200000, { 0, 5, 0 }, { 0, 0, -10 }, 40);
+        float tail = 0;
+        const float total = s->water.shadingSlopeVariance(&tail), cm = 0.003f + 0.00512f * U;
+        std::printf("[weather] ocean slope variance at %.0f m/s: grids %.4f + unresolved tail %.4f = %.4f, Cox-Munk %.4f (%+.0f%%); grids alone %+.0f%%\n", U, total - tail, tail, total, cm,
+                    100 * (total / cm - 1), 100 * ((total - tail) / cm - 1));
+        CHECK(std::fabs(total / cm - 1) < 0.30f);
+        CHECK(std::fabs((total - tail) / cm - 1) > 0.30f || U < 7);     // the shading-only fine band alone would fail at the strong winds
+    }
+}
+
+// (j) whitecaps lie along the crest: connected foam patches of a top-down view are elongated, across the wind.
+static void oceanWhitecapShape() {
+    std::vector<double> aspect, off;
+    int total = 0;
+    for (int fi = 0; fi < 4; fi++) {
+        const int f = fi * 30;
+        const Vector2 where[4] = { { 0, 0 }, { 530, 190 }, { -410, 770 }, { 880, -640 } };
+        const int N = 400;
+        Image img = look(oceanFromAbove(12, 200000, 160, 3, where[fi], 300), N, N, f);
+        std::vector<unsigned char> on((size_t)N * N);
+        for (int y = 0; y < N; y++) for (int x = 0; x < N; x++) on[(size_t)y * N + x] = linearOf(GetImageColor(img, x, y).r) > 0.5f;
+        UnloadImage(img);
+        std::vector<int> seen((size_t)N * N, 0), stack;
+        for (int y0 = 0; y0 < N; y0++)
+            for (int x0 = 0; x0 < N; x0++) {
+                if (!on[(size_t)y0 * N + x0] || seen[(size_t)y0 * N + x0]) continue;
+                double n = 0, sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
+                bool edge = false;
+                stack.assign(1, y0 * N + x0); seen[(size_t)y0 * N + x0] = 1;
+                while (!stack.empty()) {
+                    const int p = stack.back(); stack.pop_back();
+                    const int x = p % N, y = p / N;
+                    n++; sx += x; sy += y; sxx += (double)x * x; syy += (double)y * y; sxy += (double)x * y;
+                    if (x == 0 || y == 0 || x == N - 1 || y == N - 1) edge = true;
+                    const int nb[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
+                    for (const auto& d : nb) {
+                        const int xx = x + d[0], yy = y + d[1];
+                        if (xx < 0 || yy < 0 || xx >= N || yy >= N || !on[(size_t)yy * N + xx] || seen[(size_t)yy * N + xx]) continue;
+                        seen[(size_t)yy * N + xx] = 1; stack.push_back(yy * N + xx);
+                    }
+                }
+                if (n < 30 || edge) continue;
+                const double mx = sx / n, my = sy / n, cxx = sxx / n - mx * mx, cyy = syy / n - my * my, cxy = sxy / n - mx * my;
+                const double tr = cxx + cyy, det = cxx * cyy - cxy * cxy, disc = std::sqrt(std::max(tr * tr / 4 - det, 0.0));
+                const double l1 = tr / 2 + disc, l2 = std::max(tr / 2 - disc, 1e-6);
+                const double ang = 0.5 * std::atan2(2 * cxy, cxx - cyy) * RAD2DEG;       // major axis from +x (the wind), image y is z
+                aspect.push_back(std::sqrt(l1 / l2));
+                off.push_back(std::fabs(std::fabs(ang) - 90.0));                        // degrees from perpendicular to the wind
+                total++;
+            }
+    }
+    std::sort(aspect.begin(), aspect.end()); std::sort(off.begin(), off.end());
+    const double medA = aspect.empty() ? 0 : aspect[aspect.size() / 2], medO = off.empty() ? 90 : off[off.size() / 2];
+    std::printf("[weather] whitecap shape at 12 m/s: %d patches over 4 times, median aspect ratio %.2f, median angle off perpendicular to the wind %.1f deg\n", total, medA, medO);
+    CHECK(total >= 8 && medA >= 2.0 && medO <= 30.0);
+}
+
+// (k) artefacts of a storm seen low: the sea's reflection of the sky shows no contour rings, and foam edges are not hard stair steps.
+// Rings: in dark water, the share of pixels that start a flat terrace (6+ equal levels) ending in a 1-3 level step.
+// Foam: of the horizontal neighbours on the foam-only view that differ at all, the share that jump by more than half the range.
+static void oceanArtefacts() {
+    auto storm = [](int dbg) {
+        auto s = oceanScene(18, 1000000, { 0, 3.f, 0 }, { 0, 2.4f, -20 }, 60);
+        s->water.openDepth = 40; s->water.spectrum.choppiness = 1.8f; s->water.spectrum.windDirection = 90;
+        s->sky = g3d::Sky::day(); s->sky.clouds = 0.3f;
+        s->lights.push_back(g3d::Light::directional({ 3, 3.6, -12 }, { 255, 240, 216, 255 }, 2.6f));
+        s->water.sunGlint = 1; s->water.reflections = g3d::Water::Reflections::Quarter;
+        s->ground.debug = dbg;
+        return s;
+    };
+    Image a = look(storm(0), 1920, 1080, 20);
+    const std::vector<float> L = lumaOf(a);
+    // Rings are thin contour lines in a smooth gradient: the mean absolute Laplacian of the dark water's luma (levels).
+    double lap = 0; long n = 0;
+    for (int y = 600; y < 1060; y++)
+        for (int x = 10; x < 1900; x++) {
+            const float v = L[(size_t)y * 1920 + x];
+            if (v > 150) continue;
+            lap += std::fabs(L[(size_t)y * 1920 + x - 1] + L[(size_t)y * 1920 + x + 1] + L[(size_t)(y - 1) * 1920 + x] + L[(size_t)(y + 1) * 1920 + x] - 4 * v);
+            n++;
+        }
+    UnloadImage(a);
+    const double ring = lap / std::max(n, 1L);
+    Image f = look(storm(3), 960, 540, 20);
+    long any = 0, hard = 0;
+    for (int y = 100; y < 540; y++) {
+        int run = 0; float prev = linearOf(GetImageColor(f, 0, y).r);
+        for (int x = 1; x < 960; x++) {
+            const float v = linearOf(GetImageColor(f, x, y).r);
+            if (v > 0.1f && v < 0.9f) run++;
+            if ((prev - 0.5f) * (v - 0.5f) < 0) { any++; hard += (run <= 1); run = 0; }
+            prev = v;
+        }
+    }
+    UnloadImage(f);
+    const double stair = (double)hard / std::max(any, 1L);
+    std::printf("[weather] ocean artefacts, storm seen from 3 m: dark water mean Laplacian %.3f levels; foam edges crossed with at most one in-between pixel %.1f%%\n", ring, 100 * stair);
+    CHECK(ring < 4.0);
+    CHECK(stair < 0.015);
+}
+
+static void ocean() {
+    oceanNoTiling();
+    oceanSlopeVariance();
+    oceanHs();
+    oceanPure();
+    oceanOffMeansOff();
+    oceanHorizon();
+    oceanWhitecaps();
+    oceanWhitecapShape();
+    oceanArtefacts();
+    oceanNoShimmer();
+    oceanCpuTwin();
+}
+
+static void w9Images() {
+    auto lit = [](float U, Vector3 pos, Vector3 target, float fov, float cloud) {
+        auto s = oceanScene(U, 200000, pos, target, fov);
+        s->sky = g3d::Sky::day(); s->sky.clouds = cloud;
+        s->lights.push_back(g3d::Light::directional({ 3, 3.6, -12 }, { 255, 240, 216, 255 }, 2.6f));
+        s->water.openDepth = 40; s->water.sunGlint = 1; s->water.reflections = g3d::Water::Reflections::Quarter;
+        return s;
+    };
+    const char* dir = std::getenv("RMTN_WEATHER_DUMP");
+    if (!dir) return;
+    fs::create_directories(dir);
+    auto save = [&](const char* name, const Image& img) { ExportImage(img, (fs::path(dir) / name).string().c_str()); };
+    Image a = look(lit(10, { 0, 5.f, 0 }, { 0, 3.6f, -10 }, 60, 0.3f), 1920, 1080, 20);
+    save("w9_grazing_10ms.png", a);
+    Image crop = ImageFromImage(a, { 560, 640, 640, 360 });
+    ImageResizeNN(&crop, 1920, 1080);
+    save("w9_grazing_10ms_crop3x.png", crop);
+    UnloadImage(a); UnloadImage(crop);
+    { auto gf = lit(10, { 0, 5.f, 0 }, { 0, 3.6f, -10 }, 60, 0.3f); gf->ground.debug = 3; Image e = look(gf, 960, 540, 20); save("w9_grazing_10ms_foamonly.png", e); UnloadImage(e); }
+    Image b = look(lit(10, { 0, 10000, 0 }, { 0, 10000 - 80, -400 }, 62, 0.1f), 1920, 1080, 20);
+    save("w9_from_10km.png", b); UnloadImage(b);
+    auto top = oceanFromAbove(10, 200000, 2000, 0, { 0, 0 }, 3000);
+    top->sky = g3d::Sky::day();
+    top->lights.push_back(g3d::Light::directional({ 3, 3.6, -12 }, { 255, 240, 216, 255 }, 2.6f));
+    top->water.sunGlint = 1;
+    Image c = look(top, 1080, 1080, 20);
+    save("w9_topdown_2km.png", c); UnloadImage(c);
+    auto storm = [&](bool foamOnly) {
+        auto s = lit(18, { 0, 3.f, 0 }, { 0, 2.4f, -20 }, 60, 1.0f);
+        { g3d::Water st = g3d::Water::storm(); st.spectrum = s->water.spectrum; st.waves.clear(); st.fetch = s->water.fetch; st.openDepth = 40; st.sunGlint = 1; st.reflections = s->water.reflections; st.foam = 1; s->water = st; }
+        s->weather = g3d::Weather::storm(); s->weather.wind.speed = 18; s->weather.wind.direction = 90; s->weather.wind.gust = 0.3f;
+        s->water.fetch = 1000000; s->water.spectrum.choppiness = 1.8f; s->water.spectrum.windDirection = 90;
+        if (foamOnly) s->ground.debug = 3;
+        if (std::getenv("RMTN_W9_NOREFL")) s->water.reflections = g3d::Water::Reflections::Off;
+        if (const char* dbg = std::getenv("RMTN_W9_DEBUG")) s->ground.debug = std::atoi(dbg);
+        return s;
+    };
+    { auto ss = storm(false); const g3d::Water ww = g3d::waterOf(*ss); std::printf("[probe] storm: spectrumHs %.2f m, measured Hs %.2f m, wind %.1f m/s, cover %.3f, slope variance %.3f\n", ww.spectrumHs(), measuredHs(ww), ww.spectrum.windSpeed, ww.whitecapCover(), ww.shadingSlopeVariance()); }
+    { auto ss = storm(false); const g3d::Water ww = g3d::waterOf(*ss); const double t0 = frameTime(20) / ww.fps; float hi = -1e9f, lo = 1e9f, hi60 = -1e9f; for (int ix = -300; ix <= 300; ix += 3) for (int iz = 5; iz <= 400; iz += 3) { const float h = ww.height((float)ix, -(float)iz, t0); hi = std::max(hi, h); lo = std::min(lo, h); if (iz < 60 && std::abs(ix) < iz) hi60 = std::max(hi60, h); } std::printf("[probe] storm crest heights in view (camera 3 m above the mean level): max crest %.2f m, deepest trough %.2f m, highest crest within 60 m ahead %.2f m\n", hi, lo, hi60); }
+    Image d = look(storm(false), 1920, 1080, 20);
+    save("w9_storm_18ms.png", d);
+    Image dc = ImageFromImage(d, { 560, 640, 640, 360 });
+    ImageResizeNN(&dc, 1920, 1080);
+    save("w9_storm_18ms_crop3x.png", dc);
+    UnloadImage(d); UnloadImage(dc);
+    { Image e = look(storm(true), 960, 540, 20); save("w9_storm_18ms_foamonly.png", e); UnloadImage(e); }
+}
+
+static void w9Timing() {
+    constexpr int W = 1920, H = 1080;
+    for (int on = 0; on < 2; on++)
+        for (float h : { 2.4f, 10000.f }) {
+            auto s = oceanScene(9, 60000, { 0, h, 0 }, { 0, h - (h > 100 ? 80.f : 0.3f), -400 }, 62);
+            s->sky = g3d::Sky::day(); s->sky.clouds = 0.3f;
+            s->lights.push_back(g3d::Light::directional({ 3, 3.6, -12 }, WHITE, 2.6f));
+            s->water.sunGlint = 1; s->water.reflections = g3d::Water::Reflections::Quarter;
+            if (!on) { s->water.spectrum.enabled = false; s->water.waves = g3d::Water::choppy().waves; }
+            Comp c = comp(s, W, H);
+            Canvas canvas;
+            canvas.load(W, H, 1);
+            presentFrame(c, 0, canvas);
+            double best = 1e9, mean = 0;
+            for (int i = 0; i < 12; i++) {
+                const double t0 = GetTime();
+                presentFrame(c, i + 1, canvas);
+                Image img = LoadImageFromTexture(canvas.output().texture);
+                const double dt = (GetTime() - t0) * 1000;
+                UnloadImage(img);
+                best = std::min(best, dt); mean += dt / 12;
+            }
+            canvas.unload();
+            std::printf("[weather] W9 timing 1080p, spectrum %s, camera %.1f m: best %.1f ms, mean %.1f ms\n", on ? "on" : "off", h, best, mean);
+        }
+    // The CPU cost of one frame of the spectrum (3 cascades): the FFTs, uncached.
+    auto s = oceanScene(9, 60000, { 0, 5, 0 }, { 0, 0, -10 }, 40);
+    double t0 = GetTime();
+    for (int i = 0; i < 20; i++) s->water.height(1, 1, 1000.0 + i);
+    std::printf("[weather] W9 CPU frame build (3 cascades, FFTs + foam): %.1f ms per new time\n", (GetTime() - t0) * 1000 / 20);
+}
+
 int main() try {
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
@@ -5372,6 +5900,14 @@ int main() try {
         for (float v : gridMeans(g, 6, 4)) std::printf("%.2ff, ", v);
         std::printf("\n");
         shutdownGraphics(); CloseWindow(); return 0;
+    }
+    if (std::getenv("RMTN_W9_IMAGES")) { w9Images(); shutdownGraphics(); CloseWindow(); return 0; }
+    if (std::getenv("RMTN_W9_TIMING")) { w9Timing(); shutdownGraphics(); CloseWindow(); return 0; }
+    if (std::getenv("RMTN_W9_ONLY")) {
+        ocean();
+        shutdownGraphics(); CloseWindow();
+        std::printf(failures ? "[weather] %d failures\n" : "[weather] all passed\n", failures);
+        return failures ? 1 : 0;
     }
     if (std::getenv("RMTN_W8_IMAGES")) { w8Images(); shutdownGraphics(); CloseWindow(); return 0; }
     if (std::getenv("RMTN_W6_TIMING")) { waterTiming(); shutdownGraphics(); CloseWindow(); return 0; }
@@ -5437,6 +5973,7 @@ int main() try {
     wetAndSnow();
     waterBodies();
     waterWakes();
+    ocean();
     shutdownGraphics();
     CloseWindow();
     std::printf(failures ? "[weather] %d failures\n" : "[weather] all passed\n", failures);

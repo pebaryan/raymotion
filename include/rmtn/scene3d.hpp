@@ -674,6 +674,51 @@ struct Water {
     // Seen from under the surface nothing changes either way.
     bool refraction = false;
 
+    // An open sea from a wave spectrum, in place of the handful of sinusoids in `waves` (W9). Off by default: a
+    // scene that does not enable it draws exactly as before. The surface is an FFT ocean (Tessendorf): a
+    // directional JONSWAP spectrum of the wind (speed, fetch) is turned into heights, horizontal displacement
+    // (choppiness), slopes and a whitecap map on a periodic grid, by an inverse FFT on the CPU every frame, and
+    // uploaded as textures. Frame t is a pure function of t: h(k, t) = h0(k) e^{-i w t} + conj(h0(-k)) e^{+i w t},
+    // with h0 drawn from a seeded hash and w = sqrt(g k).
+    //   - Cascades: the spectrum is split by wavenumber into up to four grids of 128 x 128 with patch sizes
+    //     about 7.5 times apart (about 300 m, 40 m, 5 m, 0.7 m for a 10 m/s sea; see patchSizes()), so each carries
+    //     only its own band (cross-faded, no energy counted twice) and no one patch is a recognisable tile. The
+    //     lookup coordinate of each is also bent by a slow sine warp (`decorrelate`) so its repeats are not exact copies.
+    //   - Height, slope and ride: height() and slope() evaluate the same grids as the mesh. They include the cascades
+    //     whose patch is at least 8 m (the finer ones only shade: ripples a few centimetres high, which the mesh
+    //     cannot show). Choppy displacement is inverted by four fixed-point steps. They include the curvature.
+    //   - Distance: the mesh is a set of rings round the camera, out past the sea horizon. Its vertices read the
+    //     mip level that matches their spacing, so the geometry fades from fine to coarse without popping; the
+    //     shading reads the level that matches the pixel's footprint, and the slope variance it takes away goes
+    //     into the glint's roughness (as for `filter`). Far sea is a smooth sheen, not a pattern.
+    //   - Horizon: with `curvature` the surface falls by d^2 / 2R below the level (R = 6 371 km, the clouds' planet,
+    //     d from the origin), so from height h the horizon sits sqrt(2 h / R) below horizontal. The sky behind
+    //     it is filled in to that horizon, and the sea fades into its colour over `visibility` metres.
+    //   - Whitecaps: where the Jacobian of the displacement (J < 1 where the surface bunches up) is lowest, in
+    //     the cascade of the breaking waves, with the area following the wind (about 0.1 % at 4 m/s, 2 % at
+    //     10 m/s, 20 % at 20 m/s, less on a short fetch) and the foam fading over a few seconds after each crest.
+    //     Spray streaks along the wind begin at 12 m/s and are full at 20.
+    // The sea is seen above or below the surface as before. Objects below it are tinted against the mean level.
+    // Scene::weather (unless ownWind) sets windSpeed and windDirection; `fetch` above is the fetch. Hs follows
+    // Weather::waveHeight(fetch); the spectrum is rescaled so its realised significant height is exactly that.
+    struct Spectrum {
+        bool enabled = false;
+        int cascades = 3;               // 1..4 grids (each 128 x 128)
+        float windSpeed = 10;           // m/s at 10 m, when no weather sets it
+        float windDirection = 0;        // degrees about +y the waves travel towards (0 = +x, 90 = +z)
+        float gamma = 3.3f;             // JONSWAP peak enhancement
+        float spread = 8;               // directional spreading: at the peak energy goes as cos^(2 spread)(angle / 2) off the wind (about 29 degrees' standard deviation); shorter waves spread wider
+        float choppiness = 1;           // horizontal displacement lambda (0: pure vertical); crests sharpen as it grows
+        float swell = 0;                // 0..1: the share of the variance that is a longer, narrower swell from another heading
+        float swellDirection = 30;      // degrees off the wind the swell travels
+        float patch = 0;                // metres: the largest cascade's patch (0: 8 peak wavelengths, 120 to 2000 m)
+        float visibility = 60000;       // metres over which the sea fades into the horizon haze (0: no haze)
+        float spray = 1;                // 0..1 strength of the wind-streaked spray at high winds
+        bool curvature = true;          // the sea follows the planet's curvature (R = 6 371 km about the world origin)
+        bool decorrelate = true;        // bend each cascade's lookup so tiles are not exact repeats (false: for comparison)
+        unsigned seed = 1;              // the realisation
+    } spectrum;
+
     Color deep{ 6, 62, 84, 255 };       // what the water scatters back
     Vector3 absorb{ 0.34f, 0.07f, 0.04f };   // loss per metre of path, per red/green/blue
     float openDepth = 0;                // > 0: water this deep under the surface, so it is opaque
@@ -688,6 +733,16 @@ struct Water {
     // The surface height at (x, z) at `seconds`, and its slope there (d height / dx, dz).
     float height(float x, float z, double seconds) const;
     Vector2 slope(float x, float z, double seconds) const;
+    // The spectrum's significant wave height Hs (m), the patch sizes of its cascades (largest first, m), and the
+    // fraction of the sea under whitecaps (the area law, before the foam's own strength): from `spectrum`, `fetch`.
+    float spectrumHs() const;
+    std::vector<float> patchSizes() const;
+    float whitecapCover() const;
+    // The mean square slope (both axes) the shading uses: the grids' plus the unresolved tail that widens the glint (spectrum only).
+    float shadingSlopeVariance(float* tail = nullptr) const;
+    // The horizon dip (radians below horizontal) of an eye `above` metres over the sea: atan(sqrt(2 above / R)).
+    static float horizonDip(float above);
+    static constexpr float kPlanetRadius = 6371000.f;
     // Whether a world point lies under the surface at `seconds`.
     bool submerged(Vector3 p, double seconds) const { return enabled && p.y < height(p.x, p.z, seconds); }
 };

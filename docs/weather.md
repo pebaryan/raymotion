@@ -407,9 +407,64 @@ speed (+-20 %), growing, and round (spread under 12 % over 16 directions); a flo
 taking the slope's sign, and the footprint calming the jitter; the dinghy not moving before a wave can reach it;
 the propwash under 0.25 alpha at 30 m behind and under 2.5 beams wide at 10 m; a lit view (sky reflection, sun to the side, no foam) where the V changes the luma of columns by over 8 levels; at least 5 crests along each arm over 3 boat lengths in a lit oblique view of a 2 m/s boat; purity; and a boat and stone that have not come yet changing nothing (difference 0).
 
+## Ocean to the horizon
+
+`Water::spectrum` (off by default; old scenes are pixel-identical) replaces the sum of waves with a wave spectrum:
+a JONSWAP sea (gamma 3.3, Mitsuyasu cos^2s spreading, one-sided downwind) of the weather's wind speed and heading and the
+water's fetch, rescaled so its significant height is the W1 value (`Weather::waveHeight(fetch)`) exactly. It is turned into
+up to four cascades of 128 x 128 grids (an inverse FFT per cascade per frame on the CPU, a pure function of time), with patches
+about 7.3, 7.6 and 7.1 times apart (not whole numbers; about 8 times the peak wavelength for the largest) and a band per cascade with an
+energy-preserving cross-fade, so no wave is counted twice. Each cascade is looked up through a small smooth warp
+(`decorrelate`) so a patch never repeats on the sea. Cascades of 8 m and more move the mesh (height and choppy
+displacement); finer ones only shade. The mesh is rings from 0.2 m to past the horizon (`Water::height`, `slope` and
+`ride()` read the same grids, so a boat sits on what is drawn). Far away the shader picks a mip level from the pixel's
+footprint and puts the slope variance the level removed into the glint's roughness, so the far sea goes to a mean
+roughness and does not shimmer (`Water::filter`).
+
+The sea follows the planet: the drop is d^2/2R (R = 6371 km), so the horizon of a camera at height h lies atan(sqrt(2h/R))
+below horizontal (0.10 degrees at 10 m, 3.2 at 10 km). The far plane of the camera is raised to reach it (on a copy: your camera is
+untouched). Haze fades the far sea to the sky's own horizon colour over `visibility` metres (60 km); the
+backdrop fills the sliver down to the dipped horizon so there is no seam. Whitecaps are the Jacobian of the choppy displacement with
+three lags (0, 0.9, 2 s) so foam decays after the crest; their area follows Monahan's law (about 0 below 4 m/s, 1.5 % at 8,
+5 % at 12, 14 % at 18 m/s, scaled down by a short fetch). From 12 m/s spray streaks along the wind come in, up to full at 20 m/s.
+
+What is left out: no breaking wave shape (the foam is texture over smooth crests), no shoreline or shallow-water
+dispersion on the spectrum (water bodies keep their own waves), no spray particles, one wind heading for the whole sea,
+and the first frame of a scene costs about 8 ms for the FFTs. The planar reflection pass is still a flat mirror about the
+mean level, so on the curved sea it is correct only near the camera. Cost at 1080p on the development machine: 5 ms
+for the old sea and 16 ms for the spectrum sea (low or at 10 km), of which about 10 ms of CPU per new time (FFTs and foam).
+
+Roughness and whitecaps (added after review). The grids stop at about 5 cm, so the sea's slope variance above them is added to
+the glint's roughness as `lost` does for a mip level: the short-wave branch of Elfouhaily et al. (a curvature spectrum that rises
+with the friction velocity) integrated from the finest grid down to 5 mm. Grids plus that tail give a mean square slope of 0.033, 0.063 and
+0.111 at 5, 10 and 18 m/s against Cox and Munk's 0.029, 0.054 and 0.095 (`Water::shadingSlopeVariance()`); the grids alone are 55 to 64 % under at
+10 and 18 m/s. The foam comes from the finest cascade that still has a patch of 30 m or more (the waves of a few metres to a dozen), its Jacobian
+patches are drawn out along the crest (a line of texels about 6 m each side, so patches are about 4 times longer than wide, across the wind) and
+blurred a little; the shader sharpens the edge, breaks it into lace with three scales of noise that fade out at the pixel size, and
+thins it with a slow mask so a tile's few patches do not make a lattice from above. In a fresh breeze the area is raised up to twice the
+law, so white horses are seen at 10 m/s. A reflected ray that points into the water is folded up smoothly and tinted by the water's
+colour (the old crease drew thin rings round pits on a steep sea). The nested contour rings of a dark storm sea were the sky: all ocean
+textures are RGBA32F with trilinear mips from float data and the roughness taps are smooth, but a steep surface magnifies a tiny patch of
+the 8-bit sky image many times, and its cloud noise shows as terraces. The sea now reads the sky at a mip level that grows with its slope
+variance (`oceanSkyLod`, up to 5), which is also what a rough sea mirrors. The foam edge is widened by `fwidth` of its own value so it is
+anti-aliased rather than a stair of map texels. What remains: faint rings in the pits of the 3x crop, and the foam of a short-fetch sea is
+held down less than the law says. Test `oceanArtefacts` reads a 3 m storm view: the dark water's mean Laplacian (3.79 against 4.23 with
+the sky at full resolution, bound 4.0) and the share of foam edges crossed with at most one in-between pixel (1.0 % against 2.1 %,
+bound 1.5 %).
+
+Debug read-outs for tests (`Scene::ground.debug`): 3 draws the foam alone, 4 packs the surface height into two bytes.
+
+Tests (weather ctest, `ocean`): the slope picture of 2 km and 400 m shows no comb at the cascade periods and their harmonics
+(and does with one cascade or with `decorrelate` off); Hs at 5, 10 and 15 m/s within 20 % of the W1 prediction and
+rising as U^2 when fully developed; purity (a frame alone equals the frame after others, two runs identical, CPU height after a
+flushed cache identical); the spectrum off is pixel-identical whatever its fields hold; the horizon row at 10 m and 10 km
+against the dip (1.5 px; a flat sea misses it); foam about 0 at 3 m/s and rising at 8, 12 and 18; the far third of a
+grazing view changing little as the camera creeps (and far more with `filter` off); the CPU height within 2 cm of the
+height the mesh draws, `ride()` following the surface; the shading slope variance within 30 % of Cox and Munk at 5, 10 and 18 m/s; and foam patches at 12 m/s with a median aspect ratio of 2 or more, within 30 degrees of across the wind.
+
 ## Script
 
-The scene descriptor's `clouds` object (docs/scripting.md) takes the `Clouds` fields by name. Its `weather` object takes a `preset`, optionally `to` and
+The water's `spectrum` object and `examples/scripts/open_ocean.as` are in docs/scripting.md. The scene descriptor's `clouds` object (docs/scripting.md) takes the `Clouds` fields by name. Its `weather` object takes a `preset`, optionally `to` and
 `amount` to mix towards a second preset, and per-field overrides; `ownWind`, `ownClouds`, `ownLight`
 and `ownFog` are keys on the objects above. `examples/scripts/weather_mix.as` is a meadow with
 grass, trees, a pond and rain, mixed from clear into a storm across the clip. The `wakes` and `ripples` arrays and an

@@ -193,6 +193,11 @@ Field inWeather(const Field& f, const Weather& w, const Matrix* world) {
 
 Water inWeather(const Water& water, const Weather& w) {
     Water out = water;
+    if (w.enabled && !water.ownWind && water.spectrum.enabled) {       // the spectrum sea takes the wind itself (W9)
+        out.spectrum.windSpeed = w.wind.speed;
+        out.spectrum.windDirection = w.wind.direction;
+        return out;
+    }
     if (!w.enabled || water.ownWind || water.waves.empty()) return out;
     // The waves' mean heading, weighted by amplitude; the wind turns it all by one angle.
     float sx = 0, sy = 0;

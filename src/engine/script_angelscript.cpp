@@ -5508,6 +5508,18 @@ std::shared_ptr<g3d::Scene> buildJsonScene(const Json& j) {
             if(waves.size()>8) throw std::runtime_error("3D water supports at most eight waves"); scene->water.waves.clear(); for(const auto& w:waves.asArray()) {
  g3d::Water::Wave wave; wave.direction=(float)w.num("direction",wave.direction); wave.wavelength=(float)w.num("wavelength",wave.wavelength); wave.amplitude=(float)w.num("amplitude",wave.amplitude); wave.sharpness=(float)w.num("sharpness",wave.sharpness); wave.speed=(float)w.num("speed",wave.speed); scene->water.waves.push_back(wave); }
         }
+        // W9: an FFT ocean from a wave spectrum, in place of `waves` (see Water::Spectrum).
+        const auto& spec=water["spectrum"]; if(spec.isObject()) {
+            g3d::Water::Spectrum& sp=scene->water.spectrum; sp.enabled=spec.flag("enabled",true);
+            sp.cascades=spec.integer("cascades",sp.cascades); if(sp.cascades<1||sp.cascades>4) throw std::runtime_error("water spectrum cascades must be 1 to 4");
+            sp.windSpeed=(float)spec.num("windSpeed",sp.windSpeed); sp.windDirection=(float)spec.num("windDirection",sp.windDirection);
+            sp.gamma=(float)spec.num("gamma",sp.gamma); sp.spread=(float)spec.num("spread",sp.spread); sp.choppiness=(float)spec.num("choppiness",sp.choppiness);
+            sp.swell=(float)spec.num("swell",sp.swell); sp.swellDirection=(float)spec.num("swellDirection",sp.swellDirection); sp.patch=(float)spec.num("patch",sp.patch);
+            sp.visibility=(float)spec.num("visibility",sp.visibility); sp.spray=(float)spec.num("spray",sp.spray); sp.curvature=spec.flag("curvature",sp.curvature);
+            sp.decorrelate=spec.flag("decorrelate",sp.decorrelate); sp.seed=(unsigned)spec.integer("seed",(int)sp.seed);
+            for(float v:{sp.windSpeed,sp.windDirection,sp.gamma,sp.spread,sp.choppiness,sp.swell,sp.swellDirection,sp.patch,sp.visibility,sp.spray}) if(!std::isfinite(v)) throw std::runtime_error("water spectrum values must be finite");
+            if(sp.windSpeed<0||sp.choppiness<0||sp.patch<0||sp.visibility<0) throw std::runtime_error("water spectrum windSpeed, choppiness, patch and visibility must not be negative");
+        }
     }
     const auto& bodies=j["waterBodies"]; if(bodies.isArray()) {
         // Lakes, pools and rivers: each is a g3d::WaterBody. Points are [x, z]; the look keys are those of "water".

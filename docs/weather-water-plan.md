@@ -327,6 +327,8 @@ It stays a pure function of `t`.
   - `height` on the CPU matches the drawn surface within 2 cm at five points.
   - No visible seams between cascades in an enlarged crop.
 
+**Done 2026-11-27.** `Water::spectrum` (src/engine/ocean.cpp, `ocean.hpp`), see "Ocean to the horizon" in docs/weather.md. Left open: breaking-wave shape, a flat-mirror reflection on the curved sea, foam that reads as lace at grazing view, and a storm look at 18 m/s that is not yet convincing.
+
 ## W10. Light in the air
 
 - God rays: sun shafts through gaps in clouds and canopies and through windows, from the
