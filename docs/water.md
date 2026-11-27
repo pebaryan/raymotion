@@ -81,6 +81,24 @@ The keys of a body (`type`, `outline`, `holes`, `path`, `width`, `level`, `fall`
 `Scene3D.surfaceHeight(x, z, seconds)` returns the surface height at a point and time (the sea
 and the bodies), so a script can place something on it.
 
+## What the mirror and the bed show
+
+* **The mirror shows only what stands above the water.** The reflection pass mirrors the scene about
+  the level of the body being drawn (`WaterBody::level`, not the sea's `Water::level`) and the lit shader
+  discards everything under that level, for meshes, instances, grass and trees alike. A pile's
+  reflection starts at the waterline and its submerged part is never mirrored into the open.
+* **What lies under the water shows through the surface**, not in the mirror: the march of the refracted
+  ray reads the opaque scene, and the water absorbs it over the length of that ray.
+* **A ray that finds no bed stands in the same way.** The march is in screen space and steps over
+  anything that stands above the surface, so a bed hidden behind a deck or its rails, or beyond the
+  march, used to fall back to the straight view absorbed over the much longer view path: a darker
+  copy of the jetty on the lake and one hard line across it, where the marched hits stopped. A miss
+  now takes the bed colour at the point the refracted ray would reach (or the straight view's when
+  that point is hidden) and absorbs it over the refracted ray's length, as a hit would. A hit beside
+  the edge of something above the water is a miss, so rails leave no brown fringe.
+  Tests: `noJettyGhost`, `noSeamAcrossTheLake` (tests/weather_tests.cpp).
+  A pool seen at a grazing angle used to show two tones either side of the line; it is one now.
+
 ## Knobs
 
 | Knob | Unit | Default | Where |

@@ -309,6 +309,7 @@ billboard particles and splats are not reflected.
   - A lake polygon from geo3d sits at its level.
 
 **Done 2026-11-26.** `Scene::waterBodies` (`g3d::WaterBody`: lake, pool, river), soft shore and lace foam from the scene depth, two-phase flow map, `city::Look::realWater`, script `waterBodies`; see "Lakes, rivers and pools" in docs/weather.md. geo3d has no water polygons, so only city water converts.
+Fix 2026-11-27: a jetty's "ghost" in the lake and a hard seam across it came from the refraction march's no-hit fallback (a bed hidden behind rails or past the march took the straight view absorbed over the long view path), not from the mirror pass, whose clip and level were right; a miss now shows the bed absorbed over the refracted length (`noJettyGhost`, `noSeamAcrossTheLake`; the mirror's clip and level are guarded by `noGhostBelowTheWater`, `reflectionMeetsPost`). See "What the mirror and the bed show" in docs/water.md.
 
 ## W8. Wakes, ripples and floating objects
 

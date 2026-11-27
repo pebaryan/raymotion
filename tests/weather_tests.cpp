@@ -8121,6 +8121,169 @@ static void presetCloudTiming() {
     }
 }
 
+// ---------------------------------------------------------------- the mirror shows only what stands above the water
+// A calm lake with its level on the WaterBody (not the Scene), 0.5 m up. A post stands in it, 0.15 m across: red for
+// 1.2 m above the surface, and a magenta band on the 2 m below it (a hidden part: the water is opaque, refraction off).
+// Magenta can only reach the picture through the mirror (an inverted ghost of the part under the water), so it must
+// not appear anywhere.
+constexpr float LAKE_LEVEL = 0.5f;
+static g3d::ScenePtr postLake(bool lake, bool reflect, bool band) {
+    auto s = w6Scene(g3d::Water{}, { 0, LAKE_LEVEL + 1.1f, 7 }, { 0, LAKE_LEVEL - 0.25f, 0 }, 40);
+    s->water.enabled = false;
+    if (lake) {
+        g3d::WaterBody b = g3d::WaterBody::lake({ { -40, -40 }, { 40, -40 }, { 40, 20 }, { -40, 20 } }, LAKE_LEVEL);
+        b.look = w6Water(0);
+        b.look.refraction = false;
+        b.look.reflections = reflect ? g3d::Water::Reflections::Scene : g3d::Water::Reflections::Off;
+        b.shoreFoam = 0;
+        s->waterBodies.push_back(b);
+    }
+    s->add(g3d::Geometry::cylinder(0.15f, 1.2f), flat({ 215, 25, 25, 255 }))->position = { 0, LAKE_LEVEL + 0.6f, 0 };
+    if (band) {        // the part under the water: the post's own, and a beam across behind it that its mirror image would lift into the open
+        s->add(g3d::Geometry::cylinder(0.15f, 2.f), flat({ 240, 20, 240, 255 }))->position = { 0, LAKE_LEVEL - 1.f, 0 };
+        s->add(g3d::Geometry::box(12, 0.3f, 0.3f), flat({ 240, 20, 240, 255 }))->position = { 0, LAKE_LEVEL - 1.f, -4 };
+        s->camera.position = { 0, LAKE_LEVEL + 4.f, 9 };
+        s->camera.target = { 0, LAKE_LEVEL - 0.5f, -3 };
+    }
+    return s;
+}
+// Magenta pixels, leaving out the columns of the post itself: where water meets a standing thing it is shallow and
+// shows what is under it by design (the soft edge); the ghost is looked for everywhere else.
+static int magentaPixels(const Image& img, int skipX0 = -1, int skipX1 = -1) {
+    int n = 0;
+    for (int y = 0; y < img.height; y++)
+        for (int x = 0; x < img.width; x++) {
+            if (x >= skipX0 && x <= skipX1) continue;
+            const Color c = GetImageColor(img, x, y);
+            if (c.r > 110 && c.b > 110 && c.g < 0.6f * std::min(c.r, c.b)) n++;
+        }
+    return n;
+}
+static void noGhostBelowTheWater() {
+    constexpr int W = 480, H = 270;
+    Image truth = look(postLake(false, false, true), W, H, 3), on = look(postLake(true, true, true), W, H, 3);
+    Image off = look(postLake(true, false, true), W, H, 3);
+    dump("refl-ghost-on.png", on);
+    dump("refl-ghost-off.png", off);
+    dump("refl-ghost-truth.png", truth);
+    const int seen = magentaPixels(truth), ghost = magentaPixels(on, W / 2 - 14, W / 2 + 14), plain = magentaPixels(off, W / 2 - 14, W / 2 + 14);
+    std::printf("[weather] mirror ghost: magenta band pixels without a lake %d, lake reflecting %d, lake not reflecting %d\n", seen, ghost, plain);
+    CHECK(seen > 100);          // the band is there to be seen (the control: a test that cannot see it proves nothing)
+    CHECK(plain == 0);
+    CHECK(ghost == 0);
+    UnloadImage(truth); UnloadImage(on); UnloadImage(off);
+}
+// The post's lowest pixel (its waterline, from the picture with the mirror off) and the top of its reflection must
+// meet: the mirror is about the water body's own surface level.
+static void reflectionMeetsPost() {
+    constexpr int W = 480, H = 270;
+    Image on = look(postLake(true, true, false), W, H, 3), off = look(postLake(true, false, false), W, H, 3);
+    dump("refl-meet-on.png", on);
+    const int x = (int)std::lround(project(postLake(true, true, false)->camera, { 0, 0, 0 }, W, H).x);
+    int low = -1, top = -1, end = -1;
+    for (int y = 0; y < H; y++) if (redness(GetImageColor(off, x, y)) > 60) low = y;
+    for (int y = low + 1; y < H && low >= 0; y++) if (addedAt(on, off, x, y, 1).x > 15) { if (top < 0) top = y; end = y; }
+    const auto cam = postLake(true, true, false)->camera;
+    const int want = (int)std::lround(project(cam, { 0, LAKE_LEVEL - 1.2f, 0 }, W, H).y);     // where the mirror image of the post's top lies
+    std::printf("[weather] reflection meets the post: lowest post row %d, first reflection row %d (gap %d px), last row %d, mirrored top at %d\n", low, top, top - low - 1, end, want);
+    CHECK(low > 0 && top > 0);
+    CHECK(top - low - 1 <= 2 && top - low - 1 >= 0);       // it starts where the post stops
+    CHECK(std::abs(end - want) <= 3);                       // and runs as far as the mirror image of its top: a mirror at the wrong level shortens it
+    UnloadImage(on); UnloadImage(off);
+}
+
+// A jetty like the weather-day film's, on a calm lake: a deck and rails seen from its landward end, a bank under that
+// end, a bed 2.2 m down. `look`: 0 the wood, 1 the jetty in unlit magenta (its mask), 2 no jetty. No piles: what stands in
+// the water is not what is being tested. The sun is behind the viewer, so there is no glint and no shadow to read.
+static g3d::ScenePtr jettyLake(bool reflect, int jetty) {
+    g3d::Camera cam;
+    cam.position = { 6, 2.82f, 0 }; cam.target = { 106, 2.5f, 0 }; cam.fov = 48; cam.nearPlane = 0.3f; cam.farPlane = 6000;
+    auto s = bodyWorld(cam);
+    s->sky = g3d::Sky::day();
+    s->sky.clouds = 0;
+    s->lights.clear();
+    s->lights.push_back(g3d::Light::directional({ -50, 30, 10 }, WHITE, 2.0f, false));
+    s->weather = g3d::Weather::clear();
+    s->weather.enabled = true;
+    s->weather.wind.speed = 1.5f;
+    s->fogMode = g3d::FogMode::Exponential;                // the film's mist: the bed seen through the water carries it
+    s->fogDensity = 0.006f;
+    s->fogFromSky = true;
+    wx::WaterSpec spec;
+    spec.shore = { { 12, -90 }, { 160, -90 }, { 160, 90 }, { 12, 90 } };
+    spec.look = wx::Surface::Calm;
+    g3d::WaterBody b = wx::waterBody(spec);
+    b.look.reflections = reflect ? g3d::Water::Reflections::Scene : g3d::Water::Reflections::Off;
+    s->waterBodies.push_back(b);
+    g3d::Material bed; bed.color = { 74, 99, 52, 255 }; bed.roughness = 1;
+    s->add(g3d::Geometry::plane(600, 600), bed)->position = { 0, -2.2f, 0 };
+    s->add(g3d::Geometry::box(60, 3.2f, 200), bed)->position = { -18, -0.6f, 0 };
+    if (jetty == 2) return s;
+    g3d::Material wood; wood.color = { 109, 90, 68, 255 }; wood.roughness = 0.9f;
+    if (jetty == 1) wood = flat({ 255, 0, 255, 255 });
+    s->add(g3d::Geometry::box(24, 0.12f, 2.2f), wood)->position = { 16, 1.12f, 0 };
+    for (int i = 0; i < 7; i++)
+        for (int side : { -1, 1 }) s->add(g3d::Geometry::cylinder(0.09f, 1.0f, 12), wood)->position = { 4.5f + i * 4, 1.12f + 0.5f, side * 1.05f };
+    for (int side : { -1, 1 }) s->add(g3d::Geometry::box(24, 0.07f, 0.07f), wood)->position = { 16, 1.12f + 0.95f, side * 1.05f };
+    return s;
+}
+// What the water is made to show must not depend on what stands over it on the screen. The same lake with and without
+// a jetty, the mirror off: outside the jetty's own pixels (3 px clear of its magenta mask) the two pictures are the same
+// water. Marching a refracted ray in screen space steps over the rails and the deck, so a bed that sits behind them
+// was lost and the water there came out darker: a ghost of the jetty on the lake, seen in the film.
+static void noJettyGhost() {
+    constexpr int W = 960, H = 540;
+    Image with = look(jettyLake(false, 0), W, H, 3), mask = look(jettyLake(false, 1), W, H, 3), without = look(jettyLake(false, 2), W, H, 3);
+    dump("refr-ghost-with.png", with);
+    dump("refr-ghost-without.png", without);
+    auto magenta = [&](int x, int y) { const Color c = GetImageColor(mask, x, y); return c.r > 150 && c.b > 150 && c.g < 90; };
+    int bad = 0, n = 0, worst = 0;
+    Image diff = GenImageColor(W, H, BLACK);
+    for (int y = 288; y < 446; y++)
+        for (int x = 0; x < W; x++) {
+            bool near = false;
+            for (int j = -3; j <= 3 && !near; j++) for (int i = -3; i <= 3 && !near; i++) near = magenta(std::clamp(x + i, 0, W - 1), std::clamp(y + j, 0, H - 1));
+            if (near) continue;
+            n++;
+            const int d = pixelDelta(GetImageColor(with, x, y), GetImageColor(without, x, y));
+            worst = std::max(worst, d);
+            if (d > 8) { bad++; ImageDrawPixel(&diff, x, y, WHITE); }
+        }
+    dump("refr-ghost-diff.png", diff);
+    std::printf("[weather] jetty ghost: %d of %d water pixels off the jetty differ by more than 8 levels (worst %d)\n", bad, n, worst);
+    CHECK(n > 40000 && bad < n / 500);
+    UnloadImage(with); UnloadImage(mask); UnloadImage(without); UnloadImage(diff);
+}
+// A calm lake has no seam: the row-by-row mean brightness down the water (over a band of columns, which averages the
+// ripples out) steps by the same small amount everywhere. The marched refraction found the bed only over a band of
+// rows, and out of it fell back to a straight, far darker view: one hard line across the lake.
+static void noSeamAcrossTheLake() {
+    constexpr int W = 960, H = 540;
+    Image img = look(jettyLake(true, 2), W, H, 3);
+    dump("lake-seam.png", img);
+    std::vector<Vector3> p;
+    for (int y = 288; y < 446; y++) {
+        Vector3 s{ 0, 0, 0 };
+        for (int x = 40; x < 440; x++) { const Color c = GetImageColor(img, x, y); s.x += c.r; s.y += c.g; s.z += c.b; }
+        p.push_back(Vector3Scale(s, 1.f / 400));
+    }
+    double step = 0;
+    int at = 0;
+    for (size_t i = 0; i + 1 < p.size(); i++) {
+        const double d = std::max({ std::fabs(p[i + 1].x - p[i].x), std::fabs(p[i + 1].y - p[i].y), std::fabs(p[i + 1].z - p[i].z) });
+        if (d > step) { step = d; at = 288 + (int)i; }
+    }
+    std::printf("[weather] lake seam: the largest row-to-row step of any channel's mean level down the water is %.2f (at row %d)\n", step, at);
+    CHECK(step < 1.0);
+    UnloadImage(img);
+}
+static void mirrorAboveTheWater() {
+    noGhostBelowTheWater();
+    reflectionMeetsPost();
+    noJettyGhost();
+    noSeamAcrossTheLake();
+}
+
 int main() try {
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
@@ -8141,6 +8304,12 @@ int main() try {
         for (float v : gridMeans(g, 6, 4)) std::printf("%.2ff, ", v);
         std::printf("\n");
         shutdownGraphics(); CloseWindow(); return 0;
+    }
+    if (std::getenv("RMTN_MIRROR_ONLY")) {
+        mirrorAboveTheWater();
+        shutdownGraphics(); CloseWindow();
+        std::printf(failures ? "[weather] %d failures\n" : "[weather] all passed\n", failures);
+        return failures ? 1 : 0;
     }
     if (std::getenv("RMTN_W9_IMAGES")) { w9Images(); shutdownGraphics(); CloseWindow(); return 0; }
     if (std::getenv("RMTN_W10_TIMING")) { airTiming(); shutdownGraphics(); CloseWindow(); return 0; }
@@ -8233,6 +8402,7 @@ int main() try {
     precipitation();
     wetAndSnow();
     waterBodies();
+    mirrorAboveTheWater();
     waterWakes();
     ocean();
     lightningStorm();

@@ -391,6 +391,14 @@ vec4 seeThrough(vec3 n, vec3 v) {
             if (rayBehind(fragPos + t * mid, thk, uv)) hi = mid; else lo = mid;
         }
         uv = camUV(fragPos + t * hi);
+        // A hit beside the edge of something that stands over the water reads that thing's colour into the filtered
+        // sample (a brown fringe round every rail): a hit needs bed under the pixel and its neighbours.
+        vec2 du = vec2(2.0) / (vec2(textureSize(refrDepth, 0)) * refrMap.zw);
+        for (int k = 0; k < 4; k++) {
+            vec2 o = vec2(k < 2 ? (k == 0 ? -du.x : du.x) : 0.0, k < 2 ? 0.0 : (k == 2 ? -du.y : du.y));
+            float dn = refrDepthAt(uv + o);
+            if (dn >= 0.99999 || refrWorld(uv + o, dn).y >= fragPos.y - 0.003) return vec4(0.0);
+        }
     } else {
         uv = exitUV;
         float d = refrDepthAt(uv);
@@ -618,6 +626,7 @@ vec4 waterSurface() {
     // surface's height over where the view ray meets the scene), and that scene's colour there.
     float bedDepth = 1.0e3, edgeFade = 1.0;
     vec4 bedSeen = vec4(0.0);                         // straight view of the bed after absorption; a = 1 when there is one
+    vec3 bedRaw = vec3(0.0);                          // the bed's own colour (linear) there, before the water has absorbed any of it
     if (isBody) {
         vec2 uvS = camUV(fragPos);
         float dz = refrDepthAt(uvS);
@@ -627,7 +636,8 @@ vec4 waterSurface() {
             vec4 sc = textureLod(refrColor, refrMap.xy + uvS * refrMap.zw, 0.0);
             if (sc.a > 0.5) {
                 vec3 tr = exp(-waterAbsorb * distance(fragPos, P));
-                bedSeen = vec4(pow(sc.rgb / sc.a, vec3(2.2)) * tr + waterScatter * (1.0 - tr), 1.0);
+                bedRaw = pow(sc.rgb / sc.a, vec3(2.2));
+                bedSeen = vec4(bedRaw * tr + waterScatter * (1.0 - tr), 1.0);
             }
         }
         edgeFade = smoothstep(0.0, max(bodyShore.x, 1e-3), bedDepth);
@@ -648,6 +658,7 @@ vec4 waterSurface() {
         return vec4(c * tr + waterScatter * (1.0 - tr), 1.0);
     }
     float ndv = max(dot(n, v), 1e-3);
+)" R"(
     // What the fade took out (lost slope variance) is put back in the average, not dropped: the Fresnel term and
     // the reflected sky are averaged over normals tilted towards and away from the viewer by the lost slope's
     // standard deviation (3-point Gauss-Hermite). Flattening a chop must not change how bright it is.
@@ -768,7 +779,31 @@ vec4 waterSurface() {
     float a = clamp(F + (1.0 - F) * bodyA + dot(glint, vec3(0.3333)), 0.0, 1.0);
     if (refrMode == 1 || isBody) {                          // looks through: an opaque surface that shows what is under it itself
         vec4 st = refrMode == 1 ? seeThrough(n, v) : bedSeen;
-        if (isBody && (st.a < 0.5 || seeLeft)) st = bedSeen;                   // the ray found nothing on screen (the bed is hidden behind a deck, say): the bed straight under the pixel
+        if (isBody && (st.a < 0.5 || seeLeft)) {
+            // The march found no bed: the bed at that spot is hidden behind something in front of the water (a deck, rails, the
+            // bank) or lies past the march. Marching skips an occluder above the surface, so the same bed shows or not by what
+            // happens to stand over its screen position: a ghost of the jetty, and a seam where the hits stop. The bed the
+            // straight view sees stands in for it, absorbed over the length the refracted ray would have gone to reach it
+            // (as a hit would be), so a miss and a hit are the same water.
+            st = bedSeen;
+            if (refrMode == 1 && bedSeen.a > 0.5) {
+                vec3 rt = refract(-v, n, 1.0 / WATER_IOR);
+                float along = bedDepth / max(-rt.y, 0.05);
+                // Where the refracted ray meets the plane of that bed: if the picture shows bed level there, its colour (a
+                // floor in a pool is not the wall the straight view meets); else the straight view's.
+                vec3 raw = bedRaw;
+                vec2 uq = camUV(fragPos + rt * along);
+                if (uq.x > 0.0 && uq.x < 1.0 && uq.y > 0.0 && uq.y < 1.0) {
+                    float dq = refrDepthAt(uq);
+                    if (dq < 0.99999 && abs(refrWorld(uq, dq).y - (fragPos.y - bedDepth)) < 0.05 + 0.05 * bedDepth) {
+                        vec4 cq = textureLod(refrColor, refrMap.xy + uq * refrMap.zw, 0.0);
+                        if (cq.a > 0.5) raw = pow(cq.rgb / cq.a, vec3(2.2));
+                    }
+                }
+                vec3 tr = exp(-waterAbsorb * along);
+                st = vec4(raw * tr + waterScatter * (1.0 - tr), 1.0);
+            }
+        }
         vec3 under = mix(mix(body, st.rgb, st.a), body, bodyA);
         premul = skyRefl + (1.0 - F) * under + glint;
         a = 1.0;
