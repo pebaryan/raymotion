@@ -587,6 +587,67 @@ sea (W9's haze does that), not the clouds (`Clouds::haze` does). Land under the 
 `examples/scripts/forest_light.as` (morning mist, the sun low behind the trees; its `ambient` is 0.05, because a high one lifts the shade and the shafts die), `sunset_sea.as` (the seam case: a headland hazed into a sunset sea), `barn_shafts.as` (dust in a dark barn with a
 high window) and `blue_ridges.as` (six ridges to 35 km).
 
+## Camera weather
+
+What weather does to a lens, as a layer filter (`fx::Lens`, `rmtn/lens.hpp`; `Filter::Type::Lens`). It works on any layer: a 2D
+composition, or a 3D scene's whole image (put the filter on the node that draws the scene). It reads the layer's pixels and the
+frame; it never touches the scene, so a camera move does not move a drop. Off means off: with `rain.rate`, `frost.amount` and
+`snow.rate` at 0 and no wiper, every pixel is as it was.
+
+```cpp
+fx::Lens lens;
+lens.rain.rate = 0.7f; lens.rain.blurBehind = 12;        // raindrops, the background out of focus
+lens.rain.rateAt = fx::rainOf(scene->weather);           // or follow the scene's rain over film time
+lens.wiper.period = 3.2f;                                // a windscreen wiper
+node->isolate().filters.push_back(fx::lens(lens));       // also fx::lensRain, lensFrost, lensSnow, wiper
+```
+
+**Raindrops.** The layer is cut into square cells (0.085 of its height); each holds two slots, and a slot spawns at most one drop
+in each cycle of 7-15 s. Whether it spawns follows `rate` (or `rateAt`) at the moment of spawning. A drop grows to its radius
+(0.10-0.44 of a cell, times `size`) with a time constant of 0.7 s, stays, and shrinks away over its last 1.2 s. Everything is a hash
+of the cell, the slot and the cycle, so a frame is a pure function of `t` and `seed`. A drop above 0.27 cell starts to slide after
+0.4-1.9 s, at `slide * 3.667 * radius` px/s (a 28 px drop at slide 1: 100 px/s), with a wiggle of 0.12 radius, for 0.7-1.9 cells,
+then it sticks. It leaves a trail of tiny drops behind it. Drops that melt from snowflakes behave as small drops.
+
+Each drop is a low lens, nearly clear. Its outline is irregular (a per-drop stretch plus a low-frequency wobble; a sliding drop is a
+teardrop with a narrower top). The picture inside it is the sharp picture sampled at `c - (3.6 u + n * 0.8) r`, with `u` the offset from
+the centre in radii and `n` the slope of a low spherical cap (contact angle about 30-60 degrees): about 3.6 radii around are flipped and
+squeezed in (a ramp seen through it is minified about 4-6 times, reversed), so a whole lamp fits in a drop, at the brightness of the
+background (no darkening, no tint). Only a rim a few px wide is shaded (darker on the upper side, a faint gathered glow low), the
+colour fringe is 4% of the radius, and a small sharp glint appears only where a bright light lies in the reflected direction.
+`blurBehind` blurs the picture outside the drops by a disc of that many px, with bright lights blooming into bokeh; the drops show
+the sharp picture. The CPU functions `fx::lensDrops` and `fx::lensFlakes` return the same drops the shader draws (id, position,
+radius, sliding, speed, birth time).
+
+**Frost and condensation** (`frost`). `amount` 0..1 is how much of the glass is covered; `startFrame` and `endFrame` make it creep
+from 0 to `amount` between them. With `fromEdges` it spreads from the edges and corners inwards (the corners first), else in patches. The
+crystals are dendrites grown from nucleation points along each edge, in that edge's frame, so every frond runs inward along the
+creeping front: a stem, branches off it at 40 degrees, sub-branches and barbs off those (spacing, length and skipped branches hashed per
+frond), at four scales, plus long fine hairs running straight in, all bent by a warp that is mostly along the edge. The pattern is a
+distance to line segments, anti-aliased with a smoothstep one pixel wide (no hard thresholds, no emboss). The four edges are weighted by exp(-(d - dmin) / 0.06 H), so at a corner two sets of fronds interpenetrate with no seam, and each corner also nucleates fronds along its diagonal. A
+film of milky frost covers the glass; crystals scatter and blur what is behind, lift it toward white, and have a thin
+bright edge only on their boundary. `kind: "condensation"` is a fog instead, blurred and greyed, with clear streaks where drops ran
+(when there is rain) and the same cleared patches. `clears` (up to four `[x, y, radius]`) wipe round patches with a ragged edge.
+
+**Snowflakes** (`snow`). A flake lands at a hashed time and sits for 1.2-3.2 s as a close, out-of-focus, partly transparent soft white
+disc (radius 0.029-0.072 of the layer height, hashed opacity, about half as many as before) with a six-fold hint of under 10% of its brightness; then, over 0.9 s, the white shrinks into an irregular wet blotch while a transparent drop (0.45 of
+its radius) grows, which behaves like a small drop and evaporates.
+
+**Wiper** (`wiper`). An arm from a pivot (default 0.5, 1.18 of the layer, below the frame) of `length` 1.06 of the height
+sweeps from `from` to `to` degrees (0 is straight up, positive to the right) and back, then rests: each stroke takes 0.3 of
+`period`, the rest 0.4 of it, with a cosine ease. It is drawn as a dark arm and blade (`drawBlade`, `bladeWidth`). The wiper clears
+drops: a drop is removed at the first moment after it was born that the blade touches any part of it (its position at that moment, for a sliding
+drop), and so are the trail drops and flakes. The set of survivors is worked out from spawn times and sweep times, so it is a pure
+function of `t`; the swept sector refills at the spawn rate.
+
+Script: `layerFilter(scene, json)` with `"type": "lens"` and the sub-objects `rain`, `frost`, `snow` and `wiper` (docs/scripting.md), or the
+types `lensRain`, `lensFrost`, `lensSnow` and `wiper` with the keys at the top level. Put the wiper in the same `lens` as the rain it
+must clear. `examples/scripts/windscreen.as` (a night drive in the rain, a 3D scene) and `frosted_window.as` (a 2D evening with frost
+creeping in and a wiped patch).
+
+Left out: drops that merge, a wiper that smears the water it moves, frost that regrows after a wipe, and drops that follow gravity
+on a tilted lens (the slide is straight down the layer).
+
 ## Script
 
 The water's `spectrum` object and `examples/scripts/open_ocean.as` are in docs/scripting.md. The scene descriptor's `clouds` object (docs/scripting.md) takes the `Clouds` fields by name. Its `weather` object takes a `preset`, optionally `to` and
@@ -596,6 +657,34 @@ grass, trees, a pond and rain, mixed from clear into a storm across the clip. Th
 object's `ride` key are in docs/scripting.md; `examples/scripts/harbour_wake.as` is a launch, a dinghy and a stone in a harbour.
 
 ## Tests
+
+W11 (`RMTN_W11_ONLY=1`; 640 x 360 layers, read back from the canvas): all four filters at zero are pixel-identical (diff 0) to the
+layer without them, at three frames; static drops keep their place over 0.5 s (316 kept, 0 moved) and a sliding drop of 13.4 px
+moves at the documented 59.7 px/s in the twin and in the pixels (centroid of the changed pixels within 0.5 px of the twin; twice the
+`slide` is twice the speed); 99 of 99 drops the twin lists are drawn, and no pixel away from every drop differs from the source (0); a
+3D scene panned between two cameras has the same drop footprint (Jaccard 0.995); a wiper clears the swept sector: 226 drops in it
+without the wiper, 42 just after the sweep, all born since it began, the 116 drops it never touches all remain, 186 495 sector pixels
+away from the survivors are identical to the drop-free image (22 090 would differ without the wiper), and the sector holds 119 drops two
+seconds later; the blade is drawn at the angle the twin gives; inside a 19 px drop a ramp of 1.5 levels per px is reversed
+(correlation with the offset about -1.0 in x and y); frost changes the edge band more than the centre
+and grows with the amount and with time, with a cleared patch left identical; a flake sits as a bright blob and melts into a listed drop;
+a frame alone, after others, in a new canvas and twice is identical; `rateAt` from a weather's history raises the drop count with the
+rain. Each was broken to see it fail: the slide made frame-dependent (4 checks), the wiper ignored in the shader (the pixel check) and
+in the twin (4 checks), a flat disc instead of the refraction (2), frost without the edges (6), a tint at zero (3), the filter made
+impure (1). Not tested by breaking: drops in world space (the filter has no access to the scene, so it cannot).
+Look tests (the round-1 review): over a flat grey 128 the inside of every drop of 10 px or more (16 drops) has mean luminance 128.0, within 0.0%
+(bound 10%; with the interior darkened by 25% it reads 96.0 and fails), and the mean circularity P^2/4piA of their drawn outlines
+(16 rays) is 1.12 (bound 1.08; round drops give 1.04, which fails); the refraction check now sees the drop minified 5.1 and 4.5
+times (-0.999 / -0.999). Frost over grey: the share of 4-neighbour pairs that jump 20 levels or more is 12% (bound 18%; with hard thresholds
+instead of anti-aliasing 26%, and the earlier fern pattern 48%), none jumps 60 or more (the earlier pattern: 14%); the orientation of the
+stems, from the gradient tensor of the picture blurred over 5 px, runs inward in each edge band (0.40, 0.39, 0.38, 0.36; bound
+0.3; the pattern rotated by 37 degrees gives 0.11, the earlier ferns 0.00).
+Round 2: a drop under about 5 px has no dark arc (rim and outline fade in between 3.5 and 8 px), so over grey 128 nothing inside one falls below 118
+(92%; bound 80%; the earlier look reached 79, 62%). The sitting flakes are 10-26 px in radius on a 360 px layer, and their six-fold harmonic at 0.6 r is at
+most 0.082 of the disc (bound 0.10; the earlier flakes 0.131). Frost corners: across the diagonal the mean |difference| to the mirror pixel is 11.7 against
+12.2 across a parallel line 8 px away (it must be no larger, and at least 0.88 of it; the nearest-edge split gave 12.9 against 17.2, structure dying
+out along the seam). The camera-pan check now compares the changed pixels with the twin's drops (0 of 4085 away from every drop; 34 of 34 drops over bright picture seen
+in both cameras), since a clear drop over smooth picture changes nothing.
 
 W10 (`RMTN_W10_ONLY=1`, timing `RMTN_W10_TIMING=1`): a roof with a 3 m slot over fog, the sun above it and a shadow map on the sun: the
 fog on the line of the shaft is 2.7 times brighter (linear light) than 6 m to either side at Low, Medium and High, and 0.99 times

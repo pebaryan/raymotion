@@ -376,6 +376,12 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   a depth-aware filter, no temporal accumulation; spot and point cones with `scatterLights`), and aerial perspective that
   fades distant land to the sky's horizon colour, bluer, thinning with altitude. Off by default; 0.3 to 1.2 ms at 1080p.
   `examples/scripts/forest_light.as`, `barn_shafts.as`, `blue_ridges.as`, `sunset_sea.as`.
+* Camera weather (`fx::Lens`, `rmtn/lens.hpp`, script `layerFilter` type `lens`; `docs/weather.md`): a layer filter for 2D
+  compositions and for a 3D scene's whole image. Raindrops on the glass that refract the picture (flipped and squeezed), slide at a
+  speed set by their size and leave trails, with the background optionally out of focus and the rate following the scene's rain;
+  frost that creeps in from the edges as dendrites of ice, or condensation with clear streaks; snowflakes that land and melt; and a
+  windscreen wiper that clears what it sweeps. Pure functions of the frame; about 1-5 ms at 1080p. `examples/scripts/windscreen.as`,
+  `frosted_window.as`.
 * GPU rain, snow and sleet at scale (`Scene::precipitation`, `docs/weather.md`): drops from a hash
   in fixed world tiles, streaks as long as the shutter and slanted by the wind, lit by the scene's
   lights, stopped by roofs and trees through a top-down depth map, with splashes where rain lands.

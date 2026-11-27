@@ -185,6 +185,8 @@ struct NodeProps {
 enum class Blend { Normal, Add, Multiply, Screen };
 enum class MaskMode { Alpha, Luma };
 
+namespace fx { struct Lens; }
+
 // An image filter on a layer's flattened content (illustration looks; see Layer::filters).
 // Sizes are composition px, so a look holds at any supersampling. Patterns are fixed to
 // the canvas and the same every frame.
@@ -201,6 +203,8 @@ struct Filter {
                       // pushed past white and spread as a `bloom` glow `size` px wide, a filmic (ACES)
                       // shoulder, `contrast`, `saturation`, split toning (`shadows`/`highlights` by
                       // `toning`), a `vignette` and dither against banding. Meant for an opaque layer.
+        Lens,         // what weather does to a camera's glass (rmtn/lens.hpp): raindrops, frost, snowflakes
+                      // and a wiper, from `lens`; a pure function of the frame, so `applyFilter` needs `t`
     };
     Type type = Type::Posterize;
     int levels = 4;
@@ -223,6 +227,7 @@ struct Filter {
     Color highlights{ 128, 128, 128, 255 };
     float toning = 0;                     // film: split-toning amount
     float vignette = 0;                   // film: corner darkening, 0..1
+    std::shared_ptr<const fx::Lens> lens; // lens: the settings (shared, so copies of a Filter are cheap)
 
     static Filter posterize(int levels = 4) { Filter f; f.type = Type::Posterize; f.levels = levels; return f; }
     static Filter halftone(float cell = 8, float angle = 45, bool colored = false) {

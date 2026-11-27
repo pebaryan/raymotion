@@ -159,6 +159,9 @@ Fall fallAt(const Weather& w, double sec) {
 }
 } // namespace
 
+float Weather::rainAt(double seconds) const { return fallAt(*this, seconds).rain; }
+float Weather::snowAt(double seconds) const { return fallAt(*this, seconds).snow; }
+
 Weather::GroundState Weather::ground(double seconds) const {
     GroundState g;
     seconds = std::max(seconds, 0.0);

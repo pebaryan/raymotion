@@ -7008,6 +7008,701 @@ static void airTiming() {
     }
 }
 
+// ================================================================ W11: camera weather (rmtn/lens.hpp)
+// Small 2D compositions with fx::lens on a layer, read back from the canvas. The CPU twin (fx::lensDrops) says where each
+// drop is; the pixels say where it was drawn; the checks tie the two together.
+static void lensRamps(const Ctx&, int) {            // R rises to the right, G down the frame: a flipped drop shows both reversed
+    DrawRectangleGradientEx({ 0, 0, 640, 360 }, BLACK, GREEN, YELLOW, RED);
+}
+static void lensChecker(const Ctx&, int) {          // mid grey with 4 px checks: scatter and blur change it everywhere
+    DrawRectangle(0, 0, 640, 360, { 128, 128, 128, 255 });
+    for (int y = 0; y < 360; y += 4)
+        for (int x = (y / 4) % 2 * 4; x < 640; x += 8) DrawRectangle(x, y, 4, 4, { 92, 92, 100, 255 });
+}
+static void lensDark(const Ctx&, int) { DrawRectangle(0, 0, 640, 360, { 20, 22, 30, 255 }); }
+static Comp lensComp(const fx::Lens* l, int w, int h, std::function<void(const Ctx&, int)> fn) {
+    Comp c;
+    c.w = w; c.h = h; c.fps = 30; c.duration = 4000; c.background = BLACK;
+    TNode* n = addRoot(c.roots, 0, 4000);
+    n->fn = std::move(fn);
+    Layer& layer = n->isolate();
+    if (l) layer.filters.push_back(fx::lens(*l));
+    return c;
+}
+static Image lensImg(const fx::Lens* l, int frame, std::function<void(const Ctx&, int)> fn = lensRamps, int w = 640, int h = 360) {
+    Comp c = lensComp(l, w, h, std::move(fn));
+    return render(c, frame);
+}
+static int frameOf(double sec) { return (int)std::lround(sec * 30.0); }
+static bool differs(Color a, Color b, int tol = 0) {
+    return std::abs(a.r - b.r) > tol || std::abs(a.g - b.g) > tol || std::abs(a.b - b.b) > tol;
+}
+
+// (c) Everything at zero is the image as it was, to the last level.
+static void lensOffMeansOff() {
+    fx::Lens zero;
+    zero.frost.startFrame = 10; zero.frost.endFrame = 50;      // a creep to 0 is 0
+    zero.rain.blurBehind = 12; zero.rain.size = 1.4f;          // settings without a rate do nothing
+    for (int f : { 0, 77, 301 }) {
+        Image a = lensImg(nullptr, f), b = lensImg(&zero, f);
+        const long long d = diffImages(a, b);
+        std::printf("[weather] W11 off: diff at frame %d = %lld\n", f, d);
+        CHECK(d == 0);
+        UnloadImage(a); UnloadImage(b);
+    }
+    // and a wiper with no blade and no rain changes nothing either
+    fx::Lens wip; wip.wiper.period = 2; wip.wiper.drawBlade = false;
+    Image a = lensImg(nullptr, 90), b = lensImg(&wip, 90);
+    CHECK(diffImages(a, b) == 0);
+    UnloadImage(a); UnloadImage(b);
+}
+
+// (a) Drops stay put and slide at the documented speed, in the twin and in the pixels.
+static void lensDropsStayAndSlide() {
+    fx::Lens still;
+    still.rain.rate = 1; still.rain.slide = 0; still.rain.seed = 4;
+    int shared = 0, moved = 0;
+    {
+        const auto a = fx::lensDrops(still, 12.0, 640, 360), b = fx::lensDrops(still, 12.5, 640, 360);
+        for (const auto& p : a)
+            for (const auto& q : b)
+                if (p.id == q.id) { shared++; if (std::hypot(p.pos.x - q.pos.x, p.pos.y - q.pos.y) > 1e-3f) moved++; }
+        std::printf("[weather] W11 static: %zu drops, %d kept over 0.5 s, %d moved\n", a.size(), shared, moved);
+        CHECK(a.size() > 80 && shared > 60 && moved == 0);
+    }
+    // a sliding drop, from the twin; then the same drop in the pixels at two frames
+    fx::Lens run;
+    run.rain.rate = 0.12f; run.rain.size = 1.5f; run.rain.seed = 4;
+    const float dt = 0.3f;
+    bool found = false;
+    fx::LensDrop d1, d2;
+    int f1 = 0, f2 = 0;
+    for (double s = 3; s < 40 && !found; s += 0.25) {
+        const int fa = frameOf(s), fb = fa + frameOf(dt);
+        const auto A = fx::lensDrops(run, fa / 30.0, 640, 360), B = fx::lensDrops(run, fb / 30.0, 640, 360);
+        for (const auto& p : A) {
+            if (p.kind != fx::LensDrop::Kind::Rain || !p.sliding || p.radius < 13 || p.pos.x < 60 || p.pos.x > 580 || p.pos.y < 60 || p.pos.y > 240) continue;
+            for (const auto& q : B) {
+                if (q.id != p.id || !q.sliding) continue;
+                bool alone = true;
+                for (const auto* L : { &A, &B })
+                    for (const auto& o : *L)
+                        if (o.id != p.id && o.kind != fx::LensDrop::Kind::Trail && std::hypot(o.pos.x - p.pos.x, o.pos.y - p.pos.y) < 2.6f * p.radius + o.radius + 6) alone = false;
+                if (alone) { found = true; d1 = p; d2 = q; f1 = fa; f2 = fb; }
+            }
+            if (found) break;
+        }
+    }
+    CHECK(found);
+    if (!found) return;
+    const double span = (f2 - f1) / 30.0;
+    const float twinSpeed = (d2.pos.y - d1.pos.y) / (float)span;
+    Image a = lensImg(&run, f1), b = lensImg(&run, f2), src = lensImg(nullptr, 0);
+    auto centroid = [&](const Image& img, fx::LensDrop d, float& cx) {
+        double sy = 0, sx = 0, n = 0;
+        const int x0 = (int)(d.pos.x - 1.5f * d.radius), x1 = (int)(d.pos.x + 1.5f * d.radius);
+        const int y0 = (int)(d.pos.y - 1.5f * d.radius), y1 = (int)(d.pos.y + 1.5f * d.radius);
+        for (int y = std::max(y0, 0); y < std::min(y1, 360); y++)
+            for (int x = std::max(x0, 0); x < std::min(x1, 640); x++)
+                if (std::hypot(x - d.pos.x, y - d.pos.y) < 1.3f * d.radius && differs(GetImageColor(img, x, y), GetImageColor(src, x, y), 3)) { sy += y; sx += x; n += 1; }
+        cx = n > 0 ? (float)(sx / n) : -1;
+        return n > 0 ? (float)(sy / n) : -1.f;
+    };
+    float cx1, cx2;
+    const float y1m = centroid(a, d1, cx1), y2m = centroid(b, d2, cx2);
+    std::printf("[weather] W11 slide: radius %.1f px, documented speed %.1f px/s, twin %.1f px/s, drawn %.1f px/s (centroid y %.1f -> %.1f, twin %.1f -> %.1f)\n",
+                d1.radius, d1.speed, twinSpeed, (y2m - y1m) / (float)span, y1m, y2m, d1.pos.y, d2.pos.y);
+    CHECK(std::fabs(twinSpeed / d1.speed - 1) < 0.05f);
+    CHECK(y1m > 0 && y2m > 0);
+    CHECK(std::fabs(y1m - d1.pos.y) < 2.5f && std::fabs(y2m - d2.pos.y) < 2.5f);              // drawn where the twin says
+    CHECK(std::fabs((y2m - y1m) / (float)span / d1.speed - 1) < 0.05f);                         // and moving at the documented speed
+    CHECK(std::fabs(cx1 - d1.pos.x) < 2.5f);
+    // twice the slide: twice the speed
+    fx::Lens fast = run; fast.rain.slide = 2;
+    const auto F = fx::lensDrops(fast, f2 / 30.0, 640, 360);
+    for (const auto& q : F)
+        if (q.id == d1.id && q.sliding) {
+            std::printf("[weather] W11 slide x2: speed %.1f (was %.1f)\n", q.speed, d1.speed);
+            CHECK(std::fabs(q.speed / d1.speed - 2) < 0.01f);
+        }
+    UnloadImage(a); UnloadImage(b); UnloadImage(src);
+
+    // every drop the twin lists is drawn, and pixels away from all drops are the source's (so nothing is drawn that the twin lacks)
+    {
+        const int f = frameOf(14.0);
+        fx::Lens dense = run; dense.rain.rate = 1;
+        Image img = lensImg(&dense, f), base = lensImg(nullptr, f);
+        const auto L = fx::lensDrops(dense, f / 30.0, 640, 360);
+        int drawn = 0, big = 0, strays = 0;
+        for (const auto& d : L)
+            if (d.radius >= 6 && d.pos.x > 12 && d.pos.x < 628 && d.pos.y > 12 && d.pos.y < 348) {
+                big++;
+                int changed = 0;
+                for (int y = (int)d.pos.y - 3; y <= (int)d.pos.y + 3; y++)
+                    for (int x = (int)d.pos.x - 3; x <= (int)d.pos.x + 3; x++)
+                        if (differs(GetImageColor(img, x, y), GetImageColor(base, x, y), 2)) changed++;
+                if (changed > 6) drawn++;
+            }
+        for (int y = 0; y < 360; y += 2)
+            for (int x = 0; x < 640; x += 2) {
+                bool near = false;
+                for (const auto& d : L) if (std::hypot(x - d.pos.x, y - d.pos.y) < d.radius * 1.15f + 3.f) { near = true; break; }
+                if (!near && differs(GetImageColor(img, x, y), GetImageColor(base, x, y), 0)) strays++;
+            }
+        std::printf("[weather] W11 twin vs pixels: %d of %d drops (r >= 6) drawn at their centre, %d stray pixels away from every drop\n", drawn, big, strays);
+        CHECK(big > 30 && drawn >= big - 1);
+        CHECK(strays == 0);
+        UnloadImage(img); UnloadImage(base);
+    }
+}
+
+// (a) A camera move does not move the drops: a 3D scene under the filter, panned.
+static g3d::ScenePtr lensStreet(float yaw) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera.position = { 0, 1.5f, 6 };
+    s->camera.target = { 6.f * std::sin(yaw), 1.5f, 6 - 6.f * std::cos(yaw) };
+    s->ambient = 0.9f;
+    g3d::Material ground;
+    ground.color = { 90, 96, 110, 255 };
+    s->add(g3d::Geometry::plane(80, 80), ground);
+    for (int i = 0; i < 9; i++) {
+        g3d::Material m;
+        m.color = { (unsigned char)(80 + 20 * i), (unsigned char)(200 - 15 * i), 120, 255 };
+        m.unlit = true;
+        s->add(g3d::Geometry::box(1, 2 + (float)(i % 3), 1), m)->position = { -8.f + 2.f * (float)i, 1.5f, -3.f - (float)(i % 4) };
+    }
+    return s;
+}
+static void lensCameraMove() {
+    fx::Lens l;
+    l.rain.rate = 1; l.rain.slide = 0; l.rain.seed = 7;
+    std::vector<std::vector<char>> masks, valid;            // valid: the picture is bright enough there for a drop to show
+    for (float yaw : { 0.f, 0.5f }) {
+        Comp c;
+        c.w = 480; c.h = 270; c.fps = 30; c.duration = 600; c.background = BLACK;
+        TNode* n = addRoot(c.roots, 0, 600);
+        n->fn = g3d::draw(lensStreet(yaw), {});
+        n->isolate().filters.push_back(fx::lens(l));
+        Comp plain;
+        plain.w = 480; plain.h = 270; plain.fps = 30; plain.duration = 600; plain.background = BLACK;
+        TNode* m = addRoot(plain.roots, 0, 600);
+        m->fn = g3d::draw(lensStreet(yaw), {});
+        m->isolate();
+        Image a = render(c, 200), b = render(plain, 200);
+        std::vector<char> mask((size_t)480 * 270, 0), ok((size_t)480 * 270, 0);
+        int n1 = 0;
+        for (int y = 0; y < 270; y++)
+            for (int x = 0; x < 480; x++) {
+                const Color q = GetImageColor(b, x, y);
+                ok[(size_t)y * 480 + x] = q.r + q.g + q.b > 240;
+                if (differs(GetImageColor(a, x, y), q, 2)) { mask[(size_t)y * 480 + x] = 1; n1++; }
+            }
+        masks.push_back(mask);
+        valid.push_back(ok);
+        UnloadImage(a); UnloadImage(b);
+        CHECK(n1 > 1500);
+    }
+    // the drops are clear now, so a drop over smooth picture changes nothing: check against the twin instead of the other camera.
+    // No changed pixel lies away from every drop the twin lists, and the drops that have bright picture behind them show up in both.
+    const auto L = fx::lensDrops(l, 200 / 30.0, 480, 270);
+    long long stray[2] = { 0, 0 }, total[2] = { 0, 0 };
+    int tested = 0, seen[2] = { 0, 0 };
+    for (int cam = 0; cam < 2; cam++)
+        for (int y = 0; y < 270; y++)
+            for (int x = 0; x < 480; x++) {
+                if (!masks[cam][(size_t)y * 480 + x]) continue;
+                total[cam]++;
+                bool near = false;
+                for (const auto& d : L) if (std::hypot(x - d.pos.x, y - d.pos.y) < d.radius + 2.5f) { near = true; break; }
+                if (!near) stray[cam]++;
+            }
+    for (const auto& d : L) {
+        if (d.radius < 6.f) continue;
+        int okpx = 0; bool hit[2] = { false, false };
+        for (int y = std::max(0, (int)(d.pos.y - d.radius - 2)); y < std::min(270, (int)(d.pos.y + d.radius + 3)); y++)
+            for (int x = std::max(0, (int)(d.pos.x - d.radius - 2)); x < std::min(480, (int)(d.pos.x + d.radius + 3)); x++)
+                if (std::hypot(x - d.pos.x, y - d.pos.y) < d.radius + 2.5f) {
+                    okpx += valid[0][(size_t)y * 480 + x] && valid[1][(size_t)y * 480 + x];
+                    for (int cam = 0; cam < 2; cam++) hit[cam] = hit[cam] || masks[cam][(size_t)y * 480 + x];
+                }
+        if (okpx < 40) continue;
+        tested++; seen[0] += hit[0]; seen[1] += hit[1];
+    }
+    std::printf("[weather] W11 camera pan: %lld / %lld changed pixels away from every drop (two cameras); of %d drops over bright picture, %d and %d show in the two cameras\n",
+                stray[0], total[0], tested, seen[0], seen[1]);
+    CHECK(stray[0] == 0 && stray[1] == 0);
+    CHECK(tested >= 5 && seen[0] >= 0.85 * tested && seen[1] >= 0.85 * tested);
+}
+
+// (b) The wiper clears what it sweeps, then the glass refills.
+static void lensWiper() {
+    fx::Lens l;
+    l.rain.rate = 1; l.rain.slide = 0; l.rain.seed = 9;
+    l.wiper.period = 6; l.wiper.pivot = { 0.5f, 1.2f }; l.wiper.length = 1.4f; l.wiper.from = -60; l.wiper.to = 60; l.wiper.drawBlade = false;
+    fx::Lens bare = l; bare.wiper.period = 0;
+    const float W = 640, H = 360, px = 0.5f * W, py = 1.2f * H, L = 1.4f * H;
+    const double m = 2;                                    // the third sweep, so every drop has had time to build up before it
+    auto inSector = [&](const fx::LensDrop& d, float margin) {
+        const float dx = d.pos.x - px, dy = d.pos.y - py, rho = std::hypot(dx, dy), phi = std::atan2(dx, -dy) * RAD2DEG;
+        return rho + d.radius < L - margin && phi - d.radius / rho * RAD2DEG > -60 + margin && phi + d.radius / rho * RAD2DEG < 60 - margin;
+    };
+    auto count = [&](const std::vector<fx::LensDrop>& v) { int n = 0; for (const auto& d : v) n += inSector(d, 0) ? 1 : 0; return n; };
+    const double tAfter = m * 6 + 3.6 + 0.04;               // just after the blade is back at its rest
+    const auto wiped = fx::lensDrops(l, tAfter, W, H), unwiped = fx::lensDrops(bare, tAfter, W, H);
+    const int nBefore = count(unwiped), nAfter = count(wiped);
+    int young = 0, outsideOld = 0, outsideKept = 0;
+    auto touches = [&](const fx::LensDrop& d) {            // any part of the drop within the blade's reach
+        const float rr = std::max(d.radius, 14.f), dx = d.pos.x - px, dy = d.pos.y - py, rho = std::hypot(dx, dy), phi = std::atan2(dx, -dy) * RAD2DEG, dl = std::asin(std::min(rr / rho, 1.f)) * RAD2DEG;
+        return rho - rr <= L && phi + dl >= -60 && phi - dl <= 60;
+    };
+    for (const auto& d : wiped) if (inSector(d, 0)) young += d.born >= m * 6 - 1e-3 ? 1 : 0;
+    for (const auto& d : unwiped) if (!touches(d)) { outsideOld++; for (const auto& e : wiped) if (e.id == d.id) { outsideKept++; break; } }
+    std::printf("[weather] W11 wiper: sector holds %d drops without the wiper, %d just after the sweep (%d of them born since it began); outside it %d of %d drops remain\n",
+                nBefore, nAfter, young, outsideKept, outsideOld);
+    CHECK(nBefore > 40);
+    CHECK(nAfter <= nBefore * 0.3f);
+    CHECK(young == nAfter);                                // every survivor is younger than the sweep
+    CHECK(outsideOld > 10 && outsideKept == outsideOld);   // drops the blade never touches keep their place
+    // the pixels: inside the swept sector, away from the survivors, the image is the drop-free image to the last level
+    Image img = lensImg(&l, frameOf(tAfter)), clean = lensImg(nullptr, 0), withAll = lensImg(&bare, frameOf(tAfter));
+    int checked = 0, wrong = 0, wouldBeWrong = 0;
+    for (int y = 0; y < 360; y++)
+        for (int x = 0; x < 640; x++) {
+            fx::LensDrop probe; probe.pos = { (float)x, (float)y };
+            if (!inSector(probe, 6)) continue;
+            bool near = false;
+            for (const auto& d : wiped) if (std::hypot(x - d.pos.x, y - d.pos.y) < d.radius * 1.2f + 3) { near = true; break; }
+            if (near) continue;
+            checked++;
+            if (differs(GetImageColor(img, x, y), GetImageColor(clean, x, y), 0)) wrong++;
+            if (differs(GetImageColor(withAll, x, y), GetImageColor(clean, x, y), 0)) wouldBeWrong++;
+        }
+    std::printf("[weather] W11 wiper pixels: %d sector pixels checked, %d differ from the drop-free image (%d would without the wiper)\n", checked, wrong, wouldBeWrong);
+    CHECK(checked > 30000 && wrong == 0 && wouldBeWrong > 2000);
+    UnloadImage(img); UnloadImage(clean); UnloadImage(withAll);
+    // refill: two seconds later the sector holds more drops, at about the spawn rate of the glass outside it
+    const int n2 = count(fx::lensDrops(l, tAfter + 2.0, W, H));
+    std::printf("[weather] W11 wiper refill: %d drops in the sector at the sweep's end, %d two seconds later (%d with no wiper)\n", nAfter, n2, count(fx::lensDrops(bare, tAfter + 2.0, W, H)));
+    CHECK(n2 >= nAfter + 8);
+    // the blade passes: it is drawn at the angle the twin gives
+    fx::Lens drawn = l; drawn.wiper.drawBlade = true; drawn.rain.rate = 0;
+    const double tMid = m * 6 + 1.8;                        // the top of the sweep
+    const float ang = fx::wiperAngle(drawn.wiper, tMid);
+    Image bl = lensImg(&drawn, frameOf(tMid), lensChecker);
+    const float bx = px + std::sin(ang * DEG2RAD) * 0.6f * L, by = py - std::cos(ang * DEG2RAD) * 0.6f * L;
+    std::printf("[weather] W11 blade: angle %.1f deg at its top; pixel at 60%% of the arm: %d (glass 92..128)\n", ang, GetImageColor(bl, (int)bx, (int)by).r);
+    CHECK(std::fabs(ang - 60) < 1.0f);
+    CHECK(GetImageColor(bl, (int)bx, (int)by).r < 40 && GetImageColor(bl, (int)bx - 30, (int)by).r >= 85);
+    UnloadImage(bl);
+}
+
+// (d) A drop refracts: the picture inside it is flipped and minified.
+static void lensRefraction() {
+    fx::Lens l;
+    l.rain.rate = 1; l.rain.size = 1.5f; l.rain.slide = 0; l.rain.seed = 3;
+    fx::LensDrop best;
+    int f = 0;
+    for (double s = 3; s < 30 && best.radius < 17; s += 0.5) {
+        for (const auto& d : fx::lensDrops(l, frameOf(s) / 30.0, 640, 360))
+            if (d.kind == fx::LensDrop::Kind::Rain && d.radius > best.radius && d.pos.x > 80 && d.pos.x < 560 && d.pos.y > 80 && d.pos.y < 280) { best = d; f = frameOf(s); }
+    }
+    CHECK(best.radius >= 14);
+    const auto all = fx::lensDrops(l, f / 30.0, 640, 360);
+    const Vector2 bc = best.pos;      // a pattern centred on the drop: R = 128 + 1.5 dx, G = 128 + 1.5 dy, B = 0
+    Image img = lensImg(&l, f, [bc](const Ctx&, int) {
+        DrawRectangle(0, 0, 640, 360, BLACK);
+        DrawRectangleGradientEx({ bc.x - 60, bc.y - 60, 120, 120 }, { 38, 38, 0, 255 }, { 38, 218, 0, 255 }, { 218, 218, 0, 255 }, { 218, 38, 0, 255 });
+    });
+    { Image crop = ImageFromImage(img, { bc.x - 30, bc.y - 30, 60, 60 }); ImageResizeNN(&crop, 360, 360); dump("w11-refraction-crop.png", crop); UnloadImage(crop); }
+    // fit the colour inside the drop against the offset from its centre
+    std::vector<double> rr, gg, dxs, dys;
+    for (int y = (int)(best.pos.y - best.radius); y <= (int)(best.pos.y + best.radius); y++)
+        for (int x = (int)(best.pos.x - best.radius); x <= (int)(best.pos.x + best.radius); x++) {
+            const float dx = x - best.pos.x, dy = y - best.pos.y;
+            if (std::hypot(dx, dy) > 0.5f * best.radius) continue;
+            bool clear = true;
+            for (const auto& o : all) if (o.id != best.id && std::hypot(x - o.pos.x, y - o.pos.y) < o.radius + 2) clear = false;
+            if (!clear) continue;
+            const Color c = GetImageColor(img, x, y);
+            rr.push_back((double)c.r - c.b); gg.push_back((double)c.g - c.b); dxs.push_back(dx); dys.push_back(dy);
+        }
+    auto corr = [](const std::vector<double>& a, const std::vector<double>& b) {
+        double ma = 0, mb = 0; for (size_t i = 0; i < a.size(); i++) { ma += a[i]; mb += b[i]; } ma /= a.size(); mb /= a.size();
+        double sab = 0, saa = 0, sbb = 0;
+        for (size_t i = 0; i < a.size(); i++) { sab += (a[i] - ma) * (b[i] - mb); saa += (a[i] - ma) * (a[i] - ma); sbb += (b[i] - mb) * (b[i] - mb); }
+        return sab / std::sqrt(std::max(saa * sbb, 1e-9));
+    };
+    auto slope = [](const std::vector<double>& a, const std::vector<double>& b) {      // d a / d b
+        double ma = 0, mb = 0; for (size_t i = 0; i < a.size(); i++) { ma += a[i]; mb += b[i]; } ma /= a.size(); mb /= a.size();
+        double sab = 0, sbb = 0; for (size_t i = 0; i < a.size(); i++) { sab += (a[i] - ma) * (b[i] - mb); sbb += (b[i] - mb) * (b[i] - mb); }
+        return sab / std::max(sbb, 1e-9);
+    };
+    const double cx = rr.empty() ? 0 : corr(rr, dxs), cy = gg.empty() ? 0 : corr(gg, dys);
+    // the source is a ramp of 1.5 levels per px: a minified image has a slope of 1.5 * k per px with k > 1 for the
+    // neighbourhood being squeezed into the drop, and the sign of a flip is negative
+    const double kx = rr.empty() ? 0 : -slope(rr, dxs) / 1.5, ky = gg.empty() ? 0 : -slope(gg, dys) / 1.5;
+    std::printf("[weather] W11 refraction: drop r=%.1f px, %zu px inside; corr(R, dx) = %.3f, corr(G, dy) = %.3f; minification %.2f (x), %.2f (y)\n",
+                best.radius, rr.size(), cx, cy, kx, ky);
+    CHECK(rr.size() > 80);
+    CHECK(cx < -0.9 && cy < -0.9);
+    CHECK(kx > 2.5 && kx < 7 && ky > 2.5 && ky < 7);
+    UnloadImage(img);
+}
+
+// (e) Frost creeps in from the edges, and grows with the amount and with time.
+static void lensFrostEdges() {
+    auto meanDiff = [](const Image& a, const Image& b, int x0, int y0, int x1, int y1) {
+        double s = 0; int n = 0;
+        for (int y = y0; y < y1; y++)
+            for (int x = x0; x < x1; x++) {
+                const Color p = GetImageColor(a, x, y), q = GetImageColor(b, x, y);
+                s += std::abs(p.r - q.r) + std::abs(p.g - q.g) + std::abs(p.b - q.b); n++;
+            }
+        return s / (3.0 * std::max(n, 1));
+    };
+    Image base = lensImg(nullptr, 0, lensChecker);
+    double prevAll = -1;
+    for (float amount : { 0.2f, 0.4f, 0.6f, 0.9f }) {
+        fx::Lens l;
+        l.frost.amount = amount; l.frost.seed = 2;
+        Image img = lensImg(&l, 0, lensChecker);
+        const double band = (meanDiff(img, base, 0, 0, 640, 40) + meanDiff(img, base, 0, 320, 640, 360) + meanDiff(img, base, 0, 40, 40, 320) + meanDiff(img, base, 600, 40, 640, 320)) / 4;
+        const double centre = meanDiff(img, base, 220, 110, 420, 250), all = meanDiff(img, base, 0, 0, 640, 360);
+        std::printf("[weather] W11 frost amount %.1f: mean change %.1f in the edge band, %.1f in the centre, %.1f overall\n", amount, band, centre, all);
+        if (amount <= 0.4f) CHECK(band > 2.0 * centre + 3);
+        if (amount <= 0.6f) CHECK(band > centre);
+        CHECK(all > prevAll * 1.02 + 0.2);
+        prevAll = all;
+        UnloadImage(img);
+    }
+    // in time: the creep between two frames
+    fx::Lens t;
+    t.frost.amount = 0.9f; t.frost.startFrame = 0; t.frost.endFrame = 120; t.frost.seed = 2;
+    double prev = -1;
+    for (int f : { 10, 40, 70, 100, 130 }) {
+        Image img = lensImg(&t, f, lensChecker);
+        const double all = meanDiff(img, base, 0, 0, 640, 360);
+        std::printf("[weather] W11 frost creep, frame %d: mean change %.1f\n", f, all);
+        if (f < 120) CHECK(all > prev + 0.2); else CHECK(all >= prev - 0.5);
+        prev = all;
+        UnloadImage(img);
+    }
+    // a cleared patch stays clear
+    fx::Lens c;
+    c.frost.amount = 1; c.frost.seed = 2; c.frost.clears = { { 320, 180, 70 } };
+    Image img = lensImg(&c, 0, lensChecker);
+    long long d = 0, cnt = 0;
+    for (int y = 130; y < 230; y++)
+        for (int x = 270; x < 370; x++)
+            if (std::hypot(x - 320.f, y - 180.f) < 40) { d += differs(GetImageColor(img, x, y), GetImageColor(base, x, y), 0); cnt++; }
+    std::printf("[weather] W11 frost clear patch: %lld of %lld pixels inside its core differ from the glass-free image\n", d, cnt);
+    CHECK(d == 0);
+    UnloadImage(img); UnloadImage(base);
+}
+
+// Snowflakes: one lands, sits as a bright blob, melts into a drop.
+static void lensSnowflakes() {
+    fx::Lens l;
+    l.snow.rate = 1; l.snow.seed = 5;
+    fx::LensFlake flake;
+    double tL = -1;
+    for (double s = 3; s < 40 && tL < 0; s += 0.2) {
+        for (const auto& f : fx::lensFlakes(l, s, 640, 360))
+            if (f.alpha > 0.99f && f.melt == 0 && f.pos.x > 80 && f.pos.x < 560 && f.pos.y > 60 && f.pos.y < 300) { flake = f; tL = s; break; }
+    }
+    CHECK(tL > 0);
+    if (tL < 0) return;
+    Image sitting = lensImg(&l, frameOf(tL), lensDark), base = lensImg(nullptr, 0, lensDark);
+    const Color at = GetImageColor(sitting, (int)flake.pos.x, (int)flake.pos.y);
+    std::printf("[weather] W11 snow: flake r=%.1f px sits at (%.0f, %.0f), centre pixel %d (glass %d)\n", flake.radius, flake.pos.x, flake.pos.y, at.r, GetImageColor(base, 5, 5).r);
+    CHECK(at.r > 90);
+    // later it is a drop: the twin lists a Melt drop at the same place and the blob is gone
+    double tM = tL;
+    bool melted = false;
+    for (double s = tL + 0.1; s < tL + 12 && !melted; s += 0.1)
+        for (const auto& d : fx::lensDrops(l, s, 640, 360))
+            if (d.kind == fx::LensDrop::Kind::Melt && d.radius > 1.5f && std::hypot(d.pos.x - flake.pos.x, d.pos.y - flake.pos.y) < 1.f) { melted = true; tM = s; }
+    Image later = lensImg(&l, frameOf(tM), lensDark);
+    std::printf("[weather] W11 snow: after melting %s; centre pixel %d\n", melted ? "a drop is listed" : "no drop", GetImageColor(later, (int)flake.pos.x, (int)flake.pos.y).r);
+    CHECK(melted);
+    CHECK(GetImageColor(later, (int)flake.pos.x, (int)flake.pos.y).r < at.r - 35);
+    UnloadImage(sitting); UnloadImage(base); UnloadImage(later);
+}
+
+// (f) Purity: a frame alone equals the frame after others.
+static void lensPurity() {
+    fx::Lens l;
+    l.rain.rate = 0.8f; l.rain.blurBehind = 6; l.snow.rate = 0.6f; l.frost.amount = 0.5f; l.frost.startFrame = 0; l.frost.endFrame = 200;
+    l.wiper.period = 3; l.wiper.drawBlade = true;
+    Image a = lensImg(&l, 150, lensChecker);
+    for (int f : { 20, 400, 99, 150, 7 }) UnloadImage(lensImg(&l, f, lensChecker));
+    Image b = lensImg(&l, 150, lensChecker);
+    const long long d = diffImages(a, b);
+    // the same inside one composition, frames out of order
+    Comp c = lensComp(&l, 640, 360, lensChecker);
+    Image x = render(c, 150);
+    for (int f : { 60, 300, 12 }) UnloadImage(render(c, f));
+    Image y = render(c, 150);
+    const long long d2 = diffImages(x, y);
+    const auto d1 = fx::lensDrops(l, 5.0, 640, 360), d3 = fx::lensDrops(l, 5.0, 640, 360);
+    bool same = d1.size() == d3.size();
+    for (size_t i = 0; same && i < d1.size(); i++) same = d1[i].id == d3[i].id && d1[i].pos.x == d3[i].pos.x && d1[i].pos.y == d3[i].pos.y;
+    std::printf("[weather] W11 purity: diff %lld (new canvas), %lld (same comp, other frames between); twin repeatable: %s\n", d, d2, same ? "yes" : "no");
+    CHECK(d == 0 && d2 == 0 && same);
+    // and a different seed is a different glass
+    fx::Lens other = l; other.rain.seed = 2;
+    Image z = lensImg(&other, 150, lensChecker);
+    CHECK(diffImages(a, z) > 20000);
+    UnloadImage(a); UnloadImage(b); UnloadImage(x); UnloadImage(y); UnloadImage(z);
+}
+
+// Rain that follows the weather: the drop count follows the intensity of the rain over time.
+static void lensFollowsWeather() {
+    g3d::Weather w = g3d::Weather::rain();
+    w.history = { { 0, g3d::Precipitation::Rain, 0.1f }, { 20, g3d::Precipitation::Rain, 1.0f } };
+    fx::Lens l;
+    l.rain.rateAt = fx::rainOf(w);
+    l.rain.slide = 0;
+    size_t prev = 0;
+    for (double s : { 14.0, 24.0, 34.0 }) {
+        const size_t n = fx::lensDrops(l, s, 640, 360).size();
+        std::printf("[weather] W11 weather rain: %zu drops at %.0f s (rain %.2f at spawn time)\n", n, s, w.rainAt(s - 3));
+        CHECK(n > prev);
+        prev = n;
+    }
+}
+
+// The cost at 1080p: each filter on a flat layer, against the same layer with no filter.
+static void lensTiming() {
+    constexpr int W = 1920, H = 1080;
+    struct Row { const char* name; fx::Lens l; };
+    std::vector<Row> rows;
+    rows.push_back({ "no filter", {} });
+    { fx::Lens l; rows.push_back({ "isolated layer, lens at zero", l }); }
+    { fx::Lens l; l.rain.rate = 0.8f; rows.push_back({ "rain, rate 0.8", l }); }
+    { fx::Lens l; l.rain.rate = 0.8f; l.rain.blurBehind = 12; rows.push_back({ "rain + blurBehind 12", l }); }
+    { fx::Lens l; l.frost.amount = 0.8f; rows.push_back({ "frost 0.8", l }); }
+    { fx::Lens l; l.frost.amount = 0.8f; l.frost.kind = fx::LensFrost::Kind::Condensation; l.rain.rate = 0.5f; rows.push_back({ "condensation + rain", l }); }
+    { fx::Lens l; l.snow.rate = 1; rows.push_back({ "snow, rate 1", l }); }
+    { fx::Lens l; l.wiper.period = 3; rows.push_back({ "wiper blade", l }); }
+    { fx::Lens l; l.rain.rate = 0.8f; l.rain.blurBehind = 12; l.snow.rate = 0.5f; l.frost.amount = 0.4f; l.wiper.period = 3; rows.push_back({ "all four", l }); }
+    for (size_t r = 0; r < rows.size(); r++) {
+        Comp c = lensComp(r == 0 ? nullptr : &rows[r].l, W, H, [](const Ctx&, int) {
+            DrawRectangleGradientEx({ 0, 0, 1920, 1080 }, BLACK, GREEN, YELLOW, RED);
+        });
+        Canvas canvas;
+        canvas.load(W, H, 1);
+        presentFrame(c, 150, canvas);
+        UnloadImage(LoadImageFromTexture(canvas.output().texture));
+        double best = 1e9, mean = 0;
+        for (int i = 0; i < 12; i++) {
+            const double t0 = GetTime();
+            presentFrame(c, 150 + 7 * i, canvas);
+            Image img = LoadImageFromTexture(canvas.output().texture);
+            const double dt = (GetTime() - t0) * 1000;
+            UnloadImage(img);
+            best = std::min(best, dt);
+            mean += dt / 12;
+        }
+        canvas.unload();
+        std::printf("[weather] W11 timing 1080p, %s: best %.1f ms, mean %.1f ms\n", rows[r].name, best, mean);
+    }
+}
+
+constexpr double FROST_STEP_BOUND = 1.0, FROST_ORIENT_BOUND = 0.3;
+// A drop is almost clear and irregular: over a flat grey its inside is the grey (the sharp picture refracted), only a thin rim
+// is darker, and its outline is not a circle.
+static void lensFlat(const Ctx&, int) { DrawRectangle(0, 0, 640, 360, { 128, 128, 128, 255 }); }
+static void lensDropLook() {
+    fx::Lens l;
+    l.rain.rate = 1; l.rain.size = 1.5f; l.rain.slide = 1; l.rain.seed = 3;
+    int n = 0;
+    double sumCirc = 0, worstLum = 0, sumLum = 0, minCirc = 9;
+    for (double s = 6; s < 40; s += 2.5) {
+        const int f = frameOf(s);
+        const auto L = fx::lensDrops(l, f / 30.0, 640, 360);
+        Image img = lensImg(&l, f, lensFlat);
+        for (const auto& d : L) {
+            if (d.kind != fx::LensDrop::Kind::Rain || d.radius < 10 || d.pos.x < 40 || d.pos.x > 600 || d.pos.y < 40 || d.pos.y > 320) continue;
+            bool alone = true;
+            for (const auto& o : L)
+                if (o.id != d.id && std::hypot(o.pos.x - d.pos.x, o.pos.y - d.pos.y) < 1.5f * d.radius + o.radius + 5) alone = false;
+            if (!alone) continue;
+            // the inside: mean luminance within 0.4 r of the centre
+            double sum = 0; int cnt = 0;
+            for (int y = (int)(d.pos.y - d.radius); y <= (int)(d.pos.y + d.radius); y++)
+                for (int x = (int)(d.pos.x - d.radius); x <= (int)(d.pos.x + d.radius); x++)
+                    if (std::hypot(x - d.pos.x, y - d.pos.y) < 0.4f * d.radius) { sum += luma(GetImageColor(img, x, y)); cnt++; }
+            const double lum = sum / std::max(cnt, 1), rel = std::fabs(lum / 128.0 - 1);
+            // the outline: the outermost changed pixel along 16 rays, as a polygon
+            std::vector<Vector2> pts;
+            for (int k = 0; k < 16; k++) {
+                const float a = 6.2831853f * (float)k / 16.f;
+                float rr = 0;
+                for (float t = 1.5f * d.radius + 4; t > 0; t -= 0.25f) {
+                    const int x = (int)std::lround(d.pos.x + std::cos(a) * t), y = (int)std::lround(d.pos.y + std::sin(a) * t);
+                    if (differs(GetImageColor(img, x, y), { 128, 128, 128, 255 }, 2)) { rr = t; break; }
+                }
+                pts.push_back({ std::cos(a) * rr, std::sin(a) * rr });
+            }
+            double P = 0, A = 0;
+            for (size_t k = 0; k < pts.size(); k++) {
+                const Vector2 p = pts[k], q = pts[(k + 1) % pts.size()];
+                P += std::hypot(q.x - p.x, q.y - p.y);
+                A += 0.5 * (p.x * q.y - q.x * p.y);
+            }
+            const double circ = P * P / (4 * 3.14159265358979 * std::fabs(A));
+            n++; sumCirc += circ; minCirc = std::min(minCirc, circ); worstLum = std::max(worstLum, rel); sumLum += lum;
+        }
+        UnloadImage(img);
+    }
+    std::printf("[weather] W11 drop look over flat grey 128: %d drops of r >= 10; inside mean luminance %.1f (worst %.1f%% off); circularity P^2/4piA mean %.3f (min %.3f)\n",
+                n, n ? sumLum / n : 0.0, worstLum * 100, n ? sumCirc / n : 0.0, minCirc);
+    CHECK(n >= 8);
+    CHECK(worstLum <= 0.10);
+    CHECK(n && sumCirc / n > 1.08);
+}
+
+// Frost: no hard steps (anti-aliased), and its fronds run inward from the edges.
+static void lensFrostLook() {
+    fx::Lens l;
+    l.frost.amount = 0.9f; l.frost.seed = 2;
+    Image img = lensImg(&l, 0, lensFlat);
+    std::vector<float> Y((size_t)640 * 360);
+    for (int y = 0; y < 360; y++) for (int x = 0; x < 640; x++) Y[(size_t)y * 640 + x] = luma(GetImageColor(img, x, y));
+    long long steps = 0, pairs = 0, soft = 0;
+    for (int y = 1; y < 359; y++)
+        for (int x = 1; x < 639; x++) {
+            const float c = Y[(size_t)y * 640 + x];
+            const float dx = std::fabs(Y[(size_t)y * 640 + x + 1] - c), dy = std::fabs(Y[(size_t)(y + 1) * 640 + x] - c);
+            pairs += 2; steps += (dx >= 60) + (dy >= 60); soft += (dx >= 20) + (dy >= 20);
+        }
+    const double stepFrac = (double)steps / (double)pairs;
+    std::printf("[weather] W11 frost steps: %.4f%% of 4-neighbour pairs jump >= 60 levels (%.3f%% jump >= 20)\n", stepFrac * 100, 100.0 * (double)soft / (double)pairs);
+    CHECK(stepFrac < FROST_STEP_BOUND);
+    CHECK((double)soft / (double)pairs < 0.18);            // a hard-edged crystal pattern jumps >= 20 levels on 26% of pairs, the anti-aliased one on about 12%
+    // orientation: the structure tensor of the luminance in each edge band; fronds are lines, so their gradients are across them
+    struct Band { const char* name; int x0, y0, x1, y1; int inward; };    // inward: 0 down, 1 up, 2 right, 3 left
+    const Band bands[] = { { "top", 60, 8, 580, 64, 0 }, { "bottom", 60, 296, 580, 352, 1 }, { "left", 8, 60, 64, 300, 2 }, { "right", 576, 60, 632, 300, 3 } };
+    double sum = 0;
+    for (const Band& b : bands) {
+        // the dominant orientation of the stems: the gradient tensor of the picture blurred over 5 px (the finest barbs wash out, the stems
+        // and long branches stay). m > 0 where the structure runs vertically; towards > 0 where it runs along the inward direction.
+        double jxx = 0, jyy = 0;
+        for (int y = b.y0; y < b.y1; y++)
+            for (int x = b.x0; x < b.x1; x++) {
+                auto box = [&](int cx, int cy) { double s = 0; for (int j = -2; j <= 2; j++) for (int i = -2; i <= 2; i++) s += Y[(size_t)(cy + j) * 640 + cx + i]; return s / 25.0; };
+                const double gx = box(x + 2, y) - box(x - 2, y), gy = box(x, y + 2) - box(x, y - 2);
+                jxx += gx * gx; jyy += gy * gy;
+            }
+        const double m = (jxx - jyy) / std::max(jxx + jyy, 1e-9);
+        const double towards = (b.inward < 2) ? m : -m;
+        std::printf("[weather] W11 frost orientation, %s band: line direction vs inward %.3f\n", b.name, towards);
+        sum += towards;
+        CHECK(towards > FROST_ORIENT_BOUND);
+    }
+    std::printf("[weather] W11 frost orientation: mean %.3f\n", sum / 4);
+    // corners: no seam along the diagonal. The mean |difference| between a pixel and its mirror across the diagonal (1-3 px each
+    // side) must be no larger than across a line parallel to it, 8 px away.
+    {
+        double dDiag = 0, dOff = 0, lDiag = 0, lOff = 0; long long cnt = 0;
+        const int cxs[4] = { 0, 639, 0, 639 }, cys[4] = { 0, 0, 359, 359 };
+        for (int c = 0; c < 4; c++) {
+            const int sx = cxs[c] == 0 ? 1 : -1, sy = cys[c] == 0 ? 1 : -1;
+            for (int t = 30; t <= 130; t++)
+                for (int k = 1; k <= 3; k++)
+                    for (int pass = 0; pass < 2; pass++) {
+                        const int bx = cxs[c] + sx * t + (pass ? 8 * sx : 0), by = cys[c] + sy * t;
+                        const float a = Y[(size_t)(by - sy * k) * 640 + bx + sx * k], b = Y[(size_t)(by + sy * k) * 640 + bx - sx * k];
+                        (pass ? dOff : dDiag) += std::fabs(a - b);
+                        (pass ? lOff : lDiag) += 0.5 * (a + b);
+                    }
+            cnt += 101 * 3;
+        }
+        std::printf("[weather] W11 frost corners: mean |difference| across the diagonal %.2f, across a parallel line 8 px away %.2f\n", dDiag / cnt, dOff / cnt);
+        std::printf("[weather] W11 frost corners: mean luminance in the diagonal band %.1f, in the parallel band %.1f\n", lDiag / cnt, lOff / cnt);
+        CHECK(dDiag <= dOff * 1.0);
+        CHECK(dDiag >= 0.88 * dOff);                          // and the structure does not die out along it
+        CHECK(lDiag >= 0.97 * lOff);                          // crystals do not stop along the diagonal
+    }
+    UnloadImage(img);
+}
+
+// Tiny drops are a faint lens, not a dark mark: over flat grey nothing inside a drop under 5 px falls below 0.8 of the grey.
+static void lensTinyDrops() {
+    fx::Lens l;
+    l.rain.rate = 1; l.rain.size = 0.5f; l.rain.slide = 0; l.rain.seed = 7;
+    int n = 0; double worst = 1e9;
+    for (double s = 6; s < 30; s += 2) {
+        const int f = frameOf(s);
+        const auto L = fx::lensDrops(l, f / 30.0, 640, 360);
+        Image img = lensImg(&l, f, lensFlat);
+        for (const auto& d : L) {
+            if (d.radius < 2.f || d.radius >= 5.f || d.pos.x < 20 || d.pos.x > 620 || d.pos.y < 20 || d.pos.y > 340) continue;
+            bool alone = true;
+            for (const auto& o : L) if (o.id != d.id && std::hypot(o.pos.x - d.pos.x, o.pos.y - d.pos.y) < d.radius + o.radius + 4) alone = false;
+            if (!alone) continue;
+            double mn = 1e9;
+            for (int y = (int)std::floor(d.pos.y - d.radius); y <= (int)std::ceil(d.pos.y + d.radius); y++)
+                for (int x = (int)std::floor(d.pos.x - d.radius); x <= (int)std::ceil(d.pos.x + d.radius); x++)
+                    if (std::hypot(x - d.pos.x, y - d.pos.y) <= d.radius) mn = std::min<double>(mn, luma(GetImageColor(img, x, y)));
+            n++; worst = std::min(worst, mn);
+        }
+        UnloadImage(img);
+    }
+    std::printf("[weather] W11 tiny drops: %d drops of 2-5 px over grey 128; darkest pixel inside any of them %.1f (%.0f%% of the grey)\n", n, worst, 100 * worst / 128.0);
+    CHECK(n >= 8);
+    CHECK(worst >= 0.8 * 128.0);
+}
+
+// Snowflakes on a lens are big, out of focus and nearly featureless: at 0.6 r the six-fold harmonic is under 15% of the disc's brightness.
+static void lensFlakeLook() {
+    fx::Lens l;
+    l.snow.rate = 1; l.snow.seed = 9;
+    int n = 0; double worst = 0, sumR = 0, minR = 1e9, maxR = 0;
+    for (double s = 3; s < 60; s += 0.7) {
+        const int f = frameOf(s);
+        const auto L = fx::lensFlakes(l, f / 30.0, 640, 360);
+        Image img = lensImg(&l, f, lensFlat);
+        for (const auto& fl : L) {
+            if (fl.alpha < 0.99f || fl.melt > 0 || fl.pos.x < 70 || fl.pos.x > 570 || fl.pos.y < 70 || fl.pos.y > 290) continue;
+            bool alone = true;
+            for (const auto& o : L) if (&o != &fl && std::hypot(o.pos.x - fl.pos.x, o.pos.y - fl.pos.y) < 2.5f * (fl.radius + o.radius)) alone = false;
+            if (!alone) continue;
+            double re = 0, im = 0, mean = 0; const int N = 72;
+            for (int k = 0; k < N; k++) {
+                const double a = 6.2831853 * k / N;
+                const double v = luma(GetImageColor(img, (int)std::lround(fl.pos.x + 0.6 * fl.radius * std::cos(a)), (int)std::lround(fl.pos.y + 0.6 * fl.radius * std::sin(a))));
+                re += (v - 128) * std::cos(6 * a); im += (v - 128) * std::sin(6 * a); mean += v - 128;
+            }
+            const double amp = 2 * std::hypot(re, im) / N, disc = mean / N;       // the harmonic against the disc's lift over the glass
+            if (disc < 10) continue;
+            n++; worst = std::max(worst, amp / disc); sumR += fl.radius; minR = std::min<double>(minR, fl.radius); maxR = std::max<double>(maxR, fl.radius);
+        }
+        UnloadImage(img);
+    }
+    std::printf("[weather] W11 flakes: %d sitting flakes of radius %.0f-%.0f px (mean %.0f) on a 360 px layer; six-fold contrast at 0.6 r at most %.3f of the disc\n", n, minR, maxR, n ? sumR / n : 0.0, worst);
+    CHECK(n >= 4);
+    CHECK(worst <= 0.10);
+}
+
+static void cameraWeather() {
+    lensOffMeansOff();
+    lensDropsStayAndSlide();
+    lensCameraMove();
+    lensWiper();
+    lensRefraction();
+    lensDropLook();
+    lensTinyDrops();
+    lensFlakeLook();
+    lensFrostEdges();
+    lensFrostLook();
+    lensSnowflakes();
+    lensPurity();
+    lensFollowsWeather();
+    lensTiming();
+}
+
 int main() try {
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
@@ -7024,6 +7719,12 @@ int main() try {
     }
     if (std::getenv("RMTN_W9_IMAGES")) { w9Images(); shutdownGraphics(); CloseWindow(); return 0; }
     if (std::getenv("RMTN_W10_TIMING")) { airTiming(); shutdownGraphics(); CloseWindow(); return 0; }
+    if (std::getenv("RMTN_W11_ONLY")) {
+        cameraWeather();
+        shutdownGraphics(); CloseWindow();
+        std::printf(failures ? "[weather] %d failures\n" : "[weather] all passed\n", failures);
+        return failures ? 1 : 0;
+    }
     if (std::getenv("RMTN_W10_ONLY")) {
         lightInAir();
         shutdownGraphics(); CloseWindow();
@@ -7110,6 +7811,7 @@ int main() try {
     ocean();
     lightningStorm();
     lightInAir();
+    cameraWeather();
     shutdownGraphics();
     CloseWindow();
     std::printf(failures ? "[weather] %d failures\n" : "[weather] all passed\n", failures);

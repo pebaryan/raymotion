@@ -68,6 +68,7 @@ add_library(rmtn_engine STATIC
   src/engine/fonts.cpp
   src/engine/render.cpp
   src/engine/filters.cpp
+  src/engine/lens.cpp
   src/engine/anim.cpp
   src/engine/layout.cpp
   src/engine/json.cpp

@@ -76,6 +76,11 @@ struct Weather {
     // How much of the bow shows for the rain that falls (0..1): the weather's rain intensity (rain and sleet; a bow
     // needs drops) or the distant rain, whichever is more, through a soft curve.
     float rainbowRain() const;
+    // What falls at `seconds` of film time (from the history when there is one, else the current kind): the rain
+    // intensity and the snow intensity, 0..1 each (sleet counts 0.6 rain and 0.4 snow). The camera filters
+    // fx::lensRain and fx::lensSnow follow these (see rmtn/lens.hpp).
+    float rainAt(double seconds) const;
+    float snowAt(double seconds) const;
     // The sun's share of the bow's strength: it follows how much sun gets through cloud (sunScale) and fades out as the sun
     // sets, and in Auto above 42 degrees (the bow is below the horizon then). `elevation` is the sun's height in degrees.
     float rainbowSun(float elevation) const;

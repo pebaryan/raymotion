@@ -374,6 +374,16 @@ perspective on, land seen through shallow water near a shore gets no haze and sh
   - The wiper clears the swept area in its frames.
   - Off means no pixel change.
 
+**Done 2026-11-27.** `fx::Lens` (rmtn/lens.hpp, src/engine/lens.cpp): `Filter::Type::Lens` with `fx::lens`, `lensRain`, `lensFrost`,
+`lensSnow`, `wiper`, `rainOf`, `snowOf` and a CPU twin (`lensDrops`, `lensFlakes`); `Weather::rainAt`/`snowAt`; script `layerFilter`
+types `lens`, `lensRain`, `lensFrost`, `lensSnow`, `wiper`; see "Camera weather" in docs/weather.md. `applyFilter` now takes the layer's frame.
+Examples `windscreen.as` (3D) and `frosted_window.as` (2D); checks in tests/weather_tests.cpp (`RMTN_W11_ONLY=1`). Left out: merging
+drops, water smeared by the wiper, frost that regrows after a wipe; drops always slide straight down the layer.
+Round 1 review fixes: drops are clear irregular low lenses (teardrops when sliding) with a thin rim and a light-driven glint, frost is an anti-aliased
+dendrite distance field growing inward from the edges with no emboss, snowflakes are soft out-of-focus discs that melt into wet blotches and drops. Round 2: the four edges' fronds blend by distance and the
+corners nucleate their own (no seam), drops under ~5 px lose their rim, flakes are larger and more defocused. Open: the frost is dense
+and keeps a faint horizontal/vertical bias; a wiper must share one `fx::lens` with the rain it clears.
+
 ## W12. Showcase, prefabs and documentation
 
 - Prefabs: `weather`, `water body`, `rain`, `lightning`.

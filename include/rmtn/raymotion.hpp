@@ -30,6 +30,7 @@
 #include "splat.hpp"
 #include "physics.hpp"
 #include "particles.hpp"
+#include "lens.hpp"
 #include "paths.hpp"
 #include "math.hpp"
 #include "plot.hpp"

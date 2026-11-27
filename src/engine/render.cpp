@@ -247,7 +247,7 @@ bool drawLayer(TNode& n, int t, const Ctx& c) {
         rlDrawRenderBatchActive();                     // finish the content before acquiring (see above)
         for (const Filter& f : n.layer->filters) {
             RenderTexture out = acquire(w, h);
-            applyFilter(f, content, out, parent.scale);
+            applyFilter(f, content, out, parent.scale, t);
             release(content);
             content = out;
         }
@@ -437,7 +437,7 @@ bool drawLayerBlurred(TNode& n, int lt, int t, const Ctx& parentCtx) {
     if (!n.layer->filters.empty()) {
         for (const Filter& f : n.layer->filters) {
             RenderTexture out = acquire(w, h);
-            applyFilter(f, content, out, parent.scale);
+            applyFilter(f, content, out, parent.scale, lt);
             release(content);
             content = out;
         }
