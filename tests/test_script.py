@@ -754,6 +754,60 @@ void draw(int frame) {}
         self.assertIn("positive size", self.run_cli("still", "fp", "--script", self.path, "--png", "x.png", ok=False))
 
     @unittest.skipUnless(GL, "needs OpenGL")
+    def test_weather_prefabs_and_keys(self):
+        # W12: the four prefabs draw and change over time; every key W12 added to a scene descriptor parses and
+        # draws; the function bindings answer; bad values say what is wrong. The parser has no unknown-key
+        # warning (a misspelt key is ignored, as everywhere in the descriptors), so this pins that too.
+        def run(body, props=None, ok=True, at=2, name="wp.png", frames=60):
+            self.path.write_text('void configure(Composition &inout c) {\n    c.name = "wp"; c.w = 128; c.h = 72; c.fps = 30; c.duration = %d; c.supersample = 1;\n%s\n}\n' % (frames, body))
+            return self.run_cli("still", "wp", "--script", self.path, "--at", at, "--png", name, ok=ok, timeout=240)
+        def prefab(pname, props, **kw):
+            return run('    prefab::use(0, %d, "%s", "%s");\n    scene(0, c.duration, "draw");\n}\nvoid draw(int frame) {' % (kw.pop("frames", 60), pname, json.dumps(props).replace('"', '\\"')), **kw)
+        base = {"box": [0, 0, 128, 72], "trees": 2, "quality": "preview", "size": 30}
+        for name, props in (("weather", {"preset": "squall"}), ("water-body", {"look": "choppy"}), ("rain", {"intensity": 0.9, "delay": 0.2, "ramp": 0.5}),
+                            ("lightning", {"count": 4, "span": 1.5, "seed": 3})):
+            prefab(name, dict(base, **props), at=3, name="a.png")
+            prefab(name, dict(base, **props), at=55, name="b.png")
+            self.assertNotEqual((self.cwd / "a.png").read_bytes(), (self.cwd / "b.png").read_bytes(), name)
+        prefab("weather", dict(base, preset="clear", to="thunderstorm", start=10, end=50), name="c.png")
+        for name, props, needle in (("weather", {"preset": "hurricane"}, "no weather preset"), ("water-body", {"look": "stormy"}, "look must be"),
+                                    ("rain", {"from": [1, 2]}, "[x, y, z]"), ("lightning", {"area": [1]}, "[x, z]")):
+            self.assertIn(needle, prefab(name, props, ok=False))
+
+        def scene(extra, call="g3d::draw(j, frame, 0, 0, 128, 72);"):
+            d = {"fps": 30, "camera": {"position": [0, 2, 6], "target": [0, 3, 0], "fov": 55}, "lights": [{"type": "directional", "position": [3, 6, 4], "intensity": 2}],
+                 "objects": [{"geometry": "box", "width": 30, "height": 1, "depth": 30, "position": [0, -0.5, 0]}]}
+            d.update(extra)
+            return 'string j = %s;\n    %s' % (json.dumps(json.dumps(d)), call)
+        def draw(extra, call="g3d::draw(j, frame, 0, 0, 128, 72);", ok=True, name="k.png"):
+            return run('    scene(0, c.duration, "draw");\n}\nvoid draw(int frame) {\n    ' + scene(extra, call).replace("\n    ", "\n    "), ok=ok, name=name)
+        keys = [
+            {"weatherPreset": "squall"}, {"weatherPreset": {"name": "clear", "to": "snowfall", "amount": 0.4}},
+            {"weatherPreset": "thunderstorm", "lightning": {"roughness": 0.6, "depth": 6, "branchFall": 0.5, "branchLength": 0.4, "maxLevel": 3, "spread": 40, "downward": 0.7}},
+            {"lightningSchedule": {"count": 3, "start": 0, "span": 1, "area": [0, -400], "radius": 100, "cloudBase": 900, "groundY": 0, "groundShare": 0.5, "seed": 4}},
+        ]
+        for i, extra in enumerate(keys):
+            draw(extra, name=f"k{i}.png")                                             # parses, no warning on stderr
+        self.assertNotEqual((self.cwd / "k0.png").read_bytes(), (self.cwd / "k1.png").read_bytes())
+        draw({"weatherPreset": "squall", "notAKey": 1}, name="unk.png")               # unknown keys are ignored, not fatal
+        for extra, needle in (({"weatherPreset": "hurricane"}, "weatherPreset"), ({"weatherPreset": 3}, "weatherPreset"),
+                              ({"weatherPreset": {"name": "clear", "amount": "x"}}, ""),
+                              ({"lightningSchedule": {"count": 9999}}, "lightningSchedule count"), ({"lightningSchedule": {"area": [1]}}, "area must be"),
+                              ({"lightningSchedule": {"groundShare": 2}}, "groundShare"), ({"lightning": {"depth": 99}}, "depth"),
+                              ({"lightning": {"maxLevel": 9}}, "maxLevel"), ({"lightning": {"spread": 400}}, "spread")):
+            self.assertIn(needle, draw(extra, ok=False))
+
+        # The functions: JSON out, and a scene handle method that applies the weather keys.
+        cue = {"camera": {"position": [0, 2, 0]}, "lightningSchedule": {"count": 4, "span": 3, "seed": 3, "area": [0, -1500]}}
+        out = draw({}, call='draw::text(g3d::thunderCues(%s, 300, 30), 2, 2, 5, 0xffffff);' % json.dumps(json.dumps(cue)), name="cues.png")
+        self.assertNotIn("arn", out)
+        self.assertGreater((self.cwd / "cues.png").stat().st_size, 500)
+        self.assertIn("thunderCues needs", draw({}, call='g3d::thunderCues("{}", 0, 30);', ok=False))
+        handle = ('Scene3D@ s = g3d::scene(); s.weather("{\\"weatherPreset\\":\\"squall\\"}"); '
+                  'draw::text(s.groundState(30.0), 2, 2, 5, 0xffffff); s.surfaceHeight(0, 0, 1.0); s.render(frame, 0, 0, 128, 72);')
+        draw({}, call=handle, name="handle.png")
+
+    @unittest.skipUnless(GL, "needs OpenGL")
     def test_map_helpers_draw(self):
         # geo::base, choropleth, colorbar, labels, highlight, markers, route, fly, focus,
         # valuesAt and the geo-route / geo-flyto prefabs: every frame sampled must draw.

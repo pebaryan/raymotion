@@ -4552,7 +4552,9 @@ CloudFrame cloudFrame(const Scene& s, double frame) {
                 break;
             }
     const float vis = std::clamp((f.sun.y + 0.02f) / 0.08f, 0.f, 1.f);
-    f.sunE = Vector3Scale(sunCol, 0.62f * vis * vis * (3 - 2 * vis));
+    // Under a heavy cover the sun is mostly blocked by the deck itself, which the march only sees locally: the light is diffuse, so the lit lobes under it do not shine white.
+    const float cv = std::clamp((f.c.cover - 0.7f) / 0.3f, 0.f, 1.f), diffuse = 1.f - 0.75f * cv * cv * (3 - 2 * cv);
+    f.sunE = Vector3Scale(sunCol, 0.62f * vis * vis * (3 - 2 * vis) * diffuse);
     Vector3 zen, hor, gr;
     if (s.sky.enabled) { zen = linear3(k.zenith); hor = linear3(k.horizon); gr = linear3(k.ground); f.haze = linear3(k.haze); f.hazeAmount = k.hazeAmount; }
     else { zen = linear3(s.skyColor); hor = Vector3Lerp(zen, { 1, 1, 1 }, 0.4f); gr = linear3(s.groundColor); f.haze = hor; f.hazeAmount = 0; }
@@ -5803,7 +5805,12 @@ void renderBody(Scene& s, Camera& camIn, Rectangle vp, const RenderTexture& targ
     renderPrecipOcclusion(cam, precip, items);
     const WetFrame wet = wetFrame(s);
     setWetUniforms(s, wet, precip);
-    if (reflect) renderReflection(s, cam, *cull.mirror, rview, mirrorItems, shadows, envTex, scale, cloudsOn ? &cloudNow : nullptr, vw0, vh0);
+    if (reflect) {
+        renderReflection(s, cam, *cull.mirror, rview, mirrorItems, shadows, envTex, scale, cloudsOn ? &cloudNow : nullptr, vw0, vh0);
+        // The mirrored clouds use texture unit 7 (CLOUD_LOW_SLOT) and leave it empty, which is where the rain's depth map was bound for
+        // the ground's shelter test: without this the whole ground read as sheltered and kept no snow (a water body was enough).
+        setWetUniforms(s, wet, precip);
+    }
 
     // Main pass, into the target or (for depth of field) a target with a depth texture.
     const int fbW = target.texture.width, fbH = target.texture.height;

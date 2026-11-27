@@ -368,12 +368,14 @@ float lightDepth(vec3 p, vec3 s) {                  // optical depth from p to t
     }
     return tau;
 }
-float upDepth(vec3 p, float alt) {                  // optical depth straight up (sky light)
+float upDepth(vec3 p, float alt) {                  // optical depth straight up through the whole column above p (sky light)
     vec3 up = normalize(vec3(p.x, p.y + planetR, p.z));
-    float h = cloudTop - cloudBase, tau = 0.0;
-    for (int i = 1; i <= 2; i++) {
-        vec3 q = p + up * (h * 0.16 * float(i));
-        tau += cloudDensity(q, alt + h * 0.16 * float(i), false) * SIGMA * h * 0.16;
+    float rem = max(cloudTop - alt, 1.0), tau = 0.0, prev = 0.0;
+    for (int i = 0; i < 4; i++) {
+        float fr = i == 0 ? 0.08 : (i == 1 ? 0.25 : (i == 2 ? 0.55 : 1.0));
+        float mid = 0.5 * (prev + fr);
+        tau += cloudDensity(p + up * (rem * mid), alt + rem * mid, false) * SIGMA * rem * (fr - prev);
+        prev = fr;
     }
     return tau;
 }
@@ -438,7 +440,7 @@ void march(vec3 o, vec3 d, vec2 seg, float jit, float cosT, inout vec3 L, inout 
         float powder = 1.0 - exp(-rho * 7.0);
         sunSum *= mix(1.0, powder, 0.55 * (1.0 - max(cosT, 0.0)));
         float tauU = upDepth(p, alt);
-        vec3 amb = mix(ambBot, ambTop, smoothstep(0.0, 1.0, pow(hf, 0.7))) * (0.35 + 0.65 * exp(-tauU * 1.2));
+        vec3 amb = mix(ambBot, ambTop, smoothstep(0.0, 1.0, pow(hf, 0.7))) * (0.10 + 0.90 * exp(-tauU * 0.9));
         amb *= 1.0 + 0.9 * exp(-rho * 3.0);                                              // thin spots let the sky light through: a lumpy base is lighter where it thins
         vec3 S = sunE * sunSum + amb;
         if (flashCol.r + flashCol.g + flashCol.b > 0.0) {

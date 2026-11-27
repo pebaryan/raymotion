@@ -104,6 +104,7 @@ add_library(rmtn_engine STATIC
   src/engine/flora_tree.cpp
   src/engine/flora2d.cpp
   src/engine/flora_prefabs.cpp
+  src/engine/weather_prefabs.cpp
   src/engine/crowd_rig.cpp
   src/engine/voxel.cpp
   src/engine/splat.cpp
@@ -365,6 +366,12 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   target_link_libraries(raymotion_weather_tests PRIVATE rmtn_engine)
   add_test(NAME weather COMMAND raymotion_weather_tests)
   set_tests_properties(weather PROPERTIES LABELS gl SKIP_RETURN_CODE 77 TIMEOUT 900)
+
+  # W12: the weather and water prefabs. The first half needs no window; the rendered half skips itself without one.
+  add_executable(raymotion_weather_prefab_tests tests/weather_prefab_tests.cpp)
+  target_link_libraries(raymotion_weather_prefab_tests PRIVATE rmtn_engine)
+  add_test(NAME weather_prefabs COMMAND raymotion_weather_prefab_tests)
+  set_tests_properties(weather_prefabs PROPERTIES TIMEOUT 900)
 
   add_executable(raymotion_media_tests tests/media_tests.cpp)
   target_link_libraries(raymotion_media_tests PRIVATE rmtn_engine)

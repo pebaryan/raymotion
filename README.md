@@ -391,6 +391,18 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   mirror the sky and the scene (screen-space reflection), puddles gather on flat ground and dry from
   the edges, rain rings run on puddles and water, snow settles on up-facing faces and tints trees and
   grass, and `weathering: false` opts a material out. `porch_rain.as`, `first_snow.as`.
+* Weather and water prefabs (`weather`, `water-body`, `rain`, `lightning`; `rmtn/weather_prefabs.hpp`, `docs/weather.md`,
+  [docs/water.md](docs/water.md)), each a thin composition of the pieces above, pure in the frame:
+  * `weather`: eight named looks (`clear`, `cumulus day`, `overcast`, `squall`, `thunderstorm`, `snowfall`, `fog dawn`,
+    `golden evening`) that set the sky, clouds, precipitation, ground, light shafts and sun together, blended across a frame
+    range with `to`, `start` and `end`. Script key `weatherPreset`.
+  * `water-body`: a lake, pool or river (calm, breezy or choppy) with a shore from a polygon or a seeded ellipse, mirroring the
+    scene.
+  * `rain`: precipitation, a ground that soaks and puddles, and optionally drops on the camera's glass, from `delay`, `ramp` and
+    `intensity`.
+  * `lightning`: a seeded strike schedule (`count`, `span`, `area`, `seed`) with storm light, and with `clip` a thunder sound at
+    each strike's arrival time. Script key `lightningSchedule`, function `g3d::thunderCues`.
+  `examples/scripts/weather_prefabs.as`.
 * 2D vegetation (`flora2d::`, drawn with the node's context, so flat compositions and
   `g3d::Surface` alike): grass along a ground line, tufts, a meadow filling a shape (smaller
   toward its back), shrubs, and branching trees (oak, birch, pine; a silhouette option for

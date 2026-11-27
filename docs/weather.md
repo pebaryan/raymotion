@@ -1,10 +1,10 @@
 # Weather
 
 `g3d::Weather` (include/rmtn/weather.hpp, `Scene::weather`) is one weather state for a 3D scene:
-a wind, cloud cover, haze and a few things later releases will draw. While `weather.enabled` is
+a wind, cloud cover, haze, precipitation, wet ground and snow, lightning and a rainbow. While `weather.enabled` is
 true, the scene's grass, trees, water, rain and snow, sky and fog read it, so they all lean, roll,
 slant and grey the same way. With `enabled` false (the default) nothing reads it and no pixel
-changes: old scenes render as they did.
+changes: old scenes render as they did. For a ready-made look, see "Prefabs" below; for water on its own, [water.md](water.md).
 
 ```cpp
 scene->weather = g3d::Weather::storm();                 // everything follows a gale
@@ -64,7 +64,7 @@ All have `enabled` true and a wind towards 17 degrees.
 `Weather::mix(a, b, t)` interpolates every number. The wind direction goes by angle, the short
 way round (350 to 10 degrees passes through 0, and a 0 to 170 degree turn is an even 0.85 degrees
 a step over 200 steps). The kinds and types (cloud type, precipitation kind) switch at t = 0.5;
-nothing draws them yet, so there is no pixel jump. `enabled` is true when either is.
+a cloud type or precipitation kind therefore changes at the middle of a blend (the `weather` prefab fades a rain that only one end has in from zero instead; `wx::mix`). `enabled` is true when either is.
 When the wind changes over a shot, the clouds would swim if their position were speed x t, so give
 `windRun` the integral of the speed (a function of t); `mix` interpolates it when both have one.
 Gust fronts and flutter keep the plain speed x t clock of `Field` and `ForestSpec`, so they
@@ -120,6 +120,12 @@ the pixels, measured in `weather_tests`), `type` is the W1 `CloudType` (a profil
 with flat bases, a stratus sheet by the base, cumulonimbus towers with an anvil, a flat-topped deck),
 `density`, `detail`, `seed`, `evolution` (the shape slides through the cloud at that many m/s, so it slowly
 changes; the drift is separate), `haze` (aerial perspective), `quality` and `resolution`.
+
+Light under a thick sky (W12): the sky light a sample gets is dimmed by the optical depth of the whole column above it
+(four taps to the top of the layer, floor 10 per cent), so the underside of a thick deck or storm is dark; and the sun is cut
+by up to 75 per cent as `cover` goes from 0.7 to 1, because the deck blocks it in a way the local march cannot see, so the
+lobes under a heavy cover do not shine white. A thick deck seen from below with the sun high on its far side has a base at
+0.44 of the clear horizon's luminance and nothing brighter than 1.16 of it (before: 0.94 and 1.42; `weather_prefabs` test).
 
 How it is drawn:
 
@@ -343,6 +349,8 @@ shortened by snow, only whitened.
 `examples/scripts/porch_rain.as` (puddles and rings on the path) and `first_snow.as` (settling snow).
 
 ## Lakes, rivers and pools
+
+(A short guide, with the `water-body` prefab, is in [water.md](water.md).)
 
 `Scene::waterBodies` holds `g3d::WaterBody` shapes of water beside (or instead of) the endless sea
 `Scene::water`. A **lake or pool** is a polygon (`WaterBody::lake(outline, level)`, optional `holes`
@@ -648,9 +656,62 @@ creeping in and a wiped patch).
 Left out: drops that merge, a wiper that smears the water it moves, frost that regrows after a wipe, and drops that follow gravity
 on a tilted lens (the slide is straight down the layer).
 
+## Prefabs
+
+Four prefabs set the pieces above up for you: a landscape (terrain, a meadow, cone trees, optionally a lake), the sky and weather, and a camera,
+drawn into a box like the flora prefabs. They are thin: each one fills the `Scene` fields documented on this page, and `rmtn/weather_prefabs.hpp`
+(namespace `rmtn::wx`) makes the same state without a prefab for a scene of your own. Water has its own page, [water.md](water.md). `raymotion prefabs`
+lists the props. Everything is a pure function of the frame, so any frame renders alone.
+
+```
+prefab::use(0, 150, "weather",   "{\"box\":[0,0,1280,720],\"preset\":\"clear\",\"to\":\"thunderstorm\",\"start\":20,\"end\":120}");
+prefab::use(0, 150, "rain",      "{\"box\":[0,0,1280,720],\"intensity\":0.8,\"delay\":0.5,\"lens\":0.6}");
+prefab::use(0, 150, "lightning", "{\"box\":[0,0,1280,720],\"count\":7,\"span\":4,\"seed\":2,\"clip\":\"thunder.wav\"}");
+prefab::use(0, 150, "water-body", "{\"box\":[0,0,1280,720],\"look\":\"breezy\"}");
+```
+
+All four take `box`, `size` (landscape width, metres), `trees`, `orbit` (camera turn, radians a second), `fov` (degrees), `quality`
+(`preview`, `film`, `high`, the clouds' march), `seed`, `fps` and `ground` (the land's colour). The ones below are theirs alone.
+
+**`weather`**: `preset` (one of the eight below), `to` (a second preset to blend towards; empty for none), `start` and `end` (the frames the blend
+runs between; 0 and 0 for none), `lake` (a lake ahead of the camera, default true), `grass` (`auto` is a meadow, bare under settled snow; or a
+`flora::grass` look, or `none`), `shafts` (`auto`: only the presets that want them; `off`, `low`, `medium`, `high`) and `pitch` (camera, degrees).
+The blend is `wx::mix`: numbers interpolate, a rain or snow that only one end has fades in from zero for the whole blend rather than switching
+on halfway, the shafts and lightning follow whichever end has them. The camera looks towards the sun's azimuth plus the preset's `viewFromSun`.
+
+| Preset | hour | cloud cover | wind m/s | precipitation | wetness | snow | notes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `clear` | 11 | 0.08 | 3 | none | 0 | 0 | high thin cumulus, full aerial perspective |
+| `cumulus day` | 13.5 | 0.45 | 5 | none | 0 | 0 | the default |
+| `overcast` | 12 | 0.90 | 5 | none | 0.1 | 0 | stratus deck |
+| `squall` | 15 | 0.98 | 13 (gust 0.75) | rain 0.9 | 0.75 | 0 | low dark base |
+| `thunderstorm` | 15 | 0.62 | 16 | rain 1.0 | 0.9 | 0 | cumulonimbus to 11 km on a 600 m base, slate sky (`gloom`), a tower and anvil ahead (`Clouds::storms`), 6 strikes a minute, a choppy lake, light shafts, the sun behind the camera |
+| `snowfall` | 10.5 | 0.92 | 4 | snow 0.6 | 0 | 1 | bright, flat light |
+| `fog dawn` | 6.3 | 0.50 | 1 | none | 0.2 | 0 | haze 0.8, shafts at medium |
+| `golden evening` | 17.6 | 0.35 | 3 | none | 0.3 | 0 | low sun, shafts, the rain that has passed as a rainbow |
+
+`wx::applyPreset(scene, name)` (also `wx::apply(scene, look)`, `wx::applyBlend(scene, a, b, amount)`, `wx::look(name)` and `wx::mix`) sets the weather,
+clouds, precipitation, ground, lightning, light shafts, aerial perspective, ambient light and sky (`Sky::at(hour)`) of a scene, and puts light 0 at the sun
+(never under the horizon) with the sky's own sun light off.
+
+**`rain`**: `intensity` (0..1; drizzle to downpour, 0.6), `wind` (m/s, 7), `windDirection` (degrees, 17), `delay` and `ramp` (seconds before it starts
+and to build up; 0 and 1), `wetRate` (how many weather seconds one film second soaks the ground, 60; 0 keeps it dry), `lens` (0..1 drops on the
+camera glass, 0: none) and `cover` (0.95). It draws a shelter, a lamp and barrels. `wx::addRain(scene, RainSpec)` sets the weather, the
+precipitation, the ground and a `Scene::up` step that sets the intensity from t (`wx::rainIntensity`); `wx::rainLens(spec)` makes the lens filter
+with a rate that follows the same history as the ground, so the glass and the puddles agree.
+
+**`lightning`**: `count` strikes (6) falling one in each of `count` equal parts of `[start, start + span)` (0 and 10 seconds) in a disc of `radius`
+(1500 m) at `area` `[x, z]` (default `[0, -3000]`), above `cloudBase` (1200 m), `groundShare` of them (0.5) reaching the ground; `rain` (0.8) falls
+under it, `light` (1) scales the storm light; `clip` is the path of a thunder sound and `volume` its level (1). With a `clip` it places one audio node
+at the time each strike's sound arrives (strike time plus distance over 343 m/s), and none past the end of the film. `wx::strikeSchedule(StrikeSpec)`
+lists the strikes, `wx::addLightning(scene, spec)` sets `Scene::lightning` to them (no rate, not following the clouds), and
+`wx::thunderCues(spec, listener)` lists the thunder, sorted by arrival, without building a scene. The nearest of a channel's ends and middle is the distance.
+
+Seeded: the same props always give the same strikes and shapes. Open: the prefab landscapes are plain (cone trees, flat meadow); a film builds its own.
+
 ## Script
 
-The water's `spectrum` object and `examples/scripts/open_ocean.as` are in docs/scripting.md. The scene descriptor's `clouds` object (docs/scripting.md) takes the `Clouds` fields by name. Its `weather` object takes a `preset`, optionally `to` and
+The `weatherPreset` key of a scene descriptor, and the `lightningSchedule` key and the lightning shape keys, are in docs/scripting.md. The water's `spectrum` object and `examples/scripts/open_ocean.as` are in docs/scripting.md. The scene descriptor's `clouds` object (docs/scripting.md) takes the `Clouds` fields by name. Its `weather` object takes a `preset`, optionally `to` and
 `amount` to mix towards a second preset, and per-field overrides; `ownWind`, `ownClouds`, `ownLight`
 and `ownFog` are keys on the objects above. `examples/scripts/weather_mix.as` is a meadow with
 grass, trees, a pond and rain, mixed from clear into a storm across the clip. The `wakes` and `ripples` arrays and an
