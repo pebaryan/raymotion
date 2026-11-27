@@ -329,6 +329,47 @@ shortened by snow, only whitened.
 "snowOnGrass", "ownWeather", "seed"}`; weather keys `temperature`, `accumulationScale`, `history`.
 `examples/scripts/porch_rain.as` (puddles and rings on the path) and `first_snow.as` (settling snow).
 
+## Lakes, rivers and pools
+
+`Scene::waterBodies` holds `g3d::WaterBody` shapes of water beside (or instead of) the endless sea
+`Scene::water`. A **lake or pool** is a polygon (`WaterBody::lake(outline, level)`, optional `holes`
+for islands); a **river** is a path with a width per point and a level or a fall
+(`WaterBody::river(path, width, level, flowSpeed)`). Polygons are ear-clipped, rivers are a strip
+whose uv is (across, arc length). Every body has its own `Water` look (`look`), shares the sea's
+shader and gets its reflection (the planar pass is shared by bodies at the level of the sea or of
+the first reflecting body; bodies at other levels reflect the sky only), refraction, band-limiting,
+the weather's wind and rain rings. `fetch` defaults to the body's own size: a pond does not grow
+ocean waves.
+
+* **Shore.** The surface fades out where the bed (read from the depth of the opaque scene) comes
+  within `edgeSoft` metres of it, so there is no hard waterline. Within `foamWidth` metres of depth it
+  grows lace foam: thin white filaments (the cell edges of a Worley field, bent and broken into patches)
+  drawn on top of the water, never opaque on a calm shore. How much foam there is follows the body's
+  wave energy, from the significant wave height of the waves it is drawn with (the weather's wind and the
+  body's fetch included), and for a river from the current: a calm pond keeps a few thin broken
+  threads, a windy lake a net, a fast river whitewater. The band's width is `foamWidth` times 0.4 to 1
+  with the energy, and `shoreFoam` (0 to 1) scales it. The depth is the vertical one along the view ray, so
+  foam follows the terrain, not the polygon.
+* **Small water.** A body's waves wander in phase and come and go in patches, so no single wavelength
+  stripes a small lake.
+* **Flow.** Two ripple layers advect along the river's arc length, half a period apart, with
+  weights that cross-fade through a triangle and a jitter per cycle, so a phase switch never shows.
+  `flowSpeed` is metres per second along the path; `narrowFaster` speeds it up where the river
+  narrows; `flowPeriod` is the cycle length in seconds.
+* **Limits.** Bodies are flat at their level (waves are in the shading and in `height()`), seen
+  from above water only, at most 32 per scene.
+* **City.** `city::Look::realWater` (off by default) turns CityJSON water polygons into bodies at
+  their level (`city::waterBodies(model, look)` returns them); off, water stays a flat face of the
+  mesh as before. `geo3d::` has no water polygons, so there is nothing to convert there.
+* **Script.** `waterBodies: [{ "type": "lake"|"pool"|"river", ... }]`, see docs/scripting.md.
+  `examples/scripts/river_valley.as`.
+
+Tests (weather ctest): a pool in a box (water inside the polygon, none outside), foam only where
+the depth is under the foam width, no step in a column across the shoreline, ripples moving at the
+flow speed within 15 %, no reset seam over 10 s, a city lake at its level, foam following the wind, no
+spectral stripes on a lake, the hill mirrored in it, a sea at level 2 equal to level 0 lifted, no change without
+bodies, purity, and the lake reflecting a pole.
+
 ## Script
 
 The scene descriptor's `clouds` object (docs/scripting.md) takes the `Clouds` fields by name. Its `weather` object takes a `preset`, optionally `to` and

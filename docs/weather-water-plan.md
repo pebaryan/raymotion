@@ -291,6 +291,8 @@ billboard particles and splats are not reflected.
     (compare frame pairs across the flow-map's phase switch).
   - A lake polygon from geo3d sits at its level.
 
+**Done 2026-11-26.** `Scene::waterBodies` (`g3d::WaterBody`: lake, pool, river), soft shore and lace foam from the scene depth, two-phase flow map, `city::Look::realWater`, script `waterBodies`; see "Lakes, rivers and pools" in docs/weather.md. geo3d has no water polygons, so only city water converts.
+
 ## W8. Wakes, ripples and floating objects
 
 - **Wakes:** a Kelvin wake (a 19.5° V) behind any object moving along a path on the water,

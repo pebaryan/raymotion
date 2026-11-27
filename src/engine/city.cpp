@@ -459,6 +459,11 @@ Color colorOf(const Look& look, const Object& o, const Face& f) {
 
 namespace {
 
+// A face of open water: a WaterSurface face, or a face with no semantics of a WaterBody object.
+bool isWaterFace(const Object& o, const Face& f) {
+    return f.kind == "WaterSurface" || (o.type == "WaterBody" && f.kind.empty());
+}
+
 struct Buffer {
     std::vector<float> v, n, uv;
     std::vector<unsigned char> c;
@@ -467,6 +472,7 @@ struct Buffer {
         if (!g) return;
         for (const Face& f : g->faces) {
             if (f.rings.empty() || f.rings[0].size() < 3) continue;
+            if (look.realWater && isWaterFace(o, f)) continue;     // drawn as a water body instead
             Vector3 normal{};
             const std::vector<int> tris = triangles(f, &normal);
             if (tris.empty()) continue;
@@ -563,12 +569,41 @@ g3d::Material defaults(g3d::Material m) {
 
 } // namespace
 
+std::vector<g3d::WaterBody> waterBodies(const Model& m, const Look& look) {
+    std::vector<g3d::WaterBody> out;
+    for (const Object& o : m.objects) {
+        const Geometry* g = o.at(look.lod);
+        if (!g) continue;
+        for (const Face& f : g->faces) {
+            if (f.rings.empty() || f.rings[0].size() < 3 || !isWaterFace(o, f)) continue;
+            auto ring = [](const std::vector<Vector3>& r) {
+                std::vector<Vector2> p;
+                for (const Vector3& q : r) { const Vector3 s = toScene(q); p.push_back({ s.x, s.z }); }
+                return p;
+            };
+            float level = 0;
+            for (const Vector3& q : f.rings[0]) level += q.z;
+            level /= (float)f.rings[0].size();
+            g3d::WaterBody b = g3d::WaterBody::lake(ring(f.rings[0]), level);
+            for (size_t i = 1; i < f.rings.size(); i++)
+                if (f.rings[i].size() >= 3) b.holes.push_back(ring(f.rings[i]));
+            b.look.deep = look.water;
+            out.push_back(std::move(b));
+        }
+    }
+    return out;
+}
+
 g3d::Object3D* add(g3d::Scene& scene, const Model& m, const Look& look, g3d::Material material) {
+    if (look.realWater)
+        for (g3d::WaterBody& b : waterBodies(m, look)) scene.waterBodies.push_back(std::move(b));
     return fill(scene.add(), m, look, defaults(material));
 }
 
 g3d::Object3D* add(g3d::Object3D& parent, const Model& m, const Look& look, g3d::Material material) {
-    return fill(parent.add(), m, look, defaults(material));
+    Look keep = look;
+    keep.realWater = false;         // no scene to hand the water to: it stays a face
+    return fill(parent.add(), m, keep, defaults(material));
 }
 
 bool isPlant(const Object& o) { return o.type == "SolitaryVegetationObject" || o.type == "PlantCover"; }

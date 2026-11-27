@@ -690,6 +690,94 @@ struct Water {
     bool submerged(Vector3 p, double seconds) const { return enabled && p.y < height(p.x, p.z, seconds); }
 };
 
+// ------------------------------------------------------------------ water bodies
+// A lake, pool or river: water that fills a shape instead of the whole world, in Scene::waterBodies. It is
+// drawn by the same shader as Scene::water (Fresnel sky, W6 reflection and refraction, band-limited waves, the
+// weather's wind and fetch, rain rings) with these differences:
+//   - Its look is `look`, a Water of its own; `look.level` and `look.enabled` are ignored (`level` is used).
+//     Its surface geometry is flat (at `level`, plus a river's fall): waves show in the shading and in
+//     height(), which a boat may ride, not in the silhouette.
+//   - Shore: the depth of the opaque scene behind the surface gives the water's depth to what lies under it.
+//     The surface fades to nothing over `edgeSoft` metres of depth, so there is no line where it meets the bank,
+//     and a foam band of lace (broken by noise, swashing in and out, band-limited by the pixel footprint) lies in
+//     the first `foamWidth` metres of depth. The shore is only as exact as the depth buffer. A polygon should
+//     reach under the bank, as an edge above the bed is not softened. It needs the opaque scene copied once a
+//     frame (like Water::refraction, about 0.6 ms at 1080p).
+//   - Rivers have a flow: the surface's ripples are carried along the path at `flowSpeed` by the two-phase
+//     flow-map method (two samples half a period apart, cross-faded by a triangle weight, so there is no seam).
+//     A river's `look.waves` are usually empty: its detail is the flow ripples.
+//   - It is seen from above only: from under its surface (the camera's y below `level`) it is not drawn.
+//   - Reflections: one planar reflection pass is drawn per frame, at the level of the sea if that reflects, else
+//     of the first body whose look reflects. Bodies at that level (within 1 mm) share it; bodies at other levels
+//     reflect the sky only. Objects under a body are not tinted unless the body refracts (the bed in view is
+//     tinted by the body's own surface either way).
+//   - Up to 32 bodies draw (the first ones).
+//
+//     auto lake = g3d::WaterBody::lake({ {-20, -10}, {20, -10}, {25, 15}, {-15, 12} }, 0.5f);
+//     scene->waterBodies.push_back(lake);
+//     auto river = g3d::WaterBody::river({ {0, 0}, {10, 4}, {22, 3}, {35, 12} }, 4.f, 0.5f, 1.2f);
+//     scene->waterBodies.push_back(river);
+struct WaterBody {
+    // The shape: a polygon (outline in x, z, with optional holes), or a river path (two or more points in x, z,
+    // smoothed with a Catmull-Rom curve). A body with a path of two points or more is a river; otherwise the
+    // outline is used.
+    std::vector<Vector2> outline;
+    std::vector<std::vector<Vector2>> holes;
+    std::vector<Vector2> path;
+    std::vector<float> width;       // river: the width in metres at each path point (one value for all; empty: 4)
+    // Heights: `level` is the surface's height (the reference level for the shader and the reflection). A river
+    // may fall along its path: `fall` metres of drop per metre of path, or `levels` (one absolute height per path
+    // point, which wins). A river's reflection is drawn at `level`, so keep its drop to a few metres.
+    float level = 0;
+    float fall = 0;
+    std::vector<float> levels;
+    // River flow: the speed along the path in metres a second at the middle of the channel (the banks flow at
+    // 65 %). With narrowFaster the speed at each point is flowSpeed times (mean width / width there), as a
+    // constant discharge would give (limited to 0.4 to 2.5 times). `flowPeriod` is the flow map's cycle in seconds.
+    float flowSpeed = 1;
+    bool narrowFaster = false;
+    float flowPeriod = 1;
+    // The strength (slope) and the length in metres of a river's largest ripples.
+    float ripple = 0.16f, rippleLength = 0.9f;
+    Water look;                     // waves, colour, absorption, reflections, refraction... (lake() and river() fill it)
+    // Metres of open water upwind for the weather's waves: 0 takes the body's own size (its longest extent).
+    float fetch = 0;
+    // The shore: depth in metres over which the surface fades in (0.3), the width of the foam band (0.4) and
+    // the foam's strength, 0 to 1 (1; 0 turns the shore foam off).
+    float edgeSoft = 0.3f, foamWidth = 0.4f, shoreFoam = 1;
+
+    // A lake or pool: a calm look, a fetch of its own size, lit through to the bed.
+    static WaterBody lake(std::vector<Vector2> outline, float level);
+    // A river: path points, a constant width, the surface level at the start and the flow speed.
+    static WaterBody river(std::vector<Vector2> path, float width, float level, float flowSpeed);
+
+    bool isRiver() const { return path.size() >= 2; }
+    // The reference surface height at (x, z): `level` for a polygon, the river's level at the closest path point.
+    float levelAt(float x, float z) const;
+    // The surface height at (x, z) at `seconds`, as the water look's waves give it (see Water::height), with the
+    // weather worked in when `weather` is given.
+    float height(float x, float z, double seconds, const Weather* weather = nullptr) const;
+    // Whether the point lies inside the shape (a river: within half its width of the smoothed path).
+    bool contains(float x, float z) const;
+    // The x and z extent (min x, min z, max x, max z).
+    Vector4 extent() const;
+    // The speed of the flow along the path (m/s) at distance `arc` metres along it.
+    float speedAt(float arc) const;
+};
+
+// The mesh a body is drawn with, for the CPU (the engine builds it once and draws it): positions (x, y, z) with
+// y the offset from `level`; a normal slot holding (flow speed m/s, flow heading rad about +y from +x, river
+// width m); texture coordinates (u across 0..1, v the arc length in metres along a river; polygons use
+// (x, z)); 16-bit triangle indices. A polygon is triangulated by ear clipping with holes; a river is a strip
+// along the smoothed path. Empty when the shape is degenerate.
+struct WaterBodyMesh {
+    std::vector<float> position, normal, uv;
+    std::vector<unsigned short> index;
+};
+WaterBodyMesh waterBodyMesh(const WaterBody& body);
+// A fingerprint of everything the mesh depends on (to cache it).
+uint64_t waterBodyKey(const WaterBody& body);
+
 // ------------------------------------------------------------------ volumetric clouds
 // A layer of real clouds, raymarched through a shell round a planet of Earth's size (centre 6 371 km
 // below the world origin, so the layer curves away to the horizon and is seen from orbit as well as
@@ -956,7 +1044,8 @@ struct Scene {
     bool fogFromSky = false;        // fog takes the sky's (or environment's) colour in each direction
     Sky sky;                        // a procedural sky (sky.enabled); replaces `environment`
     Water water;                    // a water surface (water.enabled)
-    Weather weather;                // one wind, clouds, haze... for everything above (weather.enabled)
+    std::vector<WaterBody> waterBodies;     // lakes, pools and rivers, drawn with the same shader (see WaterBody)
+    Weather weather;               // one wind, clouds, haze... for everything above (weather.enabled)
     Clouds clouds;                  // volumetric clouds (clouds.enabled), drawn after the opaque objects
     Downfall precipitation;         // GPU rain, snow or sleet round the camera (precipitation.enabled)
     Ground ground;                  // wet ground, puddles, ripples and snow cover (needs weather.enabled, or a pin here)
@@ -1029,6 +1118,9 @@ fx::Emitter3D inWeather(const fx::Emitter3D& e, const Weather& w, const Matrix& 
 // The water as drawn at this moment: scene.water, with the weather worked in if it is enabled.
 // Its height() and slope() are the surface the shader draws (for a boat to ride).
 Water waterOf(const Scene& scene);
+// The look of a water body as drawn: body.look at body.level with the fetch (its own size when 0), and the
+// weather worked in if it is enabled. Its height() and slope() are the waves the shader draws on the body.
+Water waterOf(const Scene& scene, const WaterBody& body);
 // The clouds as drawn this moment: `c` with the weather's cover and type worked in (unless
 // c.ownWeather or the weather is off). Their drift is c.travel(w, seconds).
 Clouds inWeather(const Clouds& c, const Weather& w);

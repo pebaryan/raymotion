@@ -2695,6 +2695,646 @@ static void waterReflections() {
     noShimmer();
 }
 
+// ---------------------------------------------------------------- W7: lakes, rivers and pools (g3d::WaterBody)
+// A top-down orthographic camera over (cx, cz): `height` metres of the world from the top of the picture to the
+// bottom, +x to the right, -z up.
+static g3d::Camera topDown(float cx, float cz, float height) {
+    g3d::Camera c;
+    c.position = { cx, 30, cz };
+    c.target = { cx, 0, cz };
+    c.upVector = { 0, 0, -1 };
+    c.orthographic = true;
+    c.orthoHeight = height;
+    return c;
+}
+static Vector2 topPx(const g3d::Camera& c, float x, float z, int w, int h) {
+    const float perM = (float)h / c.orthoHeight;
+    return { w * 0.5f + (x - c.target.x) * perM, h * 0.5f + (z - c.target.z) * perM };
+}
+static g3d::ScenePtr bodyWorld(const g3d::Camera& cam) {
+    auto s = std::make_shared<g3d::Scene>();
+    s->camera = cam;
+    s->skyColor = { 150, 190, 235, 255 };
+    s->groundColor = { 90, 100, 90, 255 };
+    s->ambient = 0.6f;
+    s->lights.push_back(g3d::Light::directional({ 10, 14, 6 }, WHITE, 1.4f));
+    return s;
+}
+static bool inPoly(const std::vector<Vector2>& p, float x, float y) {
+    bool in = false;
+    for (size_t i = 0, j = p.size() - 1; i < p.size(); j = i++)
+        if ((p[i].y > y) != (p[j].y > y) && x < (p[j].x - p[i].x) * (y - p[i].y) / (p[j].y - p[i].y) + p[i].x) in = !in;
+    return in;
+}
+static float distToPoly(const std::vector<Vector2>& p, float x, float y) {
+    float best = 1e30f;
+    for (size_t i = 0; i < p.size(); i++) {
+        const Vector2 a = p[i], b = p[(i + 1) % p.size()], ab = Vector2Subtract(b, a), ap = Vector2Subtract({ x, y }, a);
+        const float t = std::clamp(Vector2DotProduct(ap, ab) / std::max(Vector2DotProduct(ab, ab), 1e-9f), 0.f, 1.f);
+        best = std::min(best, Vector2Distance({ x, y }, Vector2Add(a, Vector2Scale(ab, t))));
+    }
+    return best;
+}
+static int pixelDiff(Color a, Color b) { return std::abs(a.r - b.r) + std::abs(a.g - b.g) + std::abs(a.b - b.b); }
+
+// (a) A pool in a box: an L-shaped pool over a sand floor. Water inside the outline, none outside: the picture with
+// the pool minus the picture without it changes inside (3 px in from the edge) and nowhere outside (3 px out).
+// A pool drawn as its bounding box would also change the notch.
+static std::vector<Vector2> lPool() { return { { -4, -2.5f }, { 4, -2.5f }, { 4, 0 }, { 0, 0 }, { 0, 2.5f }, { -4, 2.5f } }; }
+static g3d::ScenePtr poolScene(bool water) {
+    auto s = bodyWorld(topDown(0, 0, 9));
+    s->add(g3d::Geometry::plane(40, 40), flat({ 170, 150, 110, 255 }))->position = { 0, -1, 0 };
+    if (water) {
+        g3d::WaterBody b = g3d::WaterBody::lake(lPool(), 0);
+        b.look.reflections = g3d::Water::Reflections::Off;
+        b.shoreFoam = 0;
+        s->waterBodies.push_back(b);
+    }
+    return s;
+}
+static void poolInBox() {
+    constexpr int W = 320, H = 180;
+    auto on = poolScene(true), off = poolScene(false);
+    Image a = look(on, W, H, 3), b = look(off, W, H, 3);
+    dump("w7-pool.png", a);
+    std::vector<Vector2> px;
+    for (Vector2 p : lPool()) px.push_back(topPx(on->camera, p.x, p.y, W, H));
+    int inN = 0, inHit = 0, outN = 0, outHit = 0;
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            const float d = distToPoly(px, x + 0.5f, y + 0.5f);
+            if (d <= 3) continue;
+            const int diff = pixelDiff(GetImageColor(a, x, y), GetImageColor(b, x, y));
+            if (inPoly(px, x + 0.5f, y + 0.5f)) { inN++; inHit += diff > 12; }
+            else { outN++; outHit += diff > 0; }
+        }
+    std::printf("[weather] W7 pool in a box: %d of %d pixels inside change, %d of %d outside change\n", inHit, inN, outHit, outN);
+    CHECK(inN > 5000 && outN > 5000);
+    CHECK(inHit >= inN * 95 / 100);
+    CHECK(outHit <= 3);
+    UnloadImage(a); UnloadImage(b);
+}
+
+// A bed that rises at 1:4 towards +x, through the level at x = 2, under a lake whose polygon runs far past the shore.
+// `wind` < 0: the body's own authored waves, rough (energy 1). Otherwise calm-lake waves under that weather wind (m/s) over
+// a 2 km fetch, so the foam follows the wind.
+static g3d::ScenePtr shoreScene(const g3d::Camera& cam, float foam, float soft, float foamWidth, float wind = -1) {
+    auto s = bodyWorld(cam);
+    g3d::Object3D* bed = s->add(g3d::Geometry::plane(40, 20), flat({ 80, 70, 55, 255 }));
+    bed->position = { 2, 0, 0 };
+    bed->rotation = { 0, 0, std::atan(0.25f) * RAD2DEG };
+    g3d::WaterBody b = g3d::WaterBody::lake({ { -9, -6 }, { 7, -6 }, { 7, 6 }, { -9, 6 } }, 0);
+    if (wind == -2) b.look = g3d::Water{};
+    else if (wind < 0) b.look = w6Water(2);
+    else {
+        b.look = g3d::Water::calm();
+        b.fetch = 2000;
+        s->weather = g3d::Weather::clear();
+        s->weather.enabled = true;
+        s->weather.wind.speed = wind;
+    }
+    b.look.foam = 0; b.look.caustics = 0; b.look.sunGlint = 0;
+    b.look.reflections = g3d::Water::Reflections::Off;
+    b.shoreFoam = foam; b.edgeSoft = soft; b.foamWidth = foamWidth;
+    s->waterBodies.push_back(b);
+    return s;
+}
+// How much white a shoreline picture has over the same one without shore foam: per pixel the share of the way from
+// the foam-off colour to white (0 none, 1 solid). Top-down, so columns map to the bed's known depth.
+static std::vector<float> foamAlpha(const Image& on, const Image& off) {
+    std::vector<float> a((size_t)on.width * on.height);
+    for (int y = 0; y < on.height; y++)
+        for (int x = 0; x < on.width; x++) {
+            const float lo = luma(GetImageColor(off, x, y)), ln = luma(GetImageColor(on, x, y));
+            a[(size_t)y * on.width + x] = std::clamp((ln - lo) / std::max(245.f - lo, 1.f), 0.f, 1.f);
+        }
+    return a;
+}
+// (b) Shore foam only in the shallows. Seen from straight above, so the depth is the vertical one; the bed is known
+// (depth = (2 - x) / 4 metres). None where the depth passes 1.3 foam widths; some in the first 0.8; and a calm shore's
+// foam stays translucent (alpha under 0.6) while it is white, not tan.
+static void foamInTheShallows() {
+    constexpr int W = 320, H = 180;
+    const float fw = 0.5f;
+    auto s = shoreScene(topDown(-1.5f, 0, 8), 1, 0.3f, fw);
+    auto bare = shoreScene(topDown(-1.5f, 0, 8), 0, 0.3f, fw);
+    Image img = look(s, W, H, 6), none = look(bare, W, H, 6);
+    dump("w7-shore-foam.png", img);
+    const std::vector<float> al = foamAlpha(img, none);
+    auto region = [&](float x0, float x1, float* mx) {
+        double sum = 0; int n = 0; *mx = 0;
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) {
+                const float wx = s->camera.target.x + (x + 0.5f - W * 0.5f) * s->camera.orthoHeight / H;
+                if (wx < x0 || wx > x1) continue;
+                n++; sum += al[(size_t)y * W + x]; *mx = std::max(*mx, al[(size_t)y * W + x]);
+            }
+        return n ? (float)(sum / n) : 0.f;
+    };
+    float mxDeep, mxShallow;
+    const float deep = region(-8, 2 - 1.3f * fw * 4, &mxDeep), shallow = region(2 - 0.8f * fw * 4, 1.95f, &mxShallow);
+    std::printf("[weather] W7 shore foam: mean foam alpha %.4f where the depth is over 1.3 foam widths (max %.3f), %.3f in the first 0.8 (max %.2f)\n", deep, mxDeep, shallow, mxShallow);
+    CHECK(mxDeep < 0.01f);
+    CHECK(shallow > 0.04f);
+    UnloadImage(img); UnloadImage(none);
+}
+
+// Foam follows the wave energy: the same calm lake under a 1 m/s and an 8 m/s wind. The calm one has under a quarter
+// of the foam (summed alpha), and none of its foam is more than 60 % opaque.
+static void foamFollowsTheWind() {
+    constexpr int W = 320, H = 180;
+    float mass[2] = { 0, 0 }, peak[2] = { 0, 0 };
+    for (int k = 0; k < 2; k++) {
+        const float wind = k ? 8.f : 1.f;
+        auto s = shoreScene(topDown(-1.5f, 0, 8), 1, 0.3f, 0.5f, wind), bare = shoreScene(topDown(-1.5f, 0, 8), 0, 0.3f, 0.5f, wind);
+        Image on = look(s, W, H, 6), off = look(bare, W, H, 6);
+        if (k == 0) dump("w7-shore-calm.png", on); else dump("w7-shore-wind.png", on);
+        const std::vector<float> al = foamAlpha(on, off);
+        for (float a : al) { mass[k] += a; peak[k] = std::max(peak[k], a); }
+        UnloadImage(on); UnloadImage(off);
+    }
+    std::printf("[weather] W7 foam and wind: summed foam alpha %.1f at 1 m/s (peak %.2f), %.1f at 8 m/s (peak %.2f)\n", mass[0], peak[0], mass[1], peak[1]);
+    CHECK(mass[1] > 50);
+    CHECK(mass[0] < 0.25f * mass[1]);
+    CHECK(peak[0] <= 0.6f);
+}
+
+// (c) The edge is soft. From a low angle the surface mirrors the bright sky, so a hard waterline would step from
+// bed to mirror; down a column across the shoreline no pixel steps from the next by more than a bound.
+static float shoreStep() {
+    constexpr int W = 320, H = 180;
+    g3d::Camera cam;
+    cam.position = { -8, 1.0f, 0 };
+    cam.target = { 2, 0, 0 };
+    cam.fov = 40;
+    auto s = shoreScene(cam, 0, 0.3f, 0.4f, -2);
+    Image img = look(s, W, H, 6);
+    dump("w7-shore-soft.png", img);
+    const int r0 = (int)std::lround(project(cam, { 2, 0, 0 }, W, H).y);
+    int worst = 0;
+    for (int y = std::max(r0 - 30, 1); y < std::min(r0 + 25, H); y++)
+        worst = std::max(worst, pixelDiff(GetImageColor(img, W / 2, y), GetImageColor(img, W / 2, y - 1)));
+    std::printf("[weather] W7 soft edge: largest step between pixels near the shoreline (row %d): %d\n", r0, worst);
+    UnloadImage(img);
+    return (float)worst;
+}
+static void softEdge() { CHECK(shoreStep() < 40); }
+
+// A straight river along +x seen from above, its ripples drawn as the surface's slope in colour (Ground::debug 2).
+static g3d::ScenePtr riverWorld(float speed) {
+    auto s = bodyWorld(topDown(0, 0, 4.5f));
+    s->add(g3d::Geometry::plane(60, 30), flat({ 90, 80, 60, 255 }))->position = { 0, -2, 0 };
+    g3d::WaterBody r = g3d::WaterBody::river({ { -14, 0 }, { -5, 0 }, { 5, 0 }, { 14, 0 } }, 6, 0, speed);
+    r.look.reflections = g3d::Water::Reflections::Off;
+    r.shoreFoam = 0;
+    s->waterBodies.push_back(r);
+    s->ground.debug = 2;
+    return s;
+}
+// Red channel of a crop, minus its mean.
+static std::vector<float> cropOf(const Image& img, int x0, int x1, int y0, int y1) {
+    std::vector<float> v;
+    double m = 0;
+    for (int y = y0; y < y1; y++)
+        for (int x = x0; x < x1; x++) { v.push_back((float)GetImageColor(img, x, y).r); m += v.back(); }
+    m /= std::max<size_t>(v.size(), 1);
+    for (float& f : v) f -= (float)m;
+    return v;
+}
+// How many pixels the pattern of `b` lies along +x of the pattern of `a`: the peak of their correlation over
+// shifts, refined by a parabola through the peak and its neighbours.
+static float patternShift(const Image& a, const Image& b, int maxShift, float* peak = nullptr) {
+    const int y0 = a.height / 2 - 40, y1 = a.height / 2 + 40, xa = 50, xb = a.width - 50;
+    const std::vector<float> A = cropOf(a, xa, xb, y0, y1);
+    std::vector<double> corr;
+    for (int s = -maxShift; s <= maxShift; s++) {
+        const std::vector<float> B = cropOf(b, xa + s, xb + s, y0, y1);
+        double ab = 0, aa = 0, bb = 0;
+        for (size_t i = 0; i < A.size(); i++) { ab += (double)A[i] * B[i]; aa += (double)A[i] * A[i]; bb += (double)B[i] * B[i]; }
+        corr.push_back(ab / std::sqrt(std::max(aa * bb, 1e-9)));
+    }
+    size_t k = (size_t)(std::max_element(corr.begin(), corr.end()) - corr.begin());
+    if (peak) *peak = (float)corr[k];
+    float sub = 0;
+    if (k > 0 && k + 1 < corr.size()) {
+        const double l = corr[k - 1], c = corr[k], r = corr[k + 1], den = l - 2 * c + r;
+        if (std::fabs(den) > 1e-12) sub = (float)(0.5 * (l - r) / den);
+    }
+    return (float)k - maxShift + sub;
+}
+// (d) The ripples move downstream at the flow speed: between two frames 8/30 s apart, the pattern has moved
+// speed * dt metres along +x, within 15 %.
+static void riverFlows() {
+    constexpr int W = 320, H = 180;
+    const float speed = 1.2f, dt = 8.f / 30.f, perM = H / 4.5f;
+    auto s = riverWorld(speed);
+    Image a = look(s, W, H, 6), b = look(s, W, H, 14);
+    dump("w7-river-debug.png", a);
+    float peak = 0;
+    const float shift = patternShift(a, b, 30, &peak);
+    const float measured = shift / perM / dt;
+    std::printf("[weather] W7 river flow: pattern moved %.2f px = %.3f m/s against %.2f m/s (correlation %.2f)\n", shift, measured, speed, peak);
+    CHECK(peak > 0.5f);
+    CHECK(measured > speed * 0.85f && measured < speed * 1.15f);
+    UnloadImage(a); UnloadImage(b);
+}
+// (e) No reset seam: the change between consecutive frames over 10 s. Pairs that straddle the flow map's phase
+// switches (every half cycle: a layer's weight is zero there) against pairs in the middle of the cycles: the
+// largest change over the median change stays under a bound.
+static float seamRatio() {
+    constexpr int W = 160, H = 90;
+    auto s = riverWorld(1.2f);
+    auto change = [&](int f) {
+        Image a = look(s, W, H, f), b = look(s, W, H, f + 1);
+        double d = 0; int n = 0;
+        for (int y = H / 2 - 20; y < H / 2 + 20; y++)
+            for (int x = 20; x < W - 20; x++) { d += std::abs(GetImageColor(a, x, y).r - GetImageColor(b, x, y).r); n++; }
+        UnloadImage(a); UnloadImage(b);
+        return (float)(d / n);
+    };
+    std::vector<float> all;
+    float boundary = 0;
+    for (int j = 1; j <= 19; j++) {   // every half cycle: both layers' reset points
+        const float c = change(15 * j - 1);
+        boundary = std::max(boundary, c);
+        all.push_back(c);
+        all.push_back(change(15 * j + 6));
+    }
+    std::sort(all.begin(), all.end());
+    const float median = all[all.size() / 2], ratio = boundary / std::max(median, 1e-3f);
+    std::printf("[weather] W7 flow-map seam: change per frame, median %.3f, largest at a phase switch %.3f, ratio %.2f\n", median, boundary, ratio);
+    return ratio;
+}
+static void noResetSeam() { CHECK(seamRatio() < 1.5f); }
+
+// (f) A city water polygon sits at its level. A CityJSON lake at height 1.5 over a bed that rises at 1:4 through zero
+// at x = 2 meets the bed at x = 8; the last column where the picture differs from the one without the lake is there.
+static const char* cityLakeJson() {
+    return R"({"type":"CityJSON","version":"2.0","transform":{"scale":[0.5,0.5,0.5],"translate":[0,0,0]},
+      "CityObjects":{"lake":{"type":"WaterBody","geometry":[{"type":"MultiSurface","lod":"1","boundaries":[[[0,1,2,3]]],
+      "semantics":{"surfaces":[{"type":"WaterSurface"}],"values":[0]}}]},
+      "ground":{"type":"TINRelief","geometry":[{"type":"MultiSurface","lod":"1","boundaries":[[[4,5,6]]]}]}},
+      "vertices":[[-80,-80,3],[80,-80,3],[80,80,3],[-80,80,3],[-80,-80,0],[-70,-80,0],[-70,-70,0]]})";
+}
+static g3d::ScenePtr cityLake(bool realWater, bool lake) {
+    auto s = bodyWorld(topDown(3, 0, 8));
+    g3d::Object3D* bed = s->add(g3d::Geometry::plane(40, 20), flat({ 80, 70, 55, 255 }));
+    bed->position = { 2, 0, 0 };
+    bed->rotation = { 0, 0, std::atan(0.25f) * RAD2DEG };
+    if (lake) {
+        city::Model m = city::parse(cityLakeJson());
+        city::Look lk;
+        lk.realWater = realWater;
+        city::add(*s, m, lk);
+        for (g3d::WaterBody& b : s->waterBodies) {
+            b.look.reflections = g3d::Water::Reflections::Off;
+            b.look.absorb = { 3, 3, 3 };
+            b.edgeSoft = 0.02f; b.shoreFoam = 0;
+        }
+    }
+    return s;
+}
+static float lastWaterX(Image& with, Image& without, const g3d::Camera& cam) {
+    const int W = with.width, H = with.height;
+    float edge = -1e9f;
+    for (int x = 0; x < W; x++) {
+        double d = 0;
+        for (int y = H / 2 - 30; y < H / 2 + 30; y++) d += pixelDiff(GetImageColor(with, x, y), GetImageColor(without, x, y));
+        if (d / 60 > 8) edge = cam.target.x + (x + 0.5f - W * 0.5f) * cam.orthoHeight / H;
+    }
+    return edge;
+}
+static void cityWaterLevel() {
+    constexpr int W = 320, H = 180;
+    auto on = cityLake(true, true), base = cityLake(true, false), off = cityLake(false, true);
+    CHECK(on->waterBodies.size() == 1);
+    CHECK(off->waterBodies.empty());
+    Image a = look(on, W, H, 3), b = look(base, W, H, 3), c = look(off, W, H, 3);
+    dump("w7-city-lake.png", a);
+    const float edge = lastWaterX(a, b, on->camera);
+    std::printf("[weather] W7 city water: level %.2f, shoreline at x %.2f (expected 8.00)\n", on->waterBodies.empty() ? -1.f : on->waterBodies[0].level, edge);
+    CHECK(!on->waterBodies.empty() && std::fabs(on->waterBodies[0].level - 1.5f) < 1e-4f);
+    CHECK(std::fabs(edge - 8.f) < 0.4f);
+    // Off: the water stays a face of the mesh, as before (the same picture as the model added through city::mesh).
+    auto manual = bodyWorld(topDown(3, 0, 8));
+    g3d::Object3D* bed = manual->add(g3d::Geometry::plane(40, 20), flat({ 80, 70, 55, 255 }));
+    bed->position = { 2, 0, 0 };
+    bed->rotation = { 0, 0, std::atan(0.25f) * RAD2DEG };
+    city::Model m = city::parse(cityLakeJson());
+    g3d::Material mat;
+    mat.doubleSided = true;
+    manual->add(city::mesh(m, city::Look{}), mat);
+    Image d = look(manual, W, H, 3);
+    const long long same = diffImages(c, d), differs = diffImages(a, c);
+    std::printf("[weather] W7 city water off: %lld against the plain mesh; on against off: %lld\n", same, differs);
+    CHECK(same == 0);
+    CHECK(differs > 20000);
+    UnloadImage(a); UnloadImage(b); UnloadImage(c); UnloadImage(d);
+}
+
+// (g) Scenes without bodies are unchanged: bodies that cannot be seen (behind the camera, or with no shape) leave
+// the sea's picture as it was, pixel for pixel.
+static void noBodiesNoChange() {
+    constexpr int W = 320, H = 180;
+    auto plain = poleLake(1, 1, true);
+    auto with = poleLake(1, 1, true);
+    g3d::WaterBody behind = g3d::WaterBody::lake({ { -5, 30 }, { 5, 30 }, { 5, 40 }, { -5, 40 } }, 0);
+    with->waterBodies.push_back(behind);
+    with->waterBodies.push_back(g3d::WaterBody{});
+    with->waterBodies.push_back(g3d::WaterBody::river({ { 0, 20 } }, 3, 0, 1));
+    Image a = look(plain, W, H, 4), b = look(with, W, H, 4);
+    const long long d = diffImages(a, b);
+    std::printf("[weather] W7 no visible bodies: difference %lld\n", d);
+    CHECK(d == 0);
+    UnloadImage(a); UnloadImage(b);
+}
+
+// (h) Purity: a frame on its own equals the frame after others.
+static void bodiesPure() {
+    constexpr int W = 240, H = 135;
+    auto s = riverWorld(1.2f);
+    s->ground.debug = 0;
+    s->waterBodies.push_back(g3d::WaterBody::lake({ { -3, -3 }, { -1, -3 }, { -1, -1 }, { -3, -1 } }, 0));
+    Comp c = comp(s, W, H);
+    Image alone = render(c, 21);
+    for (int f : { 3, 40, 12 }) UnloadImage(render(c, f));
+    Image after = render(c, 21);
+    Comp fresh = comp(s, W, H);
+    Image first = render(fresh, 21);
+    const long long d1 = diffImages(alone, after), d2 = diffImages(alone, first);
+    std::printf("[weather] W7 purity: %lld after other frames, %lld on a fresh composition\n", d1, d2);
+    CHECK(d1 == 0 && d2 == 0);
+    UnloadImage(alone); UnloadImage(after); UnloadImage(first);
+}
+
+// (i) A lake reflects the scene: a red pole at its shore shows red below its base in the water, which is the
+// planar reflection pass shared by a body (one pass, at the level of the first reflecting body); with reflections
+// off, it does not.
+static g3d::ScenePtr poleBody(bool reflect) {
+    auto s = w6Scene(g3d::Water{}, { 0, 1.5f, 9 }, { 0, 1.5f, 0 });
+    g3d::WaterBody b = g3d::WaterBody::lake({ { -40, -40 }, { 40, -40 }, { 40, 20 }, { -40, 20 } }, 0);
+    b.look = w6Water(0);
+    b.look.refraction = false;
+    b.look.reflections = reflect ? g3d::Water::Reflections::Scene : g3d::Water::Reflections::Off;
+    s->waterBodies.push_back(b);
+    s->add(g3d::Geometry::cylinder(0.12f, 1.2f), flat({ 215, 25, 25, 255 }))->position = { 0, 0.6f, 0 };
+    return s;
+}
+static void lakeReflects() {
+    constexpr int W = 480, H = 270;
+    auto on = poleBody(true), off = poleBody(false);
+    Image a = look(on, W, H, 3), b = look(off, W, H, 3);
+    dump("w7-lake-pole.png", a);
+    const int x = (int)std::lround(project(on->camera, { 0, 0, 0 }, W, H).x), baseRow = (int)std::lround(project(on->camera, { 0, 0, 0 }, W, H).y);
+    float red = 0;
+    for (int y = baseRow + 4; y < baseRow + 24; y++) red += addedAt(a, b, x, y, 2).x / 20;
+    std::printf("[weather] W7 lake reflection: red added under the pole %.1f levels\n", red);
+    CHECK(red > 40);
+    UnloadImage(a); UnloadImage(b);
+}
+
+// (j) A lake mirrors the hill behind it. Striped hill strips rise from the far shore; the picture of the lake must
+// carry the stripes, upside down below the shoreline: the column profile of the lake picture correlates with the
+// profile of a picture of the mirrored hill (no water), over the rows the mirrored hill covers.
+static g3d::ScenePtr hillScene(bool real, bool lake) {
+    auto s = w6Scene(g3d::Water{}, { 0, 1.2f, 9 }, { 0, 1.0f, -5 }, 50);
+    s->sky.clouds = 0;
+    const float k = 0.5f, th = std::atan(k), cs = std::cos(th), sn = std::sin(th);
+    for (int i = 0; i < 8; i++) {
+        const float tc = 1.f + 2.f * i;
+        g3d::Object3D* o = s->add(g3d::Geometry::plane(60, 2), flat(i % 2 ? Color{ 40, 120, 40, 255 } : Color{ 190, 220, 120, 255 }));
+        o->material.doubleSided = !real;
+        o->position = { 0, (real ? 1.f : -1.f) * tc * sn, -5 - tc * cs };
+        o->rotation = { (real ? 1.f : -1.f) * th * RAD2DEG, 0, 0 };
+    }
+    if (lake) {
+        g3d::WaterBody b = g3d::WaterBody::lake({ { -30, -5 }, { 30, -5 }, { 30, 40 }, { -30, 40 } }, 0);
+        b.look = w6Water(0);
+        b.look.refraction = false;
+        b.shoreFoam = 0;
+        s->waterBodies.push_back(b);
+    }
+    return s;
+}
+static float hillReflection() {
+    constexpr int W = 480, H = 270;
+    auto on = hillScene(true, true), truth = hillScene(false, false);
+    Image a = look(on, W, H, 3), b = look(truth, W, H, 3);
+    dump("w7-hill-lake.png", a);
+    dump("w7-hill-truth.png", b);
+    const float th = std::atan(0.5f);
+    const int r0 = (int)std::lround(project(on->camera, { 0, 0, -5 }, W, H).y) + 4;
+    const int r1 = (int)std::lround(project(on->camera, { 0, -16 * std::sin(th), -5 - 16 * std::cos(th) }, W, H).y) - 4;
+    std::vector<float> pa, pb;
+    for (int y = r0; y < std::min(r1, H); y++) {
+        float sa = 0, sb = 0;
+        for (int x = W / 3; x < 2 * W / 3; x++) { sa += luma(GetImageColor(a, x, y)); sb += luma(GetImageColor(b, x, y)); }
+        pa.push_back(sa); pb.push_back(sb);
+    }
+    for (size_t i = 0; i + 1 < pa.size(); i++) { pa[i] = pa[i + 1] - pa[i]; pb[i] = pb[i + 1] - pb[i]; }      // the stripes, not the slow gradient under them
+    if (!pa.empty()) { pa.pop_back(); pb.pop_back(); }
+    auto mean = [](const std::vector<float>& v) { double m = 0; for (float f : v) m += f; return m / std::max<size_t>(v.size(), 1); };
+    const double ma = mean(pa), mb = mean(pb);
+    double ab = 0, aa = 0, bb = 0;
+    for (size_t i = 0; i < pa.size(); i++) { ab += (pa[i] - ma) * (pb[i] - mb); aa += (pa[i] - ma) * (pa[i] - ma); bb += (pb[i] - mb) * (pb[i] - mb); }
+    const float corr = (float)(ab / std::sqrt(std::max(aa * bb, 1e-9)));
+    std::printf("[weather] W7 hill in the lake: rows %d..%d, correlation with the mirrored hill %.2f\n", r0, r1, corr);
+    UnloadImage(a); UnloadImage(b);
+    return pa.size() > 20 ? corr : 0.f;
+}
+static void hillInTheLake() { CHECK(hillReflection() >= 0.9f); }
+
+// (k) No stripes on a lake: the calm preset under a light wind over a lake's own small fetch, seen near (from above) and
+// far (grazing), at 960 x 540. In windows 240 wide the luma is averaged along x, detrended, and its strongest spectral
+// line over periods of 3 to 16 rows is compared with the median of the band: one dominant wavelength stripes the
+// water and shows as a spike (the look before the waves were broken up measured 22 and 26; now 13 and 8).
+static g3d::ScenePtr lakeLook(bool near) {
+    g3d::Camera cam;
+    cam.position = near ? Vector3{ -8, 5.5f, 26.5f } : Vector3{ 0, 1.6f, 28 };
+    cam.target = near ? Vector3{ -5, 1.25f, -14 } : Vector3{ 0, 0.5f, -10 };
+    cam.fov = 50;
+    cam.farPlane = 400;
+    auto s = bodyWorld(cam);
+    s->sky = g3d::Sky::day();
+    s->sky.clouds = 0;
+    s->weather = g3d::Weather::clear();
+    s->weather.enabled = true;
+    s->weather.wind.speed = 4.5f;
+    s->weather.wind.direction = 70;
+    g3d::WaterBody b = g3d::WaterBody::lake({ { -30, -40 }, { 30, -40 }, { 30, 40 }, { -30, 40 } }, 0);
+    b.look = g3d::Water::calm();
+    b.look.reflections = g3d::Water::Reflections::Scene;
+    b.look.refraction = true;
+    b.shoreFoam = 0;
+    s->waterBodies.push_back(b);
+    s->add(g3d::Geometry::plane(300, 300), flat({ 60, 90, 50, 255 }))->position = { 0, -1.5f, 0 };
+    return s;
+}
+// Strongest spectral line over the median of the band, for the rows of a window: the luma is averaged along x (stripes
+// of a regular wave run across), the slow trend taken out, and the power of periods of 3 to 16 rows compared.
+static float stripePeak(const std::vector<float>& l, int W, int x0, int x1, int y0, int rows) {
+    std::vector<double> p((size_t)rows);
+    for (int y = 0; y < rows; y++) { double s = 0; for (int x = x0; x < x1; x++) s += l[(size_t)(y0 + y) * W + x]; p[(size_t)y] = s / (x1 - x0); }
+    std::vector<double> d((size_t)rows);
+    for (int y = 0; y < rows; y++) { double s = 0; int n = 0; for (int k = -8; k <= 8; k++) if (y + k >= 0 && y + k < rows) { s += p[(size_t)(y + k)]; n++; } d[(size_t)y] = p[(size_t)y] - s / n; }
+    std::vector<double> pw;
+    for (double per = 3; per <= 16; per += 0.25) {
+        double re = 0, im = 0;
+        for (int y = 0; y < rows; y++) { const double w = 0.5 - 0.5 * std::cos(2 * PI * (y + 0.5) / rows), a = 2 * PI * y / per; re += w * d[(size_t)y] * std::cos(a); im += w * d[(size_t)y] * std::sin(a); }
+        pw.push_back(re * re + im * im);
+    }
+    std::vector<double> s = pw;
+    std::sort(s.begin(), s.end());
+    return (float)(*std::max_element(pw.begin(), pw.end()) / std::max(s[s.size() / 2], 1e-9));
+}
+static float lakePeriodicity(bool near) {
+    constexpr int W = 960, H = 540;
+    Image img = look(lakeLook(near), W, H, 5);
+    dump(near ? "w7-lake-near.png" : "w7-lake-far.png", img);
+    const std::vector<float> l = lumaOf(img);
+    float worst = 0;
+    for (int y0 : near ? std::vector<int>{ 280, 400 } : std::vector<int>{ 280, 370 })
+        for (int x0 : { 60, 360, 660 }) {
+            const float p = stripePeak(l, W, x0, x0 + 240, y0, 128);
+            std::printf("  window %d,%d: %.1f\n", x0, y0, p);
+            worst = std::max(worst, p);
+        }
+    UnloadImage(img);
+    return worst;
+}
+static void lakeNoLattice() {
+    const float n = lakePeriodicity(true), f = lakePeriodicity(false);
+    std::printf("[weather] W7 lake stripes: strongest spectral line over the band median, near %.1f, far %.1f\n", n, f);
+    CHECK(n < 16.0f && f < 16.0f);
+}
+
+// (l) A sea at level 2 is the sea at level 0 lifted by two metres: the shader decides above or below the water from
+// the surface height, which used to count the level twice (so a camera a metre above a level-2 sea was taken to be
+// under it). The picture of a pole standing in a level-2 sea, seen from a metre above it, equals the level-0 one
+// with everything lowered by 2, and its waterline sits at the level.
+static g3d::ScenePtr liftedSea(float level) {
+    g3d::Water w = w6Water(1);
+    w.level = level;
+    auto s = w6Scene(w, { 0, level + 1.0f, 9 }, { 0, level + 0.4f, 0 }, 40);
+    s->add(g3d::Geometry::cylinder(0.12f, 1.2f), flat({ 215, 25, 25, 255 }))->position = { 0, level + 0.6f, 0 };
+    return s;
+}
+static void seaAtLevelTwo() {
+    constexpr int W = 320, H = 180;
+    auto hi = liftedSea(2), lo = liftedSea(0);
+    Image a = look(hi, W, H, 3), b = look(lo, W, H, 3);
+    dump("w7-sea-level2.png", a);
+    const long long d = diffImages(a, b);
+    const int row = (int)std::lround(project(hi->camera, { 0, 2, 0 }, W, H).y), x = (int)std::lround(project(hi->camera, { 0, 2, 0 }, W, H).x);
+    float redAbove = 0, redBelow = 0;
+    for (int y = row - 12; y < row - 2; y++) redAbove += redness(GetImageColor(a, x, y)) / 10;
+    for (int y = row + 2; y < row + 12; y++) redBelow += redness(GetImageColor(a, x, y)) / 10;
+    std::printf("[weather] W7 sea at level 2: %lld differing against level 0 lowered; pole redness %.0f above the waterline row %d, %.0f below\n", d, redAbove, row, redBelow);
+    CHECK(d < 2000);
+    CHECK(redAbove > 100 && redBelow < redAbove * 0.5f);
+    UnloadImage(a); UnloadImage(b);
+}
+
+// (m) A pool reads as clear water over a light floor: a striped floor 1.2 m under the surface, seen at 45 degrees,
+// shows through the water. The luma of the water pixels correlates with the render of the floor alone (>= 0.6), and
+// what the water adds (the residual of a linear fit of one on the other) has no step between neighbouring rows or
+// columns of more than a bound: no saturated wedge, no hard-edged patch. A negative control, the same pool with an
+// opaque absorbing water, must not show the floor (correlation under 0.3): the measure sees a "pale flat sheet".
+static g3d::ScenePtr clearPool(bool water, float absorb) {
+    g3d::Camera cam;
+    cam.position = { 0, 6.5f, 6.5f };
+    cam.target = { 0, 0, 0 };
+    cam.fov = 40;
+    auto s = bodyWorld(cam);
+    // The floor seen through water appears about 0.45 m nearer the camera than where the straight ray would meet it
+    // (1.2 m deep, 45 degrees): the picture without water gets its stripes moved to match.
+    for (int i = 0; i < 80; i++) {       // strips 0.1 m wide whose brightness is a sine of period 1.5 m: a smooth pattern
+        const float z = -4.0f + 0.1f * i + 0.05f, v = 0.5f + 0.5f * std::sin(2 * PI * z / 1.5f);
+        g3d::Object3D* o = s->add(g3d::Geometry::plane(8, 0.1f), flat({ (unsigned char)(110 + 120 * v), (unsigned char)(140 + 95 * v), (unsigned char)(150 + 85 * v), 255 }));
+        o->position = { 0, -1.2f, z - (water ? 0.f : 0.45f) };
+    }
+    if (water) {
+        g3d::WaterBody b = g3d::WaterBody::lake({ { -3, -3 }, { 3, -3 }, { 3, 3 }, { -3, 3 } }, 0);
+        b.look = g3d::Water::calm();
+        b.look.deep = { 40, 140, 160, 255 };
+        b.look.absorb = { absorb, absorb * 0.2f, absorb * 0.12f };
+        b.look.reflections = g3d::Water::Reflections::Off;
+        b.look.refraction = true;
+        b.shoreFoam = 0;
+        s->waterBodies.push_back(b);
+    }
+    return s;
+}
+static void poolFloorShows() {
+    constexpr int W = 480, H = 270;
+    auto truthS = clearPool(false, 0);
+    Image truth = look(truthS, W, H, 3);
+    float corr[2] = { 0, 0 }, stepRow = 0, stepCol = 0;
+    for (int k = 0; k < 2; k++) {
+        auto s = clearPool(true, k == 0 ? 0.45f : 40.f);
+        Image a = look(s, W, H, 3);
+        if (k == 0) dump("w7-clear-pool.png", a);
+        std::vector<float> la, lt, rr;
+        std::vector<int> px, py;
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) {
+                // inside the pool, a margin in from its edge: the projected corners of the 6 m square at the level
+                const Vector2 p0 = project(s->camera, { -3, 0, -3 }, W, H), p1 = project(s->camera, { 3, 0, 3 }, W, H);
+                const Vector2 q0 = project(s->camera, { 3, 0, -3 }, W, H), q1 = project(s->camera, { -3, 0, 3 }, W, H);
+                (void)q0; (void)q1;
+                const float fy = (y - p0.y) / (p1.y - p0.y);
+                if (fy < 0.15f || fy > 0.85f) continue;
+                const float wx = (x - W * 0.5f);
+                const float half = (1 - fy) * std::fabs(q0.x - W * 0.5f) + fy * std::fabs(q1.x - W * 0.5f);
+                if (std::fabs(wx) > half * 0.8f) continue;
+                la.push_back(luma(GetImageColor(a, x, y))); lt.push_back(luma(GetImageColor(truth, x, y))); px.push_back(x); py.push_back(y);
+            }
+        double ma = 0, mt = 0;
+        for (size_t i = 0; i < la.size(); i++) { ma += la[i]; mt += lt[i]; }
+        ma /= std::max<size_t>(la.size(), 1); mt /= std::max<size_t>(la.size(), 1);
+        double aa = 0, tt = 0, at = 0;
+        for (size_t i = 0; i < la.size(); i++) { aa += (la[i] - ma) * (la[i] - ma); tt += (lt[i] - mt) * (lt[i] - mt); at += (la[i] - ma) * (lt[i] - mt); }
+        corr[k] = (float)(at / std::sqrt(std::max(aa * tt, 1e-9)));
+        if (k == 0) {
+            const double slope = at / std::max(tt, 1e-9);
+            std::map<int, std::pair<double, int>> rows, cols;
+            for (size_t i = 0; i < la.size(); i++) {
+                const double r = la[i] - ma - slope * (lt[i] - mt);
+                rows[py[i]].first += r; rows[py[i]].second++; cols[px[i]].first += r; cols[px[i]].second++;
+            }
+            auto worst = [](std::map<int, std::pair<double, int>>& m) {
+                float w = 0; double prev = 0; int pk = -100;
+                for (auto& kv : m) { const double v = kv.second.first / kv.second.second; if (kv.first == pk + 1) w = std::max(w, (float)std::fabs(v - prev)); prev = v; pk = kv.first; }
+                return w;
+            };
+            stepRow = worst(rows); stepCol = worst(cols);
+        }
+        UnloadImage(a);
+    }
+    UnloadImage(truth);
+    std::printf("[weather] W7 clear pool: floor correlation %.2f (opaque control %.2f), residual step per row %.1f, per column %.1f\n", corr[0], corr[1], stepRow, stepCol);
+    CHECK(corr[0] >= 0.6f);
+    CHECK(corr[1] < 0.3f);
+    CHECK(stepRow < 20.f && stepCol < 20.f);
+}
+
+static void waterBodies() {
+    poolInBox();
+    foamInTheShallows();
+    foamFollowsTheWind();
+    softEdge();
+    riverFlows();
+    noResetSeam();
+    cityWaterLevel();
+    noBodiesNoChange();
+    bodiesPure();
+    lakeReflects();
+    hillInTheLake();
+    lakeNoLattice();
+    seaAtLevelTwo();
+    poolFloorShows();
+}
+
 static void cloudImages(const char* dir) {
     fs::create_directories(dir);
     constexpr int W = 1920, H = 1080;
@@ -4215,6 +4855,12 @@ int main() try {
         std::printf(failures ? "[weather] %d failures\n" : "[weather] all passed\n", failures);
         return failures ? 1 : 0;
     }
+    if (std::getenv("RMTN_W7_ONLY")) {
+        waterBodies();
+        shutdownGraphics(); CloseWindow();
+        std::printf(failures ? "[weather] %d failures\n" : "[weather] all passed\n", failures);
+        return failures ? 1 : 0;
+    }
     if (std::getenv("RMTN_W6_ONLY")) {
         waterReflections();
         shutdownGraphics(); CloseWindow();
@@ -4249,6 +4895,7 @@ int main() try {
     waterReflections();
     precipitation();
     wetAndSnow();
+    waterBodies();
     shutdownGraphics();
     CloseWindow();
     std::printf(failures ? "[weather] %d failures\n" : "[weather] all passed\n", failures);

@@ -353,6 +353,11 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   in it; refraction looks through to the bed along the Snell ray with absorption over the real path.
   Off by default, and Off means Off (the pixels equal the previous release's); turning it on
   changes old water scenes on purpose. `examples/scripts/lake_reflections.as`.
+* Lakes, rivers and pools (`Scene::waterBodies`, `g3d::WaterBody`; `docs/weather.md`): water that
+  fills a polygon (with islands) or follows a river path, with its own look, reflections, refraction,
+  a soft shore with lace foam read from the depth behind it, and a two-phase flow map so rivers
+  run at their flow speed without a seam. `city::Look::realWater` turns CityJSON water into bodies.
+  `examples/scripts/river_valley.as`.
 * GPU rain, snow and sleet at scale (`Scene::precipitation`, `docs/weather.md`): drops from a hash
   in fixed world tiles, streaks as long as the shutter and slanted by the wind, lit by the scene's
   lights, stopped by roofs and trees through a top-down depth map, with splashes where rain lands.
