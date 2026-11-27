@@ -401,6 +401,13 @@ and keeps a faint horizontal/vertical bias; a wiper must share one `fx::lens` wi
   then a calm evening with reflections). Built to the authoring standard (brief, reveal and
   metaphor maps, QC). Not released.
 
+**Done 2026-11-27.** Prefabs `weather` (eight presets, blendable), `water-body`, `rain` and `lightning` (rmtn/weather_prefabs.hpp);
+the script binding audit with the few C++-only names listed in docs/scripting.md; docs/water.md; `weather_prefabs.as`. The demo is
+`weather-day` (examples/showcase/weather_day.cpp, docs/one-weather-day-brief.md and -qc.md): one jetty from 06:12 to 18:18 in 54 s,
+gauges read from the engine, seven strikes with thunder at distance/343. Author-only QC (Authoredness ~21, Craft ~12, under the bar);
+owner review pending. Open: the squall shows rain shafts but no clear tower and anvil, the boat's wake is a shallow V from the low
+camera, three thunder onsets are masked by earlier rumbles, the ridge readout is not checked against pixels.
+
 ## Order and orchestration
 
 W1 first: everything reads it. Then W2 and W6 (the largest look changes), W3-W4, W7-W9, W5,
