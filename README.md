@@ -336,6 +336,73 @@ addRoot(c.roots, 60, 180)->fn = g3d::draw(scene, {1376, 716, 480, 300}, topCamer
   canopy of Gaussian splats; one object a tree, at most 256, and casting no shadow), with
   `TreeBuild::shading` for Toon, Gooch or Hatch; `flora::toonGrass()` draws blades in flat
   colour bands (`g3d::Field::colorBands`).
+* One weather state (`g3d::Weather`, `Scene::weather`, `docs/weather.md`): a wind, cloud cover,
+  haze and more that the grass, trees, water waves, rain and snow particles, sky and fog all
+  read, so they lean, roll and slant the same way; presets `clear`, `overcast`, `rain`, `storm`,
+  `snow`, `fog` and `Weather::mix` turn a clear morning into a storm across a shot. Off by
+  default (nothing changes), and each system has an `ownWind`-style opt-out.
+* Volumetric clouds (`Scene::clouds`, `docs/weather.md`): a raymarched layer round a 6 371 km planet
+  that a camera can fly through, from orbit to the street. Baked Perlin-Worley noise, per-type height
+  profiles (cumulus, stratus, cumulonimbus with an anvil, a flat deck), Beer and powder lighting with a
+  silver lining, aerial perspective, a depth-aware upsample, and a ground shadow map that moves with the
+  drift; cover, type and drift follow `Scene::weather`. Preview, Film and High quality (about 1, 2 and
+  3.5 ms a 1080p frame). Off by default; `examples/scripts/cloud_flight.as`.
+* Lightning, storm light and rainbows (`Scene::lightning`, `Weather::rainbow`, `fx::lightning`, `docs/weather.md`): seeded
+  branching bolts as emissive ribbons with a leader, a return stroke and restrikes, a flash that lights the world, the rain
+  and the cloud from inside, strikes from a list or a rate, `thunderCues` for the soundtrack, a spectral rainbow (primary,
+  secondary, Alexander's band) opposite the sun when it rains, a few cumulonimbus storm cells that differ, each with an anvil growing out of its top
+  downwind, and a darker, streaked storm sea. `examples/scripts/thunderstorm.as`, `examples/scripts/lightning_2d.as`.
+* Water that reflects the scene (`Water::reflections` Off/Scene/Half/Quarter, `reflectionDistort`,
+  `refraction`; `docs/weather.md`): a planar reflection pass mirrors the camera about the water
+  level, bent by the band-limited waves, blended by Fresnel, blurred by roughness, with the clouds
+  in it; refraction looks through to the bed along the Snell ray with absorption over the real path.
+  Off by default, and Off means Off (the pixels equal the previous release's); turning it on
+  changes old water scenes on purpose. `examples/scripts/lake_reflections.as`.
+* Lakes, rivers and pools (`Scene::waterBodies`, `g3d::WaterBody`; `docs/weather.md`): water that
+  fills a polygon (with islands) or follows a river path, with its own look, reflections, refraction,
+  a soft shore with lace foam read from the depth behind it, and a two-phase flow map so rivers
+  run at their flow speed without a seam. `city::Look::realWater` turns CityJSON water into bodies.
+  `examples/scripts/river_valley.as`.
+* Wakes, ripples and floating objects (`Scene::wakes`, `Scene::ripples`, `g3d::ride`; `docs/weather.md`): a Kelvin
+  wake (the 19.5 degree V, feathered crests, foam and a propwash trail, bow spray) worked out from a boat's path and the
+  time alone, round capillary-gravity rings from a dropped stone, and objects that ride the waves on a
+  footprint grid with a draft. `examples/scripts/harbour_wake.as`.
+* Ocean to the horizon (`Water::spectrum`, `docs/weather.md`): a JONSWAP spectrum of the weather's wind and fetch as FFT cascades
+  with no tile to see, a distance-filtered normal that goes to mean roughness, the planet's curvature (the horizon dips
+  atan(sqrt(2h/R))), haze to the sky colour, whitecaps that follow the wind and decay, and spray at 15 m/s and up. Height, slope and
+  `ride` agree with the picture. Off by default; about 16 ms at 1080p. `examples/scripts/open_ocean.as`.
+* Light in the air (`Scene::volumetric`, `Scene::aerial`, `docs/weather.md`): the scene's fog marched at reduced size and lit by
+  the sun's shadow map and the clouds' shadow, so shafts form through canopies, windows and cloud gaps (Henyey-Greenstein phase,
+  a depth-aware filter, no temporal accumulation; spot and point cones with `scatterLights`), and aerial perspective that
+  fades distant land to the sky's horizon colour, bluer, thinning with altitude. Off by default; 0.3 to 1.2 ms at 1080p.
+  `examples/scripts/forest_light.as`, `barn_shafts.as`, `blue_ridges.as`, `sunset_sea.as`.
+* Camera weather (`fx::Lens`, `rmtn/lens.hpp`, script `layerFilter` type `lens`; `docs/weather.md`): a layer filter for 2D
+  compositions and for a 3D scene's whole image. Raindrops on the glass that refract the picture (flipped and squeezed), slide at a
+  speed set by their size and leave trails, with the background optionally out of focus and the rate following the scene's rain;
+  frost that creeps in from the edges as dendrites of ice, or condensation with clear streaks; snowflakes that land and melt; and a
+  windscreen wiper that clears what it sweeps. Pure functions of the frame; about 1-5 ms at 1080p. `examples/scripts/windscreen.as`,
+  `frosted_window.as`.
+* GPU rain, snow and sleet at scale (`Scene::precipitation`, `docs/weather.md`): drops from a hash
+  in fixed world tiles, streaks as long as the shutter and slanted by the wind, lit by the scene's
+  lights, stopped by roofs and trees through a top-down depth map, with splashes where rain lands.
+  Over 200 000 drops in a 1080p view for about 1.7 ms. Off by default; `examples/scripts/porch_rain.as`.
+* Wet ground and settling snow (`Scene::ground`, `docs/weather.md`): wetness and snow depth are pure
+  functions of time from the weather's precipitation history (or pinned). Wet surfaces darken and
+  mirror the sky and the scene (screen-space reflection), puddles gather on flat ground and dry from
+  the edges, rain rings run on puddles and water, snow settles on up-facing faces and tints trees and
+  grass, and `weathering: false` opts a material out. `porch_rain.as`, `first_snow.as`.
+* Weather and water prefabs (`weather`, `water-body`, `rain`, `lightning`; `rmtn/weather_prefabs.hpp`, `docs/weather.md`,
+  [docs/water.md](docs/water.md)), each a thin composition of the pieces above, pure in the frame:
+  * `weather`: eight named looks (`clear`, `cumulus day`, `overcast`, `squall`, `thunderstorm`, `snowfall`, `fog dawn`,
+    `golden evening`) that set the sky, clouds, precipitation, ground, light shafts and sun together, blended across a frame
+    range with `to`, `start` and `end`. Script key `weatherPreset`.
+  * `water-body`: a lake, pool or river (calm, breezy or choppy) with a shore from a polygon or a seeded ellipse, mirroring the
+    scene.
+  * `rain`: precipitation, a ground that soaks and puddles, and optionally drops on the camera's glass, from `delay`, `ramp` and
+    `intensity`.
+  * `lightning`: a seeded strike schedule (`count`, `span`, `area`, `seed`) with storm light, and with `clip` a thunder sound at
+    each strike's arrival time. Script key `lightningSchedule`, function `g3d::thunderCues`.
+  `examples/scripts/weather_prefabs.as`.
 * 2D vegetation (`flora2d::`, drawn with the node's context, so flat compositions and
   `g3d::Surface` alike): grass along a ground line, tufts, a meadow filling a shape (smaller
   toward its back), shrubs, and branching trees (oak, birch, pine; a silhouette option for

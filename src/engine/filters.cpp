@@ -2,6 +2,7 @@
 // ink edges, watercolour), tilt-shift and a film response (bloom, filmic curve, grade), one
 // full-target pass each over premultiplied content (film: a half-size bright pass, then one).
 #include "rmtn/render.hpp"
+#include "rmtn/lens.hpp"
 #include <rlgl.h>
 #include <algorithm>
 #include <cmath>
@@ -203,7 +204,8 @@ Vector4 rgba(Color c) { return { c.r / 255.f, c.g / 255.f, c.b / 255.f, c.a / 25
 
 } // namespace
 
-void applyFilter(const Filter& f, const RenderTexture& src, const RenderTexture& dst, float scale) {
+void applyFilter(const Filter& f, const RenderTexture& src, const RenderTexture& dst, float scale, int t) {
+    if (f.type == Filter::Type::Lens) { applyLens(f, src, dst, scale, t); return; }
     ensureShader();
     const float w = (float)src.texture.width, h = (float)src.texture.height;
     const int mode = (int)f.type, colored = f.colored ? 1 : 0;

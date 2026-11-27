@@ -68,10 +68,16 @@ add_library(rmtn_engine STATIC
   src/engine/fonts.cpp
   src/engine/render.cpp
   src/engine/filters.cpp
+  src/engine/lens.cpp
   src/engine/anim.cpp
   src/engine/layout.cpp
   src/engine/json.cpp
   src/engine/scene3d.cpp
+  src/engine/weather.cpp
+  src/engine/waterbody.cpp
+  src/engine/wake.cpp
+  src/engine/ocean.cpp
+  src/engine/lightning.cpp
   src/engine/devices.cpp
   src/engine/media.cpp
   src/engine/prefab.cpp
@@ -98,6 +104,7 @@ add_library(rmtn_engine STATIC
   src/engine/flora_tree.cpp
   src/engine/flora2d.cpp
   src/engine/flora_prefabs.cpp
+  src/engine/weather_prefabs.cpp
   src/engine/crowd_rig.cpp
   src/engine/voxel.cpp
   src/engine/splat.cpp
@@ -206,6 +213,7 @@ if(RAYMOTION_BUILD_EXAMPLES)
     examples/showcase/flora.cpp
     examples/showcase/maps_2d.cpp
     examples/showcase/far_and_near.cpp
+    examples/showcase/weather_day.cpp
     examples/showcase/diagrams.cpp
     examples/showcase/particles.cpp
     examples/showcase/particles3d.cpp
@@ -354,6 +362,17 @@ if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND RAYMOTION_BUILD_EXAMPLES)
   target_link_libraries(raymotion_scene3d_tests PRIVATE rmtn_engine)
   add_test(NAME scene3d COMMAND raymotion_scene3d_tests)
   set_tests_properties(scene3d PROPERTIES TIMEOUT 3600)   # 20-30 min under Mesa's llvmpipe on the Linux runners
+
+  add_executable(raymotion_weather_tests tests/weather_tests.cpp)
+  target_link_libraries(raymotion_weather_tests PRIVATE rmtn_engine)
+  add_test(NAME weather COMMAND raymotion_weather_tests)
+  set_tests_properties(weather PROPERTIES LABELS gl SKIP_RETURN_CODE 77 TIMEOUT 900)
+
+  # W12: the weather and water prefabs. The first half needs no window; the rendered half skips itself without one.
+  add_executable(raymotion_weather_prefab_tests tests/weather_prefab_tests.cpp)
+  target_link_libraries(raymotion_weather_prefab_tests PRIVATE rmtn_engine)
+  add_test(NAME weather_prefabs COMMAND raymotion_weather_prefab_tests)
+  set_tests_properties(weather_prefabs PROPERTIES TIMEOUT 900)
 
   add_executable(raymotion_media_tests tests/media_tests.cpp)
   target_link_libraries(raymotion_media_tests PRIVATE rmtn_engine)

@@ -94,6 +94,12 @@ struct Look {
     Color road{ 92, 96, 108, 255 }, water{ 70, 140, 200, 255 }, vegetation{ 110, 168, 96, 255 };
     Color terrain{ 170, 160, 130, 255 }, furniture{ 78, 82, 94, 255 }, other{ 200, 200, 200, 255 };
     std::string lod;                        // empty: each object's most detailed geometry
+    // true: add(scene, ...) leaves the model's water faces (WaterSurface faces, and the faces of a WaterBody
+    // object without semantics) out of its mesh and adds them to Scene::waterBodies instead (waterBodies() below),
+    // each a polygon at its own height, with Water's reflections, shore foam and waves. mesh() leaves them out
+    // too, and add(parent, ...) does not (there is no scene to take them): call waterBodies() for those. Default false:
+    // water is a flat coloured face, as before.
+    bool realWater = false;
     // Texture coordinates, for a tiled material map (a facade, paving): `textureSize` is the
     // metres one repeat of the texture covers on a wall (width, height); 0 = none. Walls run
     // along the wall and up from height 0, so floors line up from one building to the next;
@@ -116,6 +122,12 @@ g3d::GeometryPtr mesh(const Object& o, const Look& look = {}, Vector3 offset = {
 g3d::GeometryPtr mesh(const Model& m, const Look& look = {});
 // Middle of an object's footprint at its lowest point (CityJSON axes).
 Vector3 base(const Object& o, const std::string& lod = "");
+
+// The model's water faces as water bodies (see Look::realWater): one polygon per face, in scene axes, at the
+// face's mean height, with the face's holes, `look.water` as the deep colour, and a fetch of the polygon's size.
+// Everything else is WaterBody's default (calm waves, scene reflections and refraction); change the bodies before
+// adding them to Scene::waterBodies.
+std::vector<g3d::WaterBody> waterBodies(const Model& m, const Look& look = {});
 
 // A group holding one child per object with geometry (named by its id, placed at its
 // base, so scaling a child grows it from the ground). Children of a BuildingPart-style

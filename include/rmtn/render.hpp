@@ -63,7 +63,8 @@ bool fillWinding(const std::vector<Vector2>& add, const std::vector<Vector2>& su
 
 // Runs one layer filter over `src` (premultiplied, raylib RT orientation) into `dst` of the
 // same size; `scale` is target px per composition px. drawLayer uses it for Layer::filters.
-void applyFilter(const Filter& f, const RenderTexture& src, const RenderTexture& dst, float scale);
+// `t` is the layer's frame (only the Lens filter reads it).
+void applyFilter(const Filter& f, const RenderTexture& src, const RenderTexture& dst, float scale, int t = 0);
 
 // While presentFrame runs: the frame rate of the composition being drawn and the scale
 // from composition units to pixels of the current target (the supersample factor).

@@ -2,6 +2,7 @@
 #include "rmtn/particles.hpp"
 #include "rmtn/draw.hpp"
 #include "rmtn/render.hpp"
+#include "rmtn/lightning.hpp"
 #include <rlgl.h>
 #include <algorithm>
 #include <cmath>
@@ -501,6 +502,8 @@ void flight(const Emitter3D& e, const Seeded3& s, double age, Vector3& pos, Vect
     axisMotion(e.drag, s.p0.x, s.v0.x, e.gravity.x, age, pos.x, vel.x);
     axisMotion(e.drag, s.p0.y, s.v0.y, e.gravity.y, age, pos.y, vel.y);
     axisMotion(e.drag, s.p0.z, s.v0.z, e.gravity.z, age, pos.z, vel.z);
+    pos.x += e.drift.x * (float)age; pos.y += e.drift.y * (float)age; pos.z += e.drift.z * (float)age;
+    vel.x += e.drift.x; vel.y += e.drift.y; vel.z += e.drift.z;
     if (e.turbulence > 0) {
         const double f = e.turbulenceFreq, ramp = std::min(1.0, age * f), k = e.turbulence * ramp;
         auto ph = [&](Slot3 sl) { return rnd(e, s.index, sl) * 2 * PI; };
@@ -670,6 +673,7 @@ Emitter3D snow3d(float width, float depth, float height) {
     e.colors = { { 255, 255, 255, 220 } };
     e.fadeIn = 0.02f;
     e.fadeOut = 0.05f;
+    e.windFollow = 0.3f;                    // g3d::Weather::kSnowFollow
     return e;
 }
 
@@ -689,6 +693,7 @@ Emitter3D rain3d(float width, float depth, float height) {
     e.colors = { { 170, 190, 230, 150 } };
     e.fadeIn = 0;
     e.fadeOut = 0.05f;
+    e.windFollow = 0.5f;                    // g3d::Weather::kRainFollow
     return e;
 }
 
@@ -768,6 +773,52 @@ Emitter3D debris3d(int count) {
     e.fadeIn = 0;
     e.fadeOut = 0.15f;
     return e;
+}
+
+// ---- lightning (2D)
+void lightning(const Ctx& c, const LightningBolt& b, double t) {
+    const float tau = (float)((t - b.start) / std::max(b.fps, 1.f));
+    const bolt::Profile p = bolt::profile(b.seed, tau, b.leaderTime, b.minVisible);
+    if (!p.alive || p.flash <= 0.002f) return;
+    bolt::Shape shape;
+    shape.planar = true;
+    shape.branchChance = b.branchChance;
+    const bolt::Bolt bolt = bolt::make({ b.from.x, b.from.y, 0 }, { b.to.x, b.to.y, 0 }, b.seed, shape);
+    const float reach = bolt.reach * p.visible;
+    rlSetBlendFactorsSeparate(RL_SRC_ALPHA, RL_ONE, RL_ONE, RL_ONE_MINUS_SRC_ALPHA, RL_FUNC_ADD, RL_FUNC_ADD);
+    BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+    const float k = std::min(p.flash * b.intensity, 1.5f);
+    const Color core{ 255, 255, 255, 255 };
+    // Layers from the widest and faintest to the hot core: a stepped falloff, fine enough at these widths to read as a glow.
+    struct Layer { float w, a; Color col; };
+    const Layer layers[5] = { { 11.f * b.glow, 0.06f, b.color }, { 6.f * b.glow, 0.12f, b.color }, { 3.f * b.glow, 0.22f, b.color },
+                              { 1.6f, 0.65f, { 225, 232, 255, 255 } }, { 0.7f, 1.0f, core } };
+    for (const Layer& l : layers) {
+        Color col = l.col;
+        col.a = (unsigned char)std::clamp(255.f * l.a * k * c.a, 0.f, 255.f);
+        for (const bolt::Segment& s : bolt.segments) {
+            if (s.reachA >= reach) continue;
+            Vector3 q = s.b;
+            if (s.reachB > reach) {                                           // the leader's tip: part of the last piece
+                const float u = (reach - s.reachA) / std::max(s.reachB - s.reachA, 1e-4f);
+                q = { s.a.x + (s.b.x - s.a.x) * u, s.a.y + (s.b.y - s.a.y) * u, 0 };
+            }
+            const float w = std::max(l.w * b.width / 3.f * s.width * c.s, 0.8f * c.s * (l.w < 2 ? 0.6f : 1.f) * (s.level == 0 ? 1.f : 0.7f));
+            DrawLineEx(mapP(c, { s.a.x, s.a.y }), mapP(c, { q.x, q.y }), w, col);
+        }
+    }
+    if (b.flash > 0 && canvasSize().x > 0) {                                  // the whole picture lights up
+        const Vector2 cs = canvasSize();
+        Color f = b.color;
+        f.a = (unsigned char)std::clamp(255.f * b.flash * p.flash * b.intensity * c.a * 0.5f, 0.f, 255.f);
+        DrawRectangle(0, 0, (int)cs.x, (int)cs.y, f);
+    }
+    if (canvasSize().x > 0) restoreBlend();
+    else EndBlendMode();
+}
+
+std::function<void(const Ctx& c, int t)> lightning(LightningBolt b) {
+    return [b](const Ctx& c, int t) { lightning(c, b, frameTime(t)); };
 }
 
 } } // rmtn::fx

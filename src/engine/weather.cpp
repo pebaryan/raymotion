@@ -1,0 +1,446 @@
+// weather.cpp -- g3d::Weather: presets, mix, and how the weather's numbers become each system's
+// own settings. CPU only; render() in scene3d.cpp calls the inWeather() functions every frame.
+#include "rmtn/scene3d.hpp"
+#include <raymath.h>
+#include <algorithm>
+#include <cmath>
+
+namespace rmtn {
+namespace g3d {
+
+namespace {
+float lerp(float a, float b, float t) { return a + (b - a) * t; }
+float smoothstepF(float e0, float e1, float x) { const float u = std::clamp((x - e0) / (e1 - e0), 0.f, 1.f); return u * u * (3 - 2 * u); }
+
+Color mixC(Color a, Color b, float t) {
+    auto m = [t](unsigned char x, unsigned char y) { return (unsigned char)std::lround(x + (y - x) * t); };
+    return { m(a.r, b.r), m(a.g, b.g), m(a.b, b.b), a.a };
+}
+
+// The grey a colour fades to under cloud: its own brightness, a little darker.
+Color greyOf(Color c, float darken) {
+    const float l = (0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b) * (1 - darken);
+    const unsigned char v = (unsigned char)std::clamp((int)std::lround(l), 0, 255);
+    return { v, v, v, c.a };
+}
+
+Weather preset(float speed, float gust, float gustSpeed, float cover, CloudType type, Precipitation kind, float intensity,
+               float wet, float snow, float haze, float strikes) {
+    Weather w;
+    w.enabled = true;
+    w.wind.speed = speed;
+    w.wind.gust = gust;
+    w.wind.gustSpeed = gustSpeed;
+    w.clouds = { cover, type };
+    w.precipitation = { kind, intensity };
+    (void)wet; (void)snow;                          // the ground accumulates from the precipitation (wetness, snowCover stay -1)
+    w.haze = haze;
+    w.lightningRate = strikes;
+    return w;
+}
+} // namespace
+
+Weather Weather::clear() { return preset(3, 0.2f, 4, 0.15f, CloudType::Cumulus, Precipitation::None, 0, 0, 0, 0.05f, 0); }
+Weather Weather::overcast() { return preset(5, 0.25f, 5, 0.9f, CloudType::Stratus, Precipitation::None, 0, 0, 0, 0.15f, 0); }
+Weather Weather::rain() { return preset(7, 0.4f, 7, 0.95f, CloudType::Stratus, Precipitation::Rain, 0.5f, 0.8f, 0, 0.25f, 0); }
+Weather Weather::storm() { return preset(20, 0.8f, 14, 1, CloudType::Cumulonimbus, Precipitation::Rain, 1, 1, 0, 0.3f, 6); }
+Weather Weather::snow() { return preset(4, 0.2f, 4, 0.9f, CloudType::Stratus, Precipitation::Snow, 0.5f, 0, 0.6f, 0.35f, 0); }
+Weather Weather::fog() { return preset(1, 0.05f, 2, 0.6f, CloudType::Deck, Precipitation::None, 0, 0.3f, 0, 0.9f, 0); }
+
+Weather Weather::mix(const Weather& a, const Weather& b, float t) {
+    t = std::clamp(t, 0.f, 1.f);
+    Weather w = t < 0.5f ? a : b;                  // the kinds and types switch at 0.5
+    w.enabled = a.enabled || b.enabled;
+    w.fps = lerp(a.fps, b.fps, t);
+    // The wind direction the short way round: 350 to 10 degrees goes through 0, not 180.
+    const float turn = std::fmod(std::fmod(b.wind.direction - a.wind.direction, 360.f) + 540.f, 360.f) - 180.f;
+    w.wind.direction = a.wind.direction + turn * t;
+    w.wind.speed = lerp(a.wind.speed, b.wind.speed, t);
+    w.wind.gust = lerp(a.wind.gust, b.wind.gust, t);
+    w.wind.gustSpeed = lerp(a.wind.gustSpeed, b.wind.gustSpeed, t);
+    w.wind.gustScale = lerp(a.wind.gustScale, b.wind.gustScale, t);
+    w.windRun = a.windRun >= 0 && b.windRun >= 0 ? lerp(a.windRun, b.windRun, t) : -1.f;
+    w.clouds.cover = lerp(a.clouds.cover, b.clouds.cover, t);
+    w.precipitation.intensity = lerp(a.precipitation.intensity, b.precipitation.intensity, t);
+    // A pin (>= 0) mixes with a pin; against an unpinned ground the pin switches at 0.5, like a kind.
+    w.wetness = a.wetness >= 0 && b.wetness >= 0 ? lerp(a.wetness, b.wetness, t) : w.wetness;
+    w.snowCover = a.snowCover >= 0 && b.snowCover >= 0 ? lerp(a.snowCover, b.snowCover, t) : w.snowCover;
+    w.temperature = a.temperature != Weather::kAutoTemperature && b.temperature != Weather::kAutoTemperature
+                        ? lerp(a.temperature, b.temperature, t) : w.temperature;
+    w.accumulationScale = lerp(a.accumulationScale, b.accumulationScale, t);
+    if (w.history.empty()) w.history = t < 0.5f ? b.history : a.history;          // the history is the film's, not a state to mix
+    w.haze = lerp(a.haze, b.haze, t);
+    w.lightningRate = lerp(a.lightningRate, b.lightningRate, t);
+    w.rainbow.distantRain = lerp(a.rainbow.distantRain, b.rainbow.distantRain, t);
+    w.rainbow.rainDistance = lerp(a.rainbow.rainDistance, b.rainbow.rainDistance, t);
+    w.rainbow.strength = lerp(a.rainbow.strength, b.rainbow.strength, t);
+    return w;
+}
+
+float Weather::rainbowRain() const {
+    const bool drops = precipitation.kind == Precipitation::Rain || precipitation.kind == Precipitation::Sleet;
+    const float here = drops ? std::clamp(precipitation.intensity, 0.f, 1.f) * (precipitation.kind == Precipitation::Sleet ? 0.6f : 1.f) : 0.f;
+    const float r = std::max(here, std::clamp(rainbow.distantRain, 0.f, 1.f));
+    return r < 0.02f ? 0.f : std::pow(r, 0.6f);
+}
+
+float Weather::rainbowSun(float elevation) const {
+    const float cloud = std::clamp((sunScale() - 0.45f) / 0.4f, 0.f, 1.f);       // cover 1: 0.25, none gets through; cover 0.5: 0.7; a bow wants a sun that casts shadows
+    const float horizon = smoothstepF(0.f, 4.f, elevation);
+    const float high = rainbow.mode == Rainbow::Mode::Auto ? 1.f - smoothstepF(40.f, 46.f, elevation) : 1.f;
+    return cloud * horizon * high;
+}
+
+// ---- the rules
+
+Vector2 Weather::windVector() const {
+    const float d = wind.direction * DEG2RAD;
+    return { std::cos(d), std::sin(d) };
+}
+float Weather::fogDensity() const { const float h = std::clamp(haze, 0.f, 1.f); return 0.065f * h * h; }
+float Weather::cloudGrey() const { return std::pow(std::clamp(clouds.cover, 0.f, 1.f), 1.5f) * 0.85f; }
+float Weather::sunScale() const { return 1 - 0.75f * std::clamp(clouds.cover, 0.f, 1.f); }
+float Weather::ambientScale() const { return 1 + 0.35f * std::clamp(clouds.cover, 0.f, 1.f); }
+float Weather::skyLightScale() const { return 1 - 0.35f * std::clamp(clouds.cover, 0.f, 1.f); }
+float Weather::grassSway() const { return std::clamp(0.015f * wind.speed, 0.f, 0.6f); }
+float Weather::grassGust() const { return 0.7f * std::clamp(wind.gust, 0.f, 1.f); }
+float Weather::treeWind() const { return std::max(wind.speed / 8.f, 0.05f); }
+float Weather::treeGust() const { return 1.2f * std::clamp(wind.gust, 0.f, 1.f); }
+float Weather::waveHeight(float fetch) const {
+    const float g = 9.81f, U = std::max(wind.speed, 0.1f), F = std::max(fetch, 1.f);
+    return std::min(0.0016f * U * std::sqrt(F / g), 0.21f * U * U / g);
+}
+float Weather::wavePeakLength(float fetch) const {
+    const float g = 9.81f, U = std::max(wind.speed, 0.1f), F = std::max(fetch, 1.f);
+    const float fp = 3.5f * (g / U) * std::pow(g * F / (U * U), -0.33f);
+    const float tp = std::min(1.f / fp, 7.16f * U / g);
+    return g * tp * tp / (2 * PI);
+}
+float Weather::cloudTravel(double seconds) const { return windRun >= 0 ? windRun : (float)(wind.speed * seconds); }
+
+// ---- the ground: wetness and settled snow, accumulated from the history
+float Weather::airTemperature() const {
+    if (temperature != kAutoTemperature) return temperature;
+    switch (precipitation.kind) {
+        case Precipitation::Snow: case Precipitation::Sleet: return -3.f;
+        case Precipitation::Rain: return 8.f;
+        default: return 10.f;
+    }
+}
+float Weather::dryTimeConstant() const {
+    // Calm air under full sun dries in kDryTime; each m/s of wind and each part of unclouded sun dries faster.
+    return kDryTime / ((1 + 0.08f * std::max(wind.speed, 0.f)) * (0.5f + sunScale()));
+}
+float Weather::dryingTime() const { return std::log(10.f) * dryTimeConstant(); }
+
+namespace {
+// What fell at `sec` of film time: the rain and the snow, each as an intensity 0..1.
+struct Fall { float rain = 0, snow = 0; };
+Fall fallAt(const Weather& w, double sec) {
+    Precipitation kind = w.precipitation.kind;
+    float intensity = w.precipitation.intensity;
+    if (!w.history.empty()) {
+        const std::vector<Weather::Key>& k = w.history;
+        if (sec < k.front().seconds) return {};
+        size_t i = 0;
+        while (i + 1 < k.size() && k[i + 1].seconds <= sec) i++;
+        kind = k[i].kind;
+        intensity = k[i].intensity;
+        if (i + 1 < k.size() && k[i + 1].kind == kind && k[i + 1].seconds > k[i].seconds)
+            intensity += (k[i + 1].intensity - intensity) * (float)((sec - k[i].seconds) / (k[i + 1].seconds - k[i].seconds));
+    }
+    intensity = std::clamp(intensity, 0.f, 1.f);
+    switch (kind) {
+        case Precipitation::Rain: return { intensity, 0 };
+        case Precipitation::Snow: return { 0, intensity };
+        case Precipitation::Sleet: return { 0.6f * intensity, 0.4f * intensity };
+        default: return {};
+    }
+}
+} // namespace
+
+float Weather::rainAt(double seconds) const { return fallAt(*this, seconds).rain; }
+float Weather::snowAt(double seconds) const { return fallAt(*this, seconds).snow; }
+
+Weather::GroundState Weather::ground(double seconds) const {
+    GroundState g;
+    seconds = std::max(seconds, 0.0);
+    const bool pinWet = wetness >= 0, pinSnow = snowCover >= 0;
+    if (pinWet) g.wetness = std::clamp(wetness, 0.f, 1.f);
+    if (pinSnow) g.snowDepth = std::clamp(snowCover, 0.f, 1.f) * kSnowFull;
+    if (pinWet && pinSnow) return g;
+    const double scale = std::max(accumulationScale, 0.f);
+    const double dt = std::max(0.1, seconds / 4000.0);                    // film seconds a step: 0.1 s, coarser past 400 s
+    const int steps = (int)std::ceil(seconds / dt);
+    const float T = airTemperature();
+    const float stick = 1.f - smoothstepF(0.f, 3.f, T);                  // wet flakes stick up to 0, none from 3 degrees
+    const float melt = std::max(T, 0.f) * kMeltRate * (0.5f + sunScale());
+    const float dry = 1.f / dryTimeConstant();
+    float wet = 0, depth = 0;
+    for (int i = 0; i < steps; i++) {
+        const double a = i * dt, b = std::min(seconds, a + dt), mid = 0.5 * (a + b);
+        const float ds = (float)((b - a) * scale);                        // weather seconds
+        const Fall f = fallAt(*this, mid);
+        const float inflow = f.rain / kSoakTime, outflow = dry * (1.f - 0.8f * f.rain);
+        const float k = inflow + outflow, target = k > 0 ? inflow / k : wet;
+        wet = target + (wet - target) * std::exp(-k * ds);
+        depth = std::max(0.f, depth + (f.snow * kSnowRate * stick - melt) * ds);
+    }
+    if (!pinWet) g.wetness = std::clamp(wet, 0.f, 1.f);
+    if (!pinSnow) g.snowDepth = depth;
+    return g;
+}
+
+// ---- each system
+
+Field inWeather(const Field& f, const Weather& w, const Matrix* world) {
+    Field out = f;
+    if (!w.enabled || f.ownWind) return out;
+    Vector2 d = w.windVector();
+    if (world) {                                    // the shader wants the wind in the field's own space
+        const Matrix inv = MatrixInvert(*world);
+        const Vector3 a = Vector3Transform({ d.x, 0, d.y }, inv), o = Vector3Transform({ 0, 0, 0 }, inv);
+        const Vector2 l{ a.x - o.x, a.z - o.z };
+        if (Vector2Length(l) > 1e-6f) d = Vector2Normalize(l);
+    }
+    out.windDirection = d;
+    out.sway = w.grassSway();
+    out.gust = w.grassGust();
+    out.gustSpeed = w.wind.gustSpeed;
+    out.gustScale = w.wind.gustScale;
+    return out;
+}
+
+Water inWeather(const Water& water, const Weather& w) {
+    Water out = water;
+    if (w.enabled && !water.ownWind && water.spectrum.enabled) {       // the spectrum sea takes the wind itself (W9)
+        out.spectrum.windSpeed = w.wind.speed;
+        out.spectrum.windDirection = w.wind.direction;
+        const float U = w.wind.speed, t = std::clamp((U - 12.f) / 8.f, 0.f, 1.f);
+        const float storm = water.spectrum.storm >= 0 ? std::min(water.spectrum.storm, 1.f) : t * t * (3 - 2 * t);
+        out.spectrum.choppiness *= 1.f + 0.5f * storm;                   // a gale's crests are sharper (W5)
+        return out;
+    }
+    if (!w.enabled || water.ownWind || water.waves.empty()) return out;
+    // The waves' mean heading, weighted by amplitude; the wind turns it all by one angle.
+    float sx = 0, sy = 0;
+    for (const Water::Wave& v : water.waves) {
+        const float a = v.direction * DEG2RAD, m = std::fabs(v.amplitude);
+        sx += m * std::cos(a);
+        sy += m * std::sin(a);
+    }
+    const float mean = sx * sx + sy * sy > 1e-12f ? std::atan2(sy, sx) * RAD2DEG : water.waves[0].direction;
+    const float turn = w.wind.direction - mean;
+    // Fetch-limited sea: scale the authored waves so Hs and the longest wavelength are the wind's.
+    float sum = 0, longest = 0;
+    for (const Water::Wave& v : water.waves) { sum += v.amplitude * v.amplitude / 2; longest = std::max(longest, v.wavelength); }
+    const float hs0 = 4 * std::sqrt(sum);
+    const float amp = hs0 > 1e-9f ? w.waveHeight(water.fetch) / hs0 : 1.f;
+    const float len = longest > 1e-6f ? w.wavePeakLength(water.fetch) / longest : 1.f;
+    for (Water::Wave& v : out.waves) {
+        v.direction += turn;
+        v.wavelength *= len;
+        v.amplitude *= amp;
+        const float cap = 0.5f * Weather::kMaxSteepness * v.wavelength;    // 2 a / L <= kMaxSteepness
+        if (std::fabs(v.amplitude) > cap) v.amplitude = std::copysign(cap, v.amplitude);
+    }
+    return out;
+}
+
+Sky inWeather(const Sky& sky, const Weather& w, double frame) {
+    Sky k = sky;
+    if (!w.enabled || !sky.enabled || sky.ownClouds) return k;
+    const float cover = std::clamp(w.clouds.cover, 0.f, 1.f), g = w.cloudGrey(), keep = 1 - cover;
+    k.clouds = cover;
+    // Under cover the sky goes to grey, a little darker; the sun's disc, glow and the stars go.
+    k.zenith = mixC(sky.zenith, greyOf(sky.zenith, 0.1f), g);
+    k.horizon = mixC(sky.horizon, greyOf(sky.horizon, 0.12f), g);
+    k.haze = mixC(sky.haze, greyOf(sky.haze, 0.1f), g);
+    k.cloudColor = mixC(sky.cloudColor, greyOf(sky.cloudColor, 0.12f), g);
+    k.cloudShade = mixC(sky.cloudShade, greyOf(sky.cloudShade, 0.3f), g);
+    k.sunSize = sky.sunSize * keep * keep;
+    k.sunGlow = sky.sunGlow * (1 - 0.85f * cover);
+    k.hazeAmount = sky.hazeAmount * (1 - 0.5f * cover);
+    k.stars = sky.stars * keep;
+    // The clouds drift downwind. The sky shader moves a cloud against the sign of its offset.
+    const Vector2 d = w.windVector();
+    const float run = w.cloudTravel(frame / std::max(w.fps, 1.f)) * Weather::kCloudPerMetre;
+    k.cloudDrift = { 0, 0 };
+    k.cloudShift = { -d.x * run, -d.y * run };
+    return k;
+}
+
+fx::Emitter3D inWeather(const fx::Emitter3D& e, const Weather& w, const Matrix& world) {
+    fx::Emitter3D out = e;
+    if (!w.enabled || e.ownWind || e.windFollow <= 0) return out;
+    const Vector2 d = w.windVector();
+    const float v = e.windFollow * w.wind.speed / std::max(w.fps, 1.f);       // units a frame, in the world
+    const Matrix inv = MatrixInvert(world);
+    const Vector3 a = Vector3Transform({ d.x * v, 0, d.y * v }, inv), o = Vector3Transform({ 0, 0, 0 }, inv);
+    out.drift = { e.drift.x + a.x - o.x, e.drift.y + a.y - o.y, e.drift.z + a.z - o.z };
+    if (std::fabs(e.direction.y) > 1e-4f) out.direction = { 0, e.direction.y, 0 };     // the wind sets the slant
+    return out;
+}
+
+Water waterOf(const Scene& scene) { return inWeather(scene.water, scene.weather); }
+
+
+std::vector<Clouds::Storm> stormCells(const Clouds& c, float x0, float z0, float x1, float z1) {
+    std::vector<Clouds::Storm> out;
+    if (!c.storms.empty()) {
+        for (const Clouds::Storm& s : c.storms)
+            if (s.x >= x0 && s.x <= x1 && s.z >= z0 && s.z <= z1) out.push_back(s);
+        return out;
+    }
+    constexpr float GS = 40000.f;
+    const float pr = std::clamp(0.3f + 3.f * c.cover, 0.3f, 0.8f);
+    const uint64_t key = 0x9E3779B97F4A7C15ull * (uint64_t)(c.seed + 11u);
+    for (int j = (int)std::floor(z0 / GS) - 1; j <= (int)std::floor(z1 / GS) + 1; j++)
+        for (int i = (int)std::floor(x0 / GS) - 1; i <= (int)std::floor(x1 / GS) + 1; i++) {
+            const uint64_t cell = ((uint64_t)(uint32_t)(i + 100000) << 32) | (uint32_t)(j + 100000);
+            auto r = [&](int k) { return (float)rnd01(key ^ (cell * 0xD6E8FEB86659FD93ull), (uint64_t)k); };
+            if (r(0) > pr) continue;
+            Clouds::Storm s;
+            s.x = ((float)i + 0.2f + 0.6f * r(1)) * GS;
+            s.z = ((float)j + 0.2f + 0.6f * r(2)) * GS;
+            s.radius = 4500.f + 2500.f * r(3);
+            if (s.x >= x0 && s.x <= x1 && s.z >= z0 && s.z <= z1) out.push_back(s);
+        }
+    return out;
+}
+Clouds inWeather(const Clouds& c, const Weather& w) {
+    Clouds k = c;
+    if (!w.enabled || c.ownWeather) return k;
+    k.cover = std::clamp(w.clouds.cover, 0.f, 1.f);
+    k.type = w.clouds.type;
+    if (k.type == CloudType::Cumulonimbus) k.top = std::max(k.top, 12000.f);   // the tower reaches the tropopause
+    return k;
+}
+
+Vector2 Clouds::travel(const Weather& w, double seconds) const {
+    if (w.enabled && !ownWeather) {
+        const Vector2 d = w.windVector();
+        const float run = w.cloudTravel(seconds);
+        return { d.x * run, d.y * run };
+    }
+    return { (float)(drift.x * seconds), (float)(drift.y * seconds) };
+}
+
+// ---- precipitation (Downfall): the CPU twin of the shader in precip_glsl.hpp. Keep them in step.
+namespace {
+uint32_t dropHash(uint32_t x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
+float dropRand(uint32_t x) { return (float)(dropHash(x) >> 8) / 16777216.f; }
+float fract1(float x) { return x - std::floor(x); }
+} // namespace
+
+Vector2 Downfall::slant(bool snow) const {
+    const bool flake = snow && kind == Precipitation::Snow;         // sleet falls at the rain's slant
+    const Vector2 sp = flake ? snowSpeed : rainSpeed;
+    const float mean = std::max(0.5f * (sp.x + sp.y), 0.1f);
+    const float k = std::max(windSpeed, 0.f) * (flake ? Weather::kSnowFollow : Weather::kRainFollow) / mean;
+    const float d = windDirection * DEG2RAD;
+    return { std::cos(d) * k, std::sin(d) * k };
+}
+
+uint32_t Downfall::dropsPerTile() const {
+    const float density = kind == Precipitation::Snow ? snowDensity : kind == Precipitation::Sleet ? 0.5f * (rainDensity + snowDensity) : rainDensity;
+    return (uint32_t)std::max(0.f, std::round(density * kTile * kTile * kCell));
+}
+uint32_t Downfall::farDropsPerTile() const {
+    return (uint32_t)std::max(0.f, std::round(farDensity * kFarTile * kFarTile * kFarCell));
+}
+
+Downfall::Drop Downfall::drop(int ix, int iy, int iz, uint32_t k, double seconds, bool faraway) const {
+    const float S = faraway ? kFarTile : kTile, Hc = faraway ? kFarCell : kCell;
+    const uint32_t n = faraway ? farDropsPerTile() : dropsPerTile();
+    const uint32_t sd = faraway ? seed ^ 0x9E3779B9u : seed;
+    const uint32_t ck = dropHash((uint32_t)ix * 73856093u ^ (uint32_t)iz * 19349663u ^ (uint32_t)iy * 83492791u ^ sd * 2654435761u);
+    const uint32_t h = dropHash(k * 2654435769u ^ ck);
+    const float r1 = dropRand(h), r2 = dropRand(h + 1u), r3 = dropRand(h + 2u), r4 = dropRand(h + 3u);
+    const float r5 = dropRand(h + 4u), r6 = dropRand(h + 5u), r7 = dropRand(h + 6u), r8 = dropRand(h + 7u);
+    Drop d;
+    d.rank = ((float)k + 0.5f) / std::max((float)n, 1.f);
+    d.snow = kind == Precipitation::Snow || (kind == Precipitation::Sleet && r5 < 0.4f);
+    const Vector2 sp = d.snow ? snowSpeed : rainSpeed, sz = d.snow ? snowSize : rainSize;
+    const float v = d.snow ? sp.x + (sp.y - sp.x) * r6 : sp.x + (sp.y - sp.x) * r3;
+    d.diameter = sz.x + (sz.y - sz.x) * r3 * r3;
+    const Vector2 a = slant(d.snow);
+    const float s = (float)seconds;
+    const float f = fract1(s * v / Hc + r4);
+    d.phase = f;
+    const float hgt = Hc * (1 - f);
+    const float qx = ((float)ix + r1) * S, qz = ((float)iz + r2) * S;
+    Vector3 pos{ qx - a.x * hgt, (float)iy * Hc + hgt, qz - a.y * hgt };
+    Vector3 vel{ a.x * v, -v, a.y * v };
+    if (d.snow) {
+        const float w1 = 1.f + r1, w2 = 1.3f * (1.f + r2), p1 = r7 * 6.2831853f, p2 = r8 * 6.2831853f;
+        pos.x += flutter * std::sin(s * w1 + p1);
+        pos.z += flutter * std::sin(s * w2 + p2);
+        vel.x += flutter * w1 * std::cos(s * w1 + p1);
+        vel.z += flutter * w2 * std::cos(s * w2 + p2);
+    }
+    d.position = pos;
+    d.velocity = vel;
+    return d;
+}
+
+Downfall inWeather(const Downfall& d, const Weather& w) {
+    Downfall k = d;
+    if (!w.enabled) return k;
+    if (!d.ownWeather) {
+        k.kind = w.precipitation.kind;
+        k.intensity = std::clamp(w.precipitation.intensity, 0.f, 1.f);
+    }
+    if (!d.ownWind) {
+        k.windDirection = w.wind.direction;
+        k.windSpeed = w.wind.speed;
+        k.fps = w.fps;
+    }
+    return k;
+}
+
+} // namespace g3d
+} // namespace rmtn
+
+// ---- wet ground and snow: the pins, and the CPU twin of the ripple rings in wet_glsl.hpp
+namespace rmtn {
+namespace g3d {
+
+Weather::GroundState groundOf(const Scene& scene, double seconds) {
+    Weather::GroundState g;
+    if (scene.weather.enabled && !scene.ground.ownWeather) g = scene.weather.ground(seconds);
+    if (scene.ground.wetness >= 0) g.wetness = std::clamp(scene.ground.wetness, 0.f, 1.f);
+    if (scene.ground.snowCover >= 0) g.snowDepth = std::clamp(scene.ground.snowCover, 0.f, 1.f) * Weather::kSnowFull;
+    return g;
+}
+
+namespace {
+uint32_t ringHash(uint32_t x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
+float ringRand(uint32_t x) { return (float)(ringHash(x) >> 8) / 16777216.f; }
+} // namespace
+
+// Mirrors rippleSum() in wet_glsl.hpp: cells of kCell metres, kSlots slots a cell, each slot one impact every
+// kPeriod seconds at its own phase, kept when its hash is under rate / maxRate. Keep the two in step.
+std::vector<Ground::Ring> Ground::rings(float x, float z, double seconds, float rate, uint32_t precipSeed) const {
+    std::vector<Ring> out;
+    const float act = std::clamp(rate / maxRate(), 0.f, 1.f), t = (float)seconds;
+    const uint32_t sd = precipSeed * 2654435761u + seed;
+    const int c0 = (int)std::floor(x / kCell), r0 = (int)std::floor(z / kCell);
+    for (int dz = -1; dz <= 1; dz++)
+        for (int dx = -1; dx <= 1; dx++) {
+            const int cx = c0 + dx, cz = r0 + dz;
+            for (int s = 0; s < kSlots; s++) {
+                const uint32_t ck = ringHash((uint32_t)cx * 73856093u ^ (uint32_t)cz * 19349663u ^ (uint32_t)s * 83492791u ^ sd * 2654435761u);
+                const float phase = ringRand(ck) * kPeriod;
+                const float n = std::floor((t - phase) / kPeriod);
+                const float age = t - phase - n * kPeriod;
+                const uint32_t h = ringHash((uint32_t)(int)n * 2654435769u ^ ck);
+                if (ringRand(h) >= act) continue;
+                out.push_back({ { ((float)cx + ringRand(h + 1u)) * kCell, ((float)cz + ringRand(h + 2u)) * kCell }, age });
+            }
+        }
+    return out;
+}
+
+} // namespace g3d
+} // namespace rmtn

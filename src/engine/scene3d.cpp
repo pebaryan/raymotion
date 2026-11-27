@@ -19,6 +19,14 @@
 // poses the bones without CPU skinning, for skinning in our vertex shader.
 extern "C" void UpdateModelAnimationBones(Model model, ModelAnimation anim, float frame);
 
+#include "clouds_glsl.hpp"
+#include "lightning_glsl.hpp"
+#include "precip_glsl.hpp"
+#include "wet_glsl.hpp"
+#include "wake_glsl.hpp"
+#include "ocean.hpp"
+#include "air_glsl.hpp"
+
 namespace rmtn {
 namespace g3d {
 namespace {
@@ -28,6 +36,9 @@ constexpr int MAX_BONES = 128;
 constexpr int MAX_TILES = 16;            // shadow-atlas tiles per scene
 constexpr int MAX_ATLAS = 8192;
 constexpr int ENV_SLOT = 13, SHADOW_SLOT = 14, DEPTH_SLOT = 15;   // material maps use units 0..11
+// Volumetric clouds. The lit shader reads the cloud shadow map from unit 11 (a material map slot the
+// engine never fills); the cloud passes, which are not lit, use units 4..8 (raylib's batch owns 0..3).
+constexpr int CLOUD_SLOT = 11, CLOUD_SHAPE_SLOT = 4, CLOUD_DETAIL_SLOT = 5, CLOUD_WEATHER_SLOT = 6, CLOUD_LOW_SLOT = 7, CLOUD_BLUE_SLOT = 8;
 
 // ---- shaders ---------------------------------------------------------------------------
 // Attribute and uniform names are raylib's defaults, so DrawMesh binds them.
@@ -207,26 +218,200 @@ uniform int waveCount; uniform vec4 waveA[8]; uniform vec4 waveB[8];
 // (angular speed, phase, sharpness); sharpness 1 is a sine, more narrows the crests. `foot`
 // is the size of what is being sampled (a pixel, a blur): waves shorter than a few of it
 // fade out, as they would average out in the sample (0 = all of them).
+// The slope variance the fade took out (sum of (1 - fade^2) (k a sharpness)^2 / 2) lands in
+// waveLost: the shading adds it to the specular roughness so the average is conserved.
+float wHash(vec2 p) {
+    p = mod(p, 4099.0);
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+float wNoise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(wHash(i), wHash(i + vec2(1.0, 0.0)), f.x), mix(wHash(i + vec2(0.0, 1.0)), wHash(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+float waveLost = 0.0;
 float waveHeightLod(vec2 p, float foot, out vec2 g) {
-    float h = 0.0; g = vec2(0.0);
+    float h = 0.0; g = vec2(0.0); waveLost = 0.0;
     for (int i = 0; i < 8; i++) {
         if (i >= waveCount) break;
-        float fade = foot > 0.0 ? smoothstep(2.0, 5.0, 6.2832 / (waveA[i].z * foot)) : 1.0;
+        float fade = foot > 0.0 ? smoothstep(3.0, 12.0, 6.2832 / (waveA[i].z * foot)) : 1.0;
+        float ks = waveA[i].z * waveA[i].w * waveB[i].z;
+        waveLost += (1.0 - fade * fade) * 0.5 * ks * ks;
         if (fade <= 0.0) continue;
         float s = waveA[i].z * dot(waveA[i].xy, p) - waveB[i].x * waterTime + waveB[i].y;
+        float amp = waveA[i].w;
+        if (waterMode == 2) {          // a body is small: no single wavelength may stripe it. Each wave's phase wanders and its height comes and goes in patches
+            vec2 pk = p * waveA[i].z;
+            s += 4.4 * (wNoise(pk * 0.11 + float(i) * 9.1) - 0.5);
+            amp *= 0.15 + 1.7 * smoothstep(0.3, 0.7, wNoise(pk * 0.09 + 31.0 + float(i) * 4.3));
+        }
         float u = max(0.5 + 0.5 * sin(s), 1e-4), sh = waveB[i].z;
-        h += fade * waveA[i].w * (2.0 * pow(u, sh) - 1.0);
-        g += fade * waveA[i].w * sh * pow(u, sh - 1.0) * cos(s) * waveA[i].z * waveA[i].xy;
+        h += fade * amp * (2.0 * pow(u, sh) - 1.0);
+        g += fade * amp * sh * pow(u, sh - 1.0) * cos(s) * waveA[i].z * waveA[i].xy;
     }
     return h;
 }
 float waveHeight(vec2 p, out vec2 g) { return waveHeightLod(p, 0.0, g); }
+
+// ---- Water::spectrum (W9): the FFT ocean, as up to four cascades of two textures each: A = (Dx, h, Dz, whitecap),
+// B = (slope x, slope z) with respect to the cascade's own lookup coordinate. Every cascade's lookup is bent by a slow
+// sine (oceanWarp: amplitude, two wavenumbers) so no patch repeats exactly. oceanLost[c * 8 + l] is the mean square
+// slope that mip level l has averaged away from level 0 (the shading puts it back into the glint's roughness).
+uniform int oceanOn; uniform int oceanCount; uniform int oceanGeo;
+uniform float oceanLambda; uniform float oceanCurve; uniform float oceanTail;
+uniform vec4 oceanPatch; uniform vec4 oceanWarp[4]; uniform float oceanLost[32];
+uniform vec3 oceanRing;                       // the mesh: inner radius, outer radius, radial spacing as a share of the radius
+uniform sampler2D oceanA0; uniform sampler2D oceanB0; uniform sampler2D oceanA1; uniform sampler2D oceanB1;
+uniform sampler2D oceanA2; uniform sampler2D oceanB2; uniform sampler2D oceanA3; uniform sampler2D oceanB3;
+const float OCEAN_N = 128.0;
+float oceanLostAt(int c, float lod) {
+    float f = clamp(lod, 0.0, 7.0);
+    int i = int(floor(f));
+    return mix(oceanLost[c * 8 + i], oceanLost[c * 8 + min(i + 1, 7)], f - float(i));
+}
+void oceanCascade(sampler2D A, sampler2D B, int c, vec2 p, float lod, bool shade, inout vec3 hd, inout vec2 g, inout float foam, inout float lost) {
+    vec4 wp = oceanWarp[c];
+    float s1 = wp.y * p.y + 1.7 + 2.3 * float(c), s2 = wp.z * p.x + 0.4 + 1.9 * float(c);
+    vec2 q = p + wp.x * vec2(sin(s1), sin(s2));
+    vec2 uv = q / oceanPatch[c] + 0.5 / OCEAN_N;
+    vec4 va = textureLod(A, uv, lod);
+    hd += va.xyz;
+    if (shade) {
+        vec2 s = textureLod(B, uv, lod).xy;
+        float al = wp.x * wp.y * cos(s1), be = wp.x * wp.z * cos(s2);
+        g += vec2(s.x + be * s.y, al * s.x + s.y);
+        foam = max(foam, va.w);
+        lost += oceanLostAt(c, lod);
+    }
+}
+// A mip level that matches a sample spacing of `size` metres in the lookup plane (0 = full detail).
+float oceanLod(int c, float size) { return size > 0.0 ? max(log2(2.0 * size * OCEAN_N / oceanPatch[c]), 0.0) : 0.0; }
+// The vertices: the cascades the mesh can show, each at the level its ring spacing allows.
+void oceanGeometry(vec2 p, float spacing, out float h, out vec2 d) {
+    vec3 hd = vec3(0.0); vec2 g = vec2(0.0); float foam = 0.0, lost = 0.0;
+    if (oceanGeo > 0) oceanCascade(oceanA0, oceanB0, 0, p, oceanLod(0, spacing), false, hd, g, foam, lost);
+    if (oceanGeo > 1 && oceanCount > 1) oceanCascade(oceanA1, oceanB1, 1, p, oceanLod(1, spacing), false, hd, g, foam, lost);
+    if (oceanGeo > 2 && oceanCount > 2) oceanCascade(oceanA2, oceanB2, 2, p, oceanLod(2, spacing), false, hd, g, foam, lost);
+    if (oceanGeo > 3 && oceanCount > 3) oceanCascade(oceanA3, oceanB3, 3, p, oceanLod(3, spacing), false, hd, g, foam, lost);
+    h = hd.y; d = hd.xz;
+}
+// The pixels: every cascade at the level of the pixel's footprint `foot` (metres of the lookup plane; 0 = no band limit).
+void oceanFragment(vec2 p, float foot, out float h, out vec2 g, out float foam, out float lost) {
+    vec3 hd = vec3(0.0); g = vec2(0.0); foam = 0.0; lost = 0.0;
+    oceanCascade(oceanA0, oceanB0, 0, p, oceanLod(0, foot), true, hd, g, foam, lost);
+    if (oceanCount > 1) oceanCascade(oceanA1, oceanB1, 1, p, oceanLod(1, foot), true, hd, g, foam, lost);
+    if (oceanCount > 2) oceanCascade(oceanA2, oceanB2, 2, p, oceanLod(2, foot), true, hd, g, foam, lost);
+    if (oceanCount > 3) oceanCascade(oceanA3, oceanB3, 3, p, oceanLod(3, foot), true, hd, g, foam, lost);
+    h = hd.y;
+}
 )";
 
 const char* WATER_FS = R"(
 uniform vec3 waterAbsorb; uniform vec3 waterScatter; uniform float waterCaustics; uniform float waterFoam;
-uniform float waterOpen; uniform float waterInvAmp; uniform float waterGlint; uniform float waterBand;
+uniform float waterOpen; uniform float waterInvAmp; uniform float waterGlint; uniform float waterBand; uniform float waterFilter;
+uniform float oceanStorm; uniform vec2 oceanWind; uniform float oceanSpray; uniform float oceanVis;       // Water::spectrum: wind heading (unit), spray 0..1, haze distance (0: none)
 const float WATER_IOR = 1.333;
+
+// Water::reflections and Water::refraction. reflVP is the viewing camera's view-projection: it finds the pixel of
+// a world point. The reflection image was drawn with the scene mirrored about the water level, in the same
+// view, so a point's mirror image lands on the pixel that shows the point's reflection.
+uniform int reflMode; uniform sampler2D reflTex; uniform mat4 reflVP; uniform vec2 reflSize; uniform float reflDistort; uniform float reflDistortFull;   // reflDistortFull: Water::reflectionDistort before the sea's height scales it (wakes and ripples bend a calm mirror at once)
+uniform int refrMode; uniform sampler2D refrColor; uniform sampler2D refrDepth; uniform vec4 refrMap; uniform mat4 refrInvVP;
+uniform int reflClip;                      // 1 while the mirrored scene is drawn: what lies under the water is cut away
+
+vec2 camUV(vec3 p) {
+    vec4 c = reflVP * vec4(p, 1.0);
+    return c.xy / max(c.w, 1e-3) * 0.5 + 0.5;
+}
+vec3 mirrorY(vec3 p) { return vec3(p.x, 2.0 * waterLevel - p.y, p.z); }
+// A reflected ray that points into the water is folded up. The plain fold has a crease where it crosses the horizon, which
+// on a steep sea draws thin contour rings around every pit; this one is smooth.
+vec3 foldUp(vec3 r) { return normalize(vec3(r.x, sqrt(r.y * r.y + 0.0036), r.z)); }
+// The reflection image at uv as linear premultiplied rgb and its coverage (1 where something was drawn),
+// fading out towards the image's edge, where the sky takes over.
+vec4 planarAt(vec2 uv, float lod) {
+    vec4 t = textureLod(reflTex, uv, lod);
+    vec3 lin = pow(t.rgb / max(t.a, 1e-3), vec3(2.2)) * t.a;
+    float edge = smoothstep(0.0, 0.05, min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y)));
+    return vec4(lin, t.a) * edge;
+}
+float refrDepthAt(vec2 uv) {
+    ivec2 sz = textureSize(refrDepth, 0);
+    return texelFetch(refrDepth, clamp(ivec2((refrMap.xy + uv * refrMap.zw) * vec2(sz)), ivec2(0), sz - 1), 0).r;
+}
+vec3 refrWorld(vec2 uv, float d) {
+    vec4 c = refrInvVP * vec4(uv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
+    return c.xyz / c.w;
+}
+// What lies under the surface at this pixel, seen along the refracted ray: linear rgb after the water has
+// absorbed it over the real path, and 1 in .a (0 when the ray meets nothing drawn, so it is deep water).
+// A screen-space march: the refracted ray from the surface point is stepped (steps that grow by a tenth,
+// about 17 m in all), each point is projected and compared with the opaque depth under it; where the ray
+// passes behind the scene it is bisected. A scene sample that lies above the surface (a pole standing in the
+// water, the bank) is not an occluder of the underwater ray and is stepped over; a ray that leaves the picture
+// meets nothing. The path through the water is the length of the ray to the hit.
+bool rayBehind(vec3 Q, float thick, out vec2 uv) {
+    vec4 c = reflVP * vec4(Q, 1.0);
+    uv = c.xy / max(c.w, 1e-3) * 0.5 + 0.5;
+    if (c.w < 1e-3 || uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return false;
+    float d = refrDepthAt(uv);
+    if (d >= 0.99999) return false;
+    vec3 P = refrWorld(uv, d);
+    float pw = (reflVP * vec4(P, 1.0)).w;
+    return c.w > pw && c.w - pw < thick && P.y < fragPos.y - 0.003;       // behind what is drawn, but not far behind it: an occluder in front of the ray is not a hit
+}
+bool seeLeft = false;                          // set by seeThrough: the refracted ray left the picture
+vec4 seeThrough(vec3 n, vec3 v) {
+    seeLeft = false;
+    vec3 t = refract(-v, n, 1.0 / WATER_IOR);
+    float s0 = 0.0, st = 0.04, lo = 0.0, hi = 0.0, thk = 0.1;
+    bool hit = false, left = false;
+    vec2 uv, exitUV = vec2(0.5);
+    for (int i = 0; i < 40; i++) {
+        float s1 = s0 + st;
+        thk = (1.6 * st * abs(t.y) + 0.05) / max(v.y, 0.1);       // the ray may be this far behind what is drawn (more at a grazing view, where one pixel spans a long line of sight)
+        vec4 c = reflVP * vec4(fragPos + t * s1, 1.0);
+        vec2 u = c.xy / max(c.w, 1e-3) * 0.5 + 0.5;
+        if (c.w < 1e-3 || u.x < 0.0 || u.x > 1.0 || u.y < 0.0 || u.y > 1.0) {
+            // The ray leaves the picture before it meets anything: carry on with the colour at the edge it crossed
+            // (the last pixel the ray was over), absorbed over the length it travelled, so no edge forms where
+            // rays that still hit meet rays that left.
+            if (c.w >= 1e-3) { left = true; seeLeft = true; exitUV = clamp(u, vec2(0.002), vec2(0.998)); hi = s1; }
+            break;
+        }
+        if (rayBehind(fragPos + t * s1, thk, uv)) { lo = s0; hi = s1; hit = true; break; }
+        s0 = s1; st *= 1.1;
+    }
+    if (!hit && !left) return vec4(0.0);
+    if (hit) {
+        for (int i = 0; i < 6; i++) {
+            float mid = 0.5 * (lo + hi);
+            if (rayBehind(fragPos + t * mid, thk, uv)) hi = mid; else lo = mid;
+        }
+        uv = camUV(fragPos + t * hi);
+        // A hit beside the edge of something that stands over the water reads that thing's colour into the filtered
+        // sample (a brown fringe round every rail): a hit needs bed under the pixel and its neighbours.
+        vec2 du = vec2(2.0) / (vec2(textureSize(refrDepth, 0)) * refrMap.zw);
+        for (int k = 0; k < 4; k++) {
+            vec2 o = vec2(k < 2 ? (k == 0 ? -du.x : du.x) : 0.0, k < 2 ? 0.0 : (k == 2 ? -du.y : du.y));
+            float dn = refrDepthAt(uv + o);
+            if (dn >= 0.99999 || refrWorld(uv + o, dn).y >= fragPos.y - 0.003) return vec4(0.0);
+        }
+    } else {
+        uv = exitUV;
+        float d = refrDepthAt(uv);
+        if (d >= 0.99999) return vec4(0.0);
+        vec3 P = refrWorld(uv, d);
+        hi = max(hi, (fragPos.y - P.y) / max(-t.y, 0.05));      // the length down to that depth along the ray, as the floor there would have it
+        if (P.y >= fragPos.y - 0.003) return vec4(0.0);                // nothing drawn under the surface there: deep water
+    }
+    vec4 sc = textureLod(refrColor, refrMap.xy + uv * refrMap.zw, 0.0);
+    vec3 lin = pow(sc.rgb / max(sc.a, 1e-3), vec3(2.2));
+    vec3 tr = exp(-waterAbsorb * hi);
+    return vec4(lin * tr + waterScatter * (1.0 - tr), sc.a);
+}
 
 // Length of the segment a-b that lies under a horizontal surface at `lvl`.
 float waterPath(vec3 a, vec3 b, float lvl) {
@@ -278,6 +463,7 @@ vec3 waterLight(int i) {
 // does to its colour.
 vec3 waterTint(vec3 color) {
     if (waterOn == 0) return color;
+    if (refrMode >= 1 && viewPos.y >= waterEye) return color;     // the surface looks through it: refracted, absorbed there
     float lvl = surfaceAt(fragPos);
     float d = waterPath(viewPos, fragPos, viewPos.y < waterEye || fragPos.y < lvl ? lvl : waterLevel);
     if (d <= 0.0) return color;
@@ -291,16 +477,173 @@ float vnoise(vec2 p) {
     f = f * f * (3.0 - 2.0 * f);
     return mix(mix(hash21(i), hash21(i + vec2(1.0, 0.0)), f.x), mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x), f.y);
 }
+// A steep sea reflects a tiny patch of the sky image, magnified many times over, so the cloud noise in it shows up as nested
+// contour rings round every pit. A rough sea mirrors a blurred sky anyway (its slope variance spreads every reflection), so
+// for the sea the sky is read at a mip level that grows with that variance (oceanSkyLod, from Water::shadingSlopeVariance).
+uniform float oceanSkyLod;
 vec3 skyAt(vec3 d) {
-    if (hasEnv == 1) return env(d, 0.0) * backdropScale;
+    if (hasEnv == 1) {
+        if (oceanOn == 1) {
+            float u = atan(d.z, d.x) / (2.0 * PI) + 0.5 + envRotation;
+            float v = acos(clamp(d.y, -1.0, 1.0)) / PI;
+            vec3 c = textureLod(envMap, vec2(u, v), min(oceanSkyLod, envMaxLod)).rgb;
+            return (envLinear == 1 ? c : pow(max(c, vec3(0.0)), vec3(2.2))) * envIntensity * backdropScale;
+        }
+        return env(d, 0.0) * backdropScale;
+    }
     return mix(groundColor, skyColor, clamp(d.y * 0.5 + 0.5, 0.0, 1.0));
 }
 
+)";
+
+const char* WATER_BODY_FS = R"(
+// ---- water bodies (Scene::waterBodies, waterMode 2): shore and river flow
+// bodyShore: x soft-edge depth (m), y foam width (m), z foam strength. bodyFlow: x flow period (s), y ripple slope,
+// z ripple length (m), w 1 for a river. A river's vertices carry (speed, heading, width) in the normal and
+// (u across, arc length) in the texture coordinate.
+uniform vec4 bodyShore; uniform vec4 bodyFlow; uniform int bodyDebug;      // bodyDebug 2: the surface draws its slope as colour (for tests)
+float hashB(vec2 p) {
+    p = mod(p, 4099.0);
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+// Value noise and its derivative (quintic): (value, d/dx, d/dy).
+vec3 noiseD(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0), du = 30.0 * f * f * (f * (f - 2.0) + 1.0);
+    float a = hashB(i), b = hashB(i + vec2(1.0, 0.0)), c = hashB(i + vec2(0.0, 1.0)), d = hashB(i + vec2(1.0, 1.0));
+    float k1 = b - a, k2 = c - a, k4 = a - b - c + d;
+    return vec3(a + k1 * u.x + k2 * u.y + k4 * u.x * u.y, du * vec2(k1 + k4 * u.y, k2 + k4 * u.x));
+}
+// The slope (d/ds along the river, d/dc across it) of three octaves of ripples at river coordinates q (metres),
+// each fading out when its length nears the pixel footprint; `lost` gets the slope variance the fade took out.
+vec2 rippleLayer(vec2 q, float foot, inout float lost) {
+    vec2 g = vec2(0.0);
+    for (int o = 0; o < 3; o++) {
+        float L = bodyFlow.z * exp2(-float(o));
+        float fade = smoothstep(2.0, 6.0, L / max(foot, 1e-4));
+        float amp = bodyFlow.y * pow(0.7, float(o));
+        vec3 nd = noiseD(vec2(q.x / 2.2, q.y) / L + vec2(float(o) * 17.3, float(o) * 5.1));
+        g += fade * amp * vec2(nd.y / 2.2, nd.z);
+        lost += (1.0 - fade * fade) * 0.5 * amp * amp * 0.6;
+    }
+    return g;
+}
+// A river's ripple slope in world x, z by the two-phase flow map: two layers of the same ripples, each carried
+// along the channel at the local speed through a cycle of bodyFlow.x seconds and half a cycle apart, cross-faded by
+// a triangle weight that is zero where a layer's cycle restarts (so its jump never shows). The weights sum to 1
+// and the blend is divided by sqrt(w0^2 + w1^2), so the ripples keep their strength at the middle of the fade.
+vec2 riverSlope(float foot, inout float lost) {
+    float T = max(bodyFlow.x, 0.2);
+    float u = fragTexCoord.x, s = fragTexCoord.y;
+    float prof = 1.0 - 0.35 * (2.0 * u - 1.0) * (2.0 * u - 1.0);
+    float speed = fragNormal.x * prof;
+    float c = (u - 0.5) * fragNormal.z;
+    vec2 acc = vec2(0.0), lostAcc = vec2(0.0);
+    float w2 = 0.0;
+    for (int i = 0; i < 2; i++) {
+        float ph = waterTime / T + 0.5 * float(i);
+        float cyc = floor(ph), f = ph - cyc;
+        float w = 1.0 - abs(2.0 * f - 1.0);
+        vec2 jit = vec2(hashB(vec2(cyc * 1.37, float(i) * 5.1 + 1.0)), hashB(vec2(float(i) * 3.3 + 2.0, cyc * 0.71))) * 97.0;
+        float l = 0.0;
+        acc += w * rippleLayer(vec2(s - speed * f * T, c) + jit, foot, l);
+        lostAcc.x += w * w * l;
+        w2 += w * w;
+    }
+    lost += lostAcc.x / max(w2, 1e-3);
+    acc *= inversesqrt(max(w2, 1e-3));
+    vec2 dir = vec2(cos(fragNormal.y), sin(fragNormal.y));
+    return dir * acc.x + vec2(-dir.y, dir.x) * acc.y;
+}
+// Distance gap between the nearest and second-nearest cell point (Worley F2 - F1), in cell units: small along the
+// cell edges, so a threshold on it draws a net of thin filaments.
+float worleyEdge(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    float f1 = 8.0, f2 = 8.0;
+    for (int y = -1; y <= 1; y++)
+        for (int x = -1; x <= 1; x++) {
+            vec2 c = vec2(float(x), float(y));
+            vec2 o = vec2(hashB(i + c), hashB(i + c + 71.7));
+            float d = length(c + o - f);
+            if (d < f1) { f2 = f1; f1 = d; } else if (d < f2) f2 = d;
+        }
+    return f2 - f1;
+}
+// Lace foam on the shallows, 0 to 1: a net of thin filaments (the cell edges of a Worley field, which drifts and
+// shifts with time) inside a band that is fw deep, broken into patches by noise. `e` is the body's wave energy
+// (0 calm, 1 rough): a calm shore keeps only a few thin broken threads at the edge, a rough one a thicker net
+// reaching up the bank. The filament width is faded to its average coverage when it is finer than the pixel.
+float shoreFoam(float depth, float fw, float e, vec2 p, float foot, float t) {
+    float sw = 0.5 + 0.5 * sin(t * 1.3 + vnoise(p * 0.4) * 9.0);
+    float band = 1.0 - smoothstep(0.0, fw, depth - fw * 0.25 * sw);
+    if (band <= 0.0) return 0.0;
+    float L = 0.26;
+    float thick = L * mix(0.07, 0.16, e);                                   // filament width in metres
+    vec2 wp = p + (vec2(vnoise(p * 2.3 + 5.0), vnoise(p * 2.3 + 19.0)) - 0.5) * 0.6;       // bend the net so it is not a honeycomb
+    thick *= 0.55 + 0.9 * vnoise(p * 6.0 + 3.0);
+    float d = worleyEdge(wp / L + vec2(t * 0.05, -t * 0.03)) * L;
+    float line = 1.0 - smoothstep(0.5 * thick, thick, d);
+    float avg = clamp(thick * 3.0 / L, 0.0, 1.0);
+    line = mix(avg, line, smoothstep(0.8, 2.2, thick / max(foot, 1e-4)));
+    float patch = smoothstep(0.42, 0.62, vnoise(p * 1.7 + vec2(t * 0.08, 3.0)) + 0.3 * e - 0.1 * (1.0 - band));
+    return line * patch * band;
+}
+)";
+
+const char* WATER_SURFACE_FS = R"(
 // The surface itself, as a straight colour and an alpha to blend over what is behind it.
 vec4 waterSurface() {
     vec2 g;
-    float h = waveHeightLod(fragPos.xz, length(fwidth(fragPos.xz)), g);   // ripples finer than a pixel fade
+    // Derivatives first (uniform flow). Waves a few pixels long or less fade out of the normal; the slope
+    // variance they took away (waveLost) widens the glint below, so a far chop is a rough sheen, not a pattern.
+    float foot = waterFilter > 0.5 ? max(length(dFdx(fragPos.xz)), length(dFdy(fragPos.xz))) : 0.0;
+    bool ocean = oceanOn == 1 && waterMode == 1;
+    float h, lost, oceanFoam = 0.0;
+    if (ocean) {                                   // the spectrum: textures at the mip level of the footprint in the lookup plane
+        float footP = waterFilter > 0.5 ? max(length(dFdx(oceanP)), length(dFdy(oceanP))) : 0.0;
+        oceanFragment(oceanP, footP, h, g, oceanFoam, lost);
+        lost += oceanTail;                         // the spectrum above the finest grid: roughness the grids cannot hold
+        g -= 2.0 * oceanCurve * fragPos.xz;        // the planet's curvature tilts the surface: h = -d^2 / 2R
+    } else {
+        h = waveHeightLod(fragPos.xz, foot, g);
+        lost = waveLost;
+    }
     float dist = length(viewPos - fragPos);
+    if (rippleRate > 0.0) g += rippleSlope(fragPos.xz, max(length(dFdx(fragPos.xz)), length(dFdy(fragPos.xz))));    // rain rings
+    float wakeFoam = 0.0, wakeMag = 0.0;
+    if (wakeCount > 0 || rippleCount > 0) {                    // boats' wakes and dropped stones (Scene::wakes, Scene::ripples)
+        float fp = max(length(dFdx(fragPos.xz)), length(dFdy(fragPos.xz)));
+        vec2 g0 = g;
+        if (wakeCount > 0) wakeField(fragPos.xz, fp, g, wakeFoam);
+        if (rippleCount > 0) g += rippleField(fragPos.xz, fp);
+        wakeMag = length(g - g0);
+    }
+    bool isBody = waterMode == 2;
+    if (isBody && bodyFlow.w > 0.5) g += riverSlope(max(length(dFdx(fragPos.xz)), length(dFdy(fragPos.xz))), lost);
+    // A body reads the opaque scene behind its surface: how deep the water is above what lies under it (the
+    // surface's height over where the view ray meets the scene), and that scene's colour there.
+    float bedDepth = 1.0e3, edgeFade = 1.0;
+    vec4 bedSeen = vec4(0.0);                         // straight view of the bed after absorption; a = 1 when there is one
+    vec3 bedRaw = vec3(0.0);                          // the bed's own colour (linear) there, before the water has absorbed any of it
+    if (isBody) {
+        vec2 uvS = camUV(fragPos);
+        float dz = refrDepthAt(uvS);
+        if (dz < 0.99999) {
+            vec3 P = refrWorld(uvS, dz);
+            bedDepth = max(fragPos.y - P.y, 0.0);
+            vec4 sc = textureLod(refrColor, refrMap.xy + uvS * refrMap.zw, 0.0);
+            if (sc.a > 0.5) {
+                vec3 tr = exp(-waterAbsorb * distance(fragPos, P));
+                bedRaw = pow(sc.rgb / sc.a, vec3(2.2));
+                bedSeen = vec4(bedRaw * tr + waterScatter * (1.0 - tr), 1.0);
+            }
+        }
+        edgeFade = smoothstep(0.0, max(bodyShore.x, 1e-3), bedDepth);
+        if (bodyFlow.w > 0.5) edgeFade *= smoothstep(0.0, 0.06, min(fragTexCoord.x, 1.0 - fragTexCoord.x));
+    }
+    if (bodyDebug == 2) return vec4(pow(clamp(vec3(0.5 + 2.0 * g.x, 0.5 + 2.0 * g.y, 0.5), 0.0, 1.0), vec3(2.2)), 1.0);
     vec3 n = normalize(vec3(-g.x, 1.0, -g.y));
     vec3 v = normalize(viewPos - fragPos);
     if (viewPos.y < waterEye) {                      // from below: a window onto the sky, ringed by mirror
@@ -315,31 +658,180 @@ vec4 waterSurface() {
         return vec4(c * tr + waterScatter * (1.0 - tr), 1.0);
     }
     float ndv = max(dot(n, v), 1e-3);
-    float F = 0.02 + 0.98 * pow(1.0 - ndv, 5.0);
+)" R"(
+    // What the fade took out (lost slope variance) is put back in the average, not dropped: the Fresnel term and
+    // the reflected sky are averaged over normals tilted towards and away from the viewer by the lost slope's
+    // standard deviation (3-point Gauss-Hermite). Flattening a chop must not change how bright it is.
+    float sig = sqrt(4.0 * lost);
+    vec3 hv = normalize(vec3(v.x, 0.0, v.z) + vec3(1e-5, 0.0, 0.0));
+    float F = 0.0;
+    vec3 skyRefl = vec3(0.0);
+    // The planar reflection: where the mirror image of what the tilted surface turns the ray towards lies on
+    // the screen. A reflected ray's displacement is the pixel of the mirrored point at the tilted direction
+    // against the one at the flat direction (a point `reach` metres out), scaled by reflDistort and faded
+    // with distance. The normals are the Gauss-Hermite ones of the Fresnel average: the lost slope spreads
+    // the three taps, and widens the mip they read.
+    vec2 uvq[3] = vec2[3](vec2(0.0), vec2(0.0), vec2(0.0));
+    float reflLod = 0.0;
+    if (reflMode == 1) {
+        vec3 base = vec3(fragPos.x, waterLevel, fragPos.z);
+        float reach = max(30.0, 1.5 * dist), k = mix(reflDistort, reflDistortFull, smoothstep(0.01, 0.04, wakeMag)) / (1.0 + dist / 250.0);
+        vec3 rf = reflect(-v, vec3(0.0, 1.0, 0.0));
+        vec2 own = camUV(base), flatUV = camUV(mirrorY(base + rf * reach));
+        for (int q = 0; q < 3; q++) {
+            float z = q == 0 ? -1.2247 : (q == 1 ? 0.0 : 1.2247);
+            vec3 nq = normalize(n + hv * (sig * z));
+            vec3 rq = reflect(-v, nq);
+            rq = ocean ? foldUp(rq) : vec3(rq.x, abs(rq.y), rq.z);
+            uvq[q] = own + (camUV(mirrorY(base + rq * reach)) - flatUV) * k;
+        }
+        vec2 spread = (uvq[2] - uvq[0]) * 0.5 * reflSize;
+        reflLod = max(log2(max(length(spread), 1.0)) - 1.0, 0.0);
+        // Where the bending squeezes the image into fewer pixels (the pixel-to-pixel step of the sampled position is more
+        // than a texel) the mip it needs is a coarser one: standard mip selection from the footprint, which is what
+        // keeps thin cloud outlines from breaking into rings of aliased contours.
+        vec2 fx = dFdx(uvq[1]) * reflSize, fy = dFdy(uvq[1]) * reflSize;
+        reflLod = max(reflLod, log2(max(max(length(fx), length(fy)), 1.0)));
+        // And a surface that throws the image about by many pixels is a rough mirror: the farther the bend takes the sample,
+        // the softer it reads (a quarter of the bend, in texels, as blur), so a heavy chop smears the reflected cloud edges
+        // into a glow instead of leaving thin rings of them.
+        reflLod = max(reflLod, log2(1.0 + 0.25 * length((uvq[1] - own) * reflSize)));
+    }
+    for (int q = 0; q < 3; q++) {
+        float z = q == 0 ? -1.2247 : (q == 1 ? 0.0 : 1.2247), wq = q == 1 ? 0.6667 : 0.1667;
+        vec3 nq = normalize(n + hv * (sig * z));
+        float c = clamp(dot(nq, v), 1e-3, 1.0), Fq = 0.02 + 0.98 * pow(1.0 - c, 5.0);
+        vec3 rq = reflect(-v, nq);
+        float ry = rq.y;
+        rq = ocean ? foldUp(rq) : vec3(rq.x, abs(rq.y), rq.z);
+        F += wq * Fq;
+        vec3 sq = skyAt(rq);
+        if (reflMode == 1) {
+            vec4 pq = planarAt(uvq[q], reflLod);
+            sq = pq.rgb + (1.0 - pq.a) * sq;
+        }
+        if (ocean) sq = mix(sq, waterScatter * 1.4, 0.7 * smoothstep(0.06, -0.12, ry));      // pointing into the next wave: its face, not the sky
+        skyRefl += wq * Fq * sq;
+    }
     vec3 r = reflect(-v, n);
-    r.y = abs(r.y);
+    r = ocean ? foldUp(r) : vec3(r.x, abs(r.y), r.z);
     float crest = clamp(h * waterInvAmp, -1.0, 1.0);
     vec3 body = waterScatter * (1.0 + 0.5 * max(crest, 0.0));
     float bodyA = waterOpen > 0.0 ? 1.0 - exp(-waterOpen * dot(waterAbsorb, vec3(0.3333)) / max(ndv, 0.25)) : 0.0;
+    float glintExp = 2.0 / (2.0 / 902.0 + lost) - 2.0;     // Beckmann: roughness variances add
     vec3 glint = vec3(0.0), foamLight = mix(groundColor, skyColor, 0.5);
     for (int i = 0; i < 8; i++) {
         if (i >= lightCount) break;
         vec3 l; float ndl;
         float a = lightAt(i, n, l, ndl);
         if (a <= 0.0) continue;
-        float sp = pow(max(dot(n, normalize(l + v)), 0.0), 900.0) * (908.0 / 25.1327);
+        float sp = pow(max(dot(n, normalize(l + v)), 0.0), glintExp) * ((glintExp + 8.0) / 25.1327);
         glint += lightColor[i] * (a * sp * F * 0.25 * waterGlint);
         foamLight += lightColor[i] * (a * ndl);
     }
-    float fn = vnoise(fragPos.xz * 2.2 + waterTime * 0.15) * 0.6 + vnoise(fragPos.xz * 7.0) * 0.4;
-    float foamA = waterFoam * smoothstep(0.55, 0.85, crest + (fn - 0.5) * 0.5);
-    vec3 premul = F * skyAt(r) + (1.0 - F) * bodyA * body + glint;
+    float foamA;
+    if (ocean) {
+        // Whitecaps from the cascade's map (the share of foam, already band-limited by its mip level), broken up into lace
+        // by noise that fades to its mean as it gets finer than a pixel; then spray streaks along the wind.
+        float nf1 = 1.0 - smoothstep(0.1, 0.4, foot), nf2 = 1.0 - smoothstep(0.03, 0.12, foot);
+        float n = 0.5 + nf1 * (vnoise(fragPos.xz * 1.3 + waterTime * 0.07) - 0.5) * 0.9 + nf2 * (vnoise(fragPos.xz * 5.3 - waterTime * 0.11) - 0.5) * 0.7;
+        float nf3 = 1.0 - smoothstep(0.012, 0.05, foot);
+        n += nf3 * (vnoise(fragPos.xz * 15.0 + waterTime * 0.2) - 0.5) * 0.6;
+        // a sharp edge broken into lace: the map's share, pushed through a step whose position the noise moves
+        // The map repeats every patch, and a patch holds only a few whitecaps, so a lattice of the same dash would show from
+        // above: a slow mask (scales that are not whole patches) takes about half of them out, the rest are made up in the map.
+        float msc = 1.0;
+        float fm = oceanFoam * smoothstep(0.42, 0.58, vnoise(oceanP * 0.035 * msc) * 0.65 + vnoise(oceanP * 0.083 * msc + 7.3) * 0.35);
+        float soft = clamp(foot * 1.2, 0.0, 0.7);                              // from afar the edge is a gradient, not a cut-out
+        float fx = fm * (0.35 + 1.3 * n) + 0.35 * (fm - 0.5) * nf1, fw = fwidth(fx) * 1.5;   // edge width follows the pixel: anti-aliased
+        if (oceanStorm > 0.0) fx *= mix(1.0, 0.3 + 1.4 * (vnoise(oceanP * 1.3 + 3.7) * 0.6 + vnoise(oceanP * 3.1 + 1.1) * 0.4), oceanStorm * (1.0 - smoothstep(0.2, 1.0, foot)));   // a gale: the whitecaps break into small patches (the mean is kept)
+        foamA = waterFoam * mix(0.9, 0.55, soft) * smoothstep(0.2 - 0.15 * soft - fw, 0.5 + 0.6 * soft + fw, fx);
+        if (oceanSpray > 0.0 || oceanStorm > 0.0) {
+            vec2 wd = oceanWind, cw = vec2(-wd.y, wd.x);
+            float along = dot(fragPos.xz, wd) - waterTime * 3.0, across = dot(fragPos.xz, cw);
+            across += (vnoise(vec2(along * 0.03, across * 0.02)) - 0.5) * 9.0 + (vnoise(vec2(along * 0.11 + 9.0, across * 0.05)) - 0.5) * 3.0;     // the streaks wander sideways, slowly: not ruled lines
+            float sfade = 1.0 - smoothstep(0.35, 1.4, foot);
+            float st = vnoise(vec2(across * 2.2, along * 0.05)) * 0.65 + vnoise(vec2(across * 5.5, along * 0.14)) * 0.35;
+            float streak = smoothstep(0.5, 0.9, st) * smoothstep(-0.4, 0.5, crest);
+            streak = mix(0.18, streak, sfade);
+            foamA = max(foamA, waterFoam * oceanSpray * 0.6 * streak);
+            if (oceanStorm > 0.0) {                                   // a gale: foam lies in long, narrow, wavering filaments along the wind, down the troughs
+                float ac = across;
+                float ts = vnoise(vec2(ac * 3.0, along * 0.18)) * 0.55 + vnoise(vec2(ac * 7.5, along * 0.45 + 3.1)) * 0.35 + vnoise(vec2(ac * 13.0, along * 0.6)) * 0.1;
+                float wid = 0.6 + 0.2 * (vnoise(vec2(along * 0.02, across * 0.011 + 5.0)) - 0.5);                  // their width varies
+                float gapn = vnoise(vec2(along * 0.06 + 2.0, ac * 0.3)) * 0.7 + vnoise(vec2(along * 0.2, ac * 0.9 + 4.0)) * 0.3;   // and they break
+                float ew = max(0.9, 3.0 * fwidth(ts)), gw = max(0.6, 3.0 * fwidth(gapn));   // soft edges, wider than a pixel
+                float tstreak = smoothstep(wid, wid + ew, ts) * smoothstep(0.34, 0.34 + gw, gapn) * (1.0 - smoothstep(-0.1, 0.45, crest));
+                foamA = max(foamA, waterFoam * oceanStorm * 0.4 * mix(0.2, tstreak, sfade * sfade));
+            }
+        }
+    } else {
+        float fn = vnoise(fragPos.xz * 2.2 + waterTime * 0.15) * 0.6 + vnoise(fragPos.xz * 7.0) * 0.4;
+        foamA = waterFoam * smoothstep(0.55, 0.85, crest + (fn - 0.5) * 0.5);
+    }
+    foamA = max(foamA, wakeFoam);
+    if (bodyDebug == 3) return vec4(vec3(foamA), 1.0);                      // the foam alone (tests)
+    if (bodyDebug == 4) {                                                   // the surface height (m), in two bytes: coarse, and the metre's fraction
+        float a = (fragPos.y + 8.0) / 16.0;
+        return vec4(a, fract(a * 16.0), 0.0, 1.0);
+    }
+    vec3 premul = skyRefl + (1.0 - F) * bodyA * body + glint;
     float a = clamp(F + (1.0 - F) * bodyA + dot(glint, vec3(0.3333)), 0.0, 1.0);
+    if (refrMode == 1 || isBody) {                          // looks through: an opaque surface that shows what is under it itself
+        vec4 st = refrMode == 1 ? seeThrough(n, v) : bedSeen;
+        if (isBody && (st.a < 0.5 || seeLeft)) {
+            // The march found no bed: the bed at that spot is hidden behind something in front of the water (a deck, rails, the
+            // bank) or lies past the march. Marching skips an occluder above the surface, so the same bed shows or not by what
+            // happens to stand over its screen position: a ghost of the jetty, and a seam where the hits stop. The bed the
+            // straight view sees stands in for it, absorbed over the length the refracted ray would have gone to reach it
+            // (as a hit would be), so a miss and a hit are the same water.
+            st = bedSeen;
+            if (refrMode == 1 && bedSeen.a > 0.5) {
+                vec3 rt = refract(-v, n, 1.0 / WATER_IOR);
+                float along = bedDepth / max(-rt.y, 0.05);
+                // Where the refracted ray meets the plane of that bed: if the picture shows bed level there, its colour (a
+                // floor in a pool is not the wall the straight view meets); else the straight view's.
+                vec3 raw = bedRaw;
+                vec2 uq = camUV(fragPos + rt * along);
+                if (uq.x > 0.0 && uq.x < 1.0 && uq.y > 0.0 && uq.y < 1.0) {
+                    float dq = refrDepthAt(uq);
+                    if (dq < 0.99999 && abs(refrWorld(uq, dq).y - (fragPos.y - bedDepth)) < 0.05 + 0.05 * bedDepth) {
+                        vec4 cq = textureLod(refrColor, refrMap.xy + uq * refrMap.zw, 0.0);
+                        if (cq.a > 0.5) raw = pow(cq.rgb / cq.a, vec3(2.2));
+                    }
+                }
+                vec3 tr = exp(-waterAbsorb * along);
+                st = vec4(raw * tr + waterScatter * (1.0 - tr), 1.0);
+            }
+        }
+        vec3 under = mix(mix(body, st.rgb, st.a), body, bodyA);
+        premul = skyRefl + (1.0 - F) * under + glint;
+        a = 1.0;
+    }
+    if (isBody) {                                         // the shore: foam in the shallows, a soft edge into the bank
+        float e = bodyShore.w;                             // wave energy: 0 calm, 1 rough (the foam grows with it)
+        float shore = bodyShore.z > 0.0 ? bodyShore.z * shoreFoam(bedDepth, bodyShore.y, e, fragPos.xz, foot, waterTime) : 0.0;
+        float ramp = smoothstep(0.0, 0.08 * bodyShore.y + 0.5 * foot, bedDepth);
+        float fa = max(foamA * 0.8, shore * (0.3 + 0.55 * e)) * ramp;       // foam is never opaque on a calm shore
+        vec3 foamCol = vec3(clamp(dot(foamLight, vec3(0.3333)), 0.6, 1.0)) * vec3(1.0, 0.995, 0.98);      // white, lit
+        float aw = edgeFade;                               // the water over what is behind, then the foam over the water
+        vec3 colB = (foamCol * fa + (1.0 - fa) * premul * aw) / max(1.0 - (1.0 - fa) * (1.0 - aw), 1e-3);
+        float aOut = 1.0 - (1.0 - fa) * (1.0 - aw);
+        float f2 = fogAmount(fragPos);
+        if (f2 > 0.0) colB = mix(colB, fogTint(fragPos), f2);
+        return vec4(colB, aOut);
+    }
     premul = mix(premul, vec3(0.95) * foamLight, foamA);
     a = mix(a, 1.0, foamA);
     vec3 col = premul / max(a, 1e-3);
+    if (ocean && oceanVis > 0.0) {                         // aerial perspective: the far sea becomes the sky's own horizon colour
+        float k = 1.0 - exp(-dist / oceanVis);
+        col = mix(col, skyAt(normalize(vec3(-v.x, 0.0, -v.z) + vec3(1e-5, 0.0, 0.0))), k);
+        a = mix(a, 1.0, k);
+    }
     float f = fogAmount(fragPos);
     if (f > 0.0) { col = mix(col, fogTint(fragPos), f); a = mix(a, 1.0, f); }
+    if (ocean) col += (fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453) - 0.5) * (1.5 / 255.0);   // dither: smooth gradients of the dark sea must not show 8-bit contour lines
     return vec4(col, a);
 }
 )";
@@ -418,14 +910,38 @@ void main() {
 
 const char* LIT_VS_BODY = R"(
 out vec3 fragPos; out vec2 fragTexCoord; out vec3 fragNormal; out vec4 fragColor; flat out float fragFade;
+out vec2 oceanP;
 void main() {
     fragTexCoord = vertexTexCoord;
     fragFade = 1.0;
+    oceanP = vec2(0.0);
+    if (waterMode == 1 && oceanOn == 1) {     // the spectrum sea: rings out to the horizon (y = the ring's place 0..1), displaced by the cascades
+        float r = oceanRing.x * pow(oceanRing.y / oceanRing.x, vertexPosition.y);
+        vec2 p = vertexPosition.xz * r + waterCentre, d;
+        float h;
+        oceanGeometry(p, r * oceanRing.z, h, d);
+        vec2 xz = p + oceanLambda * d;
+        vec4 world = vec4(xz.x, waterLevel + h - oceanCurve * dot(xz, xz), xz.y, 1.0);
+        oceanP = p;
+        fragPos = world.xyz;
+        fragNormal = vec3(0.0, 1.0, 0.0);
+        fragColor = vec4(1.0);
+        gl_Position = mvp * world;
+        return;
+    }
     if (waterMode == 1) {                     // the sea's surface: a mesh round the camera, rolled by the waves
         vec2 p = vertexPosition.xz + waterCentre, g;
         vec4 world = vec4(p.x, waterLevel + waveHeight(p, g), p.y, 1.0);
         fragPos = world.xyz;
         fragNormal = vec3(0.0, 1.0, 0.0);
+        fragColor = vec4(1.0);
+        gl_Position = mvp * world;
+        return;
+    }
+    if (waterMode == 2) {                     // a body's surface: flat at its level plus the river's fall, in world coordinates
+        vec4 world = vec4(vertexPosition.x, waterLevel + vertexPosition.y, vertexPosition.z, 1.0);
+        fragPos = world.xyz;
+        fragNormal = vertexNormal;            // a river's (speed, heading, width)
         fragColor = vec4(1.0);
         gl_Position = mvp * world;
         return;
@@ -534,6 +1050,7 @@ void main() {
 // uniforms, converted on the CPU); lighting is linear and the result is re-encoded.
 const char* LIT_FS = R"(#version 330
 in vec3 fragPos; in vec2 fragTexCoord; in vec3 fragNormal; in vec4 fragColor; flat in float fragFade;
+in vec2 oceanP;
 uniform sampler2D texture0; uniform vec4 colDiffuse;
 uniform vec3 viewPos;
 uniform vec3 skyColor; uniform vec3 groundColor;
@@ -551,6 +1068,8 @@ uniform float envIntensity; uniform float envRotation; uniform int skybox;
 uniform vec3 fogColor; uniform float fogNear; uniform float fogFar;
 uniform int fogMode; uniform float fogDensity; uniform float fogHeight; uniform float fogFalloff; uniform int fogSky;
 uniform float backdropScale;
+uniform int cloudShadowOn; uniform int cloudShadowLight; uniform sampler2D cloudShadowTex;   // Scene::clouds' ground shadow
+uniform vec4 cloudShadowMap; uniform vec3 cloudShadowSun; uniform float cloudShadowFloor;
 uniform vec4 clipPlane; uniform vec4 clipEdge;        // Material::clip: xyz normal, w offset; rgb colour (linear), a width
 uniform int shading; uniform float pxScale;
 uniform int toonBands; uniform float toonSoftness; uniform float toonHighlight; uniform float toonHighlightSize;
@@ -658,8 +1177,14 @@ float fogAmount(vec3 p) {
     }
     return fogMode == 1 ? 1.0 - exp(-od) : 1.0 - exp(-od * od);
 }
+// With the spectrum sea the sky is filled in down to the sea horizon: a direction below the geometric horizon
+// (the sliver between it and the dipped sea horizon, and the sea's distance haze) looks at the sky's horizon.
+vec3 seaSkyDir(vec3 d) {
+    if (oceanOn == 1 && d.y < 0.0) return vec3(d.x, 0.0, d.z) / max(length(d.xz), 1e-4);
+    return d;
+}
 vec3 fogTint(vec3 p) {
-    if (fogSky == 1 && hasEnv == 1) return env(normalize(p - viewPos), max(envMaxLod - 7.0, 0.0)) * backdropScale;
+    if (fogSky == 1 && hasEnv == 1) return env(seaSkyDir(normalize(p - viewPos)), max(envMaxLod - 7.0, 0.0)) * backdropScale;
     return fogColor;
 }
 // Karis' analytic approximation of the split-sum environment BRDF.
@@ -672,6 +1197,17 @@ vec3 envBRDF(vec3 spec, float rough, float ndv) {
 
 vec4 encode(vec3 c, float a) { return vec4(pow(clamp(c, 0.0, 1.0), vec3(1.0 / 2.2)), a); }
 
+// How much of the sun gets through the clouds to p: the shadow map is the transmittance on the plane
+// y = cloudShadowMap.w, so p is carried along the sun's rays to that plane first (a hill is shadowed
+// where its ray crosses a cloud, not where its foot does). Lit outside the map, fading in at its edge.
+float cloudShadowAt(vec3 p) {
+    float s = (cloudShadowMap.w - p.y) / cloudShadowSun.y;
+    vec2 uv = (p.xz + cloudShadowSun.xz * s - cloudShadowMap.xy) * cloudShadowMap.z + 0.5;
+    float edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+    if (edge <= 0.0) return 1.0;
+    float t = textureLod(cloudShadowTex, uv, 0.0).r;
+    return mix(1.0, mix(cloudShadowFloor, 1.0, t), smoothstep(0.0, 0.08, edge));
+}
 // Light i at this fragment: `l` points to it and `ndl` is n.l; returns the attenuation
 // times shadow (0 when the light does not reach a front-facing point).
 float lightAt(int i, vec3 n, out vec3 l, out float ndl) {
@@ -695,10 +1231,16 @@ float lightAt(int i, vec3 n, out vec3 l, out float ndl) {
         vec3 ng = normalize(fragNormal);
         atten *= shadowAt(tile, lightBias[i], ndl, dot(ng, l) < 0.0 ? -ng : ng);
     }
+    if (cloudShadowOn == 1 && i == cloudShadowLight) atten *= cloudShadowAt(fragPos);
     return atten;
 }
 
+//@RIPPLE_FS@
 //@WATER_FS@
+//@WATER_BODY_FS@
+//@WAKE_FS@
+//@WATER_SURFACE_FS@
+//@WET_FS@
 // ---- stylised shading
 // x in 0..1 to `toonBands` flat steps; each step's edge ramps over toonSoftness.
 float band(float x) {
@@ -773,10 +1315,11 @@ void main() {
     if (hasNormalMap == 2) { texDx *= PICTURE_SHARPEN; texDy *= PICTURE_SHARPEN; }
     if (skybox == 1) {
         if (waterOn == 1 && viewPos.y < waterEye) { finalColor = encode(waterScatter, 1.0); return; }
-        finalColor = encode(env(normalize(fragPos - viewPos), 0.0) * backdropScale, 1.0);
+        finalColor = encode(env(seaSkyDir(normalize(fragPos - viewPos)), 0.0) * backdropScale, 1.0);
         return;
     }
-    if (waterMode == 1) { vec4 w = waterSurface(); finalColor = encode(w.rgb, w.a); return; }
+    if (waterMode >= 1) { vec4 w = waterSurface(); finalColor = encode(w.rgb, w.a); return; }
+    if (reflClip == 1 && fragPos.y < waterLevel) discard;     // the mirrored scene: nothing under the water
     float cutDist = clipPlane.w - dot(fragPos, clipPlane.xyz);     // < 0: beyond the cut
     if (cutDist < 0.0) discard;
     if (fadedAway(fragFade)) discard;
@@ -789,9 +1332,25 @@ void main() {
     if (unlit == 1) { finalColor = vec4(base.rgb, base.a * opacity); return; }
     vec3 albedo = pow(base.rgb, vec3(2.2));
     vec3 n = normalize(fragNormal);
-    if (!gl_FrontFacing && fieldOn == 0) n = -n;                    // a field's blades face the camera already
+    if ((reflClip == 1 ? gl_FrontFacing : !gl_FrontFacing) && fieldOn == 0) n = -n;   // a field's blades face the camera already; mirrored, the winding is too
     vec3 v = normalize(viewPos - fragPos);
+    vec3 ng = n;
     if (hasNormalMap >= 1 && shading == 0) n = mapNormal(n, fragPos, fragTexCoord);
+    if (ssrPass == 1 && !(wetOn == 1 && wetMat == 1)) discard;
+    if (wetOn == 1 && wetMat == 1) {
+        weatherSurface(ng, n, albedo, max(length(posDx.xz), length(posDy.xz)));
+        if (ssrPass == 1) {                                         // the second draw: the scene's reflection over flat wet ground
+            if (gFilm <= 0.003 || ng.y < 0.9) discard;
+            vec3 rr = reflect(-v, n);
+            if (rr.y <= 0.02) discard;
+            vec4 hit = ssrTrace(fragPos + ng * 0.01, rr);
+            float a = wetFresnel(max(dot(n, v), 1e-3), gPuddle) * gFilm * (1.0 - gSnow) * hit.a * mix(0.45, 1.0, gPuddle);
+            if (a <= 0.002) discard;
+            finalColor = vec4(hit.rgb, clamp(a, 0.0, 1.0));
+            return;
+        }
+        if (wetDebug == 1 && gPuddle > 0.001) { finalColor = vec4(0.5 + n.x, 0.5 + n.z, 0.5, 1.0); return; }
+    }
 
     vec3 color;
     if (shading == 1) color = toon(albedo, n, v);
@@ -804,6 +1363,11 @@ void main() {
             rough *= mr.g; metal *= mr.b;
         }
         rough = clamp(rough, 0.0, 1.0);
+        if (wetOn == 1 && wetMat == 1) {                            // wet ground is smoother, standing water a mirror, snow matte and not metal
+            rough = mix(rough * (1.0 - 0.65 * gWet), 0.05, gPuddle);
+            rough = mix(rough, 0.9, gSnow);
+            metal *= 1.0 - gSnow;
+        }
         vec3 specColor = mix(vec3(0.04), albedo, metal);
         vec3 diffColor = albedo * (1.0 - metal);
         float sunVis = 1.0;                                         // baked self-shadow, and the spread of the normals a texel stands for
@@ -838,6 +1402,11 @@ void main() {
             vec3 h = normalize(l + v);
             float spec = pow(max(dot(n, h), 0.0), shininess) * (shininess + 8.0) / 25.1327;
             color += (diffColor + specColor * spec) * lightColor[i] * waterLight(i) * atten * ndl;
+        }
+        if (wetOn == 1 && wetMat == 1 && gFilm > 0.0) {             // the film of water: a Fresnel mirror of the sky
+            float c = max(dot(n, v), 1e-3);
+            float blur = max(envMaxLod - 4.0, 0.0) * 0.75 * (1.0 - gPuddle);
+            color += wetSky(reflect(-v, n), blur) * (wetFresnel(c, gPuddle) * gFilm * (1.0 - gSnow));
         }
     }
     color += emissive;
@@ -1127,7 +1696,10 @@ struct LitLocs {
         translucency, translucencyColor, hasRoughnessMap, hasNormalMap, normalScale;
 };
 struct WaterLocs { int on, mode, level, eye, time, centre, count, waveA, waveB, absorb, scatter, caustics, foam,
-                   open, invAmp, glint, band; };
+                   open, invAmp, glint, band, filter,
+                   reflMode, reflTex, reflVP, reflSize, reflDistort, refrMode, refrColor, refrDepth, refrMap, refrInvVP, reflClip; };
+constexpr int REFL_SLOT = 8, REFR_COLOR_SLOT = 9, REFR_DEPTH_SLOT = 10;    // the water's textures (the lit shader reads maps 0..2)
+constexpr int WET_OCC_SLOT = 7;          // the rain's depth map from above, for the ground's shelter test
 struct ClipLocs { int plane, edge; };
 struct SplatLocs { int data, view, world, proj, viewport, camObj, scaleMul, opacityMul, shDegree, clipPlane, clipBand, scatter, corner, index; };
 constexpr int SPLAT_SLOT = 13;           // a splat cloud's texture
@@ -1148,9 +1720,40 @@ constexpr int MAX_STYLES = 64;
 // An offscreen target with a sampleable depth texture (for depth of field).
 struct DepthTarget { unsigned int fbo = 0, color = 0, depth = 0; int w = 0, h = 0; };
 
+// Volumetric clouds (Scene::clouds): shaders and baked noise made lazily at the first cloud frame.
+struct CloudGpu {
+    Shader bake{}, march{}, shadow{}, up{};
+    RenderTexture shape{}, detail{};            // the noise volumes as tiled atlases
+    Texture2D weather{};                        // the coverage map (equalised, tiling)
+    Texture2D blue{};                           // a 64 x 64 blue-noise tile (void and cluster)
+    bool ready = false;
+    unsigned lowFbo = 0, lowTex = 0, fullFbo = 0, fullTex = 0;   // the march's image and the upsampled one (RGBA16F)
+    int lowW = 0, lowH = 0, fullW = 0, fullH = 0;
+    RenderTexture shadowRT{};                   // the ground shadow map: the sun's transmittance
+    int shadowRes = 0;
+    // This frame's shadow, for the lit shader (set by renderCloudShadow, off otherwise).
+    bool shadowOn = false;
+    Vector4 shadowMap{ 0, 0, 0, 0 };            // centre x, z, 1 / extent, the plane's y
+    Vector3 shadowSun{ 0, 1, 0 };
+    int shadowLight = -1;
+    float shadowFloor = 0.1f;
+};
+struct CloudLitLocs { int on = -1, light = -1, tex = -1, map = -1, sun = -1, floor = -1; };
+
+// Light in the air (Scene::volumetric, Scene::aerial): the march's shader and image, and the composite shader.
+struct AirGpu {
+    Shader march{}, comp{};
+    unsigned lowFbo = 0, lowTex = 0;
+    int lowW = 0, lowH = 0;
+    float lastMs = 0;
+};
+
 struct Gpu {
     bool ready = false;
-    Shader lit{}, depth{}, dof{}, gbuf{}, line{}, particle{}, sky{};
+    CloudGpu cl;
+    AirGpu air;
+    CloudLitLocs cll;
+    Shader lit{}, depth{}, dof{}, gbuf{}, line{}, particle{}, sky{}, bolt{}, rainbow{};
     LitLocs L{};
     WaterLocs W{};
     ClipLocs C{};
@@ -1165,6 +1768,10 @@ struct Gpu {
     };
     std::map<const splat::Cloud*, SplatGpu> splats;
     std::unique_ptr<Object3D> waterObj;  // the sea's surface, drawn with the transparent objects
+    std::unique_ptr<Object3D> oceanObj;  // and the spectrum sea's (Water::spectrum): more rings, out to the horizon
+    struct OceanGpu { unsigned tex[4][2] = {}; uint64_t id = 0; int cascades = 0; } ocean;   // the cascades' textures, and the frame they hold
+    struct BodyMesh { std::unique_ptr<Object3D> obj; int used = 0; };
+    std::map<uint64_t, BodyMesh> bodyMeshes;    // the meshes of Scene::waterBodies, by shape (waterBodyKey)
     SkyLocs S{};
     RenderTexture skyTarget{};          // the procedural sky, remade each frame
     DofLocs D{};
@@ -1172,6 +1779,7 @@ struct Gpu {
     LineLocs N{};
     int depthSkinned = -1, depthBones = -1;
     int cutoff[3] = { -1, -1, -1 };      // alphaCutoff in the lit, depth and g-buffer programs
+    int wetMat = -1;                     // the lit program's wetMat: whether this material takes the ground's weather
     Shader inst[3]{};                    // lit, depth, gbuf, for DrawMeshInstanced
     std::array<int, 32> instLocs[3]{};
     InstLocs il[3];
@@ -1191,10 +1799,14 @@ struct Gpu {
         std::vector<float> tileArrival;                                   // and the earliest arrival
     };
     std::map<const Field*, FieldMaps> fields;
+    // GPU rain and snow (Scene::precipitation): the program, a bare VAO (the corners come from gl_VertexID) and the
+    // depth map seen from above along the fall.
+    struct PrecipGpu { Shader sh{}; unsigned int vao = 0; std::map<std::string, int> loc; DepthTarget occ; long long drops = 0, splashes = 0; } pr;
     ::Material material{};               // raylib material: owns a MAX_MATERIAL_MAPS maps array
     unsigned int atlasFbo = 0, atlasTex = 0;
     int atlasSize = 0;
     DepthTarget sceneTarget, lineTarget;
+    DepthTarget reflTarget, refrTarget;  // the water's mirrored scene, and the opaque scene copied for the water to look through
     Mesh skyCube{};
     std::map<std::string, Texture2D> textures;
     std::map<const Scene*, Texture2D> generated;    // environmentGenerator results
@@ -1226,12 +1838,20 @@ void releaseGpu() {
     if (gpu.line.id) UnloadShader(gpu.line);
     if (gpu.particle.id) UnloadShader(gpu.particle);
     if (gpu.sky.id) UnloadShader(gpu.sky);
+    if (gpu.bolt.id) UnloadShader(gpu.bolt);
+    if (gpu.rainbow.id) UnloadShader(gpu.rainbow);
+    if (gpu.air.march.id) UnloadShader(gpu.air.march);
+    if (gpu.air.comp.id) UnloadShader(gpu.air.comp);
+    if (gpu.air.lowFbo) rlUnloadFramebuffer(gpu.air.lowFbo);
     for (auto& [mesh, v] : gpu.vat)
         if (v.tex) rlUnloadTexture(v.tex);
     for (auto& [field, f] : gpu.fields)
         if (f.tex) rlUnloadTexture(f.tex);
     if (gpu.fieldVao) rlUnloadVertexArray(gpu.fieldVao);
     if (gpu.fieldVbo) rlUnloadVertexBuffer(gpu.fieldVbo);
+    if (gpu.pr.sh.id) UnloadShader(gpu.pr.sh);
+    if (gpu.pr.vao) rlUnloadVertexArray(gpu.pr.vao);
+    unloadDepthTarget(gpu.pr.occ);
     if (gpu.splat.id) UnloadShader(gpu.splat);
     for (auto& [cloud, s] : gpu.splats) {
         if (s.tex) rlUnloadTexture(s.tex);
@@ -1240,6 +1860,15 @@ void releaseGpu() {
         if (s.indexVbo) rlUnloadVertexBuffer(s.indexVbo);
     }
     if (gpu.skyTarget.id) UnloadRenderTexture(gpu.skyTarget);
+    {
+        CloudGpu& c = gpu.cl;
+        for (Shader* sh : { &c.bake, &c.march, &c.shadow, &c.up }) if (sh->id) UnloadShader(*sh);
+        for (RenderTexture* rt : { &c.shape, &c.detail, &c.shadowRT }) if (rt->id) UnloadRenderTexture(*rt);
+        if (c.weather.id) UnloadTexture(c.weather);
+        if (c.blue.id) UnloadTexture(c.blue);
+        if (c.lowFbo) rlUnloadFramebuffer(c.lowFbo);
+        if (c.fullFbo) rlUnloadFramebuffer(c.fullFbo);
+    }
     if (gpu.material.maps) {
         gpu.material.maps[MATERIAL_MAP_DIFFUSE].texture = whiteTexture();   // cached textures are freed below
         UnloadMaterial(gpu.material);
@@ -1247,7 +1876,10 @@ void releaseGpu() {
     if (gpu.atlasFbo) rlUnloadFramebuffer(gpu.atlasFbo);
     unloadDepthTarget(gpu.sceneTarget);
     unloadDepthTarget(gpu.lineTarget);
+    unloadDepthTarget(gpu.reflTarget);
+    unloadDepthTarget(gpu.refrTarget);
     if (gpu.skyCube.vertexCount) UnloadMesh(gpu.skyCube);
+    for (auto& pair : gpu.ocean.tex) for (unsigned id : pair) if (id) rlUnloadTexture(id);
     for (auto& [path, tex] : gpu.textures) UnloadTexture(tex);
     for (auto& [scene, tex] : gpu.generated) UnloadTexture(tex);
     for (auto& [src, d] : gpu.dynamic) {
@@ -1262,7 +1894,7 @@ void ensureGpu() {
     const std::string head = std::string(SKIN_VS_HEAD) + FIELD_VS;
     auto splice = [](std::string src) {
         for (const auto& [marker, text] : { std::pair<const char*, const char*>{ "//@WATER_COMMON@", WATER_COMMON },
-                                            { "//@WATER_FS@", WATER_FS }, { "//@CUTOUT_FS@", CUTOUT_FS } }) {
+                                            { "//@RIPPLE_FS@", RIPPLE_FS }, { "//@WATER_FS@", WATER_FS }, { "//@WATER_BODY_FS@", WATER_BODY_FS }, { "//@WAKE_FS@", WAKE_FS }, { "//@WATER_SURFACE_FS@", WATER_SURFACE_FS }, { "//@WET_FS@", WET_FS }, { "//@CUTOUT_FS@", CUTOUT_FS } }) {
             const size_t at = src.find(marker);
             if (at != std::string::npos) src.replace(at, std::strlen(marker), text);
         }
@@ -1297,11 +1929,21 @@ void ensureGpu() {
               loc("translucency"), loc("translucencyColor"), loc("hasRoughnessMap"), loc("hasNormalMap"),
               loc("normalScale") };
     gpu.cutoff[0] = loc("alphaCutoff");
+    gpu.wetMat = loc("wetMat");
+    { const int occUnit = WET_OCC_SLOT; SetShaderValue(gpu.lit, loc("wetOcc"), &occUnit, SHADER_UNIFORM_INT); }
     gpu.cutoff[1] = GetShaderLocation(gpu.depth, "alphaCutoff");
     gpu.cutoff[2] = GetShaderLocation(gpu.gbuf, "alphaCutoff");
     gpu.W = { loc("waterOn"), loc("waterMode"), loc("waterLevel"), loc("waterEye"), loc("waterTime"), loc("waterCentre"),
               loc("waveCount"), loc("waveA"), loc("waveB"), loc("waterAbsorb"), loc("waterScatter"), loc("waterCaustics"),
-              loc("waterFoam"), loc("waterOpen"), loc("waterInvAmp"), loc("waterGlint"), loc("waterBand") };
+              loc("waterFoam"), loc("waterOpen"), loc("waterInvAmp"), loc("waterGlint"), loc("waterBand"), loc("waterFilter"),
+              loc("reflMode"), loc("reflTex"), loc("reflVP"), loc("reflSize"), loc("reflDistort"), loc("refrMode"),
+              loc("refrColor"), loc("refrDepth"), loc("refrMap"), loc("refrInvVP"), loc("reflClip") };
+    {
+        const int reflUnit = REFL_SLOT, colorUnit = REFR_COLOR_SLOT, depthUnit = REFR_DEPTH_SLOT;
+        SetShaderValue(gpu.lit, gpu.W.reflTex, &reflUnit, SHADER_UNIFORM_INT);
+        SetShaderValue(gpu.lit, gpu.W.refrColor, &colorUnit, SHADER_UNIFORM_INT);
+        SetShaderValue(gpu.lit, gpu.W.refrDepth, &depthUnit, SHADER_UNIFORM_INT);
+    }
     gpu.C = { loc("clipPlane"), loc("clipEdge") };
     {
         auto sp = [](const char* name) { return GetShaderLocation(gpu.splat, name); };
@@ -1349,6 +1991,10 @@ void ensureGpu() {
     SetShaderValue(gpu.lit, gpu.L.shadowAtlas, &shadowUnit, SHADER_UNIFORM_INT);
     SetShaderValue(gpu.dof, gpu.D.depthTex, &depthUnit, SHADER_UNIFORM_INT);
     SetShaderValue(gpu.line, gpu.N.depthTex, &depthUnit, SHADER_UNIFORM_INT);
+    gpu.cll = { loc("cloudShadowOn"), loc("cloudShadowLight"), loc("cloudShadowTex"), loc("cloudShadowMap"),
+                loc("cloudShadowSun"), loc("cloudShadowFloor") };
+    const int cloudUnit = CLOUD_SLOT;
+    SetShaderValue(gpu.lit, gpu.cll.tex, &cloudUnit, SHADER_UNIFORM_INT);
     gpu.material = LoadMaterialDefault();
     gpu.ready = true;
     onGraphicsShutdown(releaseGpu);
@@ -1514,7 +2160,8 @@ Vector3 sunOf(const Scene& s) {
 // The sky into its equirectangular target, mipmapped for the environment's blur. Called
 // before anything else in the frame; leaves the caller's framebuffer, viewport and matrices.
 Texture2D renderSky(const Scene& s, double frame, unsigned int callerFbo, int fbW, int fbH) {
-    const Sky& k = s.sky;
+    Sky k = s.weather.enabled ? inWeather(s.sky, s.weather, frame) : s.sky;     // with the weather worked in
+    if (s.clouds.enabled) k.clouds = 0;         // the volumetric layer replaces the flat painted one
     const int w = std::clamp(k.resolution, 32, 4096), h = w / 2;
     if (gpu.skyTarget.texture.width != w) {
         if (gpu.skyTarget.id) UnloadRenderTexture(gpu.skyTarget);
@@ -1536,7 +2183,7 @@ Texture2D renderSky(const Scene& s, double frame, unsigned int callerFbo, int fb
     const Vector3 zen = linear3(k.zenith), hor = linear3(k.horizon), gr = linear3(k.ground), sun = sunOf(s),
                   sc = linear3(k.sunColor), hz = linear3(k.haze), cc = linear3(k.cloudColor), cs = linear3(k.cloudShade);
     const float sunCos = k.sunSize > 0 ? std::cos(k.sunSize * DEG2RAD) : 1.f, f = (float)frame, seed = (float)(k.seed % 9973);
-    const Vector2 off{ k.cloudDrift.x * f, k.cloudDrift.y * f };
+    const Vector2 off{ k.cloudDrift.x * f + k.cloudShift.x, k.cloudDrift.y * f + k.cloudShift.y };
     SetShaderValue(gpu.sky, S.size, &size, SHADER_UNIFORM_VEC2);
     SetShaderValue(gpu.sky, S.zenith, &zen, SHADER_UNIFORM_VEC3);
     SetShaderValue(gpu.sky, S.horizon, &hor, SHADER_UNIFORM_VEC3);
@@ -1767,27 +2414,34 @@ Matrix localMatrix(const Object3D& o) {
 struct Cull {
     bool on = false;
     const Camera* cam = nullptr;
+    const Camera* mirror = nullptr;      // the water's mirrored camera: an object it sees stays in the frame too
     float aspect = 1, floorY = 0;
     std::vector<Vector3> shadowDirs;     // unit: the way the shadows of each shadowing light run
     struct Footprint { Vector3 target, dir; float extent; };
     std::vector<Footprint> footprints;   // what each shadowing light's map covers: the shadowExtent round its target
     float screenH = 1080;                // canvas px the view covers, top to bottom (surfaces)
     float compH = 1080;                  // composition px the view covers, top to bottom (line widths)
+    float rainR = 0;                     // > 0: an object within this many metres (x, z) of the camera stays: it may shelter the rain
 };
 // A Surface object's world matrix: its own, or square to the camera for a billboard (see below).
 Matrix surfaceWorld(const Object3D& o, const Matrix& world, const Camera& cam, float screenH);
 // Seen, or casting a shadow that can fall into view. A shadow runs from the sphere along
 // each light's direction down to the floor (at most 80 m): the swept sphere is tested as a
 // string of spheres no further apart than its radius.
-bool inSight(const Cull& k, Vector3 c, float r) {
-    if (visibleSphere(*k.cam, k.aspect, c, r)) return true;
+bool inSight(const Cull& k, Vector3 c, float r, const Camera* from = nullptr) {
+    if (!from) from = k.cam;
+    if (k.rainR > 0) {
+        const float dx = c.x - k.cam->position.x, dz = c.z - k.cam->position.z, reach = k.rainR + r;
+        if (dx * dx + dz * dz <= reach * reach) return true;
+    }
+    if (visibleSphere(*from, k.aspect, c, r)) return true;
     for (const Vector3& away : k.shadowDirs) {
         float reach = 80;
         if (away.y < -0.05f) reach = std::min(reach, std::max(0.f, (c.y - k.floorY) / -away.y));
         const float rs = r + 0.3f;
         const int n = std::clamp((int)std::ceil(reach / std::max(rs, 0.5f)), 1, 160);
         for (int i = 1; i <= n; i++)
-            if (visibleSphere(*k.cam, k.aspect, Vector3Add(c, Vector3Scale(away, reach * i / n)), rs)) return true;
+            if (visibleSphere(*from, k.aspect, Vector3Add(c, Vector3Scale(away, reach * i / n)), rs)) return true;
     }
     return false;
 }
@@ -1803,7 +2457,8 @@ void animate(std::vector<std::unique_ptr<Object3D>>& list, int t, const Matrix& 
                 const float sc = std::max({ std::sqrt(world.m0 * world.m0 + world.m1 * world.m1 + world.m2 * world.m2),
                                             std::sqrt(world.m4 * world.m4 + world.m5 * world.m5 + world.m6 * world.m6),
                                             std::sqrt(world.m8 * world.m8 + world.m9 * world.m9 + world.m10 * world.m10) });
-                if (!inSight(k, Vector3Transform(o->cullCentre, world), o->cullRadius * sc)) {
+                const Vector3 cc = Vector3Transform(o->cullCentre, world);
+                if (!inSight(k, cc, o->cullRadius * sc) && !(k.mirror && inSight(k, cc, o->cullRadius * sc, k.mirror))) {
                     o->culled = true;
                     continue;
                 }
@@ -2037,7 +2692,10 @@ void collect(std::vector<std::unique_ptr<Object3D>>& list, const Matrix& parent,
         Matrix world = MatrixMultiply(localMatrix(*o), parent);
         if (o->surface) world = surfaceWorld(*o, world, *k.cam, k.screenH);
         if (o->emitter && o->geometry) {
-            fx::each(*o->emitter, t, [&](const fx::Particle3D& p) {
+            const bool inWind = viewingScene && viewingScene->weather.enabled && !o->emitter->ownWind
+                                && o->emitter->windFollow > 0;                   // the weather's wind, on a copy
+            const fx::Emitter3D windy = inWind ? inWeather(*o->emitter, viewingScene->weather, world) : fx::Emitter3D{};
+            fx::each(inWind ? windy : *o->emitter, t, [&](const fx::Particle3D& p) {
                 const float a = p.alpha * p.color.a / 255.f;
                 if (a <= 0.002f || p.size <= 0) return;
                 const Matrix m = MatrixMultiply(MatrixMultiply(MatrixScale(p.size, p.size, p.size),
@@ -2094,6 +2752,8 @@ void setMaterial(const g3d::Material& m) {
     SetShaderValue(sh, gpu.L.unlit, &unlit, SHADER_UNIFORM_INT);
     SetShaderValue(sh, gpu.L.opacity, &m.opacity, SHADER_UNIFORM_FLOAT);
     SetShaderValue(sh, gpu.L.receiveShadow, &receive, SHADER_UNIFORM_INT);
+    const int weathers = m.weathering && !m.unlit ? 1 : 0;
+    SetShaderValue(sh, gpu.wetMat, &weathers, SHADER_UNIFORM_INT);
     const float translucency = std::max(m.translucency, 0.f), normalScale = m.normalScale;
     const Vector3 tc = linear(m.translucencyColor);
     const int hasRough = m.roughnessMap.empty() ? 0 : 1, hasNormal = m.normalMap.empty() && !m.dynamicNormalMap ? 0 : m.normalAlphaShade ? 2 : 1;
@@ -2222,11 +2882,16 @@ void drawInstances(const Item& it, Pass pass) {
 // vertex shader. Shadow passes draw only the tiles marked to cast.
 void drawField(const Item& it, Pass pass) {
     const Object3D& o = *it.obj;
-    const Field& f = *o.field;
+    const Field& own = *o.field;
+    // With the weather enabled the wind settings come from it: a copy for this draw, never the user's field.
+    const bool inWind = viewingScene && viewingScene->weather.enabled && !own.ownWind;
+    Field resolved;
+    if (inWind) resolved = inWeather(own, viewingScene->weather, &it.world);
+    const Field& f = inWind ? resolved : own;
     const int p = (int)pass;
     const Shader& sh = pass == Pass::Lit ? gpu.lit : pass == Pass::Depth ? gpu.depth : gpu.gbuf;
     const FieldLocs& L = gpu.F[p];
-    auto found = gpu.fields.find(&f);
+    auto found = gpu.fields.find(&own);
     if (found == gpu.fields.end()) return;
     const Gpu::FieldMaps& maps = found->second;
     fieldTemplates();
@@ -2648,19 +3313,129 @@ PackedWaves packWaves(const Water& w) {
     return p;
 }
 
+void setWaterLook(const Scene& s, const Camera& cam, const Water& w, float eye, double seconds);
+void setWakeUniforms(const Scene& s, double seconds);
+
+// ---- the spectrum sea (Water::spectrum): the cascades as textures on units OCEAN_SLOT.., and the uniforms
+void bindUnit(int slot, unsigned int id);
+constexpr int OCEAN_SLOT = 16;                         // cascade c: A on 16 + 2c, B on 17 + 2c
+constexpr int OCEAN_RINGS = 160, OCEAN_SEGMENTS = 256;  // the mesh
+constexpr float OCEAN_R0 = 0.2f;                        // its inner ring (m)
+
+// The horizon's distance for an eye `above` metres over the sea (the tangent point of the sphere), and the sea mesh's
+// reach and the far plane that go with it.
+float seaHorizon(float above) { const double R = Water::kPlanetRadius, h = std::max(above, 0.5f); return (float)std::sqrt(2 * R * h + h * h); }
+float seaReach(const Water& w, float above) { return w.spectrum.curvature ? 1.4f * seaHorizon(above) + 2000.f : 12000.f; }
+
+void uploadOcean(const ocean::Frame& f) {
+    Gpu::OceanGpu& o = gpu.ocean;
+    if (o.id == f.id) return;
+    for (int c = 0; c < f.cascades; c++)
+        for (int k = 0; k < 2; k++) {
+            unsigned& id = o.tex[c][k];
+            const std::vector<float>& data = k == 0 ? f.a[c] : f.b[c];
+            if (!id) {
+                id = rlLoadTexture(nullptr, ocean::kN, ocean::kN, RL_PIXELFORMAT_UNCOMPRESSED_R32G32B32A32, 1);
+                rlTextureParameters(id, RL_TEXTURE_WRAP_S, RL_TEXTURE_WRAP_REPEAT);
+                rlTextureParameters(id, RL_TEXTURE_WRAP_T, RL_TEXTURE_WRAP_REPEAT);
+                rlTextureParameters(id, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_LINEAR);
+                rlTextureParameters(id, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_MIP_LINEAR);
+            }
+            rlUpdateTexture(id, 0, 0, ocean::kN, ocean::kN, RL_PIXELFORMAT_UNCOMPRESSED_R32G32B32A32, data.data());
+            int mips = 0;
+            rlGenTextureMipmaps(id, ocean::kN, ocean::kN, RL_PIXELFORMAT_UNCOMPRESSED_R32G32B32A32, &mips);
+        }
+    o.id = f.id;
+    o.cascades = f.cascades;
+}
+
+// How much the sea looks like a gale: Water::Spectrum::storm, or from the wind (0 at 12 m/s, 1 at 20) when it is -1.
+float stormOf(const Water& w) {
+    if (w.spectrum.storm >= 0) return std::min(w.spectrum.storm, 1.f);
+    const float t = std::clamp((w.spectrum.windSpeed - 12.f) / 8.f, 0.f, 1.f);
+    return t * t * (3 - 2 * t);
+}
+
+void setOceanUniforms(const Water& w, const Camera& cam, double seconds) {
+    const Shader& lit = gpu.lit;
+    auto at = [&](const char* name) { return GetShaderLocation(lit, name); };
+    const int on = w.enabled && w.spectrum.enabled ? 1 : 0;
+    SetShaderValue(lit, at("oceanOn"), &on, SHADER_UNIFORM_INT);
+    if (!on) return;
+    const std::shared_ptr<const ocean::Frame> fr = ocean::frameAt(w, seconds);
+    const ocean::Frame& f = *fr;
+    uploadOcean(f);
+    for (int c = 0; c < ocean::kMaxCascades; c++)
+        for (int k = 0; k < 2; k++) {
+            const int unit = OCEAN_SLOT + 2 * c + k;
+            SetShaderValue(lit, at(TextFormat("ocean%c%d", k == 0 ? 'A' : 'B', c)), &unit, SHADER_UNIFORM_INT);
+        }
+    Vector4 patch{ 1, 1, 1, 1 }, warp[4] = {};
+    float lost[32] = {};
+    for (int c = 0; c < f.cascades; c++) {
+        (&patch.x)[c] = f.patch[c];
+        warp[c] = { f.warp[c].amp, f.warp[c].a, f.warp[c].b, 0 };
+        for (int l = 0; l < ocean::kLevels; l++) lost[c * 8 + l] = f.lost[c][l];
+    }
+    const float curve = w.spectrum.curvature ? 0.5f / Water::kPlanetRadius : 0.f;
+    const float above = std::max(cam.position.y - w.level, 0.f), r1 = seaReach(w, above);
+    const Vector3 ring{ OCEAN_R0, r1, std::log(r1 / OCEAN_R0) / (OCEAN_RINGS - 1) };
+    const float heading = w.spectrum.windDirection * DEG2RAD;
+    const Vector2 wind{ std::cos(heading), std::sin(heading) };
+    const float U = w.spectrum.windSpeed, t = std::clamp((U - 12.f) / 8.f, 0.f, 1.f);
+    const float storm = stormOf(w);
+    const float spray = std::clamp(w.spectrum.spray, 0.f, 1.f) * std::max(t * t * (3 - 2 * t), storm);
+    const float vis = std::max(w.spectrum.visibility, 0.f) * (1.f - 0.45f * storm);      // spray hangs over a gale
+    const int count = f.cascades, geo = f.geometry;
+    SetShaderValue(lit, at("oceanCount"), &count, SHADER_UNIFORM_INT);
+    SetShaderValue(lit, at("oceanGeo"), &geo, SHADER_UNIFORM_INT);
+    SetShaderValue(lit, at("oceanLambda"), &f.lambda, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, at("oceanCurve"), &curve, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, at("oceanTail"), &f.tail, SHADER_UNIFORM_FLOAT);
+    const float skyLod = std::clamp(std::log2(1.f + 80.f * (f.resolved + f.tail)), 0.f, 5.f);
+    SetShaderValue(lit, at("oceanSkyLod"), &skyLod, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, at("oceanPatch"), &patch, SHADER_UNIFORM_VEC4);
+    SetShaderValueV(lit, at("oceanWarp"), warp, SHADER_UNIFORM_VEC4, 4);
+    SetShaderValueV(lit, at("oceanLost"), lost, SHADER_UNIFORM_FLOAT, 32);
+    SetShaderValue(lit, at("oceanRing"), &ring, SHADER_UNIFORM_VEC3);
+    SetShaderValue(lit, at("oceanWind"), &wind, SHADER_UNIFORM_VEC2);
+    SetShaderValue(lit, at("oceanSpray"), &spray, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, at("oceanStorm"), &storm, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(lit, at("oceanVis"), &vis, SHADER_UNIFORM_FLOAT);
+}
+
+// Binds (or clears) the cascades' textures for the sea's draw.
+void bindOceanTextures(bool on) {
+    for (int c = 0; c < ocean::kMaxCascades; c++)
+        for (int k = 0; k < 2; k++) bindUnit(OCEAN_SLOT + 2 * c + k, on && c < gpu.ocean.cascades ? gpu.ocean.tex[c][k] : 0);
+}
+
 // Everything the lit shader needs of the sea: the waves, the water's fog and the light
 // that reaches under it.
 void setWaterUniforms(const Scene& s, const Camera& cam) {
-    const Water& w = s.water;
+    const Water w = waterOf(s);                 // with the weather's wind worked in, if it is enabled
     const WaterLocs& K = gpu.W;
     const Shader& lit = gpu.lit;
-    const int on = w.enabled ? 1 : 0, mode = 0;
+    const int on = w.enabled ? 1 : 0, mode = 0, none = 0;
     SetShaderValue(lit, K.on, &on, SHADER_UNIFORM_INT);
     SetShaderValue(lit, K.mode, &mode, SHADER_UNIFORM_INT);
+    SetShaderValue(lit, K.reflClip, &none, SHADER_UNIFORM_INT);         // the mirrored pass and the water draw switch these on
+    SetShaderValue(lit, K.reflMode, &none, SHADER_UNIFORM_INT);
+    SetShaderValue(lit, K.refrMode, &none, SHADER_UNIFORM_INT);
+    SetShaderValue(lit, GetShaderLocation(lit, "oceanOn"), &none, SHADER_UNIFORM_INT);
     if (!on) return;
     const double seconds = frameTime(gpu.frame) / std::max(w.fps, 1.f);   // frames to seconds
+    setOceanUniforms(w, cam, seconds);
+    setWaterLook(s, cam, w, w.height(cam.position.x, cam.position.z, seconds), seconds);      // height() includes the level
+}
+
+// The water look's uniforms of the lit shader (a sea or a body): `eye` is the surface height the camera
+// is compared with to tell above from below.
+void setWaterLook(const Scene& s, const Camera& cam, const Water& w, float eye, double seconds) {
+    const WaterLocs& K = gpu.W;
+    const Shader& lit = gpu.lit;
     const PackedWaves pk = packWaves(w);
-    const float time = (float)seconds, eye = w.level + w.height(cam.position.x, cam.position.z, seconds);
+    const float time = (float)seconds;
     const Vector2 centre{ cam.position.x, cam.position.z };
     SetShaderValue(lit, K.level, &w.level, SHADER_UNIFORM_FLOAT);
     SetShaderValue(lit, K.eye, &eye, SHADER_UNIFORM_FLOAT);
@@ -2680,7 +3455,11 @@ void setWaterUniforms(const Scene& s, const Camera& cam) {
     }
     const float meanAbsorb = (w.absorb.x + w.absorb.y + w.absorb.z) / 3;
     const float fade = std::exp(-meanAbsorb * std::max(0.f, w.level - cam.position.y) * 0.5f);
-    const Vector3 scatter = Vector3Scale(linear(w.deep), std::clamp(daylight, 0.03f, 2.f) * fade);
+    Vector3 scatter = Vector3Scale(linear(w.deep), std::clamp(daylight, 0.03f, 2.f) * fade);
+    if (w.enabled && w.spectrum.enabled) {        // a gale scatters back the grey sky: darker and greyer
+        const float st = stormOf(w), lum = 0.2126f * scatter.x + 0.7152f * scatter.y + 0.0722f * scatter.z;
+        scatter = Vector3Scale(Vector3Lerp(scatter, { lum * 0.9f, lum, lum * 1.05f }, 0.55f * st), 1.f - 0.4f * st);
+    }
     SetShaderValue(lit, K.scatter, &scatter, SHADER_UNIFORM_VEC3);
     const float caustics = std::clamp(w.caustics, 0.f, 1.f), foam = std::clamp(w.foam, 0.f, 1.f);
     const float open = std::max(w.openDepth, 0.f), invAmp = 1.f / std::max(pk.amplitude, 1e-3f), band = pk.amplitude + 0.05f;
@@ -2690,6 +3469,51 @@ void setWaterUniforms(const Scene& s, const Camera& cam) {
     SetShaderValue(lit, K.invAmp, &invAmp, SHADER_UNIFORM_FLOAT);
     SetShaderValue(lit, K.glint, &w.sunGlint, SHADER_UNIFORM_FLOAT);
     SetShaderValue(lit, K.band, &band, SHADER_UNIFORM_FLOAT);
+    const float filterOn = w.filter ? 1.f : 0.f;
+    SetShaderValue(lit, K.filter, &filterOn, SHADER_UNIFORM_FLOAT);
+    { const int dbg = s.ground.debug; SetShaderValue(lit, GetShaderLocation(lit, "bodyDebug"), &dbg, SHADER_UNIFORM_INT); }
+    setWakeUniforms(s, seconds);
+}
+
+// Scene::wakes and Scene::ripples as the shader reads them (wake_glsl.hpp): the emission tables of the first four
+// wakes and the first sixteen ripples, at `seconds`. With none, only the counts are set (0).
+void setWakeUniforms(const Scene& s, double seconds) {
+    const Shader& lit = gpu.lit;
+    static const int kWakeMax = 4, kRippleMax = 16;
+    int wakes = 0, ripples = 0;
+    Vector4 a[4] = {}, b[4] = {}, boat[4] = {};
+    static std::vector<Vector4> table;
+    table.assign((size_t)kWakeMax * Wake::kSamples, Vector4{ 0, 0, 0, 0 });
+    for (const Wake& w : s.wakes) {
+        if (wakes >= kWakeMax) break;
+        if (w.path.size() < 2 || w.speed <= 0) continue;
+        w.emissions(seconds, &table[(size_t)wakes * Wake::kSamples]);
+        a[wakes] = { w.length, std::max(w.beam, 0.05f), w.speed, w.amplitude() };
+        b[wakes] = { std::max(w.life, 1.f), std::clamp(w.foam, 0.f, 1.f), std::max(w.trail, 0.f), 0.f };
+        Vector2 p, h;
+        boat[wakes] = w.at(seconds, &p, &h) ? Vector4{ p.x, p.y, h.x, h.y } : Vector4{ 0, 0, 0, 0 };
+        wakes++;
+    }
+    Vector4 ra[16] = {}, rb[16] = {};
+    for (const Ripple& r : s.ripples) {
+        if (ripples >= kRippleMax) break;
+        ra[ripples] = { r.x, r.z, (float)(seconds - r.time), r.strength };
+        rb[ripples] = { r.size, r.life, 0.f, 0.f };
+        ripples++;
+    }
+    auto at = [&](const char* name) { return GetShaderLocation(lit, name); };
+    SetShaderValue(lit, at("wakeCount"), &wakes, SHADER_UNIFORM_INT);
+    SetShaderValue(lit, at("rippleCount"), &ripples, SHADER_UNIFORM_INT);
+    if (wakes) {
+        SetShaderValueV(lit, at("wakeA"), a, SHADER_UNIFORM_VEC4, 4);
+        SetShaderValueV(lit, at("wakeB"), b, SHADER_UNIFORM_VEC4, 4);
+        SetShaderValueV(lit, at("wakeBoat"), boat, SHADER_UNIFORM_VEC4, 4);
+        SetShaderValueV(lit, at("wakeE"), table.data(), SHADER_UNIFORM_VEC4, kWakeMax * Wake::kSamples);
+    }
+    if (ripples) {
+        SetShaderValueV(lit, at("rippleA"), ra, SHADER_UNIFORM_VEC4, 16);
+        SetShaderValueV(lit, at("rippleB"), rb, SHADER_UNIFORM_VEC4, 16);
+    }
 }
 
 // The sea's surface: rings that thicken with distance round a point (the camera, which the
@@ -2731,6 +3555,54 @@ Mesh makeWaterMesh() {
         }
     UploadMesh(&m, false);
     return m;
+}
+// The spectrum sea's mesh: unit rings (cos a, w, sin a) whose radius the vertex shader sets from w (0 = the inner
+// ring, 1 = the outer, on a log scale), so the sea reaches as far as the horizon needs and no further.
+Mesh makeOceanMesh() {
+    constexpr int R = OCEAN_RINGS, S = OCEAN_SEGMENTS;
+    Mesh m = {};
+    m.vertexCount = 1 + R * S;
+    m.triangleCount = S + (R - 1) * S * 2;
+    m.vertices = (float*)MemAlloc((unsigned)m.vertexCount * 3 * sizeof(float));
+    m.normals = (float*)MemAlloc((unsigned)m.vertexCount * 3 * sizeof(float));
+    m.texcoords = (float*)MemAlloc((unsigned)m.vertexCount * 2 * sizeof(float));
+    m.indices = (unsigned short*)MemAlloc((unsigned)m.triangleCount * 3 * sizeof(unsigned short));
+    for (int v = 0; v < m.vertexCount; v++) {
+        m.normals[v * 3 + 1] = 1;
+        m.normals[v * 3] = m.normals[v * 3 + 2] = 0;
+    }
+    for (int i = 0; i < R; i++)
+        for (int j = 0; j < S; j++) {
+            const float a = 2 * PI * j / S;
+            const int v = 1 + i * S + j;
+            m.vertices[v * 3] = std::cos(a);
+            m.vertices[v * 3 + 1] = (float)i / (R - 1);
+            m.vertices[v * 3 + 2] = std::sin(a);
+        }
+    int k = 0;
+    auto tri = [&](int a, int b, int c) {
+        m.indices[k++] = (unsigned short)a; m.indices[k++] = (unsigned short)b; m.indices[k++] = (unsigned short)c;
+    };
+    for (int j = 0; j < S; j++) tri(0, 1 + (j + 1) % S, 1 + j);
+    for (int i = 0; i + 1 < R; i++)
+        for (int j = 0; j < S; j++) {
+            const int a = 1 + i * S + j, b = 1 + i * S + (j + 1) % S, c = a + S, d = b + S;
+            tri(a, b, c);
+            tri(b, d, c);
+        }
+    UploadMesh(&m, false);
+    return m;
+}
+Object3D& oceanObject() {
+    if (!gpu.oceanObj) {
+        gpu.oceanObj = std::make_unique<Object3D>();
+        gpu.oceanObj->name = "ocean";
+        gpu.oceanObj->geometry = std::make_shared<Geometry>([] { return makeOceanMesh(); });
+        Material& m = gpu.oceanObj->material;
+        m.doubleSided = true;
+        m.castShadow = false;
+    }
+    return *gpu.oceanObj;
 }
 Object3D& waterObject() {
     if (!gpu.waterObj) {
@@ -2814,6 +3686,15 @@ void setSceneUniforms(const Scene& s, const Camera& cam, const Shadows& sh, Text
     SetShaderValue(lit, L.backdropScale, &backdrop, SHADER_UNIFORM_FLOAT);
     SetShaderValue(lit, L.envRotation, &rot, SHADER_UNIFORM_FLOAT);
     SetShaderValue(lit, L.skybox, &sky0, SHADER_UNIFORM_INT);
+    const CloudGpu& cg = gpu.cl;
+    const int cloudOn = cg.shadowOn ? 1 : 0;
+    SetShaderValue(lit, gpu.cll.on, &cloudOn, SHADER_UNIFORM_INT);
+    if (cloudOn) {
+        SetShaderValue(lit, gpu.cll.light, &cg.shadowLight, SHADER_UNIFORM_INT);
+        SetShaderValue(lit, gpu.cll.map, &cg.shadowMap, SHADER_UNIFORM_VEC4);
+        SetShaderValue(lit, gpu.cll.sun, &cg.shadowSun, SHADER_UNIFORM_VEC3);
+        SetShaderValue(lit, gpu.cll.floor, &cg.shadowFloor, SHADER_UNIFORM_FLOAT);
+    }
 }
 
 void bindUnit(int slot, unsigned int id) {
@@ -2987,7 +3868,8 @@ float fogAmount(const Scene& s, Vector3 eye, Vector3 p) {
 Color fogged(const Scene& s, Color c, Vector3 eye, Vector3 p, bool additive) {
     const float f = fogAmount(s, eye, p);
     if (f <= 0) return c;
-    const Color tint = s.fogFromSky && s.sky.enabled ? s.sky.horizon : s.fogColor;
+    const Color tint = s.fogFromSky && s.sky.enabled ? (s.weather.enabled ? inWeather(s.sky, s.weather, 0).horizon : s.sky.horizon)
+                                                     : s.fogColor;
     if (additive) return { c.r, c.g, c.b, (unsigned char)(c.a * (1 - f)) };   // light fades out in fog
     auto lin = [](unsigned char v) { return std::pow(v / 255.f, 2.2f); };
     auto mix = [&](unsigned char a, unsigned char b) {
@@ -2998,7 +3880,10 @@ Color fogged(const Scene& s, Color c, Vector3 eye, Vector3 p, bool additive) {
 
 void particleQuads(const Scene& s, const Camera& cam, const Emitting& em, const Matrix& view, double t,
                    std::vector<Quad>& out) {
-    const fx::Emitter3D& e = *em.obj->emitter;
+    const fx::Emitter3D& own = *em.obj->emitter;
+    const bool inWind = s.weather.enabled && !own.ownWind && own.windFollow > 0;     // the weather's wind, on a copy
+    const fx::Emitter3D windy = inWind ? inWeather(own, s.weather, em.world) : fx::Emitter3D{};
+    const fx::Emitter3D& e = inWind ? windy : own;
     const Matrix& w = em.world;
     const float unitScale = Vector3Length({ w.m0, w.m1, w.m2 });
     const Vector3 right{ view.m0, view.m4, view.m8 }, up{ view.m1, view.m5, view.m9 };
@@ -3462,8 +4347,1443 @@ void drawParticles(const Scene& s, const Camera& cam, const std::vector<Emitting
     rlEnableDepthMask();
 }
 
-void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target, float scale, int t, const Cull& cull) {
+// ---- volumetric clouds (Scene::clouds) ------------------------------------------------------
+// One frame's resolved cloud settings: the layer with the weather worked in, where the pattern has
+// drifted to, and the light it is seen by.
+struct CloudFrame {
+    Clouds c;
+    Vector2 travel{ 0, 0 };
+    Vector2 shear{ 0.8f, 0.6f };                    // the way towers lean: downwind
+    double seconds = 0;
+    Vector3 sun{ 0, 1, 0 }, sunE{ 1, 1, 1 }, ambTop{ 0.3f, 0.4f, 0.6f }, ambBot{ 0.1f, 0.1f, 0.1f };
+    Vector3 horizon{ 0.5f, 0.6f, 0.8f }, haze{ 1, 0.6f, 0.4f };
+    float hazeAmount = 0;
+    int steps = 56, lightSteps = 6, shadowSteps = 20, shadowRes = 256;
+    float res = 0.5f;
+};
+
+constexpr float CLOUD_SHAPE_SIZE = 6000, CLOUD_DETAIL_SIZE = 900, CLOUD_WEATHER_SIZE = 24000;
+
+float cloudHash(unsigned a, unsigned b, unsigned seed) {
+    unsigned h = a * 374761393u + b * 668265263u + seed * 2246822519u + 0x9e3779b9u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    h ^= h >> 16;
+    h *= 2246822519u;
+    h ^= h >> 15;
+    return (float)(h & 0xffffffu) / 16777215.f;
+}
+// Periodic value noise with f cells over 0..1.
+float cloudValueNoise(float x, float y, int f, unsigned seed) {
+    const float fx = x * f, fy = y * f;
+    const int ix = (int)std::floor(fx), iy = (int)std::floor(fy);
+    const float tx = fx - ix, ty = fy - iy;
+    auto q = [](float t) { return t * t * t * (t * (t * 6 - 15) + 10); };
+    auto h = [&](int a, int b) { return cloudHash((unsigned)(((a % f) + f) % f), (unsigned)(((b % f) + f) % f), seed); };
+    const float u = q(tx), v = q(ty);
+    return Lerp(Lerp(h(ix, iy), h(ix + 1, iy), u), Lerp(h(ix, iy + 1), h(ix + 1, iy + 1), u), v);
+}
+// The coverage map: two fields (R: where clouds are, G: how tall they grow), each pushed through its
+// own rank so its values are uniform in 0..1. A cover of c then puts cloud on exactly the share c of the
+// map, which is what lets the sky fraction match `cover`.
+Image cloudWeatherImage() {
+    constexpr int N = 256;
+    Image img = GenImageColor(N, N, BLACK);
+    Color* px = (Color*)img.data;
+    for (int ch = 0; ch < 2; ch++) {
+        std::vector<float> v((size_t)N * N);
+        for (int y = 0; y < N; y++)
+            for (int x = 0; x < N; x++) {
+                const float u = (x + 0.5f) / N, w = (y + 0.5f) / N;
+                float sum = 0;
+                const int fs[4] = { 6, 12, 24, 48 };
+                const float ws[4] = { 0.5f, 0.28f, 0.16f, 0.06f };
+                for (int o = 0; o < 4; o++) sum += ws[o] * cloudValueNoise(u, w, fs[o], 101u * (unsigned)ch + 17u * (unsigned)o + 3u);
+                v[(size_t)y * N + x] = sum;
+            }
+        std::vector<int> order(v.size());
+        for (size_t i = 0; i < order.size(); i++) order[i] = (int)i;
+        std::sort(order.begin(), order.end(), [&](int a, int b) { return v[(size_t)a] < v[(size_t)b] || (v[(size_t)a] == v[(size_t)b] && a < b); });
+        for (size_t r = 0; r < order.size(); r++) {
+            const unsigned char b = (unsigned char)std::lround(255.0 * r / (double)(order.size() - 1));
+            Color& c = px[order[r]];
+            (ch == 0 ? c.r : c.g) = b;
+        }
+    }
+    for (int i = 0; i < N * N; i++) px[i].a = 255;
+    return img;
+}
+
+// Draws `sh` over a rectangle (vx, vy, vw, vh in the framebuffer's pixels) of `fbo`, one fragment
+// per pixel (gl_FragCoord), blending off. The caller restores its framebuffer and viewport.
+void cloudPass(const Shader& sh, unsigned fbo, int vx, int vy, int vw, int vh) {
+    rlDrawRenderBatchActive();
+    rlEnableFramebuffer(fbo);
+    rlViewport(vx, vy, vw, vh);
+    rlMatrixMode(RL_PROJECTION);
+    rlPushMatrix();
+    rlLoadIdentity();
+    rlOrtho(0, vw, vh, 0, -1, 1);
+    rlMatrixMode(RL_MODELVIEW);
+    rlPushMatrix();
+    rlLoadIdentity();
+    rlDisableColorBlend();
+    BeginShaderMode(sh);
+    DrawRectangle(0, 0, vw, vh, WHITE);
+    EndShaderMode();
+    rlDrawRenderBatchActive();
+    rlEnableColorBlend();
+    rlMatrixMode(RL_MODELVIEW);
+    rlPopMatrix();
+    rlMatrixMode(RL_PROJECTION);
+    rlPopMatrix();
+    rlMatrixMode(RL_MODELVIEW);
+}
+
+void shF(const Shader& sh, const char* n, float v) { SetShaderValue(sh, GetShaderLocation(sh, n), &v, SHADER_UNIFORM_FLOAT); }
+void shI(const Shader& sh, const char* n, int v) { SetShaderValue(sh, GetShaderLocation(sh, n), &v, SHADER_UNIFORM_INT); }
+void shV2(const Shader& sh, const char* n, Vector2 v) { SetShaderValue(sh, GetShaderLocation(sh, n), &v, SHADER_UNIFORM_VEC2); }
+void shV3(const Shader& sh, const char* n, Vector3 v) { SetShaderValue(sh, GetShaderLocation(sh, n), &v, SHADER_UNIFORM_VEC3); }
+
+bool colorTarget(unsigned& fbo, unsigned& tex, int& cw, int& ch, int w, int h) {
+    if (fbo && cw == w && ch == h) return true;
+    if (fbo) rlUnloadFramebuffer(fbo);
+    fbo = rlLoadFramebuffer();
+    tex = rlLoadTexture(nullptr, w, h, RL_PIXELFORMAT_UNCOMPRESSED_R16G16B16A16, 1);
+    rlFramebufferAttach(fbo, tex, RL_ATTACHMENT_COLOR_CHANNEL0, RL_ATTACHMENT_TEXTURE2D, 0);
+    const bool ok = rlFramebufferComplete(fbo);
+    rlDisableFramebuffer();
+    if (!ok) { rlUnloadFramebuffer(fbo); fbo = tex = 0; cw = ch = 0; throw std::runtime_error("g3d: cloud render target incomplete"); }
+    cw = w; ch = h;
+    return true;
+}
+
+// Compiles the cloud shaders and bakes the noise, once. Leaves `callerFbo` and its viewport bound.
+// A 64 x 64 tileable blue-noise image by void and cluster (Ulichney): a binary pattern is relaxed until its
+// ones are as evenly spread as they can be, then every pixel gets its rank, in the order the ones would
+// be removed (the first ten percent), added (to half) and the zeros removed (the rest). Deterministic (the
+// start is a hash), toroidal, a few milliseconds, built once.
+Image cloudBlueNoiseImage() {
+    constexpr int N = 64, M = N * N, R = 6;
+    constexpr float sigma = 1.5f;
+    std::vector<float> kern((size_t)(2 * R + 1) * (2 * R + 1));
+    for (int dy = -R; dy <= R; dy++)
+        for (int dx = -R; dx <= R; dx++) kern[(size_t)(dy + R) * (2 * R + 1) + dx + R] = std::exp(-(float)(dx * dx + dy * dy) / (2 * sigma * sigma));
+    std::vector<float> e1((size_t)M, 0.f), e0((size_t)M, 0.f);        // the energy of the ones' pattern and of the zeros'
+    std::vector<char> bit((size_t)M, 0);
+    auto splat = [&](std::vector<float>& e, int i, float sgn) {
+        const int x = i % N, y = i / N;
+        for (int dy = -R; dy <= R; dy++)
+            for (int dx = -R; dx <= R; dx++)
+                e[(size_t)(((y + dy + N) % N) * N + (x + dx + N) % N)] += sgn * kern[(size_t)(dy + R) * (2 * R + 1) + dx + R];
+    };
+    auto set = [&](int i, bool on) {
+        bit[(size_t)i] = on ? 1 : 0;
+        splat(e1, i, on ? 1.f : -1.f);
+        splat(e0, i, on ? -1.f : 1.f);
+    };
+    auto pick = [&](bool among, const std::vector<float>& e, bool wantMax) {       // the pixel with bit == among, of most or least energy
+        int best = -1;
+        for (int i = 0; i < M; i++)
+            if ((bit[(size_t)i] != 0) == among && (best < 0 || (wantMax ? e[(size_t)i] > e[(size_t)best] : e[(size_t)i] < e[(size_t)best]))) best = i;
+        return best;
+    };
+    std::vector<int> order((size_t)M);
+    for (int i = 0; i < M; i++) order[(size_t)i] = i;
+    std::sort(order.begin(), order.end(), [](int a, int b) { return cloudHash((unsigned)a, 3, 77) < cloudHash((unsigned)b, 3, 77); });
+    const int K = M / 10;
+    for (int i = 0; i < M; i++) splat(e0, i, 1.f);
+    for (int i = 0; i < K; i++) set(order[(size_t)i], true);
+    for (int it = 0; it < 4000; it++) {                                           // relax: move the tightest one into the largest void
+        const int c = pick(true, e1, true);
+        set(c, false);
+        const int v = pick(false, e1, false);
+        set(v, true);
+        if (v == c) break;
+    }
+    const std::vector<char> bit0 = bit;
+    const std::vector<float> e10 = e1, e00 = e0;
+    std::vector<int> rank((size_t)M, 0);
+    for (int r = K - 1; r >= 0; r--) { const int c = pick(true, e1, true); rank[(size_t)c] = r; set(c, false); }
+    bit = bit0; e1 = e10; e0 = e00;
+    for (int r = K; r < M / 2; r++) { const int v = pick(false, e1, false); rank[(size_t)v] = r; set(v, true); }
+    for (int r = M / 2; r < M; r++) { const int c = pick(false, e0, true); rank[(size_t)c] = r; set(c, true); }
+    Image img = GenImageColor(N, N, BLACK);
+    for (int i = 0; i < M; i++) {
+        const unsigned char v = (unsigned char)std::lround(255.0 * rank[(size_t)i] / (M - 1));
+        ImageDrawPixel(&img, i % N, i / N, { v, v, v, 255 });
+    }
+    return img;
+}
+
+void ensureCloudGpu(unsigned callerFbo, int fbW, int fbH) {
+    CloudGpu& c = gpu.cl;
+    if (c.ready) return;
+    auto build = [](const char* fs) {
+        std::string src = fs;
+        const size_t at = src.find("\nCOMMON\n");
+        if (at != std::string::npos) src.replace(at + 1, 6, CLOUD_COMMON);
+        return LoadShaderFromMemory(nullptr, src.c_str());
+    };
+    c.bake = LoadShaderFromMemory(nullptr, CLOUD_BAKE_FS);
+    c.march = build(CLOUD_MARCH_FS);
+    c.shadow = build(CLOUD_SHADOW_FS);
+    c.up = LoadShaderFromMemory(nullptr, CLOUD_UP_FS);
+    if (!IsShaderValid(c.bake) || !IsShaderValid(c.march) || !IsShaderValid(c.shadow) || !IsShaderValid(c.up))
+        throw std::runtime_error("g3d: cloud shader compilation failed");
+    auto bake = [&](RenderTexture& rt, int w, int h, int mode) {
+        rt = LoadRenderTexture(w, h);
+        SetTextureFilter(rt.texture, TEXTURE_FILTER_BILINEAR);
+        SetTextureWrap(rt.texture, TEXTURE_WRAP_CLAMP);
+        shI(c.bake, "mode", mode);
+        cloudPass(c.bake, rt.id, 0, 0, w, h);
+    };
+    bake(c.shape, 2080, 1040, 0);                     // 128 slices of 128 x 128, padded to 130, 16 x 8 tiles
+    bake(c.detail, 272, 136, 1);                      // 32 slices of 32 x 32, padded to 34, 8 x 4 tiles
+    Image w = cloudWeatherImage();
+    c.weather = LoadTextureFromImage(w);
+    UnloadImage(w);
+    GenTextureMipmaps(&c.weather);                    // read by explicit LOD, so far clouds see a blurred coverage
+    SetTextureFilter(c.weather, TEXTURE_FILTER_TRILINEAR);
+    SetTextureWrap(c.weather, TEXTURE_WRAP_REPEAT);
+    Image bn = cloudBlueNoiseImage();
+    c.blue = LoadTextureFromImage(bn);
+    UnloadImage(bn);
+    SetTextureFilter(c.blue, TEXTURE_FILTER_POINT);
+    SetTextureWrap(c.blue, TEXTURE_WRAP_REPEAT);
+    rlEnableFramebuffer(callerFbo);
+    rlViewport(0, 0, fbW, fbH);
+    c.ready = true;
+}
+
+bool cloudsActive(const Scene& s, const Camera& cam) {
+    if (!s.clouds.enabled || cam.orthographic) return false;
+    if (s.water.enabled && cam.position.y < waterOf(s).level) return false;       // from under the sea: no clouds
+    return true;
+}
+
+CloudFrame cloudFrame(const Scene& s, double frame) {
+    CloudFrame f;
+    f.c = s.weather.enabled ? inWeather(s.clouds, s.weather) : s.clouds;
+    const double fps = s.weather.enabled && !s.clouds.ownWeather ? s.weather.fps : s.clouds.fps;
+    f.seconds = frame / std::max(1.0, fps);
+    f.travel = s.clouds.travel(s.weather, f.seconds);
+    if (s.weather.enabled) f.c.shafts = std::max(s.clouds.shafts, s.weather.rainAt(f.seconds));   // the rain that falls (the history or the state) hangs under the cells
+    { const Vector2 w = (s.weather.enabled && !s.clouds.ownWeather) ? Vector2{ std::cos(s.weather.wind.direction * DEG2RAD), std::sin(s.weather.wind.direction * DEG2RAD) } : Vector2{ s.clouds.drift.x, s.clouds.drift.y };
+      const float l = std::sqrt(w.x * w.x + w.y * w.y); if (l > 1e-4f) f.shear = { w.x / l, w.y / l }; }
+    struct Q { int steps, light, shadowSteps, shadowRes; float res; };
+    static const Q table[3] = { { 28, 4, 12, 128, 0.5f }, { 96, 6, 20, 256, 1.f }, { 160, 10, 32, 384, 1.f } };
+    const Q& q = table[std::clamp((int)f.c.quality, 0, 2)];
+    f.steps = q.steps; f.lightSteps = q.light; f.shadowSteps = q.shadowSteps; f.shadowRes = q.shadowRes;
+    f.res = std::clamp(f.c.resolution > 0 ? f.c.resolution : q.res, 0.1f, 1.f);
+    // The sun: the sky's, else the first directional light's.
+    const Sky k = s.sky.enabled ? (s.weather.enabled ? inWeather(s.sky, s.weather, frame) : s.sky) : Sky{};
+    f.sun = sunOf(s);
+    Vector3 sunCol{ 1, 0.96f, 0.88f };
+    if (s.sky.enabled) sunCol = linear3(k.sunColor);
+    else
+        for (const Light& l : s.lights)
+            if (l.type == Light::Type::Directional) {
+                const Vector3 d = Vector3Subtract(l.position, l.target);
+                if (Vector3Length(d) > 1e-6f) { f.sun = Vector3Normalize(d); sunCol = linear3(l.color); }
+                break;
+            }
+    const float vis = std::clamp((f.sun.y + 0.02f) / 0.08f, 0.f, 1.f);
+    // Under a heavy cover the sun is mostly blocked by the deck itself, which the march only sees locally: the light is diffuse, so the lit lobes under it do not shine white.
+    const float cv = std::clamp((f.c.cover - 0.7f) / 0.3f, 0.f, 1.f), diffuse = 1.f - 0.75f * cv * cv * (3 - 2 * cv);
+    f.sunE = Vector3Scale(sunCol, 0.62f * vis * vis * (3 - 2 * vis) * diffuse);
+    Vector3 zen, hor, gr;
+    if (s.sky.enabled) { zen = linear3(k.zenith); hor = linear3(k.horizon); gr = linear3(k.ground); f.haze = linear3(k.haze); f.hazeAmount = k.hazeAmount; }
+    else { zen = linear3(s.skyColor); hor = Vector3Lerp(zen, { 1, 1, 1 }, 0.4f); gr = linear3(s.groundColor); f.haze = hor; f.hazeAmount = 0; }
+    f.horizon = hor;
+    f.ambTop = Vector3Add(Vector3Scale(Vector3Add(Vector3Scale(zen, 0.5f), Vector3Scale(hor, 0.5f)), 0.85f), { 0.08f, 0.08f, 0.08f });
+    f.ambBot = Vector3Scale(Vector3Add(Vector3Scale(gr, 0.3f), Vector3Scale(hor, 0.7f)), 0.7f);
+    return f;
+}
+
+// The shared uniforms of the march and the shadow shaders, and the noise textures on their units.
+void setCloudCommon(const Shader& sh, const CloudFrame& f, Vector2 focus) {
+    const Clouds& c = f.c;
+    shF(sh, "planetR", Clouds::kPlanetRadius);
+    shF(sh, "cloudBase", c.base);
+    shF(sh, "shafts", c.type == CloudType::Cumulonimbus && c.anvil > 0.5f ? std::clamp(c.shafts, 0.f, 1.f) : 0.f);
+    shF(sh, "shellBase", c.type == CloudType::Cumulonimbus && c.anvil > 0.5f && c.shafts > 0.f ? 0.f : c.base);
+    shF(sh, "cloudTop", std::max(c.top, c.base + 50));
+    shF(sh, "cover", std::clamp(c.cover, 0.f, 1.f));
+    shF(sh, "densityScale", std::max(c.density, 0.f));
+    shF(sh, "detailAmt", std::clamp(c.detail, 0.f, 1.f));
+    shI(sh, "cloudType", (int)c.type);
+    shV2(sh, "windOffset", f.travel);
+    const Vector3 dir = Vector3Normalize({ 0.5f, 1.0f, 0.3f });
+    const float ev = c.evolution * (float)f.seconds;
+    const Vector3 off{ cloudHash(c.seed, 11, 5) * CLOUD_SHAPE_SIZE, cloudHash(c.seed, 12, 5) * CLOUD_SHAPE_SIZE, cloudHash(c.seed, 13, 5) * CLOUD_SHAPE_SIZE };
+    shV3(sh, "slide", { off.x + dir.x * ev, off.y + dir.y * ev, off.z + dir.z * ev });
+    shV2(sh, "seedOffset", { cloudHash(c.seed, 21, 9), cloudHash(c.seed, 22, 9) });
+    shF(sh, "shapeSize", CLOUD_SHAPE_SIZE);
+    shF(sh, "detailSize", CLOUD_DETAIL_SIZE);
+    shF(sh, "weatherSize", CLOUD_WEATHER_SIZE);
+    shI(sh, "shapeTex", CLOUD_SHAPE_SLOT);
+    shI(sh, "detailTex", CLOUD_DETAIL_SLOT);
+    shI(sh, "weatherTex", CLOUD_WEATHER_SLOT);
+    bindUnit(CLOUD_SHAPE_SLOT, gpu.cl.shape.texture.id);
+    bindUnit(CLOUD_DETAIL_SLOT, gpu.cl.detail.texture.id);
+    bindUnit(CLOUD_WEATHER_SLOT, gpu.cl.weather.id);
+    shI(sh, "extruded", c.extruded ? 1 : 0);
+    shF(sh, "nearestZ", c.nearestSlice ? 1.f : 0.f);
+    shV2(sh, "shearDir", f.shear);
+    shF(sh, "anvilOn", c.anvil > 0.5f ? 1.f : 0.f);
+    shF(sh, "towerVariety", std::clamp(c.towerVariety, 0.f, 1.f));
+    {   // the storm cells near the view (the pattern's frame), nearest 12
+        const float cx = focus.x - f.travel.x, cz = focus.y - f.travel.y, reach = 150000.f;
+        std::vector<Clouds::Storm> st = stormCells(c, cx - reach, cz - reach, cx + reach, cz + reach);
+        std::sort(st.begin(), st.end(), [&](const Clouds::Storm& a, const Clouds::Storm& b) { return std::hypot(a.x - cx, a.z - cz) < std::hypot(b.x - cx, b.z - cz); });
+        if (st.size() > 12) st.resize(12);
+        float d[48] = {}, t[12] = {};
+        const float layer = std::max(c.top, c.base + 50) - c.base;
+        for (size_t i = 0; i < st.size(); i++) {
+            d[i * 4] = st[i].x; d[i * 4 + 1] = st[i].z; d[i * 4 + 2] = st[i].radius;
+            d[i * 4 + 3] = (float)(int)(std::fmod(std::fabs(st[i].x * 0.013f + st[i].z * 0.0071f), 4000.f) + 1.f);
+            t[i] = st[i].top > 0 ? std::clamp((st[i].top - c.base) / layer, 0.3f, 0.99f) : 0.93f;
+        }
+        const int n = (int)st.size();
+        shI(sh, "stormN", c.anvil > 0.5f ? n : 0);
+        SetShaderValueV(sh, GetShaderLocation(sh, "stormD"), d, SHADER_UNIFORM_VEC4, 12);
+        SetShaderValueV(sh, GetShaderLocation(sh, "stormT"), t, SHADER_UNIFORM_FLOAT, 12);
+    }
+}
+void unbindCloudUnits() {
+    for (int slot : { CLOUD_SHAPE_SLOT, CLOUD_DETAIL_SLOT, CLOUD_WEATHER_SLOT, CLOUD_LOW_SLOT, CLOUD_BLUE_SLOT, DEPTH_SLOT }) bindUnit(slot, 0);
+}
+
+// The ground shadow map, before the scene is drawn: the sun's transmittance through the clouds, on the
+// plane y = 0 over `shadowExtent` metres round the view. Leaves the caller's framebuffer and viewport.
+void renderCloudShadow(const Scene& s, const CloudFrame& f, const Camera& cam, unsigned callerFbo, int fbW, int fbH) {
+    CloudGpu& g = gpu.cl;
+    g.shadowOn = false;
+    if (!f.c.shadows || f.sun.y < 0.03f || f.c.cover <= 0) return;
+    int light = -1;
+    if (s.sky.enabled && s.sky.sunLight >= 0 && s.sky.sunLight < (int)s.lights.size()) light = s.sky.sunLight;
+    else
+        for (int i = 0; i < (int)s.lights.size() && i < MAX_LIGHTS; i++) {
+            const Light& l = s.lights[(size_t)i];
+            const Vector3 d = Vector3Subtract(l.position, l.target);
+            if (l.type == Light::Type::Directional && Vector3Length(d) > 1e-6f && Vector3DotProduct(Vector3Normalize(d), f.sun) > 0.97f) { light = i; break; }
+        }
+    if (light < 0) return;                       // no light along the sun to dim
+    ensureCloudGpu(callerFbo, fbW, fbH);
+    const int res = f.shadowRes;
+    if (g.shadowRT.id && g.shadowRes != res) { UnloadRenderTexture(g.shadowRT); g.shadowRT = RenderTexture{}; }
+    if (!g.shadowRT.id) {
+        g.shadowRT = LoadRenderTexture(res, res);
+        SetTextureFilter(g.shadowRT.texture, TEXTURE_FILTER_BILINEAR);
+        SetTextureWrap(g.shadowRT.texture, TEXTURE_WRAP_CLAMP);
+        g.shadowRes = res;
+    }
+    const float extent = std::max(f.c.shadowExtent, 100.f);
+    Vector3 fwd = Vector3Subtract(cam.target, cam.position);
+    fwd.y = 0;
+    fwd = Vector3Length(fwd) > 1e-4f ? Vector3Normalize(fwd) : Vector3{ 0, 0, 0 };
+    const Vector2 centre{ cam.position.x + fwd.x * extent * 0.2f, cam.position.z + fwd.z * extent * 0.2f };
+    const Shader& sh = g.shadow;
+    setCloudCommon(sh, f, { cam.position.x, cam.position.z });
+    shV2(sh, "shSize", { (float)res, (float)res });
+    shV2(sh, "shCentre", centre);
+    shF(sh, "shExtent", extent);
+    shF(sh, "shY", 0);
+    shV3(sh, "sunDir", f.sun);
+    shI(sh, "shSteps", f.shadowSteps);
+    cloudPass(sh, g.shadowRT.id, 0, 0, res, res);
+    unbindCloudUnits();
+    rlEnableFramebuffer(callerFbo);
+    rlViewport(0, 0, fbW, fbH);
+    g.shadowOn = true;
+    g.shadowMap = { centre.x, centre.y, 1.f / extent, 0 };
+    g.shadowSun = f.sun;
+    g.shadowLight = light;
+    g.shadowFloor = 0.1f;
+}
+
+// ---- lightning and the rainbow (Scene::lightning, Weather::rainbow) -------------------------------
+// The strike that is brightest now, and where its light and its glow in the cloud are.
+struct FlashFrame {
+    bool on = false;
+    float power = 0;                         // flash x strike intensity x Lightning::intensity
+    LightningActive strike;
+    Vector3 lightAt{ 0, 0, 0 };              // the point light's place on the channel
+    Vector3 segA{ 0, 0, 0 }, segB{ 0, 0, 0 };    // the part of the channel inside the cloud, for the cloud's glow
+};
+double lightningSeconds(const Scene& s, double frame) { return frame / std::max(1.f, s.weather.enabled ? s.weather.fps : s.lightning.fps); }
+
+FlashFrame flashFrame(const Scene& s, double frame) {
+    FlashFrame f;
+    if (!s.lightning.enabled) return f;
+    const Lightning& l = s.lightning;
+    for (const LightningActive& a : lightningAt(s, lightningSeconds(s, frame))) {
+        const float p = a.profile.flash * a.strike.intensity * l.intensity;
+        if (p > f.power) { f.power = p; f.strike = a; f.on = true; }
+    }
+    if (!f.on) return f;
+    const Lightning::Strike& st = f.strike.strike;
+    if (f.strike.toGround) {
+        f.lightAt = Vector3Lerp(st.end, st.start, 0.3f);
+        const float up = 700.f;                                                  // the channel's charge region: above where it leaves the cloud base
+        f.segA = st.start;
+        f.segB = { st.start.x, st.start.y + up, st.start.z };
+    } else {
+        f.lightAt = Vector3Scale(Vector3Add(st.start, st.end), 0.5f);
+        f.segA = st.start; f.segB = st.end;
+    }
+    return f;
+}
+
+// While a frame is drawn: the strongest strike's light, added to the scene's lights (the last is replaced when there are
+// 8). The user's lights come back when it ends.
+struct FlashScope {
+    Scene& s;
+    bool added = false, replaced = false;
+    Light saved;
+    FlashScope(Scene& sc, int t) : s(sc) {
+        if (!s.lightning.enabled || s.lightning.light <= 0) return;
+        const FlashFrame f = flashFrame(s, frameTime(t));
+        if (!f.on || f.power < 0.01f) return;
+        Light li = Light::point(f.lightAt, s.lightning.color, 2.5f * s.lightning.light * f.power, s.lightning.lightRange);
+        if ((int)s.lights.size() < MAX_LIGHTS) { s.lights.push_back(li); added = true; }
+        else { saved = s.lights.back(); s.lights.back() = li; replaced = true; }
+    }
+    ~FlashScope() {
+        if (added) s.lights.pop_back();
+        else if (replaced) s.lights.back() = saved;
+    }
+    FlashScope(const FlashScope&) = delete;
+    FlashScope& operator=(const FlashScope&) = delete;
+};
+
+// The bolts' ribbons, over the clouds, depth tested against the opaque scene. Into `scene`'s framebuffer, inside the
+// viewport (vx, vyGL, vw, vh); leaves the framebuffer bound and the matrices as they were.
+void drawBolts(const Scene& s, const Camera& cam, const std::vector<LightningActive>& act, const DepthTarget& scene, int fbW, int fbH,
+               int vx, int vyGL, int vw, int vh) {
+    if (act.empty() || cam.orthographic) return;
+    const Lightning& l = s.lightning;
+    if (!gpu.bolt.id) {
+        gpu.bolt = LoadShaderFromMemory(BOLT_VS, BOLT_FS);
+        if (!IsShaderValid(gpu.bolt)) throw std::runtime_error("g3d: lightning shader compilation failed");
+    }
+    rlDrawRenderBatchActive();
+    rlEnableFramebuffer(scene.fbo);
+    rlViewport(vx, vyGL, vw, vh);
+    const Matrix savedProj = rlGetMatrixProjection(), savedView = rlGetMatrixModelview();
+    const double aspect = (double)vw / vh, top = cam.nearPlane * std::tan(cam.fov * 0.5 * DEG2RAD);
+    rlSetMatrixProjection(MatrixFrustum(-top * aspect, top * aspect, -top, top, cam.nearPlane, cam.farPlane));
+    rlSetMatrixModelview(MatrixLookAt(cam.position, cam.target, safeUp(Vector3Subtract(cam.target, cam.position), cam.upVector)));
+    rlEnableDepthTest();
+    rlDisableDepthMask();
+    rlDisableBackfaceCulling();
+    rlSetBlendFactorsSeparate(RL_ONE, RL_ONE, RL_ZERO, RL_ONE, RL_MAX, RL_FUNC_ADD);
+    BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+    rlSetTexture(rlGetTextureIdDefault());
+    BeginShaderMode(gpu.bolt);
+    shV3(gpu.bolt, "glowCol", linear3(l.color));
+    shV3(gpu.bolt, "coreCol", { 1.f, 0.97f, 0.92f });
+    const float tanY = std::tan(cam.fov * 0.5f * DEG2RAD);
+    const float pixelAt1 = 2.f * tanY / 1080.f;                  // metres a 1080-line pixel spans at one metre
+    for (const LightningActive& a : act) {
+        const float lvl = std::min(a.profile.flash * a.strike.intensity * l.intensity, 1.f);
+        if (lvl <= 0.003f) continue;
+        const bolt::Bolt b = bolt::make(a.strike.start, a.strike.end, a.strike.seed, l.shape);
+        const float reach = b.reach * a.profile.visible;
+        const float bright = a.toGround ? lvl : 0.3f * lvl;        // a channel inside the cloud shows as a faint glow
+        for (const bolt::Segment& sg : b.segments) {
+            if (sg.reachA >= reach) continue;
+            Vector3 p0 = sg.a, p1 = sg.b;
+            if (sg.reachB > reach) p1 = Vector3Lerp(sg.a, sg.b, (reach - sg.reachA) / std::max(sg.reachB - sg.reachA, 1e-4f));
+            const Vector3 dir = Vector3Subtract(p1, p0), mid = Vector3Scale(Vector3Add(p0, p1), 0.5f);
+            const float len = Vector3Length(dir);
+            if (len < 1e-3f) continue;
+            const Vector3 u = Vector3Scale(dir, 1.f / len);
+            Vector3 side = Vector3CrossProduct(u, Vector3Subtract(cam.position, mid));
+            if (Vector3Length(side) < 1e-5f) continue;
+            side = Vector3Normalize(side);
+            const float dist = Vector3Distance(cam.position, mid), px = pixelAt1 * dist;
+            const float sw = std::max(sg.width, 0.12f);
+            const float hc = 0.5f * std::max(l.width * sw, l.minPixels * px * (0.5f + 0.5f * sw));          // the core's half width
+            const float hg = std::max(hc * 7.f, 9.f * px * l.glow * (0.4f + 0.6f * sw)) * (0.7f + 0.3f * lvl);   // the glow's
+            const float c = a.toGround ? std::clamp(hc / hg, 0.02f, 1.f) : 0.02f;
+            const float br = bright * (sg.level == 0 ? 1.f : 0.75f);
+            const float gs = std::clamp(l.glow, 0.f, 2.f) * 0.5f * (a.toGround ? 1.f : 1.5f);
+            const unsigned char cr = (unsigned char)std::lround(std::clamp(br, 0.f, 1.f) * 255.f), cg = (unsigned char)std::lround(c * 255.f),
+                                cb = (unsigned char)std::lround(std::clamp(gs, 0.f, 1.f) * 255.f);
+            const float ext = hg;                                                                  // how far the end pieces reach past the piece
+            const Vector3 sd = Vector3Scale(side, hg);
+            // Four slices along the piece: beyond the start, the start, the end, beyond the end (1 at the outer ones).
+            const Vector3 s0 = Vector3Subtract(p0, Vector3Scale(u, ext)), s3 = Vector3Add(p1, Vector3Scale(u, ext));
+            const Vector3 cen[4] = { s0, p0, p1, s3 };
+            const float beyond[4] = { 1.f, 0.f, 0.f, 1.f };
+            rlBegin(RL_QUADS);
+            rlColor4ub(cr, cg, cb, 255);
+            for (int k = 0; k < 3; k++) {
+                const Vector3 qa = cen[k], qb = cen[k + 1];
+                rlTexCoord2f(-1.f, beyond[k]);     rlVertex3f(qa.x - sd.x, qa.y - sd.y, qa.z - sd.z);
+                rlTexCoord2f(1.f, beyond[k]);      rlVertex3f(qa.x + sd.x, qa.y + sd.y, qa.z + sd.z);
+                rlTexCoord2f(1.f, beyond[k + 1]);  rlVertex3f(qb.x + sd.x, qb.y + sd.y, qb.z + sd.z);
+                rlTexCoord2f(-1.f, beyond[k + 1]); rlVertex3f(qb.x - sd.x, qb.y - sd.y, qb.z - sd.z);
+            }
+            rlEnd();
+        }
+    }
+    EndShaderMode();
+    rlDrawRenderBatchActive();
+    rlSetTexture(0);
+    EndBlendMode();
+    restoreBlend();
+    rlEnableDepthMask();
+    rlDisableDepthTest();
+    rlSetMatrixProjection(savedProj);
+    rlSetMatrixModelview(savedView);
+    rlViewport(0, 0, fbW, fbH);
+}
+
+// The rainbow over the picture (see RainbowFrame). Two passes of one full-screen shader into `scene`.
+void drawRainbow(const Scene& s, const RainbowFrame& rf, const Camera& cam, const DepthTarget& scene, int fbW, int fbH,
+                 int vx, int vyGL, int vw, int vh) {
+    if (rf.strength <= 0.002f || cam.orthographic) return;
+    if (!gpu.rainbow.id) {
+        gpu.rainbow = LoadShaderFromMemory(nullptr, RAINBOW_FS);
+        if (!IsShaderValid(gpu.rainbow)) throw std::runtime_error("g3d: rainbow shader compilation failed");
+    }
+    const Shader& sh = gpu.rainbow;
+    const Vector3 look = Vector3Subtract(cam.target, cam.position);
+    const Vector3 fwd = Vector3Normalize(look);
+    const Vector3 right = Vector3Normalize(Vector3CrossProduct(fwd, safeUp(look, cam.upVector))), up = Vector3CrossProduct(right, fwd);
+    const float tanY = std::tan(cam.fov * 0.5f * DEG2RAD), aspect = (float)vw / (float)vh;
+    rlDrawRenderBatchActive();
+    rlEnableFramebuffer(scene.fbo);
+    rlViewport(vx, vyGL, vw, vh);
+    rlMatrixMode(RL_PROJECTION);
+    rlPushMatrix();
+    rlLoadIdentity();
+    rlOrtho(0, vw, vh, 0, -1, 1);
+    rlMatrixMode(RL_MODELVIEW);
+    rlPushMatrix();
+    rlLoadIdentity();
+    rlDisableDepthTest();
+    rlDisableDepthMask();
+    shV3(sh, "camPos", cam.position); shV3(sh, "camFwd", fwd); shV3(sh, "camRight", right); shV3(sh, "camUp", up);
+    shV2(sh, "tanHalf", { tanY * aspect, tanY });
+    shV2(sh, "vpOrigin", { (float)vx, (float)vyGL });
+    shV2(sh, "vpSize", { (float)vw, (float)vh });
+    shV2(sh, "zNF", { cam.nearPlane, cam.farPlane });
+    shV3(sh, "antiSolar", rf.antiSolar);
+    shF(sh, "strength", rf.strength);
+    shF(sh, "rainDist", std::max(s.weather.rainbow.rainDistance, 10.f));
+    shF(sh, "waterLevel", s.water.enabled ? waterOf(s).level : 0.f);
+    shI(sh, "waterOn", s.water.enabled ? 1 : 0);
+    shF(sh, "gain", 0.75f);
+    shI(sh, "depthTex", DEPTH_SLOT);
+    bindUnit(DEPTH_SLOT, scene.depth);
+    for (int pass = 0; pass < 2; pass++) {
+        shI(sh, "pass", pass);
+        if (pass == 0) rlSetBlendFactorsSeparate(RL_ZERO, RL_ONE_MINUS_SRC_ALPHA, RL_ZERO, RL_ONE, RL_FUNC_ADD, RL_FUNC_ADD);          // Alexander band: the sky darkened
+        else rlSetBlendFactorsSeparate(RL_DST_COLOR, RL_ONE, RL_ZERO, RL_ONE, RL_FUNC_ADD, RL_FUNC_ADD);                                     // light added in proportion to the sky behind: dst x (1 + bow)
+        BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+        BeginShaderMode(sh);
+        DrawRectangle(0, 0, vw, vh, WHITE);
+        EndShaderMode();
+        rlDrawRenderBatchActive();
+        EndBlendMode();
+    }
+    bindUnit(DEPTH_SLOT, 0);
+    restoreBlend();
+    rlMatrixMode(RL_MODELVIEW);
+    rlPopMatrix();
+    rlMatrixMode(RL_PROJECTION);
+    rlPopMatrix();
+    rlMatrixMode(RL_MODELVIEW);
+    rlViewport(0, 0, fbW, fbH);
+}
+
+// The clouds over the finished opaque scene in `scene` (colour and depth), inside the viewport
+// (vx, vyGL, vw, vh: framebuffer pixels, y up). The march runs at `res` of the viewport and a
+// depth-aware upsample brings it to full size, where it is blended over the scene.
+// `mirrored`: `cam` is the water's mirrored camera (see the reflection pass). Its picture is laid out as the
+// real view's, so the screen's right is the mirror image of the one `cam` would give; and the march does
+// not stop at the water plane.
+void drawClouds(const Scene& s, const CloudFrame& f, const Camera& cam, const DepthTarget& scene, int fbW, int fbH,
+                int vx, int vyGL, int vw, int vh, bool mirrored = false) {
+    CloudGpu& g = gpu.cl;
+    ensureCloudGpu(scene.fbo, fbW, fbH);
+    const int lw = std::max(8, (int)std::ceil(vw * f.res)), lh = std::max(8, (int)std::ceil(vh * f.res));
+    colorTarget(g.lowFbo, g.lowTex, g.lowW, g.lowH, lw, lh);
+    colorTarget(g.fullFbo, g.fullTex, g.fullW, g.fullH, vw, vh);
+
+    // The march.
+    const Shader& m = g.march;
+    setCloudCommon(m, f, { cam.position.x, cam.position.z });
+    const Vector3 look = Vector3Subtract(cam.target, cam.position);
+    const Vector3 fwd = Vector3Normalize(look);
+    Vector3 right = Vector3Normalize(Vector3CrossProduct(fwd, safeUp(look, cam.upVector)));
+    const Vector3 up = Vector3CrossProduct(right, fwd);
+    if (mirrored) right = Vector3Scale(right, -1.f);
+    const float tanY = std::tan(cam.fov * 0.5f * DEG2RAD), aspect = (float)vw / (float)vh;
+    shV2(m, "lowSize", { (float)lw, (float)lh });
+    Vector3 eye = cam.position;
+    if (mirrored) eye.y = std::max(eye.y, 1.f);                  // the march wants the eye above the planet's surface (a few metres' error against clouds kilometres off)
+    shV3(m, "camPos", eye);
+    shV3(m, "camFwd", fwd);
+    shV3(m, "camRight", right);
+    shV3(m, "camUp", up);
+    shV2(m, "tanHalf", { tanY * aspect, tanY });
+    shV2(m, "vpOrigin", { (float)vx, (float)vyGL });
+    shV2(m, "vpSize", { (float)vw, (float)vh });
+    shV2(m, "zNF", { cam.nearPlane, cam.farPlane });
+    shI(m, "depthTex", DEPTH_SLOT);
+    shV3(m, "sunDir", f.sun);
+    shV3(m, "sunE", f.sunE);
+    shV3(m, "ambTop", f.ambTop);
+    shV3(m, "ambBot", f.ambBot);
+    shV3(m, "horizonCol", f.horizon);
+    shV3(m, "hazeCol", f.haze);
+    shF(m, "hazeAmount", f.hazeAmount);
+    shF(m, "airK", 3.0e-5f * std::max(f.c.haze, 0.f));
+    shI(m, "steps", f.steps);
+    shI(m, "lightSteps", f.lightSteps);
+    shF(m, "jitterOn", f.c.jitter ? 1.f : 0.f);
+    shF(m, "denoiseOn", f.c.denoise ? 1.f : 0.f);
+    shI(m, "blueTex", CLOUD_BLUE_SLOT);
+    bindUnit(CLOUD_BLUE_SLOT, g.blue.id);
+    shF(m, "waterLevel", s.water.enabled ? waterOf(s).level : 0.f);
+    shI(m, "waterOn", s.water.enabled && !mirrored ? 1 : 0);
+    const Clouds::Flash& fl = f.c.flash;
+    const float fi = std::max(fl.intensity, 0.f);
+    shV3(m, "flashPos", fl.position);
+    shV3(m, "flashCol", Vector3Scale(linear3(fl.color), fi));
+    shF(m, "flashRadius", std::max(fl.radius, 1.f));
+    {   // the strongest lightning strike's channel in the cloud
+        const FlashFrame ff = flashFrame(s, frameTime(gpu.frame));
+        const float k = ff.on ? 5.f * s.lightning.cloudLight * ff.power : 0.f;
+        shV3(m, "boltA", ff.segA);
+        shV3(m, "boltB", ff.segB);
+        shV3(m, "boltCol", Vector3Scale(linear3(s.lightning.color), k));
+        shF(m, "boltRadius", ff.on && !ff.strike.toGround ? 700.f : 450.f);
+    }
+    bindUnit(DEPTH_SLOT, scene.depth);
+    cloudPass(m, g.lowFbo, 0, 0, lw, lh);
+
+    // The upsample, into a viewport-sized image.
+    const Shader& u = g.up;
+    shV2(u, "lowSize", { (float)lw, (float)lh });
+    shV2(u, "vpOrigin", { (float)vx, (float)vyGL });
+    shV2(u, "vpSize", { (float)vw, (float)vh });
+    shV2(u, "zNF", { cam.nearPlane, cam.farPlane });
+    shI(u, "lowTex", CLOUD_LOW_SLOT);
+    shF(u, "denoiseOn", f.c.denoise ? 1.f : 0.f);
+    shI(u, "depthTex", DEPTH_SLOT);
+    bindUnit(CLOUD_LOW_SLOT, g.lowTex);
+    cloudPass(u, g.fullFbo, 0, 0, vw, vh);
+    unbindCloudUnits();
+
+    // Over the scene (straight colour and alpha onto a premultiplied target).
+    rlEnableFramebuffer(scene.fbo);
+    rlViewport(vx, vyGL, vw, vh);
+    rlMatrixMode(RL_PROJECTION);
+    rlPushMatrix();
+    rlLoadIdentity();
+    rlOrtho(0, vw, vh, 0, -1, 1);
+    rlMatrixMode(RL_MODELVIEW);
+    rlPushMatrix();
+    rlLoadIdentity();
+    rlSetBlendFactorsSeparate(RL_SRC_ALPHA, RL_ONE_MINUS_SRC_ALPHA, RL_ONE, RL_ONE_MINUS_SRC_ALPHA, RL_FUNC_ADD, RL_FUNC_ADD);
+    BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+    const Texture2D full{ g.fullTex, vw, vh, 1, PIXELFORMAT_UNCOMPRESSED_R16G16B16A16 };
+    DrawTexturePro(full, { 0, 0, (float)vw, -(float)vh }, { 0, 0, (float)vw, (float)vh }, { 0, 0 }, 0, WHITE);
+    EndBlendMode();
+    rlDrawRenderBatchActive();
+    rlMatrixMode(RL_MODELVIEW);
+    rlPopMatrix();
+    rlMatrixMode(RL_PROJECTION);
+    rlPopMatrix();
+    rlMatrixMode(RL_MODELVIEW);
+    rlViewport(0, 0, fbW, fbH);
+}
+
+// ---- light in the air (Scene::volumetric, Scene::aerial) ------------------------------------------------
+DepthTarget& copyScene(const DepthTarget& src);
+
+// Something for the march to go through: the scene's fog (own, the weather's, or the one Volumetric::density sets).
+bool airFogged(const Scene& s) { return s.fogMode == FogMode::Linear ? s.fogFar > s.fogNear : s.fogDensity > 0; }
+bool airEye(const Scene& s, const Camera& cam) {          // a perspective view from the air
+    return !cam.orthographic && !(s.water.enabled && cam.position.y < waterOf(s).level);
+}
+bool volumetricActive(const Scene& s, const Camera& cam) { return s.volumetric.enabled() && airEye(s, cam) && airFogged(s); }
+bool aerialActive(const Scene& s, const Camera& cam) { return s.aerial.enabled && s.aerial.strength > 0 && airEye(s, cam); }
+
+// The light that is the sun for the shafts: the sky's, else the directional light along the sky's sun, else the first.
+int airSunLight(const Scene& s) {
+    const int n = std::min((int)s.lights.size(), MAX_LIGHTS);
+    auto towards = [&](int i, Vector3& d) {
+        if (i < 0 || i >= n || s.lights[(size_t)i].type != Light::Type::Directional) return false;
+        d = Vector3Subtract(s.lights[(size_t)i].position, s.lights[(size_t)i].target);
+        if (Vector3Length(d) < 1e-6f) return false;
+        d = Vector3Normalize(d);
+        return true;
+    };
+    Vector3 d;
+    if (s.sky.enabled && towards(s.sky.sunLight, d)) return s.sky.sunLight;
+    if (s.sky.enabled)
+        for (int i = 0; i < n; i++)
+            if (towards(i, d) && Vector3DotProduct(d, sunOf(s)) > 0.97f) return i;
+    for (int i = 0; i < n; i++)
+        if (towards(i, d)) return i;
+    return -1;
+}
+
+// How far a ray is marched when nothing stops it: to where the fog is all but opaque, within the far plane.
+float airReach(const Scene& s, const Camera& cam) {
+    if (s.fogMode == FogMode::Linear) return std::clamp(s.fogFar, 1.f, cam.farPlane);
+    float sigma = s.fogDensity;
+    if (s.fogFalloff > 0) sigma *= std::exp(std::clamp(-s.fogFalloff * (cam.position.y - s.fogHeight), -30.f, 30.f));
+    return std::clamp((s.fogMode == FogMode::Exponential ? 3.9f : 1.98f) / std::max(sigma, 1e-7f), 10.f, cam.farPlane);
+}
+
+// The environment the lit shader reads, for the two air shaders.
+void setAirEnvironment(const Shader& sh, const Scene& s, Texture2D envTex) {
+    const int hasEnv = envTex.id ? 1 : 0, envLin = hasEnv && isFloatFormat(envTex.format) ? 1 : 0;
+    const float maxLod = hasEnv ? std::floor(std::log2((float)std::max(envTex.width, envTex.height))) : 0;
+    const float rot = s.sky.enabled ? 0.f : s.environmentRotation / 360.f;
+    const float intensity = s.sky.enabled ? s.sky.lighting : s.environmentIntensity;
+    const float backdrop = s.sky.enabled ? 1.f / std::max(intensity, 1e-4f) : 1.f;
+    const Vector3 zen = linear3(s.skyColor), fallback = Vector3Lerp(zen, { 1, 1, 1 }, 0.4f);
+    shI(sh, "hasEnv", hasEnv); shI(sh, "envLinear", envLin); shF(sh, "envMaxLod", maxLod);
+    shF(sh, "envIntensity", intensity); shF(sh, "envRotation", rot); shF(sh, "backdropScale", backdrop);
+    shV3(sh, "horizonFallback", fallback);
+    shI(sh, "envMap", ENV_SLOT);
+}
+
+// The picture's fog made into shafts, and the aerial perspective, over the finished opaque scene in `scene`
+// (colour and depth), inside the viewport (vx, vyGL, vw, vh). The march writes an image at a share of the size, the
+// composite brings it up with a depth-aware filter, adds it and applies the aerial perspective.
+void drawAir(const Scene& s, const Camera& cam, const Shadows& sh, Texture2D envTex, const DepthTarget& scene, int fbW, int fbH,
+             int vx, int vyGL, int vw, int vh, bool vol, bool aerial) {
+    AirGpu& g = gpu.air;
+    if (!g.comp.id) {
+        g.march = LoadShaderFromMemory(nullptr, AIR_MARCH_FS);
+        g.comp = LoadShaderFromMemory(nullptr, AIR_COMPOSITE_FS);
+        if (!IsShaderValid(g.march) || !IsShaderValid(g.comp)) throw std::runtime_error("g3d: volumetric light shader compilation failed");
+    }
+    const Volumetric& v = s.volumetric;
+    const Vector3 look = Vector3Subtract(cam.target, cam.position);
+    const Vector3 fwd = Vector3Normalize(look);
+    const Vector3 right = Vector3Normalize(Vector3CrossProduct(fwd, safeUp(look, cam.upVector))), up = Vector3CrossProduct(right, fwd);
+    const float tanY = std::tan(cam.fov * 0.5f * DEG2RAD), aspect = (float)vw / (float)vh;
+    auto camera = [&](const Shader& sh2, Vector2 lowSize) {
+        shV3(sh2, "camPos", cam.position); shV3(sh2, "camFwd", fwd); shV3(sh2, "camRight", right); shV3(sh2, "camUp", up);
+        shV2(sh2, "tanHalf", { tanY * aspect, tanY });
+        shV2(sh2, "vpOrigin", { (float)vx, (float)vyGL });
+        shV2(sh2, "vpSize", { (float)vw, (float)vh });
+        shV2(sh2, "zNF", { cam.nearPlane, cam.farPlane });
+        shV2(sh2, "lowSize", lowSize);
+    };
+    const DepthTarget& copy = copyScene(scene);                  // colour and depth, to read while the picture is written
+    int lw = 1, lh = 1;
+    if (vol) {
+        struct Q { int steps; float res; };
+        static const Q table[3] = { { 16, 0.35f }, { 32, 0.5f }, { 48, 0.75f } };
+        const Q& q = table[std::clamp((int)v.quality - 1, 0, 2)];
+        lw = std::max(8, (int)std::ceil(vw * q.res)); lh = std::max(8, (int)std::ceil(vh * q.res));
+        colorTarget(g.lowFbo, g.lowTex, g.lowW, g.lowH, lw, lh);
+        const Shader& m = g.march;
+        camera(m, { (float)lw, (float)lh });
+        setAirEnvironment(m, s, envTex);
+        const Vector3 fogCol = linear(s.fogColor);
+        shV3(m, "fogColor", fogCol); shF(m, "fogNear", s.fogNear); shF(m, "fogFar", s.fogFar);
+        shI(m, "fogMode", (int)s.fogMode); shF(m, "fogDensity", s.fogDensity); shF(m, "fogHeight", s.fogHeight); shF(m, "fogFalloff", s.fogFalloff);
+        shI(m, "fogSky", s.fogFromSky ? 1 : 0);
+        shI(m, "seaSky", s.water.enabled && s.water.spectrum.enabled ? 1 : 0);
+        shI(m, "steps", q.steps); shF(m, "reach", airReach(s, cam));
+        shF(m, "waterLevel", s.water.enabled ? waterOf(s).level : 0.f); shI(m, "waterOn", s.water.enabled ? 1 : 0);
+        const int sun = airSunLight(s);
+        float gain = 0;
+        Vector3 toSun{ 0, 1, 0 };
+        if (sun >= 0) {
+            const Light& l = s.lights[(size_t)sun];
+            toSun = Vector3Normalize(Vector3Subtract(l.position, l.target));
+            const float k = std::clamp((toSun.y + 0.02f) / 0.08f, 0.f, 1.f);
+            gain = l.intensity > 0 ? k * k * (3 - 2 * k) : 0.f;
+            if (s.weather.enabled && !s.sky.ownLight) gain *= std::clamp(s.weather.sunScale(), 0.f, 1.f);
+        }
+        shI(m, "sun", sun); shV3(m, "sunDir", toSun); shF(m, "sunGain", gain);
+        shF(m, "aniso", std::clamp(v.anisotropy, 0.f, 0.95f)); shF(m, "ambientK", std::clamp(v.ambient, 0.f, 1.f));
+        const CloudGpu& cg = gpu.cl;
+        shI(m, "cloudShadowOn", cg.shadowOn ? 1 : 0); shI(m, "cloudShadowLight", cg.shadowLight);
+        shV3(m, "cloudShadowSun", cg.shadowSun); shF(m, "cloudShadowFloor", cg.shadowFloor);
+        { const Vector4 map = cg.shadowMap; SetShaderValue(m, GetShaderLocation(m, "cloudShadowMap"), &map, SHADER_UNIFORM_VEC4); }
+        shI(m, "cloudShadowTex", CLOUD_SLOT);
+        // The lights, as the lit shader gets them.
+        const int count = std::min((int)s.lights.size(), MAX_LIGHTS);
+        int type[MAX_LIGHTS] = {};
+        Vector3 pos[MAX_LIGHTS] = {}, dir[MAX_LIGHTS] = {}, col[MAX_LIGHTS] = {};
+        float range[MAX_LIGHTS] = {}, cin[MAX_LIGHTS] = {}, cosOut[MAX_LIGHTS] = {}, bias[MAX_LIGHTS] = {};
+        for (int i = 0; i < count; i++) {
+            const Light& l = s.lights[(size_t)i];
+            type[i] = (int)l.type; pos[i] = l.position;
+            const Vector3 d = Vector3Subtract(l.target, l.position);
+            dir[i] = Vector3Length(d) > 1e-6f ? Vector3Normalize(d) : Vector3{ 0, -1, 0 };
+            col[i] = linear(l.color, l.intensity); range[i] = l.range;
+            const float outer = std::clamp(l.outerAngle, 0.1f, 89.9f), inner = std::clamp(l.innerAngle, 0.f, outer - 0.05f);
+            cin[i] = std::cos(inner * DEG2RAD); cosOut[i] = std::cos(outer * DEG2RAD); bias[i] = l.shadowBias;
+        }
+        shI(m, "scatterLights", v.scatterLights ? 1 : 0); shI(m, "lightCount", count);
+        SetShaderValueV(m, GetShaderLocation(m, "lightType"), type, SHADER_UNIFORM_INT, MAX_LIGHTS);
+        SetShaderValueV(m, GetShaderLocation(m, "lightPos"), pos, SHADER_UNIFORM_VEC3, MAX_LIGHTS);
+        SetShaderValueV(m, GetShaderLocation(m, "lightDir"), dir, SHADER_UNIFORM_VEC3, MAX_LIGHTS);
+        SetShaderValueV(m, GetShaderLocation(m, "lightColor"), col, SHADER_UNIFORM_VEC3, MAX_LIGHTS);
+        SetShaderValueV(m, GetShaderLocation(m, "lightRange"), range, SHADER_UNIFORM_FLOAT, MAX_LIGHTS);
+        SetShaderValueV(m, GetShaderLocation(m, "lightCosInner"), cin, SHADER_UNIFORM_FLOAT, MAX_LIGHTS);
+        SetShaderValueV(m, GetShaderLocation(m, "lightCosOuter"), cosOut, SHADER_UNIFORM_FLOAT, MAX_LIGHTS);
+        SetShaderValueV(m, GetShaderLocation(m, "lightShadow"), sh.lightTile, SHADER_UNIFORM_INT, MAX_LIGHTS);
+        SetShaderValueV(m, GetShaderLocation(m, "lightBias"), bias, SHADER_UNIFORM_FLOAT, MAX_LIGHTS);
+        if (!sh.tiles.empty()) {
+            Matrix vps[MAX_TILES];
+            Vector4 rects[MAX_TILES], params[MAX_TILES];
+            for (size_t i = 0; i < sh.tiles.size(); i++) { vps[i] = sh.tiles[i].vp; rects[i] = sh.tiles[i].rect; params[i] = sh.tiles[i].params; }
+            rlEnableShader(m.id);
+            rlSetUniformMatrices(GetShaderLocation(m, "shadowVP"), vps, (int)sh.tiles.size());
+            SetShaderValueV(m, GetShaderLocation(m, "shadowRect"), rects, SHADER_UNIFORM_VEC4, (int)sh.tiles.size());
+            SetShaderValueV(m, GetShaderLocation(m, "shadowParams"), params, SHADER_UNIFORM_VEC4, (int)sh.tiles.size());
+            shF(m, "atlasTexel", 1.f / (float)gpu.atlasSize);
+        }
+        shI(m, "shadowAtlas", SHADOW_SLOT);
+        shI(m, "depthTex", DEPTH_SLOT);
+        bindUnit(DEPTH_SLOT, copy.depth);
+        bindUnit(SHADOW_SLOT, sh.tiles.empty() ? 0 : gpu.atlasTex);
+        bindUnit(ENV_SLOT, envTex.id);
+        if (cg.shadowOn) bindUnit(CLOUD_SLOT, cg.shadowRT.texture.id);
+        cloudPass(m, g.lowFbo, 0, 0, lw, lh);
+        for (int slot : { SHADOW_SLOT, CLOUD_SLOT }) bindUnit(slot, 0);
+    }
+    const Shader& c = g.comp;
+    camera(c, { (float)lw, (float)lh });
+    setAirEnvironment(c, s, envTex);
+    shI(c, "volOn", vol ? 1 : 0); shI(c, "filterOn", 1);
+    shI(c, "aerialOn", aerial ? 1 : 0);
+    const AerialPerspective& a = s.aerial;
+    shF(c, "aerialK", std::max(a.strength, 0.f) / 30000.f); shF(c, "aerialH", std::max(a.scaleHeight, 10.f));
+    shV3(c, "aerialRGB", { 0.77f, 1.f, 1.7f });
+    shF(c, "waterLevel", s.water.enabled ? waterOf(s).level : 0.f); shI(c, "waterOn", s.water.enabled ? 1 : 0);
+    shI(c, "sceneTex", REFR_COLOR_SLOT); shI(c, "depthTex", DEPTH_SLOT); shI(c, "lowTex", CLOUD_LOW_SLOT);
+    bindUnit(REFR_COLOR_SLOT, copy.color);
+    bindUnit(DEPTH_SLOT, copy.depth);
+    bindUnit(CLOUD_LOW_SLOT, g.lowTex);
+    bindUnit(ENV_SLOT, envTex.id);
+    cloudPass(c, scene.fbo, vx, vyGL, vw, vh);
+    for (int slot : { REFR_COLOR_SLOT, DEPTH_SLOT, CLOUD_LOW_SLOT, ENV_SLOT }) bindUnit(slot, 0);
+    rlEnableFramebuffer(scene.fbo);
+    rlViewport(0, 0, fbW, fbH);
+}
+
+// While the volumetric march has the fog, the scene is drawn without it (the march fogs the finished picture); released
+// before the march reads the scene's fog.
+struct FogHold {
+    Scene& s;
+    FogMode mode;
+    float density;
+    bool held;
+    FogHold(Scene& sc, bool hold) : s(sc), mode(sc.fogMode), density(sc.fogDensity), held(hold) {
+        if (held) { s.fogMode = FogMode::Exponential; s.fogDensity = 0; }
+    }
+    void release() { if (held) { s.fogMode = mode; s.fogDensity = density; held = false; } }
+    ~FogHold() { release(); }
+    FogHold(const FogHold&) = delete;
+    FogHold& operator=(const FogHold&) = delete;
+};
+
+// ---- the water's planar reflection and refraction (Water::reflections, Water::refraction)
+// How the camera sees the water this frame: above the surface, and with water somewhere in the picture
+// (some corner of the view frustum lies under the surface plane).
+struct WaterView { bool above = false, visible = false; Water water; float level = 0; };
+WaterView waterView(const Scene& s, const Camera& cam, float aspect, int t) {
+    WaterView v;
+    if (!s.water.enabled || cam.orthographic) return v;
+    v.water = waterOf(s);
+    v.level = v.water.level;
+    const double seconds = frameTime(t) / std::max(v.water.fps, 1.f);
+    v.above = cam.position.y >= v.water.height(cam.position.x, cam.position.z, seconds);
+    if (!v.above) return v;
+    const Vector3 look = Vector3Subtract(cam.target, cam.position);
+    const Vector3 f = Vector3Normalize(look);
+    const Vector3 right = Vector3Normalize(Vector3CrossProduct(f, safeUp(look, cam.upVector)));
+    const Vector3 up = Vector3CrossProduct(right, f);
+    const float ty = std::tan(cam.fov * 0.5f * DEG2RAD), tx = ty * aspect;
+    const bool spectrum = v.water.spectrum.enabled;
+    const float band = (spectrum ? 2 * v.water.spectrumHs() : packWaves(v.water).amplitude) + 0.05f;
+    const float far = spectrum ? std::max(cam.farPlane, 1.5f * seaHorizon(std::max(cam.position.y - v.level, 0.f)) + 500.f) : cam.farPlane;
+    for (int sx = -1; sx <= 1; sx += 2)
+        for (int sy = -1; sy <= 1; sy += 2) {
+            const float y = cam.position.y + (f.y + right.y * sx * tx + up.y * sy * ty) * far;
+            if (y < v.level + band) v.visible = true;
+        }
+    return v;
+}
+// The mirror image of the camera in the water plane: what the reflection pass looks from.
+Camera mirroredCamera(const Camera& cam, float level) {
+    Camera m = cam;
+    m.up = nullptr;
+    m.dof.aperture = 0;
+    m.position.y = 2 * level - cam.position.y;
+    m.target.y = 2 * level - cam.target.y;
+    m.upVector.y = -cam.upVector.y;
+    return m;
+}
+// An offscreen target that is read back as a texture: linear filtering, clamped, with `mips` the colour's chain.
+DepthTarget& waterTarget(DepthTarget& slot, int w, int h, bool mips) {
+    const bool fresh = !(slot.fbo && slot.w == w && slot.h == h);
+    DepthTarget& t = depthTarget(slot, w, h);
+    if (fresh) {
+        rlTextureParameters(t.color, RL_TEXTURE_MIN_FILTER, mips ? RL_TEXTURE_FILTER_MIP_LINEAR : RL_TEXTURE_FILTER_LINEAR);
+        rlTextureParameters(t.color, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_LINEAR);
+        for (unsigned int id : { t.color, t.depth }) {
+            rlTextureParameters(id, RL_TEXTURE_WRAP_S, RL_TEXTURE_WRAP_CLAMP);
+            rlTextureParameters(id, RL_TEXTURE_WRAP_T, RL_TEXTURE_WRAP_CLAMP);
+        }
+        rlTextureParameters(t.depth, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_NEAREST);
+        rlTextureParameters(t.depth, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_NEAREST);
+    }
+    return t;
+}
+
+// ---- water bodies (Scene::waterBodies)
+constexpr size_t MAX_WATER_BODIES = 32;
+bool validBody(const WaterBody& b) { return b.isRiver() || b.outline.size() >= 3; }
+
+// Whether a body can be on screen (its bounding circle against the view cone), and how far it is along the view.
+bool bodyInView(const WaterBody& b, const Camera& cam, float aspect, float* depth = nullptr) {
+    const Vector4 e = b.extent();
+    const Vector3 c{ 0.5f * (e.x + e.z), b.level, 0.5f * (e.y + e.w) };
+    const float r = 0.5f * std::hypot(e.z - e.x, e.w - e.y) + 1.f;
+    const Matrix view = MatrixLookAt(cam.position, cam.target, safeUp(Vector3Subtract(cam.target, cam.position), cam.upVector));
+    const Vector3 p = Vector3Transform(c, view);
+    if (depth) *depth = -p.z;
+    if (-p.z + r < cam.nearPlane || -p.z - r > cam.farPlane) return false;
+    if (cam.orthographic) return true;
+    const float ty = std::tan(cam.fov * 0.5f * DEG2RAD), tx = ty * aspect, z = std::max(-p.z, 0.f);
+    return std::fabs(p.x) <= z * tx + r * 1.5f && std::fabs(p.y) <= z * ty + r * 1.5f;
+}
+
+// The one planar reflection a frame can draw: the sea's if it reflects and is in view, else the first body (in
+// view, camera above its level) whose look reflects. `visible` is false when nothing needs the mirrored scene.
+WaterView reflectionView(const Scene& s, const Camera& cam, float aspect, int t) {
+    if (cam.orthographic) return {};
+    if (s.water.enabled && s.water.reflections != Water::Reflections::Off) {
+        const WaterView v = waterView(s, cam, aspect, t);
+        if (v.visible) return v;
+    }
+    size_t n = 0;
+    for (const WaterBody& b : s.waterBodies) {
+        if (n++ >= MAX_WATER_BODIES) break;
+        if (!validBody(b) || b.look.reflections == Water::Reflections::Off || cam.position.y < b.level) continue;
+        if (!bodyInView(b, cam, aspect)) continue;
+        WaterView v;
+        v.water = waterOf(s, b);
+        v.level = b.level;
+        v.above = v.visible = true;
+        return v;
+    }
+    return {};
+}
+
+// How far the waves bend a reflection: full from a significant wave height of 0.1 m, none at 1 cm.
+float reflectionBend(const Water& w) {
+    float sumA2 = 0;
+    for (const Water::Wave& wv : w.waves) sumA2 += wv.amplitude * wv.amplitude * 0.5f;
+    const float hs = w.spectrum.enabled ? w.spectrumHs() : 4 * std::sqrt(sumA2), tq = std::clamp((hs - 0.01f) / 0.09f, 0.f, 1.f);
+    return std::max(w.reflectionDistort, 0.f) * tq * tq * (3 - 2 * tq);
+}
+
+struct BodyDraw { const WaterBody* b; Water look; Object3D* obj; float depth; };
+
+Mesh makeBodyMesh(const WaterBody& b) {
+    const WaterBodyMesh src = waterBodyMesh(b);
+    Mesh m = {};
+    const bool empty = src.index.size() < 3;
+    m.vertexCount = empty ? 3 : (int)(src.position.size() / 3);
+    m.triangleCount = empty ? 1 : (int)(src.index.size() / 3);
+    m.vertices = (float*)MemAlloc((unsigned)m.vertexCount * 3 * sizeof(float));
+    m.normals = (float*)MemAlloc((unsigned)m.vertexCount * 3 * sizeof(float));
+    m.texcoords = (float*)MemAlloc((unsigned)m.vertexCount * 2 * sizeof(float));
+    m.indices = (unsigned short*)MemAlloc((unsigned)m.triangleCount * 3 * sizeof(unsigned short));
+    std::fill(m.vertices, m.vertices + m.vertexCount * 3, 0.f);
+    std::fill(m.normals, m.normals + m.vertexCount * 3, 0.f);
+    std::fill(m.texcoords, m.texcoords + m.vertexCount * 2, 0.f);
+    if (empty) {
+        m.indices[0] = 0; m.indices[1] = 1; m.indices[2] = 2;
+    } else {
+        std::copy(src.position.begin(), src.position.end(), m.vertices);
+        std::copy(src.normal.begin(), src.normal.end(), m.normals);
+        std::copy(src.uv.begin(), src.uv.end(), m.texcoords);
+        std::copy(src.index.begin(), src.index.end(), m.indices);
+    }
+    UploadMesh(&m, false);
+    return m;
+}
+
+// The drawing object of a body's shape: built once, kept by the shape's key, dropped when unused for a while.
+Object3D& bodyObject(const WaterBody& b, int stamp) {
+    auto& slot = gpu.bodyMeshes[waterBodyKey(b)];
+    if (!slot.obj) {
+        slot.obj = std::make_unique<Object3D>();
+        slot.obj->name = "waterBody";
+        auto shape = std::make_shared<WaterBody>(b);
+        slot.obj->geometry = std::make_shared<Geometry>([shape] { return makeBodyMesh(*shape); });
+        slot.obj->material.doubleSided = true;
+        slot.obj->material.castShadow = false;
+    }
+    slot.used = stamp;
+    return *slot.obj;
+}
+
+// The bodies that can be seen this frame (at most MAX_WATER_BODIES of the scene's, in order).
+std::vector<BodyDraw> collectBodies(const Scene& s, const Camera& cam, float aspect, int stamp) {
+    std::vector<BodyDraw> out;
+    size_t n = 0;
+    for (const WaterBody& b : s.waterBodies) {
+        if (n++ >= MAX_WATER_BODIES) break;
+        float depth = 0;
+        if (!validBody(b) || cam.position.y < b.level - 0.01f || !bodyInView(b, cam, aspect, &depth)) continue;
+        out.push_back({ &b, waterOf(s, b), &bodyObject(b, stamp), depth });
+    }
+    for (auto it = gpu.bodyMeshes.begin(); gpu.bodyMeshes.size() > 48 && it != gpu.bodyMeshes.end();)
+        it = it->second.used != stamp ? gpu.bodyMeshes.erase(it) : std::next(it);
+    return out;
+}
+
+// The lit shader's water uniforms for drawing one body: its look, its level, mode 2, and its shore and flow.
+// How rough a body's water is, 0 (glass) to 1 (a gale on a lake): the significant wave height of the waves it is
+// drawn with (the weather's wind and the body's fetch worked in), and for a river the current's speed as well.
+// Shore foam scales with it: a calm lake keeps a few thin threads, a breezy one a net, a fast river whitewater.
+float bodyEnergy(const Water& w, const WaterBody& b) {
+    float ss = 0;
+    for (const Water::Wave& v : w.waves) ss += v.amplitude * v.amplitude;
+    const float hs = 2.83f * std::sqrt(ss);
+    auto smooth = [](float a, float c, float x) { const float t = std::clamp((x - a) / (c - a), 0.f, 1.f); return t * t * (3 - 2 * t); };
+    float e = smooth(0.02f, 0.3f, hs);
+    if (b.isRiver()) e = std::max(e, smooth(0.8f, 3.2f, b.flowSpeed));
+    return e;
+}
+
+void setBodyUniforms(const Scene& s, const Camera& cam, const BodyDraw& d) {
+    const Water& w = d.look;
+    const WaterBody& b = *d.b;
+    const Shader& lit = gpu.lit;
+    const double seconds = frameTime(gpu.frame) / std::max(w.fps, 1.f);
+    setWaterLook(s, cam, w, -1e9f, seconds);                // the camera is above it: never "from below"
+    const int on = 1, mode = 2;
+    SetShaderValue(lit, gpu.W.on, &on, SHADER_UNIFORM_INT);
+    SetShaderValue(lit, gpu.W.mode, &mode, SHADER_UNIFORM_INT);
+    const float energy = bodyEnergy(w, b);
+    const Vector4 shore{ std::max(b.edgeSoft, 0.f), std::max(b.foamWidth, 0.01f) * (0.4f + 0.6f * energy), std::clamp(b.shoreFoam, 0.f, 1.f), energy };
+    const Vector4 flow{ std::max(b.flowPeriod, 0.2f), std::max(b.ripple, 0.f), std::max(b.rippleLength, 0.05f), b.isRiver() ? 1.f : 0.f };
+    SetShaderValue(lit, GetShaderLocation(lit, "bodyShore"), &shore, SHADER_UNIFORM_VEC4);
+    SetShaderValue(lit, GetShaderLocation(lit, "bodyFlow"), &flow, SHADER_UNIFORM_VEC4);
+    { const int dbg = s.ground.debug; SetShaderValue(lit, GetShaderLocation(lit, "bodyDebug"), &dbg, SHADER_UNIFORM_INT); }
+}
+
+// The scene mirrored about the water level, into the reflection target, as the viewing camera sees it
+// (so a point's mirror image lands on the pixel that shows its reflection). Only the world is mirrored: the
+// view matrix gets the flip, the lights, shadows and world positions stay real; the eye the shader sees
+// is the mirrored one. What lies under the level is discarded in the lit shader (reflClip), which keeps the
+// depth buffer an ordinary perspective one for the cloud march. The winding flips with the mirror: front
+// faces are culled instead of back faces. `mirrorItems` are collected against the mirrored frustum.
+void renderReflection(Scene& s, const Camera& cam, const Camera& mirror, const WaterView& wv, std::vector<Item>& mirrorItems,
+                      const Shadows& shadows, Texture2D envTex, float scale, const CloudFrame* clouds, int vw, int vh) {
+    const float q = wv.water.reflections == Water::Reflections::Half ? 0.5f : wv.water.reflections == Water::Reflections::Quarter ? 0.25f : 1.f;
+    const int rw = std::max(16, (int)std::lround(vw * q)), rh = std::max(16, (int)std::lround(vh * q));
+    DepthTarget& rt = waterTarget(gpu.reflTarget, rw, rh, true);
+    const long long blades = gpu.fieldBlades, shadowBlades = gpu.fieldShadowBlades, bodies = gpu.instanceBodies, tris = gpu.instanceTriangles;
+    const Vector3 savedView = gpu.viewCam;
+    rlDrawRenderBatchActive();
+    rlEnableFramebuffer(rt.fbo);
+    rlViewport(0, 0, rw, rh);
+    rlEnableDepthMask();
+    rlClearColor(0, 0, 0, 0);
+    rlClearScreenBuffers();
+    rlMatrixMode(RL_PROJECTION);
+    rlLoadIdentity();
+    const double aspect = (double)vw / vh, top = cam.nearPlane * std::tan(cam.fov * 0.5 * DEG2RAD);
+    rlFrustum(-top * aspect, top * aspect, -top, top, cam.nearPlane, cam.farPlane);
+    rlMatrixMode(RL_MODELVIEW);
+    rlLoadIdentity();
+    const Matrix view = MatrixLookAt(cam.position, cam.target, safeUp(Vector3Subtract(cam.target, cam.position), cam.upVector));
+    const Matrix flip = MatrixMultiply(MatrixScale(1, -1, 1), MatrixTranslate(0, 2 * wv.level, 0));
+    const Matrix viewR = MatrixMultiply(flip, view);
+    rlMultMatrixf(MatrixToFloat(viewR));
+    rlEnableDepthTest();
+    rlEnableDepthMask();
+    rlSetCullFace(RL_CULL_FACE_FRONT);
+
+    setSceneUniforms(s, cam, shadows, envTex, scale);
+    const int zero = 0, one = 1;
+    gpu.viewCam = mirror.position;
+    SetShaderValue(gpu.lit, gpu.L.viewPos, &mirror.position, SHADER_UNIFORM_VEC3);
+    SetShaderValue(gpu.lit, gpu.W.on, &zero, SHADER_UNIFORM_INT);
+    SetShaderValue(gpu.lit, gpu.W.level, &wv.level, SHADER_UNIFORM_FLOAT);        // what is cut away is what lies under this plane (a body's level may not be the sea's)
+    SetShaderValue(gpu.lit, gpu.W.reflClip, &one, SHADER_UNIFORM_INT);
+    bindUnit(SHADOW_SLOT, shadows.tiles.empty() ? 0 : gpu.atlasTex);
+    bindUnit(ENV_SLOT, envTex.id);
+    if (gpu.cl.shadowOn) bindUnit(CLOUD_SLOT, gpu.cl.shadowRT.texture.id);
+    std::vector<Item> clear;
+    for (Item& it : mirrorItems) {
+        if (opacityOf(it) < 1.f) {
+            const Vector3 p = Vector3Transform({ 0, 0, 0 }, MatrixMultiply(it.world, viewR));
+            it.viewDepth = -p.z;
+            clear.push_back(it);
+        } else drawItem(it, Pass::Lit);
+    }
+    std::stable_sort(clear.begin(), clear.end(), [](const Item& a, const Item& b) { return a.viewDepth > b.viewDepth; });
+    rlDisableDepthMask();
+    for (const Item& it : clear) drawItem(it, Pass::Lit);
+    rlEnableDepthMask();
+    rlSetCullFace(RL_CULL_FACE_BACK);
+    bindUnit(SHADOW_SLOT, 0);
+    bindUnit(ENV_SLOT, 0);
+    bindUnit(CLOUD_SLOT, 0);
+    SetShaderValue(gpu.lit, gpu.W.reflClip, &zero, SHADER_UNIFORM_INT);
+    rlDrawRenderBatchActive();
+    rlDisableDepthTest();
+    rlDisableBackfaceCulling();
+    rlMatrixMode(RL_MODELVIEW);
+    rlLoadIdentity();
+    if (clouds) drawClouds(s, *clouds, mirror, rt, rw, rh, 0, 0, rw, rh, true);
+    int mips = 0;
+    rlGenTextureMipmaps(rt.color, rw, rh, RL_PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, &mips);
+    gpu.fieldBlades = blades; gpu.fieldShadowBlades = shadowBlades; gpu.instanceBodies = bodies; gpu.instanceTriangles = tris;
+    gpu.viewCam = savedView;
+}
+
+// Copies the colour and depth of `src` (the opaque scene so far) into the refraction target.
+DepthTarget& copyScene(const DepthTarget& src) {
+    DepthTarget& dst = waterTarget(gpu.refrTarget, src.w, src.h, false);
+    rlDrawRenderBatchActive();
+    rlBindFramebuffer(RL_READ_FRAMEBUFFER, src.fbo);
+    rlBindFramebuffer(RL_DRAW_FRAMEBUFFER, dst.fbo);
+    rlBlitFramebuffer(0, 0, src.w, src.h, 0, 0, src.w, src.h, 0x00000100 | 0x00004000);   // depth and colour
+    rlEnableFramebuffer(src.fbo);
+    return dst;
+}
+
+// ---- precipitation (Scene::precipitation): see Downfall in scene3d.hpp and precip_glsl.hpp
+// The settings of the frame being drawn (with the weather worked in) and what the occlusion pass made.
+struct PrecipFrame {
+    bool on = false;
+    Downfall d;
+    double secs = 0;
+    Vector2 aRain{ 0, 0 }, aSnow{ 0, 0 };
+    bool map = false;                    // the depth map from above was drawn this frame
+    Matrix occVP{}, occInv{};
+    float occRange = 1;
+};
+constexpr float PRECIP_BAND = 0.1f;      // the shader's rank band (BAND)
+
+PrecipFrame precipFrame(const Scene& s) {
+    PrecipFrame f;
+    f.d = inWeather(s.precipitation, s.weather);
+    f.on = f.d.enabled && f.d.kind != Precipitation::None && f.d.intensity > 0.001f && f.d.radius > 1.f;
+    f.secs = frameTime(gpu.frame) / std::max(f.d.fps, 1.f);
+    f.aRain = f.d.slant(false);
+    f.aSnow = f.d.slant(true);
+    return f;
+}
+
+float smooth01(float e0, float e1, float x) {
+    const float u = std::clamp((x - e0) / std::max(e1 - e0, 1e-6f), 0.f, 1.f);
+    return u * u * (3 - 2 * u);
+}
+// The shader's near-layer keep fraction at a distance.
+float precipKeep(const Downfall& d, float dist) {
+    return std::min(1.f, std::pow(0.35f * d.radius / std::max(dist, 0.01f), 1.5f)) * (1 - smooth01(0.75f * d.radius, d.radius, dist));
+}
+
+// Renders the opaque scene's depth from above along the fall into gpu.pr.occ, over `radius` round the camera.
+// It is needed to keep the rain off what is under a roof (occlusion) and to find where drops land (splashes).
+void renderPrecipOcclusion(const Camera& cam, PrecipFrame& f, const std::vector<Item>& items) {
+    const Downfall& d = f.d;
+    const bool splash = d.splashes && d.kind != Precipitation::Snow;
+    if (!f.on || !(d.occlusion || splash)) return;
+    const int N = std::clamp(d.occlusionSize, 128, 4096);
+    DepthTarget& t = waterTarget(gpu.pr.occ, N, N, false);
+    const Vector2 a = d.kind == Precipitation::Snow ? f.aSnow : f.aRain;
+    const Vector3 dir = Vector3Normalize({ a.x, -1.f, a.y });                // the way a drop moves
+    const Vector3 up0 = safeUp(dir, { 0, 1, 0 });
+    const Vector3 right = Vector3Normalize(Vector3CrossProduct(dir, up0)), up = Vector3CrossProduct(right, dir);
+    const float E = d.radius + 4.f, texel = 2 * E / (float)N;
+    // The map's centre moves in whole texels, so a roof's edge does not crawl as the camera moves.
+    Vector3 target = cam.position;
+    const float cx = Vector3DotProduct(target, right), cy = Vector3DotProduct(target, up);
+    target = Vector3Add(target, Vector3Add(Vector3Scale(right, std::floor(cx / texel) * texel - cx), Vector3Scale(up, std::floor(cy / texel) * texel - cy)));
+    const float back = 80.f, zNear = 0.5f, zFar = back + 120.f;
+    rlDrawRenderBatchActive();
+    rlEnableFramebuffer(t.fbo);
+    rlViewport(0, 0, N, N);
+    rlEnableDepthTest();
+    rlEnableDepthMask();
+    rlClearColor(0, 0, 0, 0);
+    rlClearScreenBuffers();
+    rlDisableBackfaceCulling();                      // a thin roof is a roof from either side
+    Vector4 params;
+    f.occVP = loadTileCamera(Vector3Subtract(target, Vector3Scale(dir, back)), target, up0, false, E, zNear, zFar, N, params);
+    f.occInv = MatrixInvert(f.occVP);
+    f.occRange = zFar - zNear;
+    for (const Item& it : items)
+        if (!it.particle && !it.tiles && opacityOf(it) >= 1.f) drawItem(it, Pass::Depth);
+    rlDrawRenderBatchActive();
+    rlEnableBackfaceCulling();
+    f.map = true;
+}
+
+struct PrecipTile { int ix, iy, iz, n; };
+
+// The tiles of one layer (0 near, 1 far, 2 splashes) that can be seen, each with how many of its drops to draw.
+void gatherPrecip(const Downfall& d, Vector2 a, const Camera& cam, float aspect, int layer, std::vector<PrecipTile>& out) {
+    const bool farL = layer == 1;
+    const float S = farL ? Downfall::kFarTile : Downfall::kTile, Hc = farL ? Downfall::kFarCell : Downfall::kCell;
+    const uint32_t full = farL ? d.farDropsPerTile() : d.dropsPerTile();
+    const float rMax = layer == 0 ? d.radius : layer == 1 ? d.farRadius : d.splashRadius, rMin = farL ? 0.7f * d.radius : 0.f;
+    const float I = std::clamp(d.intensity, 0.f, 1.f);
+    const Vector3 c0 = cam.position;
+    const float yLo = c0.y - (farL ? 0.6f * d.farRadius : rMax), yHi = c0.y + (farL ? 0.4f * d.farRadius : rMax);
+    const int iy0 = (int)std::floor(yLo / Hc), iy1 = (int)std::floor(yHi / Hc);
+    const int ix0 = (int)std::floor((c0.x - rMax + std::min(a.x, 0.f) * Hc) / S) - 1, ix1 = (int)std::floor((c0.x + rMax + std::max(a.x, 0.f) * Hc) / S) + 1;
+    const int iz0 = (int)std::floor((c0.z - rMax + std::min(a.y, 0.f) * Hc) / S) - 1, iz1 = (int)std::floor((c0.z + rMax + std::max(a.y, 0.f) * Hc) / S) + 1;
+    const float rad = std::sqrt(std::pow(S * 0.5f + std::fabs(a.x) * Hc * 0.5f, 2.f) + Hc * Hc * 0.25f + std::pow(S * 0.5f + std::fabs(a.y) * Hc * 0.5f, 2.f));
+    for (int iy = iy0; iy <= iy1; iy++)
+        for (int iz = iz0; iz <= iz1; iz++)
+            for (int ix = ix0; ix <= ix1; ix++) {
+                const Vector3 c{ ((float)ix + 0.5f) * S - a.x * Hc * 0.5f, ((float)iy + 0.5f) * Hc, ((float)iz + 0.5f) * S - a.y * Hc * 0.5f };
+                const float dist = Vector3Distance(c, c0);
+                if (dist - rad > rMax || (farL && dist + rad < rMin)) continue;
+                if (!visibleSphere(cam, aspect, c, rad)) continue;
+                const float dn = std::max(0.f, dist - rad);
+                const float keep = layer == 0 ? precipKeep(d, dn) : layer == 1 ? 1.f : 1 - smooth01(0.5f * d.splashRadius, d.splashRadius, dn);
+                const float m = I * keep;
+                const int n = std::min((int)full, (int)std::ceil((float)full * std::min(1.f, m * (1 + PRECIP_BAND))));
+                if (n > 0) out.push_back({ ix, iy, iz, n });
+            }
+}
+
+// Draws the rain, snow and splashes of the frame into the bound target (depth tested, not written).
+void drawPrecipitation(const Scene& s, const Camera& cam, PrecipFrame& f, const Matrix& view, const Matrix& proj, int vw, int vh,
+                       Texture2D envTex) {
+    const Downfall& d = f.d;
+    Gpu::PrecipGpu& pg = gpu.pr;
+    pg.drops = pg.splashes = 0;
+    if (!pg.sh.id) {
+        pg.sh = LoadShaderFromMemory(PRECIP_VS, PRECIP_FS);
+        pg.vao = rlLoadVertexArray();
+        rlEnableVertexArray(pg.vao);
+        rlDisableVertexArray();
+    }
+    const Shader& sh = pg.sh;
+    auto L = [&](const char* name) {
+        auto it = pg.loc.find(name);
+        if (it != pg.loc.end()) return it->second;
+        return pg.loc[name] = GetShaderLocation(sh, name);
+    };
+    auto setF = [&](const char* n, float v) { SetShaderValue(sh, L(n), &v, SHADER_UNIFORM_FLOAT); };
+    auto setI = [&](const char* n, int v) { SetShaderValue(sh, L(n), &v, SHADER_UNIFORM_INT); };
+    auto set2 = [&](const char* n, float x, float y) { const float v[2] = { x, y }; SetShaderValue(sh, L(n), v, SHADER_UNIFORM_VEC2); };
+    auto set3 = [&](const char* n, Vector3 v) { SetShaderValue(sh, L(n), &v, SHADER_UNIFORM_VEC3); };
+    auto set4 = [&](const char* n, float x, float y, float z, float w) { const float v[4] = { x, y, z, w }; SetShaderValue(sh, L(n), v, SHADER_UNIFORM_VEC4); };
+
+    const float aspect = (float)vw / (float)vh;
+    std::vector<PrecipTile> nearT, farT, splashT;
+    const bool snowOnly = d.kind == Precipitation::Snow;
+    gatherPrecip(d, snowOnly ? f.aSnow : f.aRain, cam, aspect, 0, nearT);
+    if (d.farLayer && d.farRadius > d.radius) gatherPrecip(d, snowOnly ? f.aSnow : f.aRain, cam, aspect, 1, farT);
+    const bool splashOn = d.splashes && !snowOnly && f.map;
+    if (splashOn) gatherPrecip(d, f.aRain, cam, aspect, 2, splashT);
+    if (nearT.empty() && farT.empty() && splashT.empty()) return;
+
+    rlDrawRenderBatchActive();
+    rlDisableBackfaceCulling();
+    rlDisableDepthMask();
+    rlSetBlendFactorsSeparate(RL_SRC_ALPHA, RL_ONE_MINUS_SRC_ALPHA, RL_ONE, RL_ONE_MINUS_SRC_ALPHA, RL_FUNC_ADD, RL_FUNC_ADD);
+    BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+    rlEnableShader(sh.id);
+
+    // What does not change from tile to tile.
+    const Vector3 look = Vector3Subtract(cam.target, cam.position);
+    const Vector3 fwd = Vector3Normalize(look);
+    const Vector3 right = Vector3Normalize(Vector3CrossProduct(fwd, safeUp(look, cam.upVector))), upv = Vector3CrossProduct(right, fwd);
+    SetShaderValueMatrix(sh, L("prVP"), MatrixMultiply(view, proj));
+    set3("prCam", cam.position); set3("prForward", fwd); set3("prRight", right); set3("prUp", upv);
+    setI("prOrtho", cam.orthographic ? 1 : 0);
+    setF("prPixel", cam.orthographic ? cam.orthoHeight / (float)vh : 2 * std::tan(cam.fov * 0.5f * DEG2RAD) / (float)vh);
+    setF("prSecs", (float)f.secs);
+    setI("prSeed", (int)d.seed);
+    setI("prKind", d.kind == Precipitation::Rain ? 0 : d.kind == Precipitation::Snow ? 1 : 2);
+    set2("prAr", f.aRain.x, f.aRain.y); set2("prAs", f.aSnow.x, f.aSnow.y);
+    set4("prRainP", d.rainSpeed.x, d.rainSpeed.y, d.rainSize.x, d.rainSize.y);
+    set4("prSnowP", d.snowSpeed.x, d.snowSpeed.y, d.snowSize.x, d.snowSize.y);
+    setF("prFlutter", d.flutter); setF("prExposure", std::max(d.exposure, 1e-4f));
+    setF("prIntensity", std::clamp(d.intensity, 0.f, 1.f)); setF("prOpacity", std::clamp(d.opacity, 0.f, 2.f));
+    const float trueDensity = d.kind == Precipitation::Snow ? d.snowDensity : d.rainDensity;
+    set4("prRange", d.radius, 0.35f * d.radius, d.farRadius, std::max(trueDensity / std::max(d.farDensity, 1e-3f), 1.f));
+    setF("prSplashR", d.splashRadius);
+    set2("prQShift", d.worldFixed ? 0.f : cam.position.x, d.worldFixed ? 0.f : cam.position.z);
+    setI("prOccOn", f.map ? (d.occlusion ? 1 : 2) : 0);
+    if (f.map) {
+        SetShaderValueMatrix(sh, L("prOccVP"), f.occVP);
+        SetShaderValueMatrix(sh, L("prOccInv"), f.occInv);
+        setF("prOccRange", f.occRange);
+    }
+    setI("prOcc", REFR_COLOR_SLOT);
+    bindUnit(REFR_COLOR_SLOT, f.map ? gpu.pr.occ.depth : 0);
+    setF("prWater", s.water.enabled ? waterOf(s).level : -1e9f);
+    // Lights, sky and fog as the lit shader gets them.
+    const int count = std::min((int)s.lights.size(), MAX_LIGHTS);
+    int type[MAX_LIGHTS] = {};
+    Vector3 pos[MAX_LIGHTS] = {}, dir[MAX_LIGHTS] = {}, col[MAX_LIGHTS] = {};
+    float range[MAX_LIGHTS] = {}, cin[MAX_LIGHTS] = {}, cosOut[MAX_LIGHTS] = {};
+    for (int i = 0; i < count; i++) {
+        const Light& l = s.lights[(size_t)i];
+        type[i] = (int)l.type; pos[i] = l.position;
+        const Vector3 dl = Vector3Subtract(l.target, l.position);
+        dir[i] = Vector3Length(dl) > 1e-6f ? Vector3Normalize(dl) : Vector3{ 0, -1, 0 };
+        col[i] = linear(l.color, l.intensity);
+        range[i] = l.range;
+        const float outer = std::clamp(l.outerAngle, 0.1f, 89.9f), inner = std::clamp(l.innerAngle, 0.f, outer - 0.05f);
+        cin[i] = std::cos(inner * DEG2RAD); cosOut[i] = std::cos(outer * DEG2RAD);
+    }
+    setI("prLightCount", count);
+    SetShaderValueV(sh, L("prLightType"), type, SHADER_UNIFORM_INT, MAX_LIGHTS);
+    SetShaderValueV(sh, L("prLightPos"), pos, SHADER_UNIFORM_VEC3, MAX_LIGHTS);
+    SetShaderValueV(sh, L("prLightDir"), dir, SHADER_UNIFORM_VEC3, MAX_LIGHTS);
+    SetShaderValueV(sh, L("prLightColor"), col, SHADER_UNIFORM_VEC3, MAX_LIGHTS);
+    SetShaderValueV(sh, L("prLightRange"), range, SHADER_UNIFORM_FLOAT, MAX_LIGHTS);
+    SetShaderValueV(sh, L("prCosInner"), cin, SHADER_UNIFORM_FLOAT, MAX_LIGHTS);
+    SetShaderValueV(sh, L("prCosOuter"), cosOut, SHADER_UNIFORM_FLOAT, MAX_LIGHTS);
+    set3("prSky", linear(s.skyColor, s.ambient)); set3("prGround", linear(s.groundColor, s.ambient));
+    const int hasEnv = envTex.id ? 1 : 0, envLin = hasEnv && isFloatFormat(envTex.format) ? 1 : 0;
+    const float maxLod = hasEnv ? std::floor(std::log2((float)std::max(envTex.width, envTex.height))) : 0;
+    const float intensity = s.sky.enabled ? s.sky.lighting : s.environmentIntensity;
+    setI("hasEnv", hasEnv); setI("envLinear", envLin); setF("envMaxLod", maxLod); setF("envIntensity", intensity);
+    setF("envRotation", s.sky.enabled ? 0.f : s.environmentRotation / 360.f);
+    setF("backdropScale", s.sky.enabled ? 1.f / std::max(intensity, 1e-4f) : 1.f);
+    setI("envMap", ENV_SLOT);
+    set3("fogColor", linear(s.fogColor));
+    setF("fogNear", s.fogNear); setF("fogFar", s.fogFar); setI("fogMode", (int)s.fogMode); setF("fogDensity", s.fogDensity);
+    setF("fogHeight", s.fogHeight); setF("fogFalloff", s.fogFalloff); setI("fogSky", s.fogFromSky ? 1 : 0);
+
+    const int locTile = L("prTile"), locCell = L("prCell"), locSplash = L("prSplash"), locFar = L("prFar");
+    auto layer = [&](const std::vector<PrecipTile>& tiles, bool isFar, bool isSplash, uint32_t full, long long& counter) {
+        if (tiles.empty()) return;
+        const int fi = isFar ? 1 : 0, si = isSplash ? 1 : 0;
+        SetShaderValue(sh, locFar, &fi, SHADER_UNIFORM_INT);
+        SetShaderValue(sh, locSplash, &si, SHADER_UNIFORM_INT);
+        const float cell[3] = { isFar ? Downfall::kFarTile : Downfall::kTile, isFar ? Downfall::kFarCell : Downfall::kCell, (float)full };
+        SetShaderValue(sh, locCell, cell, SHADER_UNIFORM_VEC3);
+        rlEnableVertexArray(pg.vao);
+        for (const PrecipTile& t : tiles) {
+            const int key[3] = { t.ix, t.iy, t.iz };
+            SetShaderValue(sh, locTile, key, SHADER_UNIFORM_IVEC3);
+            rlDrawVertexArrayInstanced(0, isSplash ? 36 : 6, t.n);     // a splash: the ring and five droplets
+            counter += t.n;
+        }
+        rlDisableVertexArray();
+    };
+    layer(farT, true, false, d.farDropsPerTile(), pg.drops);
+    layer(nearT, false, false, d.dropsPerTile(), pg.drops);
+    layer(splashT, false, true, d.dropsPerTile(), pg.splashes);
+
+    bindUnit(REFR_COLOR_SLOT, 0);
+    rlDisableShader();
+    restoreBlend();
+    rlEnableDepthMask();
+}
+
+// ---- the ground (Scene::ground): the wet and snow state of this frame, and the uniforms that carry it
+struct WetFrame {
+    bool on = false;                     // there is wetness or snow to draw
+    bool ssr = false;                    // and the scene is to be reflected in it (a second draw after the opaque pass)
+    Weather::GroundState g;
+};
+
+WetFrame wetFrame(const Scene& s) {
+    WetFrame w;
+    const float fps = s.weather.enabled ? s.weather.fps : s.precipitation.fps;
+    w.g = groundOf(s, frameTime(gpu.frame) / std::max(fps, 1.f));
+    w.on = w.g.wetness > 0.001f || w.g.snowDepth > 0.0005f;
+    w.ssr = w.on && s.ground.reflections && w.g.wetness > 0.05f && w.g.wetness > w.g.snowDepth / Weather::kSnowFull;
+    return w;
+}
+
+// Sets the ground's uniforms of the lit program for this frame (the rain's rings too, which water uses without a
+// wet ground) and binds the rain's depth map for the shelter test. Call before any pass that draws lit items.
+void setWetUniforms(const Scene& s, const WetFrame& w, const PrecipFrame& pf) {
+    const Shader& sh = gpu.lit;
+    auto I = [&](const char* n, int v) { SetShaderValue(sh, GetShaderLocation(sh, n), &v, SHADER_UNIFORM_INT); };
+    auto F = [&](const char* n, float v) { SetShaderValue(sh, GetShaderLocation(sh, n), &v, SHADER_UNIFORM_FLOAT); };
+    const Ground& g = s.ground;
+    I("ssrPass", 0);
+    I("wetOn", w.on ? 1 : 0);
+    F("wetLevel", w.g.wetness);
+    F("snowDepth", w.g.snowDepth);
+    F("wetPuddles", std::clamp(g.puddles, 0.f, 2.f));
+    F("wetPuddleSize", std::max(g.puddleSize, 0.1f));
+    I("wetSeed", (int)g.seed);
+    I("wetGrass", g.snowOnGrass ? 1 : 0);
+    I("wetDebug", g.debug);
+    const bool shelter = w.on && pf.map;
+    I("wetOccOn", shelter ? 1 : 0);
+    if (shelter) {
+        SetShaderValueMatrix(sh, GetShaderLocation(sh, "wetOccVP"), pf.occVP);
+        F("wetOccRange", pf.occRange);
+    }
+    bindUnit(WET_OCC_SLOT, shelter ? gpu.pr.occ.depth : 0);
+    // The rings: rain and the rain share of sleet, as many a square metre as the rate and the intensity say.
+    const float share = pf.d.kind == Precipitation::Rain ? 1.f : pf.d.kind == Precipitation::Sleet ? 0.6f : 0.f;
+    const float rate = pf.on ? std::clamp(g.rippleRate, 0.f, Ground::maxRate()) * std::clamp(pf.d.intensity, 0.f, 1.f) * share : 0.f;
+    F("rippleRate", rate);
+    F("rippleTime", (float)pf.secs);
+    I("rippleSeed", (int)(pf.d.seed * 2654435761u + g.seed));
+}
+
+// The scene's reflection in flat wet ground and puddles: a copy of the opaque picture, then the plain opaque meshes
+// drawn again over it (the depth test keeps what is the nearest surface), each fragment on flat wet ground marching
+// its reflected ray through the copy and blending in what it finds by the film's Fresnel. Rays that find nothing leave the
+// sky reflection the first pass already added.
+void drawWetReflections(const std::vector<Item>& items, const DepthTarget& scene, const Vector4& map) {
+    const Matrix vpm = MatrixMultiply(rlGetMatrixModelview(), rlGetMatrixProjection());
+    const DepthTarget& copy = copyScene(scene);
+    SetShaderValueMatrix(gpu.lit, gpu.W.reflVP, vpm);
+    SetShaderValueMatrix(gpu.lit, gpu.W.refrInvVP, MatrixInvert(vpm));
+    SetShaderValue(gpu.lit, gpu.W.refrMap, &map, SHADER_UNIFORM_VEC4);
+    bindUnit(REFR_COLOR_SLOT, copy.color);
+    bindUnit(REFR_DEPTH_SLOT, copy.depth);
+    const int on = 1, off = 0;
+    SetShaderValue(gpu.lit, GetShaderLocation(gpu.lit, "ssrPass"), &on, SHADER_UNIFORM_INT);
+    rlDrawRenderBatchActive();
+    rlDisableDepthMask();
+    rlSetBlendFactorsSeparate(RL_SRC_ALPHA, RL_ONE_MINUS_SRC_ALPHA, RL_ZERO, RL_ONE, RL_FUNC_ADD, RL_FUNC_ADD);
+    BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+    for (const Item& it : items) {
+        const g3d::Material& m = it.obj->material;
+        if (it.inst || it.tiles || it.particle || opacityOf(it) < 1.f || !m.weathering || m.unlit || m.shading != Shading::Standard) continue;
+        drawItem(it, Pass::Lit);
+    }
+    rlDrawRenderBatchActive();
+    restoreBlend();
+    rlEnableDepthMask();
+    SetShaderValue(gpu.lit, GetShaderLocation(gpu.lit, "ssrPass"), &off, SHADER_UNIFORM_INT);
+    bindUnit(REFR_COLOR_SLOT, 0);
+    bindUnit(REFR_DEPTH_SLOT, 0);
+}
+
+void renderBody(Scene& s, Camera& camIn, Rectangle vp, const RenderTexture& target, float scale, int t, const Cull& cull) {
     ensureGpu();
+    Camera cam = camIn;
+    if (s.water.enabled && s.water.spectrum.enabled && !cam.orthographic) {
+        // The spectrum sea reaches the horizon: the far plane goes out to it (this frame's copy of the camera only).
+        const float above = std::max(cam.position.y - s.water.level, 0.f);
+        cam.farPlane = std::max(cam.farPlane, 1.5f * seaHorizon(above) + 500.f);
+    }
     std::vector<Item> items;
     std::vector<Emitting> emitters;
     const double ft = frameTime(t);              // particles follow motion-blur subframes
@@ -3476,8 +5796,37 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     gpu.instanceBodies = gpu.instanceTriangles = 0;
     pruneFields();
     collect(s.objects, MatrixIdentity(), items, emitters, ft, cull, instanceStore, fieldStore);
+    // The water: seen from above with water in the picture, it may need the scene mirrored (what the mirrored
+    // camera sees, so collected again against its frustum) and a copy of the opaque scene to look through.
+    const int vw0 = std::max(1, (int)std::lround(vp.width * scale)), vh0 = std::max(1, (int)std::lround(vp.height * scale));
+    const WaterView wview = waterView(s, cam, (float)vw0 / (float)vh0, t);
+    const float aspect0 = (float)vw0 / (float)vh0;
+    const WaterView rview = reflectionView(s, cam, aspect0, t);      // the one level that is mirrored: the sea's, else a body's
+    const bool reflect = cull.mirror && rview.visible;
+    const bool seaReflect = reflect && wview.visible && s.water.reflections != Water::Reflections::Off;
+    static int bodyStamp = 0;
+    const std::vector<BodyDraw> bodies = collectBodies(s, cam, aspect0, ++bodyStamp);
+    const bool refractOn = wview.visible && wview.water.refraction;
+    std::vector<Item> mirrorItems;
+    std::deque<std::vector<Matrix>> mirrorInstances;
+    std::deque<std::vector<FieldTile>> mirrorFields;
+    if (reflect) {
+        std::vector<Emitting> unused;
+        Cull km = cull;
+        km.cam = cull.mirror;
+        km.mirror = nullptr;
+        collect(s.objects, MatrixIdentity(), mirrorItems, unused, ft, km, mirrorInstances, mirrorFields);
+        mirrorItems.erase(std::remove_if(mirrorItems.begin(), mirrorItems.end(), [](const Item& it) { return it.obj->material.shadowOnly; }), mirrorItems.end());
+    }
     const Texture2D envTex = s.sky.enabled ? renderSky(s, ft, target.id, target.texture.width, target.texture.height)
                                            : environmentTexture(s);
+    gpu.cl.shadowOn = false;
+    const bool cloudsOn = cloudsActive(s, cam);
+    CloudFrame cloudNow;
+    if (cloudsOn) {
+        cloudNow = cloudFrame(s, ft);
+        renderCloudShadow(s, cloudNow, cam, target.id, target.texture.width, target.texture.height);
+    }
 
     // Background, in 2D before the viewport changes.
     if (s.background.a > 0) {
@@ -3489,12 +5838,33 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     rlPushMatrix();
     const Shadows shadows = renderShadows(s, items);
     items.erase(std::remove_if(items.begin(), items.end(), [](const Item& it) { return it.obj->material.shadowOnly; }), items.end());
+    gpu.pr.drops = gpu.pr.splashes = 0;
+    PrecipFrame precip = precipFrame(s);
+    renderPrecipOcclusion(cam, precip, items);
+    const WetFrame wet = wetFrame(s);
+    setWetUniforms(s, wet, precip);
+    if (reflect) {
+        renderReflection(s, cam, *cull.mirror, rview, mirrorItems, shadows, envTex, scale, cloudsOn ? &cloudNow : nullptr, vw0, vh0);
+        // The mirrored clouds use texture unit 7 (CLOUD_LOW_SLOT) and leave it empty, which is where the rain's depth map was bound for
+        // the ground's shelter test: without this the whole ground read as sheltered and kept no snow (a water body was enough).
+        setWetUniforms(s, wet, precip);
+    }
 
     // Main pass, into the target or (for depth of field) a target with a depth texture.
     const int fbW = target.texture.width, fbH = target.texture.height;
-    const bool dof = cam.dof.aperture > 0 && cam.dof.maxBlur > 0;
-    const DepthTarget* dofTarget = nullptr;
-    if (dof) {
+    const bool dof = cam.dof.aperture > 0 && cam.dof.maxBlur > 0;    const DepthTarget* dofTarget = nullptr;
+    // Lightning and the rainbow are drawn over the finished picture, against the opaque depth.
+    const std::vector<LightningActive> bolts = s.lightning.enabled && !cam.orthographic ? lightningAt(s, lightningSeconds(s, ft)) : std::vector<LightningActive>{};
+    RainbowFrame bow;
+    if (!cam.orthographic && s.weather.enabled) {
+        bow = rainbowOf(s, ft);
+        const float ty = std::tan(cam.fov * 0.5f * DEG2RAD), tx = ty * (float)vw0 / (float)vh0;
+        const Vector3 fwd0 = Vector3Normalize(Vector3Subtract(cam.target, cam.position));
+        const float off = std::acos(std::clamp(Vector3DotProduct(fwd0, bow.antiSolar), -1.f, 1.f)) * RAD2DEG;
+        if (off > std::atan(std::sqrt(tx * tx + ty * ty)) * RAD2DEG + 56.f) bow.strength = 0;     // the bow's whole ring lies behind the view
+    }
+    const bool volOn = volumetricActive(s, cam), aerialOn = aerialActive(s, cam);       // light in the air: both read the opaque depth
+    if (dof || cloudsOn || refractOn || wet.ssr || !bodies.empty() || !bolts.empty() || bow.strength > 0.002f || volOn || aerialOn) {         // clouds and the water need the opaque depth as a texture: draw into the depth target
         dofTarget = &sceneTarget(fbW, fbH);
         rlEnableFramebuffer(dofTarget->fbo);
         rlViewport(0, 0, fbW, fbH);
@@ -3524,9 +5894,12 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     rlEnableDepthTest();
     rlEnableDepthMask();
 
+    FogHold fogHold(s, volOn);                         // the march fogs the picture (drawAir): the surfaces carry none
     setSceneUniforms(s, cam, shadows, envTex, scale);
+    if (refractOn && s.water.enabled) { const int skipTint = 2; SetShaderValue(gpu.lit, gpu.W.refrMode, &skipTint, SHADER_UNIFORM_INT); }    // what is under the water is absorbed once, by the surface that looks through it
     bindUnit(SHADOW_SLOT, shadows.tiles.empty() ? 0 : gpu.atlasTex);
     bindUnit(ENV_SLOT, envTex.id);
+    if (gpu.cl.shadowOn) bindUnit(CLOUD_SLOT, gpu.cl.shadowRT.texture.id);
     if (envTex.id && (s.sky.enabled ? s.sky.show : s.showEnvironment)) drawSkybox(cam);
     std::vector<Item> clear;
     for (Item& it : items) {
@@ -3536,24 +5909,97 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
             clear.push_back(it);
         } else drawItem(it, Pass::Lit);
     }
+    if (wet.ssr && dofTarget)
+        drawWetReflections(items, *dofTarget, { (float)vx / fbW, (float)(fbH - vy - vh) / fbH, (float)vw / fbW, (float)vh / fbH });
     // Stable: at equal depth keep scene order, so coplanar layers do not swap between frames.
-    if (s.water.enabled) clear.push_back({ &waterObject(), MatrixIdentity(), std::numeric_limits<float>::max() });
+    const bool spectrumSea = s.water.enabled && s.water.spectrum.enabled;
+    if (s.water.enabled) clear.push_back({ spectrumSea ? &oceanObject() : &waterObject(), MatrixIdentity(), std::numeric_limits<float>::max() });
+    std::map<const Object3D*, size_t> bodyOf;                     // the water bodies, drawn among the transparent items
+    for (size_t i = 0; i < bodies.size(); i++) {
+        clear.push_back({ bodies[i].obj, MatrixIdentity(), bodies[i].depth });
+        bodyOf[bodies[i].obj] = i;
+    }
     std::stable_sort(clear.begin(), clear.end(), [](const Item& a, const Item& b) { return a.viewDepth > b.viewDepth; });
+    // The opaque scene, copied once for everything that looks through it: the sea's refraction, the bodies' shore.
+    const DepthTarget* sceneCopy = (refractOn || !bodies.empty()) && dofTarget ? &copyScene(*dofTarget) : nullptr;
+    const Vector4 sceneMap{ (float)vx / fbW, (float)(fbH - vy - vh) / fbH, (float)vw / fbW, (float)vh / fbH };
     rlDisableDepthMask();
     for (const Item& it : clear) {
-        const bool surface = it.obj == gpu.waterObj.get();       // the sea's surface is its own mode of the lit shader
-        if (surface) { const int on = 1; SetShaderValue(gpu.lit, gpu.W.mode, &on, SHADER_UNIFORM_INT); }
+        if (const auto bi = bodyOf.find(it.obj); bi != bodyOf.end() && sceneCopy) {
+            const BodyDraw& bd = bodies[bi->second];
+            setBodyUniforms(s, cam, bd);
+            const int on = 1, refr = bd.look.refraction ? 1 : 0;
+            const Matrix vpm = MatrixMultiply(rlGetMatrixModelview(), rlGetMatrixProjection());
+            SetShaderValueMatrix(gpu.lit, gpu.W.reflVP, vpm);
+            SetShaderValueMatrix(gpu.lit, gpu.W.refrInvVP, MatrixInvert(vpm));
+            SetShaderValue(gpu.lit, gpu.W.refrMap, &sceneMap, SHADER_UNIFORM_VEC4);
+            SetShaderValue(gpu.lit, gpu.W.refrMode, &refr, SHADER_UNIFORM_INT);
+            bindUnit(REFR_COLOR_SLOT, sceneCopy->color);
+            bindUnit(REFR_DEPTH_SLOT, sceneCopy->depth);
+            if (reflect && bd.look.reflections != Water::Reflections::Off && std::fabs(bd.b->level - rview.level) < 1e-3f) {
+                const DepthTarget& rt = gpu.reflTarget;
+                const Vector2 size{ (float)rt.w, (float)rt.h };
+                const float distort = reflectionBend(bd.look);
+                SetShaderValue(gpu.lit, gpu.W.reflMode, &on, SHADER_UNIFORM_INT);
+                SetShaderValue(gpu.lit, gpu.W.reflSize, &size, SHADER_UNIFORM_VEC2);
+                SetShaderValue(gpu.lit, gpu.W.reflDistort, &distort, SHADER_UNIFORM_FLOAT);
+                { const float full = std::max(bd.look.reflectionDistort, 0.f); SetShaderValue(gpu.lit, GetShaderLocation(gpu.lit, "reflDistortFull"), &full, SHADER_UNIFORM_FLOAT); }
+                bindUnit(REFL_SLOT, rt.color);
+            }
+            drawItem(it, Pass::Lit);
+            for (int slot : { REFL_SLOT, REFR_COLOR_SLOT, REFR_DEPTH_SLOT }) bindUnit(slot, 0);
+            setWaterUniforms(s, cam);                                 // the sea's uniforms again, for what is drawn after
+            continue;
+        }
+        const bool surface = it.obj == gpu.waterObj.get() || it.obj == gpu.oceanObj.get();       // the sea's surface is its own mode of the lit shader
+        if (surface) {
+            const int on = 1;
+            SetShaderValue(gpu.lit, gpu.W.mode, &on, SHADER_UNIFORM_INT);
+            if (spectrumSea) bindOceanTextures(true);
+            if (seaReflect || refractOn) {
+                const Matrix vpm = MatrixMultiply(rlGetMatrixModelview(), rlGetMatrixProjection());
+                SetShaderValueMatrix(gpu.lit, gpu.W.reflVP, vpm);
+                if (seaReflect) {
+                    const DepthTarget& rt = gpu.reflTarget;
+                    const Vector2 size{ (float)rt.w, (float)rt.h };
+                    // How far the waves bend the reflection follows how tall the sea is (reflectionBend).
+                    const float distort = reflectionBend(wview.water);
+                    SetShaderValue(gpu.lit, gpu.W.reflMode, &on, SHADER_UNIFORM_INT);
+                    SetShaderValue(gpu.lit, gpu.W.reflSize, &size, SHADER_UNIFORM_VEC2);
+                    SetShaderValue(gpu.lit, gpu.W.reflDistort, &distort, SHADER_UNIFORM_FLOAT);
+                    { const float full = std::max(wview.water.reflectionDistort, 0.f); SetShaderValue(gpu.lit, GetShaderLocation(gpu.lit, "reflDistortFull"), &full, SHADER_UNIFORM_FLOAT); }
+                    bindUnit(REFL_SLOT, rt.color);
+                }
+                if (refractOn) {
+                    SetShaderValue(gpu.lit, gpu.W.refrMode, &on, SHADER_UNIFORM_INT);
+                    SetShaderValue(gpu.lit, gpu.W.refrMap, &sceneMap, SHADER_UNIFORM_VEC4);
+                    SetShaderValueMatrix(gpu.lit, gpu.W.refrInvVP, MatrixInvert(vpm));
+                    bindUnit(REFR_COLOR_SLOT, sceneCopy->color);
+                    bindUnit(REFR_DEPTH_SLOT, sceneCopy->depth);
+                }
+            }
+        }
         drawItem(it, Pass::Lit);
-        if (surface) { const int off = 0; SetShaderValue(gpu.lit, gpu.W.mode, &off, SHADER_UNIFORM_INT); }
+        if (surface) {
+            const int off = 0;
+            SetShaderValue(gpu.lit, gpu.W.mode, &off, SHADER_UNIFORM_INT);
+            SetShaderValue(gpu.lit, gpu.W.reflMode, &off, SHADER_UNIFORM_INT);
+            SetShaderValue(gpu.lit, gpu.W.refrMode, &off, SHADER_UNIFORM_INT);
+            for (int slot : { REFL_SLOT, REFR_COLOR_SLOT, REFR_DEPTH_SLOT }) bindUnit(slot, 0);
+            if (spectrumSea) bindOceanTextures(false);
+        }
     }
     rlEnableDepthMask();
     if (!emitters.empty()) {
         drawSplats(s, cam, emitters, rlGetMatrixModelview(), rlGetMatrixProjection(), vw, vh);
         drawParticles(s, cam, emitters, view, ft, cull.compH);
     }
+    if (precip.on) drawPrecipitation(s, cam, precip, rlGetMatrixModelview(), rlGetMatrixProjection(), vw, vh, envTex);
 
     bindUnit(SHADOW_SLOT, 0);
     bindUnit(ENV_SLOT, 0);
+    bindUnit(CLOUD_SLOT, 0);
+    bindUnit(WET_OCC_SLOT, 0);
     LineStyles styles;
     const DepthTarget* lt = nullptr;
     if (s.lines.enabled) {
@@ -3567,6 +6013,11 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     rlMatrixMode(RL_MODELVIEW);
     rlLoadIdentity();
     rlViewport(0, 0, fbW, fbH);
+    fogHold.release();
+    if (dofTarget && (volOn || aerialOn)) drawAir(s, cam, shadows, envTex, *dofTarget, fbW, fbH, vx, fbH - vy - vh, vw, vh, volOn, aerialOn);
+    if (cloudsOn) drawClouds(s, cloudNow, cam, *dofTarget, fbW, fbH, vx, fbH - vy - vh, vw, vh);
+    if (dofTarget && bow.strength > 0.002f) drawRainbow(s, bow, cam, *dofTarget, fbW, fbH, vx, fbH - vy - vh, vw, vh);
+    if (dofTarget && !bolts.empty()) drawBolts(s, cam, bolts, *dofTarget, fbW, fbH, vx, fbH - vy - vh, vw, vh);
     if (lt && styles.table.size() > 1) {
         rlEnableFramebuffer(dofTarget ? dofTarget->fbo : target.id);
         compositeLines(s, cam, *lt, styles, vh, scale, t);
@@ -3574,7 +6025,15 @@ void renderBody(Scene& s, Camera& cam, Rectangle vp, const RenderTexture& target
     if (dofTarget) {
         rlEnableFramebuffer(target.id);
         rlScalef(scale, scale, 1.f);                    // the 2D state drawOffscreen bound
-        compositeDof(*dofTarget, cam, scale, { (float)(fbH - vy - vh) / fbH, (float)vh / fbH });
+        if (dof) compositeDof(*dofTarget, cam, scale, { (float)(fbH - vy - vh) / fbH, (float)vh / fbH });
+        else {                                          // clouds only: the depth target is copied over (premultiplied)
+            rlSetBlendFactorsSeparate(RL_ONE, RL_ONE_MINUS_SRC_ALPHA, RL_ONE, RL_ONE_MINUS_SRC_ALPHA, RL_FUNC_ADD, RL_FUNC_ADD);
+            BeginBlendMode(BLEND_CUSTOM_SEPARATE);
+            const Texture2D color{ dofTarget->color, dofTarget->w, dofTarget->h, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
+            DrawTexturePro(color, { 0, 0, (float)dofTarget->w, -(float)dofTarget->h }, { 0, 0, dofTarget->w / scale, dofTarget->h / scale }, { 0, 0 }, 0, WHITE);
+            EndBlendMode();
+            rlDrawRenderBatchActive();
+        }
     }
 }
 
@@ -3614,35 +6073,52 @@ float waveSum(const PackedWaves& p, float x, float z, double seconds, Vector2* s
 } // namespace
 
 float Water::height(float x, float z, double seconds) const {
+    if (spectrum.enabled) {
+        // The same grids the mesh reads, at full detail: the cascades with a patch of 8 m or more, and the curvature.
+        const auto f = ocean::frameAt(*this, seconds);
+        const float drop = spectrum.curvature ? (x * x + z * z) * 0.5f / kPlanetRadius : 0.f;
+        return level + ocean::heightAt(*f, x, z) - drop;
+    }
     return level + waveSum(packWaves(*this), x, z, seconds, nullptr);
 }
 Vector2 Water::slope(float x, float z, double seconds) const {
     Vector2 g;
+    if (spectrum.enabled) {
+        const auto f = ocean::frameAt(*this, seconds);
+        ocean::heightAt(*f, x, z, &g);
+        if (spectrum.curvature) { g.x -= x / kPlanetRadius; g.y -= z / kPlanetRadius; }
+        return g;
+    }
     waveSum(packWaves(*this), x, z, seconds, &g);
     return g;
 }
 Water Water::calm() {
     Water w;
     w.enabled = true;
-    w.waves = { { 20, 7.0f, 0.045f, 1, 1 }, { -35, 3.1f, 0.03f, 1, 1 }, { 75, 1.7f, 0.022f, 1, 1 },
-                { -58, 1.05f, 0.014f, 1, 1 }, { 31, 0.72f, 0.009f, 1, 1 }, { 112, 0.52f, 0.0065f, 1, 1 },
-                { -17, 0.4f, 0.005f, 1, 1 }, { 152, 0.29f, 0.0035f, 1, 1 } };
+    // Directions within 40 degrees of the heading and lengths that are no simple ratio of each other (a grid of
+    // regular sinusoids reads as a lattice); the amplitudes, so Hs, and the longest length are what they were.
+    w.waves = { { 20, 7.0f, 0.045f, 1, 1 }, { -3, 3.4f, 0.03f, 1, 1 }, { 51, 1.93f, 0.022f, 1, 1 },
+                { -18, 1.13f, 0.014f, 1, 1 }, { 34, 0.69f, 0.009f, 1, 1 }, { 57, 0.46f, 0.0065f, 1, 1 },
+                { 11, 0.33f, 0.005f, 1, 1 }, { -14, 0.23f, 0.0035f, 1, 1 } };
     w.foam = 0.2f;
+    w.fetch = 2000;
     return w;
 }
 Water Water::choppy() {
     Water w;
     w.enabled = true;
-    w.waves = { { 15, 14.0f, 0.16f, 1.6f, 1 }, { -30, 7.0f, 0.1f, 1.8f, 1 }, { 60, 3.3f, 0.06f, 1.5f, 1 },
-                { -75, 1.8f, 0.035f, 1, 1 }, { 5, 0.9f, 0.02f, 1, 1 }, { 120, 0.5f, 0.01f, 1, 1 } };
+    w.waves = { { 15, 14.0f, 0.16f, 1.6f, 1 }, { -13, 6.3f, 0.1f, 1.8f, 1 }, { 51, 2.9f, 0.06f, 1.5f, 1 },
+                { -18, 1.55f, 0.035f, 1, 1 }, { 32, 0.83f, 0.02f, 1, 1 }, { 53, 0.44f, 0.01f, 1, 1 } };
+    w.fetch = 10000;
     return w;
 }
 Water Water::storm() {
     Water w;
     w.enabled = true;
-    w.waves = { { 10, 34.0f, 0.7f, 2.4f, 1 }, { -25, 17.0f, 0.42f, 2.6f, 1 }, { 40, 9.0f, 0.24f, 2.2f, 1 },
-                { -60, 4.5f, 0.12f, 1.8f, 1 }, { 80, 2.3f, 0.06f, 1.4f, 1 }, { -5, 1.2f, 0.03f, 1, 1 } };
+    w.waves = { { 10, 34.0f, 0.7f, 2.4f, 1 }, { -20, 15.5f, 0.42f, 2.6f, 1 }, { 45, 8.2f, 0.24f, 2.2f, 1 },
+                { -27, 4.0f, 0.12f, 1.8f, 1 }, { 30, 2.1f, 0.06f, 1.4f, 1 }, { -2, 1.05f, 0.03f, 1, 1 } };
     w.foam = 1;
+    w.fetch = 200000;
     w.deep = { 10, 52, 66, 255 };
     return w;
 }
@@ -4198,6 +6674,8 @@ Vector2 Field::bladeRoot(int tx, int tz, uint32_t k) const {
     return { min.x + (tx + (float)(x >> 8) / 16777216.f) * ts, min.y + (tz + (float)(z >> 8) / 16777216.f) * ts };
 }
 long long fieldBladesSubmitted() { return gpu.fieldBlades; }
+long long precipitationDropsSubmitted() { return gpu.pr.drops; }
+long long precipitationSplashesSubmitted() { return gpu.pr.splashes; }
 long long fieldShadowBladesSubmitted() { return gpu.fieldShadowBlades; }
 long long instanceBodiesSubmitted() { return gpu.instanceBodies; }
 long long instanceTrianglesSubmitted() { return gpu.instanceTriangles; }
@@ -4385,6 +6863,74 @@ Ctx fillCtx(const Surface& s, float width, float height, float margin) {
     return Ctx{ { (width - s.pixels.x * k) / 2, (height - s.pixels.y * k) / 2 }, k, 0, 1 };
 }
 
+namespace {
+// While a frame is drawn with Scene::weather enabled: the fog (from the haze) and the sun, sky and
+// ambient light (under cloud) as the weather sets them. The user's values come back when it ends,
+// so nothing carries from one frame to the next. The wind and the sky are worked in where they
+// are drawn (inWeather), on copies.
+struct WeatherScope {
+    Scene& s;
+    FogMode mode;
+    float density, ambient, sunIntensity = 0, skyLighting;
+    bool fromSky, fog = false, sky = false;
+    int sun = -1;
+    explicit WeatherScope(Scene& sc) : s(sc), mode(sc.fogMode), density(sc.fogDensity), ambient(sc.ambient), skyLighting(sc.sky.lighting),
+                                       fromSky(sc.fogFromSky) {
+        const Weather& w = s.weather;
+        if (!w.enabled) return;
+        if (!s.ownFog) {
+            fog = true;
+            s.fogMode = FogMode::Exponential;
+            s.fogDensity = w.fogDensity();
+            s.fogFromSky = true;
+        }
+        if (s.sky.enabled && !s.sky.ownLight) {              // a clouded sky lights the scene less
+            sky = true;
+            s.sky.lighting = skyLighting * w.skyLightScale();
+        }
+        if (s.sky.enabled && !s.sky.ownLight && s.sky.sunLight >= 0 && s.sky.sunLight < (int)s.lights.size()) {
+            sun = s.sky.sunLight;
+            sunIntensity = s.lights[(size_t)sun].intensity;
+            s.lights[(size_t)sun].intensity = sunIntensity * w.sunScale();
+            s.ambient = ambient * w.ambientScale();
+        }
+    }
+    ~WeatherScope() {
+        if (fog) { s.fogMode = mode; s.fogDensity = density; s.fogFromSky = fromSky; }
+        if (sky) s.sky.lighting = skyLighting;
+        if (sun >= 0 && sun < (int)s.lights.size()) { s.lights[(size_t)sun].intensity = sunIntensity; s.ambient = ambient; }
+    }
+    WeatherScope(const WeatherScope&) = delete;
+    WeatherScope& operator=(const WeatherScope&) = delete;
+};
+
+// While a frame is drawn with Volumetric::density or heightFalloff set: the scene's fog is that exponential fog (so the
+// surfaces and the march share one medium). The fog takes the sky's colour unless the scene gave one.
+struct VolumetricScope {
+    Scene& s;
+    FogMode mode;
+    float density, height, falloff;
+    bool fromSky, on = false;
+    explicit VolumetricScope(Scene& sc) : s(sc), mode(sc.fogMode), density(sc.fogDensity), height(sc.fogHeight), falloff(sc.fogFalloff), fromSky(sc.fogFromSky) {
+        const Volumetric& v = s.volumetric;
+        if (!v.enabled() || (v.density <= 0 && v.heightFalloff <= 0)) return;
+        on = true;
+        if (v.density > 0) {
+            s.fogMode = FogMode::Exponential;
+            s.fogDensity = v.density;
+            if (s.fogColor.r == 0 && s.fogColor.g == 0 && s.fogColor.b == 0 && (s.sky.enabled || !s.environment.empty())) s.fogFromSky = true;
+        }
+        if (v.heightFalloff > 0) { s.fogFalloff = v.heightFalloff; s.fogHeight = v.heightBase; }
+    }
+    ~VolumetricScope() {
+        if (!on) return;
+        s.fogMode = mode; s.fogDensity = density; s.fogHeight = height; s.fogFalloff = falloff; s.fogFromSky = fromSky;
+    }
+    VolumetricScope(const VolumetricScope&) = delete;
+    VolumetricScope& operator=(const VolumetricScope&) = delete;
+};
+} // namespace
+
 void render(Scene& s, int t, const Ctx& c, Rectangle viewport, Camera* camera) {
     Camera& cam = camera ? *camera : s.camera;
     // Draw what 2D work the caller has batched first: creating canvas render textures or
@@ -4423,7 +6969,22 @@ void render(Scene& s, int t, const Ctx& c, Rectangle viewport, Camera* camera) {
         Viewing(const Camera* c, const Scene* s, float h) : before(viewing), sceneBefore(viewingScene), heightBefore(viewingHeight) { viewing = c; viewingScene = s; viewingHeight = h; }
         ~Viewing() { viewing = before; viewingScene = sceneBefore; viewingHeight = heightBefore; }
     } viewingNow(&cam, &s, cull.compH);
+    Camera mirrorCam;                                     // the water's reflection pass looks from here (when there is one)
+    {
+        const WaterView wv = reflectionView(s, cam, cull.aspect, t);    // the sea's level, else a body's
+        if (wv.visible) {
+            mirrorCam = mirroredCamera(cam, wv.level);
+            cull.mirror = &mirrorCam;
+        }
+    }
+    {
+        const Downfall pd = inWeather(s.precipitation, s.weather);
+        if (pd.enabled && pd.kind != Precipitation::None && (pd.occlusion || pd.splashes)) cull.rainR = pd.radius + 6.f;   // roofs out of view still keep the rain off
+    }
     animate(s.objects, t, MatrixIdentity(), cull);
+    const WeatherScope weatherNow(s);
+    const VolumetricScope volumetricNow(s);
+    const FlashScope flashNow(s, t);                     // a strike's light, for this frame's lights
     if (canvasSize().x > 0) {
         sizeSurfaces(s.objects, MatrixIdentity(), cam, cull.screenH * cull.aspect, cull.screenH);
         drawCanvases(s.objects, t);

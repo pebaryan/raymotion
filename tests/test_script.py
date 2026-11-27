@@ -182,6 +182,163 @@ void draw(int frame) {
         self.assertIn("grass mask needs", self.run_cli("still", "grass", "--script", self.path, "--png", "x.png", ok=False))
 
     @unittest.skipUnless(GL, "needs OpenGL")
+    def test_weather(self):
+        # A scene's "weather" object drives the grass, trees, water, rain, sky and fog; without it, or
+        # disabled, or with every opt-out set, the frame is exactly what it was; the same frame comes
+        # out the same in any order; and a bad preset says what is wrong.
+        def frame(weather=None, own=False, at=5, name="w.png"):
+            world = {
+                "fps": 30, "camera": {"position": [0, 1.6, 7], "target": [0, 1, 0], "fov": 50}, "ambient": 0.35,
+                "sky": {"enabled": True, "sunLight": 0, "clouds": 0.3, "ownClouds": own, "ownLight": own},
+                "ownFog": own, "fogMode": "exponential", "fogDensity": 0.004, "fogFromSky": True,
+                "water": {"preset": "choppy", "level": -0.5, "ownWind": own},
+                "lights": [{"type": "directional", "position": [3, 6, 4], "intensity": 2}],
+                "objects": [
+                    {"geometry": "box", "width": 14, "height": 1, "depth": 6, "position": [0, -0.5, 0], "material": {"color": "#4f5b2c"}},
+                    {"grass": {"preset": "meadow", "min": [-6, -3], "max": [6, 3], "density": 150, "seed": 3, "ownWind": own}},
+                    {"forest": {"trees": ["oak"], "at": [[-4, 0, -2, 30, 0.6, 0]], "ownWind": own}},
+                    {"particles": "rain", "width": 10, "depth": 8, "height": 5, "seed": 2, "position": [0, 5, 0], "ownWind": own},
+                ],
+            }
+            if weather is not None:
+                world["weather"] = weather
+                if own:
+                    world["ground"] = {"ownWeather": True}                       # the ground wets from the storm unless it keeps its own
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "weather"; c.w = 160; c.h = 90; c.fps = 30; c.duration = 20; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) {
+    g3d::draw(%s, frame, 0, 0, 160, 90);
+}
+''' % json.dumps(json.dumps(world)))
+            self.run_cli("still", "weather", "--script", self.path, "--at", at, "--png", name)
+            return (self.cwd / name).read_bytes()
+
+        plain = frame()
+        storm = frame({"preset": "storm"})
+        self.assertNotEqual(plain, storm)                                            # the weather is read
+        self.assertEqual(plain, frame({"preset": "storm", "enabled": False}))        # off means off
+        self.assertEqual(plain, frame({"preset": "storm"}, own=True))                # every opt-out keeps its own
+        self.assertNotEqual(storm, frame({"preset": "storm", "windDirection": 200}))   # a field overrides the preset
+        self.assertNotEqual(storm, frame({"preset": "clear", "to": "storm", "amount": 0.3}))
+        self.assertEqual(frame({"preset": "clear", "to": "storm", "amount": 0.3}, at=7, name="a.png"),
+                         frame({"preset": "clear", "to": "storm", "amount": 0.3}, at=7, name="b.png"))
+        frame({"preset": "overcast", "cover": 0.5, "haze": 0.2, "windSpeed": 9, "gust": 0.5, "cloudType": "deck",
+               "precipitation": "snow", "intensity": 0.5, "wetness": 0.2, "snowCover": 0.1, "lightningRate": 2, "windRun": 40})
+        self.assertIn("preset", self._bad_weather())
+
+    def _bad_weather(self):
+        # frame() raises on a failing run, so run the CLI directly on a script with a bad preset.
+        self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "weather"; c.w = 64; c.h = 36; c.fps = 30; c.duration = 2; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) {
+    g3d::draw("{\\"weather\\":{\\"preset\\":\\"hurricane\\"}}", frame, 0, 0, 64, 36);
+}
+''')
+        return self.run_cli("still", "weather", "--script", self.path, "--png", "x.png", ok=False)
+
+    @unittest.skipUnless(GL, "needs OpenGL")
+    def test_clouds(self):
+        # A scene's "clouds" object draws volumetric clouds; without it, or disabled, the frame is exactly
+        # what it was; the same frame comes out the same in any order; the weather's cover and type are
+        # read unless ownWeather keeps the clouds' own; and bad values say what is wrong. The example
+        # flies through the layer: under, inside and above are three different pictures.
+        def frame(clouds=None, weather=None, at=5, name="c.png"):
+            world = {
+                "fps": 30, "camera": {"position": [0, 2, 0], "target": [0, 60, -100], "fov": 60, "far": 300000},
+                "ambient": 0.35, "sky": {"enabled": True, "sunLight": 0, "sunDirection": [0.3, 0.8, -0.4],
+                                         "ownClouds": True, "ownLight": True},           # the sky does not read the weather's cover
+                "lights": [{"type": "directional", "position": [30, 80, -40], "intensity": 2}],
+                "objects": [{"geometry": "plane", "width": 600000, "depth": 600000, "material": {"color": "#4f5b2c"}}],
+            }
+            if clouds is not None:
+                world["clouds"] = clouds
+            if weather is not None:
+                world["weather"] = weather
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "clouds"; c.w = 160; c.h = 90; c.fps = 30; c.duration = 20; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) {
+    g3d::draw(%s, frame, 0, 0, 160, 90);
+}
+''' % json.dumps(json.dumps(world)))
+            self.run_cli("still", "clouds", "--script", self.path, "--at", at, "--png", name)
+            return (self.cwd / name).read_bytes()
+
+        plain = frame()
+        clouds = {"cover": 0.6, "quality": "preview"}
+        on = frame(clouds)
+        self.assertNotEqual(plain, on)                                                # the clouds are drawn
+        self.assertEqual(plain, frame(dict(clouds, enabled=False)))                   # off means off
+        self.assertEqual(on, frame(clouds, at=5, name="d.png"))                       # the same frame, the same pixels
+        self.assertNotEqual(on, frame(dict(clouds, cover=0.2)))                       # cover is read
+        self.assertNotEqual(on, frame(dict(clouds, cloudType="deck")))
+        thin, thick = {"preset": "clear", "cover": 0.1}, {"preset": "clear", "cover": 0.9}
+        self.assertNotEqual(frame(clouds, thin), frame(clouds, thick))                # the weather's cover is read
+        own = dict(clouds, ownWeather=True)
+        self.assertEqual(frame(own, thin), frame(own, thick))                         # unless the clouds keep their own
+        self.assertIn("cloudType", self._bad_clouds({"cloudType": "fog"}))
+        self.assertIn("base < top", self._bad_clouds({"base": 3000, "top": 1000}))
+        example = pathlib.Path(__file__).resolve().parents[1] / "examples/scripts/cloud_flight.as"
+        shots = []
+        for at in (0, 150, 299):
+            self.run_cli("still", "cloud-flight", "--script", example, "--at", at, "--png", f"f{at}.png")
+            shots.append((self.cwd / f"f{at}.png").read_bytes())
+        self.assertEqual(len(set(shots)), 3)
+
+    def _bad_clouds(self, clouds):
+        self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "clouds"; c.w = 64; c.h = 36; c.fps = 30; c.duration = 2; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) {
+    g3d::draw(%s, frame, 0, 0, 64, 36);
+}
+''' % json.dumps(json.dumps({"clouds": clouds})))
+        return self.run_cli("still", "clouds", "--script", self.path, "--png", "x.png", ok=False)
+
+    @unittest.skipUnless(GL, "needs OpenGL")
+    def test_water_reflections(self):
+        # The water's reflection keys: off by default (the pixels do not change), read when on, bad values named,
+        # and the lake example renders three different frames.
+        def frame(water, name="w.png"):
+            self.path.write_text('''void configure(Composition &inout c) {
+    c.name = "w"; c.w = 96; c.h = 54; c.fps = 30; c.duration = 2; c.supersample = 1;
+    scene(0, c.duration, "draw");
+}
+void draw(int frame) {
+    g3d::draw(%s, frame, 0, 0, 96, 54);
+}
+''' % json.dumps(json.dumps({"camera": {"position": [0, 1.5, 8], "target": [0, 1, -20]}, "ambient": 0.4,
+                             "sky": {"enabled": True, "show": True}, "water": dict({"preset": "calm", "level": 0}, **water),
+                             "objects": [{"geometry": "box", "width": 2, "height": 3, "depth": 2, "position": [0, 1.5, -10],
+                                          "material": {"color": "#e02020"}}]})))
+            self.run_cli("still", "w", "--script", self.path, "--png", name)
+            return (self.cwd / name).read_bytes()
+        off = frame({})
+        self.assertEqual(off, frame({"reflections": "off", "refraction": False}, "w2.png"))
+        on = frame({"reflections": "scene"})
+        self.assertNotEqual(off, on)
+        self.assertNotEqual(on, frame({"reflections": "scene", "reflectionDistort": 0}, "w3.png"))
+        self.assertNotEqual(off, frame({"refraction": True}, "w4.png"))
+        for mode in ("half", "quarter"):
+            frame({"reflections": mode}, "w5.png")
+        self.path.write_text('''void configure(Composition &inout c) { c.name = "w"; c.w = 64; c.h = 36; c.fps = 30; c.duration = 2; c.supersample = 1; scene(0, c.duration, "draw"); }
+void draw(int frame) { g3d::draw("{\\"water\\":{\\"reflections\\":\\"mirror\\"}}", frame, 0, 0, 64, 36); }
+''')
+        self.assertIn("reflections must be", self.run_cli("still", "w", "--script", self.path, "--png", "x.png", ok=False))
+        example = pathlib.Path(__file__).resolve().parents[1] / "examples/scripts/lake_reflections.as"
+        shots = []
+        for at in (0, 120, 239):
+            self.run_cli("still", "lake-reflections", "--script", example, "--at", at, "--png", f"l{at}.png")
+            shots.append((self.cwd / f"l{at}.png").read_bytes())
+        self.assertEqual(len(set(shots)), 3)
+
+    @unittest.skipUnless(GL, "needs OpenGL")
     def test_flora_area_scatter_terrain(self):
         # One area feeds a terrain, grass and scattered instances; frames repeat exactly, and
         # bad areas and oversized scatters say what is wrong.
@@ -595,6 +752,60 @@ void draw(int frame) {}
         self.assertIn('no grass "astroturf"', self.run_cli("still", "fp", "--script", self.path, "--png", "x.png", ok=False))
         write("flora-meadow", {"box": [0, 0, 0, 10]})
         self.assertIn("positive size", self.run_cli("still", "fp", "--script", self.path, "--png", "x.png", ok=False))
+
+    @unittest.skipUnless(GL, "needs OpenGL")
+    def test_weather_prefabs_and_keys(self):
+        # W12: the four prefabs draw and change over time; every key W12 added to a scene descriptor parses and
+        # draws; the function bindings answer; bad values say what is wrong. The parser has no unknown-key
+        # warning (a misspelt key is ignored, as everywhere in the descriptors), so this pins that too.
+        def run(body, props=None, ok=True, at=2, name="wp.png", frames=60):
+            self.path.write_text('void configure(Composition &inout c) {\n    c.name = "wp"; c.w = 128; c.h = 72; c.fps = 30; c.duration = %d; c.supersample = 1;\n%s\n}\n' % (frames, body))
+            return self.run_cli("still", "wp", "--script", self.path, "--at", at, "--png", name, ok=ok, timeout=240)
+        def prefab(pname, props, **kw):
+            return run('    prefab::use(0, %d, "%s", "%s");\n    scene(0, c.duration, "draw");\n}\nvoid draw(int frame) {' % (kw.pop("frames", 60), pname, json.dumps(props).replace('"', '\\"')), **kw)
+        base = {"box": [0, 0, 128, 72], "trees": 2, "quality": "preview", "size": 30}
+        for name, props in (("weather", {"preset": "squall"}), ("water-body", {"look": "choppy"}), ("rain", {"intensity": 0.9, "delay": 0.2, "ramp": 0.5}),
+                            ("lightning", {"count": 4, "span": 1.5, "seed": 3})):
+            prefab(name, dict(base, **props), at=3, name="a.png")
+            prefab(name, dict(base, **props), at=55, name="b.png")
+            self.assertNotEqual((self.cwd / "a.png").read_bytes(), (self.cwd / "b.png").read_bytes(), name)
+        prefab("weather", dict(base, preset="clear", to="thunderstorm", start=10, end=50), name="c.png")
+        for name, props, needle in (("weather", {"preset": "hurricane"}, "no weather preset"), ("water-body", {"look": "stormy"}, "look must be"),
+                                    ("rain", {"from": [1, 2]}, "[x, y, z]"), ("lightning", {"area": [1]}, "[x, z]")):
+            self.assertIn(needle, prefab(name, props, ok=False))
+
+        def scene(extra, call="g3d::draw(j, frame, 0, 0, 128, 72);"):
+            d = {"fps": 30, "camera": {"position": [0, 2, 6], "target": [0, 3, 0], "fov": 55}, "lights": [{"type": "directional", "position": [3, 6, 4], "intensity": 2}],
+                 "objects": [{"geometry": "box", "width": 30, "height": 1, "depth": 30, "position": [0, -0.5, 0]}]}
+            d.update(extra)
+            return 'string j = %s;\n    %s' % (json.dumps(json.dumps(d)), call)
+        def draw(extra, call="g3d::draw(j, frame, 0, 0, 128, 72);", ok=True, name="k.png"):
+            return run('    scene(0, c.duration, "draw");\n}\nvoid draw(int frame) {\n    ' + scene(extra, call).replace("\n    ", "\n    "), ok=ok, name=name)
+        keys = [
+            {"weatherPreset": "squall"}, {"weatherPreset": {"name": "clear", "to": "snowfall", "amount": 0.4}},
+            {"weatherPreset": "thunderstorm", "lightning": {"roughness": 0.6, "depth": 6, "branchFall": 0.5, "branchLength": 0.4, "maxLevel": 3, "spread": 40, "downward": 0.7}},
+            {"lightningSchedule": {"count": 3, "start": 0, "span": 1, "area": [0, -400], "radius": 100, "cloudBase": 900, "groundY": 0, "groundShare": 0.5, "seed": 4}},
+        ]
+        for i, extra in enumerate(keys):
+            draw(extra, name=f"k{i}.png")                                             # parses, no warning on stderr
+        self.assertNotEqual((self.cwd / "k0.png").read_bytes(), (self.cwd / "k1.png").read_bytes())
+        draw({"weatherPreset": "squall", "notAKey": 1}, name="unk.png")               # unknown keys are ignored, not fatal
+        for extra, needle in (({"weatherPreset": "hurricane"}, "weatherPreset"), ({"weatherPreset": 3}, "weatherPreset"),
+                              ({"weatherPreset": {"name": "clear", "amount": "x"}}, ""),
+                              ({"lightningSchedule": {"count": 9999}}, "lightningSchedule count"), ({"lightningSchedule": {"area": [1]}}, "area must be"),
+                              ({"lightningSchedule": {"groundShare": 2}}, "groundShare"), ({"lightning": {"depth": 99}}, "depth"),
+                              ({"lightning": {"maxLevel": 9}}, "maxLevel"), ({"lightning": {"spread": 400}}, "spread")):
+            self.assertIn(needle, draw(extra, ok=False))
+
+        # The functions: JSON out, and a scene handle method that applies the weather keys.
+        cue = {"camera": {"position": [0, 2, 0]}, "lightningSchedule": {"count": 4, "span": 3, "seed": 3, "area": [0, -1500]}}
+        out = draw({}, call='draw::text(g3d::thunderCues(%s, 300, 30), 2, 2, 5, 0xffffff);' % json.dumps(json.dumps(cue)), name="cues.png")
+        self.assertNotIn("arn", out)
+        self.assertGreater((self.cwd / "cues.png").stat().st_size, 500)
+        self.assertIn("thunderCues needs", draw({}, call='g3d::thunderCues("{}", 0, 30);', ok=False))
+        handle = ('Scene3D@ s = g3d::scene(); s.weather("{\\"weatherPreset\\":\\"squall\\"}"); '
+                  'draw::text(s.groundState(30.0), 2, 2, 5, 0xffffff); s.surfaceHeight(0, 0, 1.0); s.render(frame, 0, 0, 128, 72);')
+        draw({}, call=handle, name="handle.png")
 
     @unittest.skipUnless(GL, "needs OpenGL")
     def test_map_helpers_draw(self):
